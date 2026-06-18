@@ -1,4 +1,3 @@
-```yaml
 name: Binance Square Auto Poster
 
 on:
@@ -26,3 +25,4 @@ jobs:
         GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
         BINANCE_SQUARE_KEY: ${{ secrets.BINANCE_SQUARE_KEY }}
       run: python main.py
+      
