@@ -1,4 +1,4 @@
-import requests
+    import requests
 import json
 import random
 import os
@@ -33,13 +33,19 @@ def main():
     # GitHub Secrets se key uthayi
     gemini_key = os.environ.get("GEMINI_KEY")
     
-    # URL mein Gemini 3.5 Flash set kar diya hai
-    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={gemini_key}"
+    # URL ko simple rakha aur model standard v1beta par kiya
+    gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
     
     prompt = f"You are an elite crypto analyst. Convert this market signal into a short viral Binance Square post: {selected_coin['name']} ({selected_coin['symbol']}) is currently trading at ${live_price:,} with a 24-hour move of {live_change:+.2f}%. Include a clear trading setup at the end (Entry range close to current price, Target, Stop loss). Keep it clean, concise, short sentences only, no asterisks, no markdown formatting."
     
+    # Headers mein standard tarike se API key bheji
+    gemini_headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": gemini_key
+    }
+    
     try:
-        gemini_res = requests.post(gemini_url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={"Content-Type": "application/json"})
+        gemini_res = requests.post(gemini_url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers=gemini_headers)
         res_json = gemini_res.json()
         
         if "candidates" in res_json:
@@ -51,7 +57,7 @@ def main():
         print(f"❌ Gemini Error: {e}")
         return
 
-    # GitHub Secrets se Binance Key uthayi
+    # Binance setup
     binance_square_key = os.environ.get("BINANCE_SQUARE_KEY")
     binance_url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
     
@@ -79,4 +85,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
     
