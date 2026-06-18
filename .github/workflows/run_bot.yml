@@ -2,27 +2,46 @@ name: Binance Square Auto Poster
 
 on:
   schedule:
-    - cron: '0 */2 * * *' # Har 2 ghante baad khud chalega
-  workflow_dispatch: # Isse aap manually bhi chala sakte hain
+    # ہر 2 گھنٹے بعد (UTC وقت میں)
+    - cron: '0 */2 * * *'
+  workflow_dispatch:  # Manual run کے لیے
 
 jobs:
-  post_update:
+  run-agent:
     runs-on: ubuntu-latest
+
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Install Dependencies
-      run: pip install requests
+      - name: Install dependencies (if any)
+        run: |
+          pip install --upgrade pip
 
-    - name: Run Crypto Agent
-      env:
-        GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
-        BINANCE_SQUARE_KEY: ${{ secrets.BINANCE_SQUARE_KEY }}
-      run: python main.py
-      
+      - name: Run Crypto Agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SQUARE_API_KEY: ${{ secrets.SQUARE_API_KEY }}
+          DRY_RUN: 0                     # اصل میں پوسٹ کرے گا
+          LIVE_MARKET_DATA: 1
+          POST_INTERVAL: 7200
+          MAX_ITERATIONS: 1
+          GEMINI_MODEL: gemini-2.0-flash
+          DATABASE_PATH: agent.db
+          PUBLISH_LOG_PATH: published_posts.jsonl
+        run: python app.py
+
+      - name: Upload logs and database
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-output-${{ github.run_id }}
+          path: |
+            published_posts.jsonl
+            agent.db
+            charts/
