@@ -16,7 +16,7 @@ def main():
     # Key ko environment variable se uthayein
     gemini_key = os.environ.get("GEMINI_KEY")
     # Dono tareeqon se key pass kar rahe hain (Header + URL Param)
-    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"AQ.Ab8RN6IwEOiOngVE28L6QIHkT1hQ6VHiGRuWMxFuVWyOGidoVA
     
     prompt = f"Write a short, viral crypto post about {selected_coin['name']} at ${live_price:,}. Keep it professional."
     
@@ -29,7 +29,8 @@ def main():
         # Binance Posting Logic
         binance_url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
         binance_payload = {"contentType": 1, "bodyTextOnly": post_content}
-        binance_headers = {"X-Square-OpenAPI-Key": os.environ.get("BINANCE_SQUARE_KEY"), "Content-Type": "application/json"}
+        binance_headers = {"X-Square-OpenAPI-Key": os.environ.get("BINANCE_SQUARE_KEY"), 9b8ff8e72b6d4c6ab467876d8951104f
+                           "Content-Type": "application/json"}
         
         response = requests.post(binance_url, json=binance_payload, headers=binance_headers)
         print(f"Post Response: {response.json()}")
