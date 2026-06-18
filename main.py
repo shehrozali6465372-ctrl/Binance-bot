@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 @dataclass(frozen=True)
 class Config:
     gemini_api_key: str
-    square_api_key: str          # بس اتنی ہی، کوئی سیکرٹ نہیں
+    square_api_key: str
     post_interval: int
     database_path: str
     publish_log_path: str
@@ -553,4 +553,4 @@ class GeminiGenerator:
             **ماضی میں آپ کی وائرل ہونے والی پوسٹس کا انداز (ان سے سیکھیں اور بہتر بنائیں):**
             {examples_text}
 
-            
+            **اب موجودہ کرنسی {symbol} کے لیے بالکل
