@@ -30,19 +30,29 @@ def main():
     live_price, live_change = get_live_coin_data(selected_coin['id'])
     print(f"✅ Live Data -> {selected_coin['symbol']}: ${live_price:,} ({live_change:+.2f}%)")
 
-    gemini_key = "AQ.Ab8RN6IqpSwJ8HSpeDkyx-vYHkZjuM56UVCFacQ9-5xHlZuHww"
-    gemini_url = "https://generativelanguage.googleapis.com/v1alpha/models/gemini-2.5-flash:generateContent"
+    # GitHub Secrets se key uthayi
+    gemini_key = os.environ.get("GEMINI_KEY")
+    
+    # URL mein Gemini 3.5 Flash set kar diya hai
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={gemini_key}"
     
     prompt = f"You are an elite crypto analyst. Convert this market signal into a short viral Binance Square post: {selected_coin['name']} ({selected_coin['symbol']}) is currently trading at ${live_price:,} with a 24-hour move of {live_change:+.2f}%. Include a clear trading setup at the end (Entry range close to current price, Target, Stop loss). Keep it clean, concise, short sentences only, no asterisks, no markdown formatting."
     
     try:
-        gemini_res = requests.post(gemini_url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={"Content-Type": "application/json", "x-goog-api-key": gemini_key})
-        post_content = gemini_res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        gemini_res = requests.post(gemini_url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={"Content-Type": "application/json"})
+        res_json = gemini_res.json()
+        
+        if "candidates" in res_json:
+            post_content = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+        else:
+            print(f"❌ Gemini Response Error: {res_json}")
+            return
     except Exception as e:
         print(f"❌ Gemini Error: {e}")
         return
 
-    binance_square_key = "9b8ff8e72b6d4c6ab467876d8951104f"
+    # GitHub Secrets se Binance Key uthayi
+    binance_square_key = os.environ.get("BINANCE_SQUARE_KEY")
     binance_url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
     
     binance_headers = {
@@ -69,4 +79,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-      
+    
