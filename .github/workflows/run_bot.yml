@@ -2,9 +2,9 @@ name: Binance Square Auto Poster
 
 on:
   schedule:
-    # ہر 2 گھنٹے بعد (UTC وقت میں)
+    # ہر 2 گھنٹے بعد چلے گا (UTC وقت)
     - cron: '0 */2 * * *'
-  workflow_dispatch:  # Manual run کے لیے
+  workflow_dispatch:   # Manual run کے لیے
 
 jobs:
   run-agent:
@@ -27,14 +27,14 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SQUARE_API_KEY: ${{ secrets.SQUARE_API_KEY }}
-          DRY_RUN: 0                     # اصل میں پوسٹ کرے گا
+          DRY_RUN: 0
           LIVE_MARKET_DATA: 1
           POST_INTERVAL: 7200
           MAX_ITERATIONS: 1
           GEMINI_MODEL: gemini-2.0-flash
           DATABASE_PATH: agent.db
           PUBLISH_LOG_PATH: published_posts.jsonl
-        run: python app.py
+        run: python main.py   # <--- یہاں main.py استعمال ہو رہا ہے
 
       - name: Upload logs and database
         if: always()
