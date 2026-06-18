@@ -9,9 +9,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import hmac
-import hashlib
-import base64
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,8 +19,7 @@ from typing import Any, Dict, List, Optional
 @dataclass(frozen=True)
 class Config:
     gemini_api_key: str
-    square_api_key: str
-    square_api_secret: str
+    square_api_key: str          # بس اتنی ہی، کوئی سیکرٹ نہیں
     post_interval: int
     database_path: str
     publish_log_path: str
@@ -42,7 +38,6 @@ class Config:
         return cls(
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
             square_api_key=os.getenv("SQUARE_API_KEY", ""),
-            square_api_secret=os.getenv("SQUARE_API_SECRET", ""),
             post_interval=int(os.getenv("POST_INTERVAL", "7200")),
             database_path=os.getenv("DATABASE_PATH", "agent.db"),
             publish_log_path=os.getenv("PUBLISH_LOG_PATH", "published_posts.jsonl"),
@@ -405,17 +400,6 @@ class MarketScanner:
         universe = self._universe()
         return [c.as_dict() for c in universe if c.volume_ratio >= threshold]
 
-    def listings(self) -> List[Dict[str, Any]]:
-        return [
-            {"symbol": "TAIKO", "name": "Taiko", "event": "new_listing"},
-            {"symbol": "ZRO", "name": "LayerZero", "event": "new_listing"},
-        ]
-
-    def delistings(self) -> List[Dict[str, Any]]:
-        return [
-            {"symbol": "OLDX", "name": "OldX", "event": "delisting"},
-        ]
-
 
 # =========================
 # RESEARCH ENGINE
@@ -559,4 +543,14 @@ class GeminiGenerator:
         keyword_block = ", ".join(keywords) if keywords else "none"
         examples_text = "\n---\n".join(past_examples or []) if past_examples else "کوئی پچھلی مثال دستیاب نہیں، لیکن آپ ایک ماہر ہیں۔"
         tone = tone or self.emotion.get_tone(coin)
-        memory_keywords = ", ".join([word for word, _ in (memory_summary or {
+        memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
+        memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
+        return textwrap.dedent(
+            f"""
+            آپ 20 سال کا تجربہ رکھنے والے وال اسٹریٹ کے Veteran ٹریڈر ہیں۔
+            آپ کا موجودہ موڈ: {tone['persona']}
+
+            **ماضی میں آپ کی وائرل ہونے والی پوسٹس کا انداز (ان سے سیکھیں اور بہتر بنائیں):**
+            {examples_text}
+
+            
