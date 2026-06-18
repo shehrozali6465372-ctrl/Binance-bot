@@ -1,4 +1,4 @@
-    import requests
+import requests
 import json
 import random
 import os
@@ -33,12 +33,12 @@ def main():
     # GitHub Secrets se key uthayi
     gemini_key = os.environ.get("GEMINI_KEY")
     
-    # URL ko simple rakha aur model standard v1beta par kiya
-    gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    # URL mein Gemini 2.5 Flash set hai
+    gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     
     prompt = f"You are an elite crypto analyst. Convert this market signal into a short viral Binance Square post: {selected_coin['name']} ({selected_coin['symbol']}) is currently trading at ${live_price:,} with a 24-hour move of {live_change:+.2f}%. Include a clear trading setup at the end (Entry range close to current price, Target, Stop loss). Keep it clean, concise, short sentences only, no asterisks, no markdown formatting."
     
-    # Headers mein standard tarike se API key bheji
+    # Secure Headers setup
     gemini_headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": gemini_key
@@ -85,5 +85,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
     
