@@ -672,14 +672,24 @@ class PostPublisher:
             self._save_locally(coin, content)
             return True
 
+        import hashlib, hmac
+        timestamp = int(time.time() * 1000)
         payload = {
-            "coin_symbol": coin.get("symbol"),
             "content": content,
+            "timestamp": timestamp,
         }
-        headers = {"X-API-Key": self.config.square_api_key}
+        # Add signature for Binance API
+        if self.config.square_api_key:
+            signature_str = f"content={content}&timestamp={timestamp}"
+            payload["signature"] = hmac.new(
+                self.config.square_api_key.encode("utf-8"),
+                signature_str.encode("utf-8"),
+                hashlib.sha256
+            ).hexdigest()
+        headers = {"X-MBX-APIKEY": self.config.square_api_key}
         try:
             resp = http_post_json(
-                "https://api.square.io/v1/posts",
+                "https://api.binance.com/sapi/v1/square/post/create",
                 payload,
                 timeout=self.config.http_timeout_seconds,
                 headers=headers,
