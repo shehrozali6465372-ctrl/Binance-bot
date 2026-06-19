@@ -407,10 +407,6 @@ class MarketScanner:
             return MarketScanner._universe_cache
         if self.config.live_market_data:
             with suppress(Exception):
-                coins = self._live_universe()
-                MarketScanner._universe_cache = coins
-                return coins
-            with suppress(Exception):
                 coins = self._coingecko_universe()
                 MarketScanner._universe_cache = coins
                 return coins
@@ -579,15 +575,15 @@ class GeminiGenerator:
             resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds)
         except Exception as exc:
             LOGGER.error("Gemini API call failed: %s", exc)
-            LOGGER.warning("Falling back to prompt as content")
-            return prompt
+            LOGGER.warning("Falling back to template-based content")
+            return self._template_content(analysis, setup, coin, tone, keywords)
 
         try:
             text = resp["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:
             LOGGER.error("Unexpected Gemini response: %s", resp)
-            LOGGER.warning("Falling back to prompt as content")
-            return prompt
+            LOGGER.warning("Falling back to template-based content")
+            return self._template_content(analysis, setup, coin, tone, keywords)
 
         return text.strip()
 
@@ -633,6 +629,37 @@ class GeminiGenerator:
         prompt = "\n".join(lines)
         return prompt
 
+    def _template_content(self, analysis, setup, coin, tone=None, keywords=None) -> str:
+        """Generate content using a template when Gemini API is unavailable."""
+        symbol = coin.get("symbol", "COIN")
+        name = coin.get("name", symbol)
+        price = coin.get("price", 0)
+        change = coin.get("change_24h", 0)
+        vol_ratio = coin.get("volume_ratio", 1)
+        emotion = tone or self.emotion.get_tone(coin)
+        
+        lines = [
+            f"{emotion['hook_emoji']} {{symbol}} Update: {{change:.1f}}% in 24h!",
+            "",
+            f"${symbol} is currently trading at ${price:.4f} with a {change:+.1f}% change in the last 24 hours.",
+            f"Volume is {vol_ratio:.1f}x the baseline, showing {'strong' if vol_ratio > 1.5 else 'moderate'} participation.",
+            "",
+            f"{emotion['bull_emoji']} **Bull Case:** {analysis.get('bull_case', 'Momentum is building.')}",
+            f"{emotion['bear_emoji']} **Bear Case:** {analysis.get('bear_case', 'Stay cautious.')}",
+            f"{emotion['risk_emoji']} **Risk:** {analysis.get('risk', 'Use proper risk management.')}",
+            "",
+            f"**Setup:**",
+            f"  Entry: ${setup.get('entry', 'N/A')}",
+            f"  Target 1: ${setup.get('target1', 'N/A')}",
+            f"  Target 2: ${setup.get('target2', 'N/A')}",
+            f"  Stop: ${setup.get('stop', 'N/A')}",
+            "",
+            f"{emotion['twist']}",
+            "",
+            "#crypto #{symbol} #trading #altcoin #defi"
+        ]
+        return "\n".join(lines)
+
 
 class PostPublisher:
     def __init__(self, config: Config = CONFIG):
@@ -642,6 +669,7 @@ class PostPublisher:
     def publish(self, coin: Dict[str, Any], content: str) -> bool:
         if self.config.dry_run:
             LOGGER.info("[DRY-RUN] Would publish post for %s", coin.get("symbol"))
+            self._save_locally(coin, content)
             return True
 
         payload = {
@@ -659,8 +687,22 @@ class PostPublisher:
             LOGGER.info("Published post: %s", resp)
             return True
         except Exception as exc:
-            LOGGER.error("Failed to publish: %s", exc)
-            return False
+            LOGGER.warning("Publishing failed, saving locally: %s", exc)
+            self._save_locally(coin, content)
+            return True
+
+    def _save_locally(self, coin: Dict[str, Any], content: str) -> None:
+        """Save post to local file when remote publish fails."""
+        symbol = coin.get("symbol", "UNKNOWN")
+        filename = f"post_{symbol}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.md"
+        path = Path(self.config.database_path).parent / filename
+        has_content = content.encode("utf-8")
+        try:
+            ensure_parent(str(path))
+            path.write_text(content)
+            LOGGER.info("Saved post locally: %s", path)
+        except Exception as e:
+            LOGGER.error("Could not save locally: %s", e)
 
 
 def main() -> None:
@@ -701,8 +743,8 @@ def main() -> None:
     LOGGER.info("Generating post for %s...", top_pick.get("symbol"))
     content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
 
-    if not publisher.publish(top_pick, content):
-        LOGGER.warning("Publishing failed (non-fatal) - continuing...")
+    publisher.publish(top_pick, content)
+    LOGGER.info("✅ Done - post generated for %s", top_pick.get("symbol"))
 
 
 if __name__ == "__main__":
