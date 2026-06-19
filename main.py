@@ -545,4 +545,114 @@ class GeminiGenerator:
         coin: Dict[str, Any],
         memory_summary: Optional[Dict[str, Any]] = None,
         past_examples: Optional[List[str]] = None,
-        tone: O
+        tone: OOptional[Dict[str, Any]] = None,
+        keywords: Optional[List[str]] = None,
+    ) -> str:
+        symbol = coin.get("symbol", "COIN")
+        keyword_block = ", ".join(keywords) if keywords else "none"
+        examples_text = "\n---\n".join(past_examples or []) if past_examples else "No past examples available, but you are an expert."
+        tone = tone or self.emotion.get_tone(coin)
+        memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
+        memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
+
+        lines = [
+            "You are a 20-year veteran Wall Street trader.",
+            f"Your current mood: {tone['persona']}",
+            "",
+            "**Learn from your past viral posts and improve:**",
+            f"{examples_text}",
+            "",
+            f"**Now write for {symbol} in the same human style, with emojis and depth.**",
+            "Market Data:",
+            f"- 24h Change: {coin.get('change_24h', 0):.2f}%",
+            f"- Volume: {coin.get('volume_ratio', 1):.1f}x",
+            f"- Analysis: {analysis['reason']}",
+            f"- Bull Case: {analysis['bull_case']}",
+            f"- Bear Case: {analysis['bear_case']}",
+            f"- Risk: {analysis['risk']}",
+            f"- Entry: {setup['entry']}",
+            f"- Target 1: {setup['target1']}",
+            f"- Target 2: {setup['target2']}",
+            f"- Stop: {setup['stop']}",
+            f"- Keywords: {keyword_block}",
+        ]
+
+        prompt = "\n".join(lines)
+        return prompt
+
+
+class PostPublisher:
+    def __init__(self, config: Config = CONFIG):
+        self.config = config
+        self.db = Database(config.database_path)
+
+    def publish(self, coin: Dict[str, Any], content: str) -> bool:
+        if self.config.dry_run:
+            LOGGER.info("[DRY-RUN] Would publish post for %s", coin.get("symbol"))
+            return True
+
+        payload = {
+            "coin_symbol": coin.get("symbol"),
+            "content": content,
+        }
+        headers = {"X-API-Key": self.config.square_api_key}
+        try:
+            resp = http_post_json(
+                "https://api.square.io/v1/posts",
+                payload,
+                timeout=self.config.http_timeout_seconds,
+                headers=headers,
+            )
+            LOGGER.info("Published post: %s", resp)
+            return True
+        except Exception as exc:
+            LOGGER.error("Failed to publish: %s", exc)
+            return False
+
+
+def main() -> None:
+    config = CONFIG
+    config.validate()
+
+    scanner = MarketScanner(config)
+    research = ResearchEngine()
+    trade_setup = TradeSetup()
+    generator = GeminiGenerator(config)
+    publisher = PostPublisher(config)
+
+    top_gainers = scanner.top_gainers(limit=3)
+    top_losers = scanner.top_losers(limit=3)
+    volume_spikes = scanner.volume_spikes(threshold=1.75)
+
+    all_candidates = top_gainers + top_losers + volume_spikes
+
+    seen = set()
+    unique_candidates = []
+    for coin in all_candidates:
+        sym = coin.get("symbol")
+        if sym not in seen:
+            seen.add(sym)
+            unique_candidates.append(coin)
+
+    scored = [(research.score(coin), coin) for coin in unique_candidates]
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    top_pick = scored[0][1] if scored else None
+    if top_pick is None:
+        LOGGER.info("No candidates found. Exiting.")
+        return
+
+    analysis = research.analyze(top_pick)
+    setup = trade_setup.build(top_pick)
+
+    LOGGER.info("Generating post for %s...", top_pick.get("symbol"))
+    content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
+
+    if not publisher.publish(top_pick, content):
+        LOGGER.error("Publishing failed.")
+        return
+
+
+if __name__ == "__main__":
+    main()
+        
