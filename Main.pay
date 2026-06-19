@@ -425,50 +425,15 @@ class ResearchEngine:
             "bear_case": bear_case,
             "risk": risk,
         }
-    def create(self, coin: Dict[str, Any]) -> str:
-        symbol = coin.get("symbol", "COIN")
-        history = coin.get("history") or []
-        chart_dir = Path("charts")
-        chart_dir.mkdir(parents=True, exist_ok=True)
-        path = chart_dir / f"{symbol.lower()}_{int(time.time())}.svg"
 
-        if not history:
-            history = [0.0, 0.0]
-
-        width = 640
-        height = 320
-        margin = 28
-        min_price = min(history)
-        max_price = max(history)
-        if min_price == max_price:
-            min_price -= 1
-            max_price += 1
-
-        def scale_x(index: int) -> float:
-            span = max(len(history) - 1, 1)
-            return margin + index * ((width - 2 * margin) / span)
-
-        def scale_y(price: float) -> float:
-            span = max(max_price - min_price, 1e-9)
-            normalized = (price - min_price) / span
-            return height - margin - normalized * (height - 2 * margin)
-
-        points = " ".join(f"{scale_x(i):.1f},{scale_y(price):.1f}" for i, price in enumerate(history))
-        circles = "\n".join(
-            f'<circle cx="{scale_x(i):.1f}" cy="{scale_y(price):.1f}" r="3" fill="#7dd3fc" />'
-            for i, price in enumerate(history)
-        )
-
-        payload = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
-  <rect width="100%" height="100%" rx="18" fill="#0f172a"/>
-  <text x="{margin}" y="18" fill="#94a3b8" font-size="14">{symbol} price path</text>
-  <polyline fill="none" stroke="#38bdf8" stroke-width="3" points="{points}" />
-  {circles}
-</svg>
-
-"""
-        path.write_text(payload, encoding="utf-8")
-        return str(path)
+    def score(self, coin: Dict[str, Any]) -> float:
+        change = float(coin.get("change_24h", 0))
+        volume_ratio = float(coin.get("volume_ratio", 1))
+        market_cap = float(coin.get("market_cap", 0))
+        momentum = max(-10.0, min(10.0, change))
+        liquidity = min(10.0, volume_ratio * 3.0)
+        cap_penalty = -2.0 if market_cap <= 0 else 0.0
+        return momentum + liquidity + cap_penalty
 
 
 class TradeSetup:
@@ -566,4 +531,4 @@ class GeminiGenerator:
             f"- Target 2: {setup['target2']}",
             f"- Stop: {setup['stop']}",
             f"- Keywords: {keyword_block}",
-         """
+         
