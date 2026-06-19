@@ -492,43 +492,61 @@ class GeminiGenerator:
         self.config = config
         self.emotion = EmotionEngine()
 
-    def _build_prompt(
-        self,
-        analysis: Dict[str, str],
-        setup: Dict[str, str],
-        coin: Dict[str, Any],
-        memory_summary: Optional[Dict[str, Any]] = None,
-        past_examples: Optional[List[str]] = None,
-        tone: Optional[Dict[str, Any]] = None,
-        keywords: Optional[List[str]] = None,
-        chart_path: Optional[str] = None,
-    ) -> str:
-        symbol = coin.get("symbol", "COIN")
-        name = coin.get("name", symbol)
-        keyword_block = ", ".join(keywords) if keywords else "none"
-        examples_text = "\n---\n".join(past_examples or []) if past_examples else "No past examples available, but you are an expert."
-        tone = tone or self.emotion.get_tone(coin)
-        memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
-        memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
+def _build_prompt(
+    self,
+    analysis: Dict[str, str],
+    setup: Dict[str, str],
+    coin: Dict[str, Any],
+    memory_summary: Optional[Dict[str, Any]] = None,
+    past_examples: Optional[List[str]] = None,
+    tone: Optional[Dict[str, Any]] = None,
+    keywords: Optional[List[str]] = None,
+    chart_path: Optional[str] = None,
+) -> str:
+    symbol = coin.get("symbol", "COIN")
+    name = coin.get("name", symbol)
+    keyword_block = ", ".join(keywords) if keywords else "none"
+    examples_text = "\n---\n".join(past_examples or []) if past_examples else "No past examples available, but you are an expert."
+    tone = tone or self.emotion.get_tone(coin)
+    memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
+    memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
 
-        lines = [
-            "You are a 20-year veteran Wall Street trader.",
-            f"Your current mood: {tone['persona']}",
-            "",
-            "**Learn from your past viral posts and improve:**",
-            f"{examples_text}",
-            "",
-            f"**Now write for {symbol} in the same human style, with emojis and depth.**",
-            "Market Data:",
-            f"- 24h Change: {coin.get('change_24h', 0):.2f}%",
-            f"- Volume: {coin.get('volume_ratio', 1):.1f}x",
-            f"- Analysis: {analysis['reason']}",
-            f"- Bull Case: {analysis['bull_case']}",
-            f"- Bear Case: {analysis['bear_case']}",
-            f"- Risk: {analysis['risk']}",
-            f"- Entry: {setup['entry']}",
-            f"- Target 1: {setup['target1']}",
-            f"- Target 2: {setup['target2']}",
-            f"- Stop: {setup['stop']}",
-            f"- Keywords: {keyword_block}",
-         
+    lines = [
+        "You are a 20-year veteran Wall Street trader.",
+        f"Your current mood: {tone['persona']}",
+        "",
+        "**Learn from your past viral posts and improve:**",
+        f"{examples_text}",
+        "",
+        f"**Now write for {symbol} in the same human style, with emojis and depth.**",
+        "Market Data:",
+        f"- 24h Change: {coin.get('change_24h', 0):.2f}%",
+        f"- Volume: {coin.get('volume_ratio', 1):.1f}x",
+        f"- Analysis: {analysis['reason']}",
+        f"- Bull Case: {analysis['bull_case']}",
+        f"- Bear Case: {analysis['bear_case']}",
+        f"- Risk: {analysis['risk']}",
+        f"- Entry: {setup['entry']}",
+        f"- Target 1: {setup['target1']}",
+        f"- Target 2: {setup['target2']}",
+        f"- Stop: {setup['stop']}",
+        f"- Keywords: {keyword_block}",
+        f"- Memory Keywords: {memory_keywords}",
+        f"- Memory Hashtags: {memory_hashtags}",
+        "- Add at least 3 hashtags at the end.",
+        "",
+        "**Instructions:**",
+        f"1. Write an emotional and exciting Hook with {tone['hook_emoji']}.",
+        "2. Use at least 5 different emojis.",
+        "3. Give a counter-trade suggestion.",
+        f"4. Express your fear or greed: {tone['twist']}",
+        "5. Ask an emotional question at the end.",
+        "",
+        "**Format is free, but keep these values correct:**",
+        f"💰 Entry: {setup['entry']}",
+        f"🎯 Target 1: {setup['target1']}",
+        f"🎯 Target 2: {setup['target2']}",
+        f"🛑 Stop Loss: {setup['stop']}",
+    ]
+    return "\n".join(lines)
+        
