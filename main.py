@@ -738,3 +738,11 @@ class GeminiGenerator:
                 f"کیا آپ اس move میں buy کر رہے ہیں یا wait کریں گے؟\n"
                 f"{tag_line}"
                 f"{chart_note}")
+if __name__ == "__main__":
+    print("DEBUG: Script started, calling main()...", flush=True)
+    try:
+        main()
+    except Exception as e:
+        print(f"ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
