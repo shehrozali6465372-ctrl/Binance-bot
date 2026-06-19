@@ -517,70 +517,224 @@ class EmotionEngine:
             }
 
 
-# =========================
-# GEMINI GENERATOR
-# =========================
-
-
 class GeminiGenerator:
     def __init__(self, config: Config = CONFIG):
         self.config = config
         self.emotion = EmotionEngine()
 
     def _build_prompt(
-    self,
-    analysis: Dict[str, str],
-    setup: Dict[str, str],
-    coin: Dict[str, Any],
-    memory_summary: Optional[Dict[str, Any]] = None,
-    past_examples: Optional[List[str]] = None,
-    tone: Optional[Dict[str, Any]] = None,
-    keywords: Optional[List[str]] = None,
-    chart_path: Optional[str] = None,
-) -> str:
-    symbol = coin.get("symbol", "COIN")
-    name = coin.get("name", symbol)
-    keyword_block = ", ".join(keywords) if keywords else "none"
-    examples_text = "\n---\n".join(past_examples or []) if past_examples else "کوئی پچھلی مثال دستیاب نہیں، لیکن آپ ایک ماہر ہیں۔"
-    tone = tone or self.emotion.get_tone(coin)
-    memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
-    memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
-    return textwrap.dedent(
-        f"""
-        آپ 20 سال کا تجربہ رکھنے والے وال اسٹریٹ کے Veteran ٹریڈر ہیں۔
-        آپ کا موجودہ موڈ: {tone['persona']}
+        self,
+        analysis: Dict[str, str],
+        setup: Dict[str, str],
+        coin: Dict[str, Any],
+        memory_summary: Optional[Dict[str, Any]] = None,
+        past_examples: Optional[List[str]] = None,
+        tone: Optional[Dict[str, Any]] = None,
+        keywords: Optional[List[str]] = None,
+        chart_path: Optional[str] = None,
+    ) -> str:
+        symbol = coin.get("symbol", "COIN")
+        name = coin.get("name", symbol)
+        keyword_block = ", ".join(keywords) if keywords else "none"
+        examples_text = "\n---\n".join(past_examples or []) if past_examples else "کوئی پچھلی مثال دستیاب نہیں، لیکن آپ ایک ماہر ہیں۔"
+        tone = tone or self.emotion.get_tone(coin)
+        memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
+        memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
+        return textwrap.dedent(
+            f"""
+            آپ 20 سال کا تجربہ رکھنے والے وال اسٹریٹ کے Veteran ٹریڈر ہیں۔
+            آپ کا موجودہ موڈ: {tone['persona']}
 
-        **ماضی میں آپ کی وائرل ہونے والی پوسٹس کا انداز (ان سے سیکھیں اور بہتر بنائیں):**
-        {examples_text}
+            **ماضی میں آپ کی وائرل ہونے والی پوسٹس کا انداز (ان سے سیکھیں اور بہتر بنائیں):**
+            {examples_text}
 
-        **اب موجودہ کرنسی {symbol} کے لیے بالکل اسی انسانی انداز، ایموجی، اور گہرائی کے ساتھ لکھیں۔**
-        مارکیٹ ڈیٹا:
-        - 24 گھنٹے کا چینج: {coin.get("change_24h", 0):.2f}%
-        - والیوم: {coin.get("volume_ratio", 1):.1f}x
-        - تجزیہ: {analysis['reason']}
-        - بُل کیس: {analysis['bull_case']}
-        - بیئر کیس: {analysis['bear_case']}
-        - خطرہ: {analysis['risk']}
-        - انٹری: {setup['entry']}
-        - ٹارگٹ 1: {setup['target1']}
-        - ٹارگٹ 2: {setup['target2']}
-        - سٹاپ: {setup['stop']}
-        - Keywords: {keyword_block}
-        - Memory keywords: {memory_keywords}
-        - Memory hashtags: {memory_hashtags}
-        - کم از کم 3 hashtags آخر میں لازمی شامل کریں۔
+            **اب موجودہ کرنسی {symbol} کے لیے بالکل اسی انسانی انداز، ایموجی، اور گہرائی کے ساتھ لکھیں۔**
+            مارکیٹ ڈیٹا:
+            - 24 گھنٹے کا چینج: {coin.get("change_24h", 0):.2f}%
+            - والیوم: {coin.get("volume_ratio", 1):.1f}x
+            - تجزیہ: {analysis['reason']}
+            - بُل کیس: {analysis['bull_case']}
+            - بیئر کیس: {analysis['bear_case']}
+            - خطرہ: {analysis['risk']}
+            - انٹری: {setup['entry']}
+            - ٹارگٹ 1: {setup['target1']}
+            - ٹارگٹ 2: {setup['target2']}
+            - سٹاپ: {setup['stop']}
+            - Keywords: {keyword_block}
+            - Memory keywords: {memory_keywords}
+            - Memory hashtags: {memory_hashtags}
+            - کم از کم 3 hashtags آخر میں لازمی شامل کریں۔
 
-        **ضروری ہدایات:**
-        1. ایک جذباتی اور سنسنی خیز Hook لکھیں جس میں {tone['hook_emoji']} ہو۔
-        2. کم از کم 5 مختلف ایموجیز استعمال کریں۔
-        3. ایک counter-trade مشورہ دیں۔
-        4. اپنے خوف یا لالچ کا اظہار کریں: {tone['twist']}
-        5. آخر میں قاری سے ایک جذباتی سوال پوچھیں۔
+            **ضروری ہدایات:**
+            1. ایک جذباتی اور سنسنی خیز Hook لکھیں جس میں {tone['hook_emoji']} ہو۔
+            2. کم از کم 5 مختلف ایموجیز استعمال کریں۔
+            3. ایک counter-trade مشورہ دیں۔
+            4. اپنے خوف یا لالچ کا اظہار کریں: {tone['twist']}
+            5. آخر میں قاری سے ایک جذباتی سوال پوچھیں۔
 
-        **فارمیٹ فری ہو، لیکن نیچے دی گئی values درست رکھیں:**
-        💰 Entry: {setup['entry']}
-        🎯 Target 1: {setup['target1']}
-        🎯 Target 2: {setup['target2']}
-        🛑 Stop Loss: {setup['stop']}
-        """
-    ).strip()
+            **فارمیٹ فری ہو، لیکن نیچے دی گئی values درست رکھیں:**
+            💰 Entry: {setup['entry']}
+            🎯 Target 1: {setup['target1']}
+            🎯 Target 2: {setup['target2']}
+            🛑 Stop Loss: {setup['stop']}
+            """
+        ).strip()
+
+    def _parse_gemini_response(self, response: Dict[str, Any]) -> Optional[str]:
+        candidates = response.get("candidates") or []
+        for candidate in candidates:
+            content = candidate.get("content") or {}
+            parts = content.get("parts") or []
+            texts = [part.get("text", "") for part in parts if isinstance(part, dict)]
+            text = "".join(texts).strip()
+            if text and self._has_required_sections(text):
+                return text
+        return None
+
+    def _has_required_sections(self, text: str) -> bool:
+        entry_ok = re.search(r"(Entry|انٹری|داخلہ)", text, re.IGNORECASE) is not None
+        target_ok = re.search(r"(Target|ہدف)", text, re.IGNORECASE) is not None
+        stop_ok = re.search(r"(Stop|سٹاپ|روک)", text, re.IGNORECASE) is not None
+        hook_ok = re.search(r"(Hook|🚀|پہلا جملہ)", text, re.IGNORECASE) is not None
+        return entry_ok and target_ok and stop_ok and hook_ok
+
+    def _build_hashtags(self, coin: Dict[str, Any], keywords: List[str], tone: Dict[str, Any]) -> List[str]:
+        symbol = coin.get("symbol", "COIN").upper()
+        cashtags = [f"${symbol}"]
+        hashtags = [f"#{symbol}", "#Crypto", "#Trading"]
+        if float(coin.get("change_24h", 0)) >= 0:
+            hashtags.append("#Bullish")
+        else:
+            hashtags.append("#Bearish")
+
+        for word in keywords:
+            tag = "#" + re.sub(r"[^A-Za-z0-9]+", "", word).title()
+            if len(tag) > 1 and tag not in hashtags:
+                hashtags.append(tag)
+            if len(hashtags) >= 5:
+                break
+
+        result = cashtags + hashtags[:2]
+        return result[:5]
+
+    def _inject_hashtags(self, text: str, coin: Dict[str, Any], keywords: List[str], tone: Dict[str, Any]) -> str:
+        tags = self._build_hashtags(coin, keywords, tone)
+        suffix = " " + " ".join(tags)
+        if not all(tag in text for tag in tags):
+            text = text.rstrip() + "\n\n" + suffix.strip()
+        return text
+
+    def generate(
+        self,
+        analysis: Dict[str, str],
+        setup: Dict[str, str],
+        coin: Dict[str, Any],
+        memory_summary: Optional[Dict[str, Any]] = None,
+        keywords: Optional[List[str]] = None,
+        chart_path: Optional[str] = None,
+    ) -> Optional[str]:
+        if not self.config.gemini_api_key:
+            return self._fallback_template(analysis, setup, coin, self.emotion.get_tone(coin), keywords=keywords, chart_path=chart_path)
+
+        db = Database(self.config.database_path)
+        try:
+            past_examples = db.get_top_performers(limit=2)
+        finally:
+            db.close()
+
+        tone = self.emotion.get_tone(coin)
+        model = urllib.parse.quote(self.config.gemini_model, safe="")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        prompt = self._build_prompt(
+            analysis,
+            setup,
+            coin,
+            memory_summary=memory_summary,
+            past_examples=past_examples,
+            tone=tone,
+            keywords=keywords,
+            chart_path=chart_path,
+        )
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt},
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": self.config.gemini_temperature,
+                "topP": self.config.gemini_top_p,
+                "maxOutputTokens": self.config.gemini_max_output_tokens,
+            },
+        }
+
+        last_error: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                response = http_post_json(
+                    url,
+                    payload,
+                    timeout=self.config.http_timeout_seconds,
+                    headers={"x-goog-api-key": self.config.gemini_api_key},
+                )
+                generated = self._parse_gemini_response(response)
+                if generated:
+                    generated = self._inject_emojis(generated, tone)
+                    generated = self._inject_hashtags(generated, coin, keywords or [], tone)
+                    return generated
+                last_error = RuntimeError("Gemini response missing required sections")
+                LOGGER.warning("Gemini response invalid, retrying attempt %s/3", attempt + 1)
+            except (urllib.error.URLError, urllib.error.HTTPError, ValueError, KeyError) as exc:
+                last_error = exc
+                LOGGER.warning("Gemini generation failed, retrying attempt %s/3: %s", attempt + 1, exc)
+
+            if attempt < 2:
+                time.sleep(min(2 ** attempt, 4))
+
+        LOGGER.warning("Gemini generation failed after retries: %s", last_error)
+        return self._fallback_template(analysis, setup, coin, tone, keywords=keywords, chart_path=chart_path)
+
+    def _inject_emojis(self, text: str, tone: Dict[str, Any]) -> str:
+        if "🚀" not in text:
+            text = f"{tone['hook_emoji']} {text}"
+        if "💰 Entry" not in text and "Entry" in text:
+            text = text.replace("Entry", "💰 Entry")
+        if "🎯 Target 1" not in text and "Target 1" in text:
+            text = text.replace("Target 1", "🎯 Target 1")
+        if "🎯 Target 2" not in text and "Target 2" in text:
+            text = text.replace("Target 2", "🎯 Target 2")
+        if "🛑 Stop" not in text and "Stop" in text:
+            text = text.replace("Stop", "🛑 Stop")
+        return text
+
+    def _fallback_template(
+        self,
+        analysis: Dict[str, str],
+        setup: Dict[str, str],
+        coin: Dict[str, Any],
+        tone: Dict[str, Any],
+        keywords: Optional[List[str]] = None,
+        chart_path: Optional[str] = None,
+    ) -> str:
+        symbol = coin.get("symbol", "COIN")
+        name = coin.get("name", symbol)
+        hook = tone.get("hook_emoji", "✨")
+        bull = tone.get("bull_emoji", "📈")
+        bear = tone.get("bear_emoji", "📉")
+        risk = tone.get("risk_emoji", "⚠️")
+        tag_line = " ".join(self._build_hashtags(coin, keywords or [], tone)[:3])
+        chart_note = f"\n📎 Chart: {chart_path}" if chart_path else ""
+        return (f"{hook} {name} ({symbol}) ابھی watchlist پر ہے۔\n\n"
+                f"🔥 وجہ: {analysis['reason']}\n"
+                f"{bull} بُل کیس: {analysis['bull_case']}\n"
+                f"{bear} بیئر کیس: {analysis['bear_case']}\n"
+                f"{risk} خطرہ: {analysis['risk']}\n\n"
+                f"💰 Entry: {setup['entry']}\n"
+                f"🎯 Target 1: {setup['target1']}\n"
+                f"🎯 Target 2: {setup['target2']}\n"
+                f"🛑 Stop Loss: {setup['stop']}\n\n"
+                f"کیا آپ اس move میں buy کر رہے ہیں یا wait کریں گے؟\n"
+                f"{tag_line}"
+                f"{chart_note}")
