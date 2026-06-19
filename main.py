@@ -115,12 +115,22 @@ def _http_json_with_retry(
             request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError, ValueError) as exc:
+        except urllib.error.HTTPError as exc:
+            if exc.code == 451:
+                LOGGER.warning("HTTP 451 %s %s blocked by geo-restriction, skipping retries", method, url)
+                raise
             last_error = exc
             if attempt >= retries - 1:
                 break
             sleep_for = min(2 ** attempt, 8)
-            LOGGER.warning("HTTP %s %s failed, retrying in %ss: %s", method, url, sleep_for, exc)
+            LOGGER.warning("HTTP %s %s failed (retrying in %ss): %s", method, url, sleep_for, exc)
+            time.sleep(sleep_for)
+        except (urllib.error.URLError, ValueError) as exc:
+            last_error = exc
+            if attempt >= retries - 1:
+                break
+            sleep_for = min(2 ** attempt, 8)
+            LOGGER.warning("HTTP %s %s failed (retrying in %ss): %s", method, url, sleep_for, exc)
             time.sleep(sleep_for)
     assert last_error is not None
     raise last_error
@@ -357,10 +367,39 @@ class MarketScanner:
             start = price / (1 + change_24h / 100.0)
         return [round(start + (price - start) * (i / (steps - 1)), 8) for i in range(steps)]
 
+
+    def _coingecko_universe(self) -> List[Coin]:
+        """Fallback to CoinGecko when Binance is blocked."""
+        url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=15&sparkline=true&price_change_percentage=24h"
+        try:
+            payload = http_get_json(url, timeout=self.config.http_timeout_seconds)
+        except Exception:
+            return self._build_universe()
+
+        coins: List[Coin] = []
+        for item in payload:
+            try:
+                symbol = (item.get("symbol") or "").upper()
+                name = item.get("name") or symbol
+                price = float(item.get("current_price") or 0)
+                change_24h = float(item.get("price_change_percentage_24h") or 0)
+                volume_24h = float(item.get("total_volume") or 0)
+                market_cap = float(item.get("market_cap") or 0)
+                volume_ratio = max(1.0, volume_24h / max(market_cap, 1) * 100)
+                sparkline = item.get("sparkline_in_7d", {}).get("price", [])
+                history = [float(p) for p in sparkline[-10:]] if sparkline else self._synthetic_history(price, change_24h)
+            except (TypeError, ValueError, KeyError):
+                continue
+            coins.append(Coin(symbol, name, price, change_24h, volume_24h, volume_ratio, market_cap, history))
+
+        return coins or self._build_universe()
+
     def _universe(self) -> List[Coin]:
         if self.config.live_market_data:
             with suppress(Exception):
                 return self._live_universe()
+            with suppress(Exception):
+                return self._coingecko_universe()
         return self.universe
 
     def top_gainers(self, limit: int = 3) -> List[Dict[str, Any]]:
@@ -451,28 +490,28 @@ class EmotionEngine:
         if change > 5 and vol > 1.5:
             return {
                 "persona": "FOMO Bull",
-                "hook_emoji": "ðŸš€ðŸ’¥",
-                "bull_emoji": "ðŸ“ˆðŸ’Ž",
-                "bear_emoji": "âš ï¸ðŸ§Š",
-                "risk_emoji": "ðŸ›‘ðŸ’€",
+                "hook_emoji": "Ã°Å¸Å¡â‚¬Ã°Å¸â€™Â¥",
+                "bull_emoji": "Ã°Å¸â€œË†Ã°Å¸â€™Å½",
+                "bear_emoji": "Ã¢Å¡ Ã¯Â¸ÂÃ°Å¸Â§Å ",
+                "risk_emoji": "Ã°Å¸â€ºâ€˜Ã°Å¸â€™â‚¬",
                 "twist": "Excitement is high, but be careful! Greed can be dangerous.",
             }
         elif change < -3:
             return {
                 "persona": "Panic Bear",
-                "hook_emoji": "ðŸ“‰ðŸ˜¨",
-                "bull_emoji": "ðŸ•Šï¸ðŸ€",
-                "bear_emoji": "ðŸ»ðŸ”ª",
-                "risk_emoji": "ðŸš¨ðŸ©¸",
+                "hook_emoji": "Ã°Å¸â€œâ€°Ã°Å¸ËœÂ¨",
+                "bull_emoji": "Ã°Å¸â€¢Å Ã¯Â¸ÂÃ°Å¸Ââ‚¬",
+                "bear_emoji": "Ã°Å¸ÂÂ»Ã°Å¸â€Âª",
+                "risk_emoji": "Ã°Å¸Å¡Â¨Ã°Å¸Â©Â¸",
                 "twist": "Blood is in the water, but smart people buy fear. Are you ready?",
             }
         else:
             return {
                 "persona": "Cold Analyst",
-                "hook_emoji": "ðŸ§ðŸ“Š",
-                "bull_emoji": "ðŸ“ˆðŸ“",
-                "bear_emoji": "ðŸ“‰ðŸ“",
-                "risk_emoji": "âš–ï¸ðŸ›¡ï¸",
+                "hook_emoji": "Ã°Å¸Â§ÂÃ°Å¸â€œÅ ",
+                "bull_emoji": "Ã°Å¸â€œË†Ã°Å¸â€œÂ",
+                "bear_emoji": "Ã°Å¸â€œâ€°Ã°Å¸â€œÂ",
+                "risk_emoji": "Ã¢Å¡â€“Ã¯Â¸ÂÃ°Å¸â€ºÂ¡Ã¯Â¸Â",
                 "twist": "Leave emotions aside, only data speaks.",
             }
 
@@ -655,4 +694,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-        
