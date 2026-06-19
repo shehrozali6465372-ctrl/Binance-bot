@@ -546,7 +546,8 @@ class GeminiGenerator:
         memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
         memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
         return textwrap.dedent(
-            f"""
+            f
+            """
             آپ 20 سال کا تجربہ رکھنے والے وال اسٹریٹ کے Veteran ٹریڈر ہیں۔
             آپ کا موجودہ موڈ: {tone['persona']}
 
