@@ -465,6 +465,7 @@ class ResearchEngine:
   <polyline fill="none" stroke="#38bdf8" stroke-width="3" points="{points}" />
   {circles}
 </svg>
+
 """
         path.write_text(payload, encoding="utf-8")
         return str(path)
@@ -565,4 +566,4 @@ class GeminiGenerator:
             f"- Target 2: {setup['target2']}",
             f"- Stop: {setup['stop']}",
             f"- Keywords: {keyword_block}",
-         
+         """
