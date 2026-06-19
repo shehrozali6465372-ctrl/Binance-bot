@@ -421,8 +421,6 @@ class GeminiGenerator:
     def _fallback_template(self, analysis, setup, coin, tone, keywords=None, chart_path=None) -> str:
         symbol = coin.get("symbol","COIN")
         return f"{tone['hook_emoji']} {symbol} | Entry: {setup['entry']} | T1: {setup['target1']} | T2: {setup['target2']} | Stop: {setup['stop']} | {analysis['reason']}\n${symbol} #{symbol} #Crypto"
-
-
 class ChartGenerator:
     def create(self, coin: Dict[str,Any]) -> str:
         symbol = coin.get("symbol","COIN")
@@ -435,4 +433,9 @@ class ChartGenerator:
         if mn==mx: mn-=1; mx+=1
         def sx(i): return m + i*((w-2*m)/max(len(history)-1,1))
         def sy(p): return h - m - ((p-mn)/max(mx-mn,1e-9))*(h-2*m)
-        pts = " ".join(f"{sx(i):.1f},{sy(p):.1f}" for i,p 
+        pts = " ".join(f"{sx(i):.1f},{sy(p):.1f}" for i,p in enumerate(history))
+        circ = "\n".join(f'<circle cx="{sx(i):.1f}" cy="{sy(p):.1f}" r="3" fill="#7dd3fc"/>' for i,p in enumerate(history))
+        payload = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}"><rect width="100%" height="100%" rx="18" fill="#0f172a"/><text x="{m}" y="18" fill="#94a3b8" font-size="14">{symbol}</text><polyline fill="none" stroke="#38bdf8" stroke-width="3" points="{pts}"/>{circ}</svg>
+"""
+        path.write_text(payload, encoding="utf-8")
+        return str(path)
