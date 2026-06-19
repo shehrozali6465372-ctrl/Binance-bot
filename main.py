@@ -122,14 +122,20 @@ def _http_json_with_retry(
             last_error = exc
             if attempt >= retries - 1:
                 break
-            sleep_for = min(2 ** attempt, 8)
+            if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+                sleep_for = min(2 ** attempt * 5, 60)
+            else:
+                sleep_for = min(2 ** attempt, 8)
             LOGGER.warning("HTTP %s %s failed (retrying in %ss): %s", method, url, sleep_for, exc)
             time.sleep(sleep_for)
         except (urllib.error.URLError, ValueError) as exc:
             last_error = exc
             if attempt >= retries - 1:
                 break
-            sleep_for = min(2 ** attempt, 8)
+            if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+                sleep_for = min(2 ** attempt * 5, 60)
+            else:
+                sleep_for = min(2 ** attempt, 8)
             LOGGER.warning("HTTP %s %s failed (retrying in %ss): %s", method, url, sleep_for, exc)
             time.sleep(sleep_for)
     assert last_error is not None
@@ -394,13 +400,22 @@ class MarketScanner:
 
         return coins or self._build_universe()
 
+    _universe_cache = None
+
     def _universe(self) -> List[Coin]:
+        if MarketScanner._universe_cache is not None:
+            return MarketScanner._universe_cache
         if self.config.live_market_data:
             with suppress(Exception):
-                return self._live_universe()
+                coins = self._live_universe()
+                MarketScanner._universe_cache = coins
+                return coins
             with suppress(Exception):
-                return self._coingecko_universe()
-        return self.universe
+                coins = self._coingecko_universe()
+                MarketScanner._universe_cache = coins
+                return coins
+        MarketScanner._universe_cache = self.universe
+        return MarketScanner._universe_cache
 
     def top_gainers(self, limit: int = 3) -> List[Dict[str, Any]]:
         universe = self._universe()
@@ -479,7 +494,6 @@ class TradeSetup:
             "target2": f"{target2:.6f}".rstrip("0").rstrip("."),
             "stop": f"{stop:.6f}".rstrip("0").rstrip("."),
         }
-
 
 class EmotionEngine:
     @staticmethod
@@ -688,9 +702,9 @@ def main() -> None:
     content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
 
     if not publisher.publish(top_pick, content):
-        LOGGER.error("Publishing failed.")
-        return
+        LOGGER.warning("Publishing failed (non-fatal) - continuing...")
 
 
 if __name__ == "__main__":
     main()
+                    
