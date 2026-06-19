@@ -545,7 +545,7 @@ class GeminiGenerator:
         coin: Dict[str, Any],
         memory_summary: Optional[Dict[str, Any]] = None,
         past_examples: Optional[List[str]] = None,
-        tone: OOptional[Dict[str, Any]] = None,
+        tone: Optional[Dict[str, Any]] = None,
         keywords: Optional[List[str]] = None,
     ) -> str:
         symbol = coin.get("symbol", "COIN")
