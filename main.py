@@ -571,10 +571,28 @@ class GeminiGenerator:
             },
         }
 
-        try:
-            resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds)
-        except Exception as exc:
-            LOGGER.error("Gemini API call failed: %s", exc)
+        # Retry Gemini with longer waits for rate limits
+        gemini_exc = None
+        for gemini_attempt in range(5):
+            try:
+                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds)
+                gemini_exc = None
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    wait_time = min(15 * (gemini_attempt + 1), 120)
+                    LOGGER.warning("Gemini rate limited (429), waiting %ss (attempt %d/5)...", wait_time, gemini_attempt + 1)
+                    time.sleep(wait_time)
+                    gemini_exc = exc
+                else:
+                    gemini_exc = exc
+                    break
+            except Exception as exc:
+                gemini_exc = exc
+                break
+        
+        if gemini_exc:
+            LOGGER.error("Gemini API call failed after retries: %s", gemini_exc)
             LOGGER.warning("Falling back to template-based content")
             return self._template_content(analysis, setup, coin, tone, keywords)
 
@@ -704,13 +722,17 @@ class PostPublisher:
     def _save_locally(self, coin: Dict[str, Any], content: str) -> None:
         """Save post to local file when remote publish fails."""
         symbol = coin.get("symbol", "UNKNOWN")
-        filename = f"post_{symbol}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.md"
-        path = Path(self.config.database_path).parent / filename
-        has_content = content.encode("utf-8")
+        ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        filename = f"post_{symbol}_{ts}.md"
+        posts_dir = Path("posts")
+        posts_dir.mkdir(exist_ok=True)
+        path = posts_dir / filename
         try:
-            ensure_parent(str(path))
             path.write_text(content)
-            LOGGER.info("Saved post locally: %s", path)
+            LOGGER.info("✅ Post saved: %s", path)
+            # Also save a latest copy
+            latest = posts_dir / "latest_post.md"
+            latest.write_text(content)
         except Exception as e:
             LOGGER.error("Could not save locally: %s", e)
 
