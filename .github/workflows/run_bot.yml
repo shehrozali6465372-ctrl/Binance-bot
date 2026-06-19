@@ -2,9 +2,8 @@ name: Binance Square Auto Poster
 
 on:
   schedule:
-    # ہر 2 گھنٹے بعد چلے گا (UTC وقت)
     - cron: '0 */2 * * *'
-  workflow_dispatch:   # Manual run کے لیے
+  workflow_dispatch:
 
 jobs:
   run-agent:
@@ -34,7 +33,7 @@ jobs:
           GEMINI_MODEL: gemini-2.0-flash
           DATABASE_PATH: agent.db
           PUBLISH_LOG_PATH: published_posts.jsonl
-        run: python main.py   # <--- یہاں main.py استعمال ہو رہا ہے
+        run: python agent_bot.py    # <--- یہاں نام بدل دیا گیا ہے
 
       - name: Upload logs and database
         if: always()
