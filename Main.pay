@@ -528,29 +528,59 @@ class GeminiGenerator:
         self.emotion = EmotionEngine()
 
     def _build_prompt(
-        self,
-        analysis: Dict[str, str],
-        setup: Dict[str, str],
-        coin: Dict[str, Any],
-        memory_summary: Optional[Dict[str, Any]] = None,
-        past_examples: Optional[List[str]] = None,
-        tone: Optional[Dict[str, Any]] = None,
-        keywords: Optional[List[str]] = None,
-        chart_path: Optional[str] = None,
-    ) -> str:
-        symbol = coin.get("symbol", "COIN")
-        name = coin.get("name", symbol)
-        keyword_block = ", ".join(keywords) if keywords else "none"
-        examples_text = "\n---\n".join(past_examples or []) if past_examples else "کوئی پچھلی مثال دستیاب نہیں، لیکن آپ ایک ماہر ہیں۔"
-        tone = tone or self.emotion.get_tone(coin)
-        memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
-        memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
-        return textwrap.dedent(
-            f"""
-            آپ 20 سال کا تجربہ رکھنے والے وال اسٹریٹ کے Veteran ٹریڈر ہیں۔
-            آپ کا موجودہ موڈ: {tone['persona']}
+    self,
+    analysis: Dict[str, str],
+    setup: Dict[str, str],
+    coin: Dict[str, Any],
+    memory_summary: Optional[Dict[str, Any]] = None,
+    past_examples: Optional[List[str]] = None,
+    tone: Optional[Dict[str, Any]] = None,
+    keywords: Optional[List[str]] = None,
+    chart_path: Optional[str] = None,
+) -> str:
+    symbol = coin.get("symbol", "COIN")
+    name = coin.get("name", symbol)
+    keyword_block = ", ".join(keywords) if keywords else "none"
+    examples_text = "\n---\n".join(past_examples or []) if past_examples else "کوئی پچھلی مثال دستیاب نہیں، لیکن آپ ایک ماہر ہیں۔"
+    tone = tone or self.emotion.get_tone(coin)
+    memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
+    memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
+    return textwrap.dedent(
+        f"""
+        آپ 20 سال کا تجربہ رکھنے والے وال اسٹریٹ کے Veteran ٹریڈر ہیں۔
+        آپ کا موجودہ موڈ: {tone['persona']}
 
-            **ماضی میں آپ کی وائرل ہونے والی پوسٹس کا انداز (ان سے سیکھیں اور بہتر بنائیں):**
-            {examples_text}
+        **ماضی میں آپ کی وائرل ہونے والی پوسٹس کا انداز (ان سے سیکھیں اور بہتر بنائیں):**
+        {examples_text}
 
-            **اب موجودہ کرنسی {symbol} کے لیے بالکل
+        **اب موجودہ کرنسی {symbol} کے لیے بالکل اسی انسانی انداز، ایموجی، اور گہرائی کے ساتھ لکھیں۔**
+        مارکیٹ ڈیٹا:
+        - 24 گھنٹے کا چینج: {coin.get("change_24h", 0):.2f}%
+        - والیوم: {coin.get("volume_ratio", 1):.1f}x
+        - تجزیہ: {analysis['reason']}
+        - بُل کیس: {analysis['bull_case']}
+        - بیئر کیس: {analysis['bear_case']}
+        - خطرہ: {analysis['risk']}
+        - انٹری: {setup['entry']}
+        - ٹارگٹ 1: {setup['target1']}
+        - ٹارگٹ 2: {setup['target2']}
+        - سٹاپ: {setup['stop']}
+        - Keywords: {keyword_block}
+        - Memory keywords: {memory_keywords}
+        - Memory hashtags: {memory_hashtags}
+        - کم از کم 3 hashtags آخر میں لازمی شامل کریں۔
+
+        **ضروری ہدایات:**
+        1. ایک جذباتی اور سنسنی خیز Hook لکھیں جس میں {tone['hook_emoji']} ہو۔
+        2. کم از کم 5 مختلف ایموجیز استعمال کریں۔
+        3. ایک counter-trade مشورہ دیں۔
+        4. اپنے خوف یا لالچ کا اظہار کریں: {tone['twist']}
+        5. آخر میں قاری سے ایک جذباتی سوال پوچھیں۔
+
+        **فارمیٹ فری ہو، لیکن نیچے دی گئی values درست رکھیں:**
+        💰 Entry: {setup['entry']}
+        🎯 Target 1: {setup['target1']}
+        🎯 Target 2: {setup['target2']}
+        🛑 Stop Loss: {setup['stop']}
+        """
+    ).strip()
