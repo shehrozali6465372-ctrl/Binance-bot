@@ -705,19 +705,25 @@ class PostPublisher:
                 hashlib.sha256
             ).hexdigest()
         headers = {"X-MBX-APIKEY": self.config.square_api_key}
-        try:
-            resp = http_post_json(
-                "https://api.binance.com/sapi/v1/square/post/create",
-                payload,
-                timeout=self.config.http_timeout_seconds,
-                headers=headers,
-            )
-            LOGGER.info("Published post: %s", resp)
-            return True
-        except Exception as exc:
-            LOGGER.warning("Publishing failed, saving locally: %s", exc)
-            self._save_locally(coin, content)
-            return True
+        binance_domains = ["https://api.binance.com", "https://api1.binance.com", "https://api2.binance.com"]
+        for domain in binance_domains:
+            try:
+                url = f"{domain}/sapi/v1/square/post/create"
+                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, headers=headers)
+                LOGGER.info("Published on %s: %s", domain, resp)
+                return True
+            except urllib.error.HTTPError as exc:
+                if exc.code == 451:
+                    LOGGER.warning("Binance %s blocked (451), trying next...", domain)
+                    continue
+                LOGGER.warning("Binance %s failed (%s), trying next...", domain, exc.code)
+                continue
+            except Exception as exc:
+                LOGGER.warning("Binance %s error: %s, trying next...", domain, exc)
+                continue
+        LOGGER.warning("All Binance domains blocked, saving locally")
+        self._save_locally(coin, content)
+        return True
 
     def _save_locally(self, coin: Dict[str, Any], content: str) -> None:
         """Save post to local file when remote publish fails."""
