@@ -571,25 +571,36 @@ class GeminiGenerator:
             },
         }
 
-        # Retry Gemini with longer waits for rate limits
+        # Retry Gemini with exponential backoff + jitter + model fallback
+        import random as _random
+        models_to_try = ["gemini-2.0-flash-lite", self.config.gemini_model]
         gemini_exc = None
-        for gemini_attempt in range(5):
-            try:
-                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds)
-                gemini_exc = None
-                break
-            except urllib.error.HTTPError as exc:
-                if exc.code == 429:
-                    wait_time = min(15 * (gemini_attempt + 1), 120)
-                    LOGGER.warning("Gemini rate limited (429), waiting %ss (attempt %d/5)...", wait_time, gemini_attempt + 1)
-                    time.sleep(wait_time)
-                    gemini_exc = exc
-                else:
+        
+        for model_idx, model_name in enumerate(models_to_try):
+            model_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.config.gemini_api_key}"
+            for gemini_attempt in range(4):
+                try:
+                    resp = http_post_json(model_url, payload, timeout=self.config.http_timeout_seconds)
+                    gemini_exc = None
+                    break
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 429:
+                        base_delay = 2.0
+                        delay = min(base_delay * (2 ** gemini_attempt), 60)
+                        jitter = _random.uniform(0, 0.5 * delay)
+                        wait_time = delay + jitter
+                        LOGGER.warning("Gemini 429 on %s, waiting %.1fs (attempt %d/4)...", model_name, wait_time, gemini_attempt + 1)
+                        time.sleep(wait_time)
+                        gemini_exc = exc
+                    else:
+                        gemini_exc = exc
+                        break
+                except Exception as exc:
                     gemini_exc = exc
                     break
-            except Exception as exc:
-                gemini_exc = exc
+            if gemini_exc is None:
                 break
+            LOGGER.warning("Gemini %s failed, trying next model...", model_name)
         
         if gemini_exc:
             LOGGER.error("Gemini API call failed after retries: %s", gemini_exc)
