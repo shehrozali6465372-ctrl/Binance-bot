@@ -558,8 +558,6 @@ class GeminiGenerator:
 
         models_to_try = [
             self.config.gemini_model,
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
         ]
         # Deduplicate
         seen_models = set()
@@ -688,54 +686,52 @@ class PostPublisher:
         return True
 
     def _try_square_api(self, coin: Dict[str, Any], content: str) -> bool:
-        """Try to publish to Binance Square via Creator Center API."""
+        """Publish to Binance Square via official Creator Center API."""
         square_key = self.config.square_api_key
         if not square_key:
             LOGGER.warning("No SQUARE_API_KEY set, saving locally")
             return False
 
+        # Format content with symbol hashtags
+        symbol = coin.get("symbol", "")
+        body_text = content
+        # Add symbol hashtag if not already present
+        if symbol and f"#{symbol}" not in content:
+            body_text = content + f"\n\n#{symbol}"
+
         payload = {
-            "content": content,
-            "asset": coin.get("symbol", ""),
+            "contentType": 1,
+            "bodyTextOnly": body_text,
         }
         headers = {
-            "X-MBX-APIKEY": square_key,
+            "X-Square-OpenAPI-Key": square_key,
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            "clienttype": "binanceSkill",
         }
 
-        # Try multiple endpoints for Binance Square
-        endpoints = [
-            "https://creator.binance.com/v1/posts",
-            "https://www.binance.com/bapi/creator/v1/post/create",
-        ]
+        url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
 
-        for url in endpoints:
-            try:
-                req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-                # Don't follow redirects - we want the raw response
-                with urllib.request.urlopen(req, timeout=self.config.http_timeout_seconds) as resp:
-                    body = resp.read().decode("utf-8", errors="replace")
-                    LOGGER.info("POST %s -> HTTP %d: %s", url, resp.status, body[:200])
-                    # If we got JSON back, try to parse it
-                    try:
-                        data = json.loads(body)
-                        LOGGER.info("Published post successfully: %s", data)
-                        return True
-                    except json.JSONDecodeError:
-                        # Non-JSON response but 2xx status might still be success
-                        LOGGER.info("Published post (non-JSON response): %s", body[:100])
-                        return True
-            except urllib.error.HTTPError as exc:
-                error_body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, 'read') else str(exc)
-                LOGGER.warning("Square API %s -> HTTP %d: %s", url, exc.code, error_body[:150])
-                continue
-            except (urllib.error.URLError, OSError, ValueError) as exc:
-                LOGGER.warning("Square API %s failed: %s", url, exc)
-                continue
+        try:
+            import requests as req_lib
+            resp = req_lib.post(url, headers=headers, json=payload, timeout=self.config.http_timeout_seconds)
+            LOGGER.info("Square API response: HTTP %d %s", resp.status_code, resp.text[:300])
 
-        LOGGER.warning("All Square API endpoints failed")
-        return False
+            if resp.status_code != 200:
+                LOGGER.warning("Square API returned HTTP %d", resp.status_code)
+                return False
+
+            data = resp.json()
+            if data.get("code") == "000000":
+                post_id = data.get("data", {}).get("id", "unknown")
+                share_link = data.get("data", {}).get("shareLink", "")
+                LOGGER.info("✅ Published to Square! ID: %s Link: %s", post_id, share_link)
+                return True
+            else:
+                LOGGER.warning("Square API error [%s]: %s", data.get("code"), data.get("message"))
+                return False
+        except Exception as exc:
+            LOGGER.warning("Square API request failed: %s", exc)
+            return False
 
     def _save_locally(self, coin: Dict[str, Any], content: str) -> None:
         """Save post to local file when remote publish fails."""
