@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import logging
 import sqlite3
 import time
@@ -90,8 +91,9 @@ def http_post_json(
     payload: Dict[str, Any],
     timeout: int,
     headers: Optional[Dict[str, str]] = None,
+    retries: int = 3,
 ) -> Any:
-    return _http_json_with_retry("POST", url, timeout, payload=payload, headers=headers)
+    return _http_json_with_retry("POST", url, timeout, payload=payload, headers=headers, retries=retries)
 
 
 def _http_json_with_retry(
@@ -119,24 +121,22 @@ def _http_json_with_retry(
             if exc.code == 451:
                 LOGGER.warning("HTTP 451 %s %s blocked by geo-restriction, skipping retries", method, url)
                 raise
+            if exc.code == 429:
+                sleep_for = min(2 ** attempt * 5 + random.uniform(0, 5), 60)
+                LOGGER.warning("HTTP 429 %s %s rate limited (retrying in %ss, attempt %d/%d)", method, url, round(sleep_for, 1), attempt + 1, retries)
+            else:
+                sleep_for = min(2 ** attempt + random.uniform(0, 2), 30)
+                LOGGER.warning("HTTP %d %s %s failed (retrying in %ss, attempt %d/%d)", exc.code, method, url, round(sleep_for, 1), attempt + 1, retries)
             last_error = exc
             if attempt >= retries - 1:
                 break
-            if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
-                sleep_for = min(2 ** attempt * 5, 60)
-            else:
-                sleep_for = min(2 ** attempt, 8)
-            LOGGER.warning("HTTP %s %s failed (retrying in %ss): %s", method, url, sleep_for, exc)
             time.sleep(sleep_for)
         except (urllib.error.URLError, ValueError) as exc:
             last_error = exc
             if attempt >= retries - 1:
                 break
-            if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
-                sleep_for = min(2 ** attempt * 5, 60)
-            else:
-                sleep_for = min(2 ** attempt, 8)
-            LOGGER.warning("HTTP %s %s failed (retrying in %ss): %s", method, url, sleep_for, exc)
+            sleep_for = min(2 ** attempt + random.uniform(0, 2), 30)
+            LOGGER.warning("HTTP %s %s failed (retrying in %ss, attempt %d/%d): %s", method, url, round(sleep_for, 1), attempt + 1, retries, exc)
             time.sleep(sleep_for)
     assert last_error is not None
     raise last_error
@@ -391,7 +391,7 @@ class MarketScanner:
                 change_24h = float(item.get("price_change_percentage_24h") or 0)
                 volume_24h = float(item.get("total_volume") or 0)
                 market_cap = float(item.get("market_cap") or 0)
-                volume_ratio = max(1.0, volume_24h / max(market_cap, 1) * 100)
+                volume_ratio = min(max(0.5, volume_24h / max(market_cap, 1) * 100), 10.0)
                 sparkline = item.get("sparkline_in_7d", {}).get("price", [])
                 history = [float(p) for p in sparkline[-10:]] if sparkline else self._synthetic_history(price, change_24h)
             except (TypeError, ValueError, KeyError):
@@ -553,68 +553,49 @@ class GeminiGenerator:
         )
 
         if not self.config.gemini_api_key:
-            LOGGER.warning("No GEMINI_API_KEY set; falling back to prompt as content")
-            return prompt
-
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.config.gemini_model}:generateContent"
-            f"?key={self.config.gemini_api_key}"
-        )
-
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": self.config.gemini_temperature,
-                "topP": self.config.gemini_top_p,
-                "maxOutputTokens": self.config.gemini_max_output_tokens,
-            },
-        }
-
-        # Retry Gemini with exponential backoff + jitter + model fallback
-        import random as _random
-        models_to_try = ["gemini-2.0-flash-lite", self.config.gemini_model]
-        gemini_exc = None
-        
-        for model_idx, model_name in enumerate(models_to_try):
-            model_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.config.gemini_api_key}"
-            for gemini_attempt in range(4):
-                try:
-                    resp = http_post_json(model_url, payload, timeout=self.config.http_timeout_seconds)
-                    gemini_exc = None
-                    break
-                except urllib.error.HTTPError as exc:
-                    if exc.code == 429:
-                        base_delay = 2.0
-                        delay = min(base_delay * (2 ** gemini_attempt), 60)
-                        jitter = _random.uniform(0, 0.5 * delay)
-                        wait_time = delay + jitter
-                        LOGGER.warning("Gemini 429 on %s, waiting %.1fs (attempt %d/4)...", model_name, wait_time, gemini_attempt + 1)
-                        time.sleep(wait_time)
-                        gemini_exc = exc
-                    else:
-                        gemini_exc = exc
-                        break
-                except Exception as exc:
-                    gemini_exc = exc
-                    break
-            if gemini_exc is None:
-                break
-            LOGGER.warning("Gemini %s failed, trying next model...", model_name)
-        
-        if gemini_exc:
-            LOGGER.error("Gemini API call failed after retries: %s", gemini_exc)
-            LOGGER.warning("Falling back to template-based content")
+            LOGGER.warning("No GEMINI_API_KEY set; using template-based content")
             return self._template_content(analysis, setup, coin, tone, keywords)
 
-        try:
-            text = resp["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError, TypeError) as exc:
-            LOGGER.error("Unexpected Gemini response: %s", resp)
-            LOGGER.warning("Falling back to template-based content")
-            return self._template_content(analysis, setup, coin, tone, keywords)
+        models_to_try = [
+            self.config.gemini_model,
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+        ]
+        # Deduplicate
+        seen_models = set()
+        models = []
+        for m in models_to_try:
+            if m not in seen_models:
+                seen_models.add(m)
+                models.append(m)
 
-        return text.strip()
+        for model in models:
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model}:generateContent"
+                f"?key={self.config.gemini_api_key}"
+            )
+
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": self.config.gemini_temperature,
+                    "topP": self.config.gemini_top_p,
+                    "maxOutputTokens": self.config.gemini_max_output_tokens,
+                },
+            }
+
+            try:
+                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, retries=5)
+                text = resp["candidates"][0]["content"]["parts"][0]["text"]
+                if text and text.strip():
+                    return text.strip()
+            except Exception as exc:
+                LOGGER.warning("Gemini model %s failed: %s", model, exc)
+                continue
+
+        LOGGER.warning("All Gemini models failed; falling back to template-based content")
+        return self._template_content(analysis, setup, coin, tone, keywords)
 
     def _build_prompt(
         self,
@@ -701,50 +682,71 @@ class PostPublisher:
             self._save_locally(coin, content)
             return True
 
+        published = self._try_square_api(coin, content)
+        if not published:
+            self._save_locally(coin, content)
+        return True
+
+    def _try_square_api(self, coin: Dict[str, Any], content: str) -> bool:
+        """Try to publish to Binance Square via Creator Center API."""
+        square_key = self.config.square_api_key
+        if not square_key:
+            LOGGER.warning("No SQUARE_API_KEY set, saving locally")
+            return False
+
         payload = {
             "content": content,
+            "asset": coin.get("symbol", ""),
         }
         headers = {
-            "X-MBX-APIKEY": self.config.square_api_key,
-            "Authorization": f"Bearer {self.config.square_api_key}",
+            "X-MBX-APIKEY": square_key,
             "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
         }
-        url = "https://creator.binance.com/v1/posts"
-        try:
-            resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, headers=headers)
-            LOGGER.info("✅ Published post to Binance Square: %s", resp)
-            return True
-        except urllib.error.HTTPError as exc:
-            if exc.code == 451:
-                LOGGER.warning("Binance Square geo-blocked (451), saving locally")
-            elif exc.code == 404:
-                LOGGER.warning("Binance Square endpoint not found (404), saving locally")
-            elif exc.code == 429:
-                LOGGER.warning("Binance Square rate-limited (429), saving locally")
-            else:
-                LOGGER.warning("Binance Square HTTP %s: saving locally", exc.code)
-        except (json.JSONDecodeError, ValueError) as exc:
-            # Empty response or non-JSON response (e.g. 202 with WAF challenge) - assume accepted
-            LOGGER.info("✅ Post sent to Binance Square (202 Accepted)")
-            return True
-        except Exception as exc:
-            LOGGER.warning("Publishing failed: %s, saving locally", exc)
-        self._save_locally(coin, content)
-        return True
+
+        # Try multiple endpoints for Binance Square
+        endpoints = [
+            "https://creator.binance.com/v1/posts",
+            "https://www.binance.com/bapi/creator/v1/post/create",
+        ]
+
+        for url in endpoints:
+            try:
+                req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+                # Don't follow redirects - we want the raw response
+                with urllib.request.urlopen(req, timeout=self.config.http_timeout_seconds) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+                    LOGGER.info("POST %s -> HTTP %d: %s", url, resp.status, body[:200])
+                    # If we got JSON back, try to parse it
+                    try:
+                        data = json.loads(body)
+                        LOGGER.info("Published post successfully: %s", data)
+                        return True
+                    except json.JSONDecodeError:
+                        # Non-JSON response but 2xx status might still be success
+                        LOGGER.info("Published post (non-JSON response): %s", body[:100])
+                        return True
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, 'read') else str(exc)
+                LOGGER.warning("Square API %s -> HTTP %d: %s", url, exc.code, error_body[:150])
+                continue
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                LOGGER.warning("Square API %s failed: %s", url, exc)
+                continue
+
+        LOGGER.warning("All Square API endpoints failed")
+        return False
 
     def _save_locally(self, coin: Dict[str, Any], content: str) -> None:
         """Save post to local file when remote publish fails."""
         symbol = coin.get("symbol", "UNKNOWN")
-        ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-        filename = f"post_{symbol}_{ts}.md"
         posts_dir = Path("posts")
-        posts_dir.mkdir(exist_ok=True)
+        posts_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"post_{symbol}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.md"
         path = posts_dir / filename
         try:
             path.write_text(content)
-            LOGGER.info("✅ Post saved: %s", path)
-            latest = posts_dir / "latest_post.md"
-            latest.write_text(content)
+            LOGGER.info("Saved post locally: %s", path)
         except Exception as e:
             LOGGER.error("Could not save locally: %s", e)
 
@@ -752,13 +754,6 @@ class PostPublisher:
 def main() -> None:
     config = CONFIG
     config.validate()
-    
-    # Check IP for debugging Binance geo-block
-    try:
-        ip = http_get_json("https://api.ipify.org?format=json", timeout=10).get("ip", "unknown")
-        LOGGER.info("🌐 Server IP: %s", ip)
-    except Exception as e:
-        LOGGER.warning("Could not get IP: %s", e)
 
     scanner = MarketScanner(config)
     research = ResearchEngine()
@@ -776,9 +771,17 @@ def main() -> None:
     unique_candidates = []
     for coin in all_candidates:
         sym = coin.get("symbol")
-        if sym not in seen:
-            seen.add(sym)
-            unique_candidates.append(coin)
+        price = float(coin.get("price", 0) or 0)
+        change = float(coin.get("change_24h", 0) or 0)
+        # Skip coins with no price or extreme values
+        if price <= 0:
+            continue
+        if abs(change) > 200:
+            continue
+        if sym in seen:
+            continue
+        seen.add(sym)
+        unique_candidates.append(coin)
 
     scored = [(research.score(coin), coin) for coin in unique_candidates]
     scored.sort(key=lambda x: x[0], reverse=True)
