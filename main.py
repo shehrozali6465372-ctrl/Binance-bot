@@ -757,6 +757,13 @@ class PostPublisher:
 def main() -> None:
     config = CONFIG
     config.validate()
+    
+    # Check IP for debugging Binance geo-block
+    try:
+        ip = http_get_json("https://api.ipify.org?format=json", timeout=10).get("ip", "unknown")
+        LOGGER.info("🌐 Server IP: %s", ip)
+    except Exception as e:
+        LOGGER.warning("Could not get IP: %s", e)
 
     scanner = MarketScanner(config)
     research = ResearchEngine()
