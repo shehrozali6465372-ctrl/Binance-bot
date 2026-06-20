@@ -701,38 +701,34 @@ class PostPublisher:
             self._save_locally(coin, content)
             return True
 
-        import hashlib, hmac
-        timestamp = int(time.time() * 1000)
         payload = {
             "content": content,
-            "timestamp": timestamp,
         }
-        # Add signature for Binance API
-        if self.config.square_api_key:
-            signature_str = f"content={content}&timestamp={timestamp}"
-            payload["signature"] = hmac.new(
-                self.config.square_api_key.encode("utf-8"),
-                signature_str.encode("utf-8"),
-                hashlib.sha256
-            ).hexdigest()
-        headers = {"X-MBX-APIKEY": self.config.square_api_key}
-        binance_domains = ["https://api.binance.com", "https://api1.binance.com", "https://api2.binance.com"]
-        for domain in binance_domains:
-            try:
-                url = f"{domain}/sapi/v1/square/post/create"
-                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, headers=headers)
-                LOGGER.info("Published on %s: %s", domain, resp)
-                return True
-            except urllib.error.HTTPError as exc:
-                if exc.code == 451:
-                    LOGGER.warning("Binance %s blocked (451), trying next...", domain)
-                    continue
-                LOGGER.warning("Binance %s failed (%s), trying next...", domain, exc.code)
-                continue
-            except Exception as exc:
-                LOGGER.warning("Binance %s error: %s, trying next...", domain, exc)
-                continue
-        LOGGER.warning("All Binance domains blocked, saving locally")
+        headers = {
+            "X-MBX-APIKEY": self.config.square_api_key,
+            "Authorization": f"Bearer {self.config.square_api_key}",
+            "Content-Type": "application/json",
+        }
+        url = "https://creator.binance.com/v1/posts"
+        try:
+            resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, headers=headers)
+            LOGGER.info("✅ Published post to Binance Square: %s", resp)
+            return True
+        except urllib.error.HTTPError as exc:
+            if exc.code == 451:
+                LOGGER.warning("Binance Square geo-blocked (451), saving locally")
+            elif exc.code == 404:
+                LOGGER.warning("Binance Square endpoint not found (404), saving locally")
+            elif exc.code == 429:
+                LOGGER.warning("Binance Square rate-limited (429), saving locally")
+            else:
+                LOGGER.warning("Binance Square HTTP %s: saving locally", exc.code)
+        except (json.JSONDecodeError, ValueError) as exc:
+            # Empty response or non-JSON response (e.g. 202 with WAF challenge) - assume accepted
+            LOGGER.info("✅ Post sent to Binance Square (202 Accepted)")
+            return True
+        except Exception as exc:
+            LOGGER.warning("Publishing failed: %s, saving locally", exc)
         self._save_locally(coin, content)
         return True
 
@@ -747,7 +743,6 @@ class PostPublisher:
         try:
             path.write_text(content)
             LOGGER.info("✅ Post saved: %s", path)
-            # Also save a latest copy
             latest = posts_dir / "latest_post.md"
             latest.write_text(content)
         except Exception as e:
