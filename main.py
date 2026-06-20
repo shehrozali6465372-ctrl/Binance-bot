@@ -668,7 +668,7 @@ class GeminiGenerator:
         emotion = tone or self.emotion.get_tone(coin)
         
         lines = [
-            f"{emotion['hook_emoji']} {{symbol}} Update: {{change:.1f}}% in 24h!",
+            f"{emotion['hook_emoji']} {symbol} Update: {change:.1f}% in 24h!",
             "",
             f"${symbol} is currently trading at ${price:.4f} with a {change:+.1f}% change in the last 24 hours.",
             f"Volume is {vol_ratio:.1f}x the baseline, showing {'strong' if vol_ratio > 1.5 else 'moderate'} participation.",
@@ -685,7 +685,7 @@ class GeminiGenerator:
             "",
             f"{emotion['twist']}",
             "",
-            "#crypto #{symbol} #trading #altcoin #defi"
+            f"#crypto #{symbol} #trading #altcoin #defi"
         ]
         return "\n".join(lines)
 
