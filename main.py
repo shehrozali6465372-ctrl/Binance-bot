@@ -471,9 +471,9 @@ class ResearchEngine:
         volume_ratio = float(coin.get("volume_ratio", 1))
         market_cap = float(coin.get("market_cap", 0))
         momentum = max(-10.0, min(10.0, change))
-        liquidity = min(10.0, volume_ratio * 3.0)
-        cap_penalty = -2.0 if market_cap <= 0 else 0.0
-        return momentum + liquidity + cap_penalty
+        liquidity = min(5.0, volume_ratio * 1.5)
+        cap_bonus = min(2.0, max(0.0, market_cap / 1e11))
+        return momentum + liquidity + cap_bonus
 
 
 class TradeSetup:
@@ -765,10 +765,16 @@ def main() -> None:
         sym = coin.get("symbol")
         price = float(coin.get("price", 0) or 0)
         change = float(coin.get("change_24h", 0) or 0)
-        # Skip coins with no price or extreme values
+        market_cap = float(coin.get("market_cap", 0) or 0)
+        volume_ratio = float(coin.get("volume_ratio", 1) or 1)
+        # Skip coins with no price, extreme values, or very obscure coins
         if price <= 0:
             continue
-        if abs(change) > 200:
+        if price < 0.01:
+            continue
+        if abs(change) > 150:
+            continue
+        if market_cap > 0 and market_cap < 100000:
             continue
         if sym in seen:
             continue
