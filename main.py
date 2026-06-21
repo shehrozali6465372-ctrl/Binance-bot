@@ -479,6 +479,7 @@ class EmotionEngine:
                 "bull_emoji": "\U0001f4c8\U0001f48e",
                 "bear_emoji": "\u26a0\ufe0f",
                 "risk_emoji": "\U0001f6e1\U0001f4b0",
+                "pro_tip_emoji": "💡",
                 "twist": "Excitement is high, but be careful! Greed can be dangerous.",
             }
         elif change < -3:
@@ -488,6 +489,7 @@ class EmotionEngine:
                 "bull_emoji": "\U0001f6c8",
                 "bear_emoji": "\U0001f43b",
                 "risk_emoji": "\u26a0\ufe0f",
+                "pro_tip_emoji": "💡",
                 "twist": "Blood is in the water, but smart people buy fear. Are you ready?",
             }
         else:
@@ -497,6 +499,7 @@ class EmotionEngine:
                 "bull_emoji": "\U0001f4c8",
                 "bear_emoji": "\U0001f4c9",
                 "risk_emoji": "\u2696\ufe0f",
+                "pro_tip_emoji": "💡",
                 "twist": "Leave emotions aside, only data speaks.",
             }
 
@@ -622,11 +625,14 @@ class GeminiGenerator:
         market_cap = coin.get("market_cap", 0)
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         direction = "up" if change >= 0 else "down"
-        
-        # Pick template style
-        template_id = random.randint(0, 3)
+
+        # Pick template style - more variety with 6 styles
+        template_id = random.randint(0, 5)
         abs_change = abs(change)
-        
+        direction_word = "surge" if change >= 5 else ("drop" if change <= -5 else ("uptick" if change > 0 else "dip"))
+        excitement = "explosive" if abs_change > 8 else ("strong" if abs_change > 4 else "notable")
+        has_high_volume = vol_ratio > 1.5
+
         if template_id == 0:
             # Bold prediction / Conviction style (like the example)
             lines = [
@@ -642,20 +648,22 @@ class GeminiGenerator:
                 f"So long as the structure remains {'bullish' if change >= 0 else 'intact'}, these targets remain valid.",
                 "",
                 f"{'Congratulations to everyone who caught this move early!' if abs_change > 3 else 'Patience is key in these market conditions.'}",
-                f"⏰ {now_str}",
-                f"#{symbol} #CryptoAnalysis #Trading",
+                "",
+                f"\U0001f4a1 **Pro Tip:** {'Scale in gradually, do not go all-in at once. Use limit orders near the entry zone.' if vol_ratio > 1.5 else 'Wait for a pullback to the support zone before entering. Patience pays in trading.'}",
+                f"\u23f0 {now_str}",
+                f"#{symbol} #CryptoAnalysis #TradingSignals",
             ]
-        
+
         elif template_id == 1:
             # Educational / Market Update style
             lines = [
                 f"Quick ${symbol} Market Update for today,",
                 "",
                 f"Price: ${price:.4f} | 24h Change: {change:+.1f}%",
-                f"Volume is running at {vol_ratio:.1f}x the average, which tells us there's {'strong' if vol_ratio > 1.5 else 'moderate'} interest at these levels.",
+                f"Volume is running at {vol_ratio:.1f}x the average, which tells us there is {'strong' if vol_ratio > 1.5 else 'moderate'} interest at these levels.",
                 "",
                 f"{analysis.get('reason', 'Price is showing interesting movement.')}",
-                f"",
+                "",
                 f"On the upside: {analysis.get('bull_case', 'Structure remains positive.')}",
                 f"The risk to consider: {analysis.get('risk', 'Always manage your position size.')}",
                 "",
@@ -665,21 +673,23 @@ class GeminiGenerator:
                 f"  Target 2: ${setup.get('target2', '?')}",
                 f"  Stop: ${setup.get('stop', '?')}",
                 "",
-                f"{"The volume confirms the move - worth keeping on radar." if vol_ratio > 1.5 else "Let the market prove itself before committing."}",
-                f"⏰ {now_str}",
-                f"#{symbol} #CryptoMarket #Analysis",
+                f"{'The volume confirms the move - worth keeping on radar.' if vol_ratio > 1.5 else 'Let the market prove itself before committing.'}",
+                "",
+                f"\U0001f4a1 **Pro Tip:** {'Use limit orders instead of market orders for better entry pricing. Tighten your stop as price approaches target 1.' if abs_change > 5 else 'Position size matters more than entry price. Never risk more than 2% on a single trade.'}",
+                f"\u23f0 {now_str}",
+                f"#{symbol} #CryptoMarket #TradeSetup",
             ]
-        
+
         elif template_id == 2:
             # Friendly / Conversational style
             lines = [
-                f"Hey everyone, let's talk about ${symbol}.",
+                f"Hey everyone, let us talk about ${symbol}.",
                 "",
                 f"${name} is showing some interesting price action today - currently at ${price:.4f} with a {change:+.1f}% move in the last 24 hours.",
                 f"Trading volume is at {vol_ratio:.1f}x compared to normal, which suggests {'something is brewing' if vol_ratio > 1.5 else 'steady trading conditions'}.",
                 "",
                 f"The way I see it: {analysis.get('reason', 'Price is reacting to market conditions.')}",
-                f"",
+                "",
                 f"Bull case: {analysis.get('bull_case', 'If momentum continues, we could see further upside.')}",
                 f"Main risk: {analysis.get('risk', 'Be smart with your entries and exits.')}",
                 "",
@@ -690,29 +700,230 @@ class GeminiGenerator:
                 f"  Stop loss: ${setup.get('stop', '?')}",
                 "",
                 f"{'Volume confirms the move here.' if vol_ratio > 1.5 else 'Not forcing the trade - waiting for confirmation.'}",
-                f"",
-                f"Remember - never risk more than you can afford to lose. Do your own research.",
-                f"⏰ {now_str}",
-                f"#{symbol} #Crypto #TradingView",
+                "",
+                f"\U0001f4a1 **Pro Tip:** {'The best trades come from preparation, not impulse. Set your alerts near the entry zone and wait for the setup to play out.' if vol_ratio > 1.3 else 'Sometimes the best trade is no trade. Wait for volume confirmation before entering.'}",
+                f"\u23f0 {now_str}",
+                f"#{symbol} #CryptoInsights #TradingCommunity",
             ]
-        
-        else:
+
+        elif template_id == 3:
             # Short / Punchy style
             lines = [
-                f"${symbol} - {change:+.1f}% in 24h. Here's what I'm watching.",
+                f"${symbol} - {change:+.1f}% in 24h. Here is what I am watching.",
                 "",
                 f"Price: ${price:.4f} | Volume: {vol_ratio:.1f}x | Cap: ${market_cap:,.0f}",
                 "",
                 f"{analysis.get('reason', 'Price is moving with notable volume.')}",
-                f"",
+                "",
                 f"Bull: {analysis.get('bull_case', 'Momentum is on the side of buyers.')}",
                 f"Risk: {analysis.get('risk', 'Always use a stop loss.')}",
-                f"",
-                f"Setup: ${setup.get('entry', '?')} → ${setup.get('target1', '?')} | Stop: ${setup.get('stop', '?')}",
-                f"",
+                "",
+                f"Setup: ${setup.get('entry', '?')} \u2192 ${setup.get('target1', '?')} | Stop: ${setup.get('stop', '?')}",
+                "",
                 f"{'This one has my attention.' if abs_change > 4 else 'Keeping it on the watchlist for now.'}",
-                f"⏰ {now_str}",
-                f"#{symbol} #CryptoSignals",
+                "",
+                f"\U0001f4a1 **Pro Tip:** {'Always have a stop loss and stick to it. The market can move against you fast. Protect your capital first.' if abs_change > 3 else 'Use this time to study the chart patterns. When volume picks up, you will be ready to act.'}",
+                f"\u23f0 {now_str}",
+                f"#{symbol} #CryptoSignals #Altcoins",
             ]
-        
+
+        elif template_id == 4:
+            # News / Event Driven style
+            lines = [
+                f"\U0001f4a5 BREAKING: ${symbol} is making moves!",
+                "",
+                f"{'Volume just spiked to ' + str(round(vol_ratio, 1)) + 'x the average - something big is happening.' if has_high_volume else 'Price is reacting to market conditions with a ' + str(round(abs_change, 1)) + '% move.'}",
+                f"${symbol} currently at ${price:.4f} with {change:+.1f}% in 24h.",
+                "",
+                f"{analysis.get('reason', 'Notable price action with increasing interest.')}",
+                "",
+                f"Key levels to track:",
+                f"\U0001f4c8 Entry: ${setup.get('entry', '?')}",
+                f"\U0001f3af Target 1: ${setup.get('target1', '?')}",
+                f"\U0001f3af Target 2: ${setup.get('target2', '?')}",
+                f"\U0001f6d1 Stop: ${setup.get('stop', '?')}",
+                "",
+                f"Bull: {analysis.get('bull_case', 'Structure looks promising for the bulls.')}",
+                f"Risk: {analysis.get('risk', 'Always have a plan before entering.')}",
+                "",
+                f"\U0001f4a1 **Pro Tip:** {excitement.capitalize()} moves often see a retest before continuation. Wait for the pullback to get a better entry.",
+                f"\u23f0 {now_str}",
+                f"#{symbol} #CryptoNews #MarketAlert #Trading",
+            ]
+
+        elif template_id == 5:
+            # Attention-grabbing style with strong opinion
+            lines = [
+                f"\U0001f534 ALERT: ${symbol} just flashed a {'BULLISH' if change >= 0 else 'BEARISH'} signal.",
+                "",
+                f"The charts are showing a {'continuation pattern' if abs_change > 3 else 'potential reversal'} with {abs_change:.1f}% {'gains' if change >= 0 else 'losses'} in 24h.",
+                f"${symbol} is at ${price:.4f} with {vol_ratio:.1f}x normal volume.",
+                "",
+                f"Here is the thing:",
+                f"{analysis.get('reason', 'The numbers do not lie. This move has conviction behind it.')}",
+                "",
+                f"Bull case: {analysis.get('bull_case', 'If the volume sustains, we go higher.')}",
+                f"Risk factor: {analysis.get('risk', 'Do not chase green candles.')}",
+                "",
+                f"My levels:",
+                f"  \U0001f511 Entry: ${setup.get('entry', '?')}",
+                f"  \U0001f4c8 TP1: ${setup.get('target1', '?')} / TP2: ${setup.get('target2', '?')}",
+                f"  \U0001f6d1 SL: ${setup.get('stop', '?')}",
+                "",
+                f"\U0001f4a1 **Pro Tip:** {'Do not FOMO into a moving train. Identify the right entry during pullbacks.' if has_high_volume else 'Patience separates profitable traders from gamblers. Wait for your setup.'}",
+                f"\u23f0 {now_str}",
+                f"#{symbol} #CryptoAlerts #TradingSetup",
+            ]
+
         return "\n".join(lines)
+
+
+class PostPublisher:
+    def __init__(self, config: Config = CONFIG):
+        self.config = config
+        self.db = Database(config.database_path)
+
+    def publish(self, coin: Dict[str, Any], content: str) -> bool:
+        if self.config.dry_run:
+            LOGGER.info("[DRY-RUN] Would publish post for %s", coin.get("symbol"))
+            self._save_locally(coin, content, share_link="[DRY-RUN]")
+            return True
+
+        share_link = self._try_square_api(coin, content)
+        if share_link:
+            LOGGER.info("\U0001f4e1 Published successfully with link: %s", share_link)
+            self._save_locally(coin, content, share_link=share_link)
+        else:
+            LOGGER.warning("Square API failed, saving locally")
+            self._save_locally(coin, content, share_link=None)
+        return True
+
+    def _try_square_api(self, coin: Dict[str, Any], content: str) -> str:
+        """Publish to Binance Square via official Creator Center API."""
+        square_key = self.config.square_api_key
+        if not square_key:
+            LOGGER.warning("No SQUARE_API_KEY set, saving locally")
+            return ""
+
+        payload = {
+            "contentType": 1,
+            "bodyTextOnly": content,
+        }
+        headers = {
+            "X-Square-OpenAPI-Key": square_key,
+            "Content-Type": "application/json",
+            "clienttype": "binanceSkill",
+        }
+
+        url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
+
+        try:
+            data_bytes = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=self.config.http_timeout_seconds) as resp:
+                resp_body = resp.read().decode("utf-8", errors="replace")
+
+            LOGGER.info("Square API response: HTTP %d %s", resp.status, resp_body[:300])
+            data = json.loads(resp_body)
+
+            if data.get("code") == "000000":
+                post_id = data.get("data", {}).get("id", "unknown")
+                share_link = data.get("data", {}).get("shareLink", "")
+                LOGGER.info("Published to Square! ID: %s Link: %s", post_id, share_link)
+                return share_link
+            else:
+                LOGGER.warning("Square API error [%s]: %s", data.get("code"), data.get("message"))
+                return ""
+        except Exception as exc:
+            LOGGER.warning("Square API request failed: %s", exc)
+            return ""
+
+    def _save_locally(self, coin: Dict[str, Any], content: str, share_link: str = None) -> None:
+        """Save post to local file with share link if available."""
+        symbol = coin.get("symbol", "UNKNOWN")
+        posts_dir = Path("posts")
+        posts_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        filename = f"post_{symbol}_{ts}.md"
+        path = posts_dir / filename
+        try:
+            header = f"---\nSymbol: {symbol}\nTime: {ts} UTC\n"
+            if share_link:
+                header += f"Square Link: {share_link}\n"
+            header += "---\n\n"
+            path.write_text(header + content)
+            LOGGER.info("Saved post locally: %s (link: %s)", path, share_link or "N/A")
+        except Exception as e:
+            LOGGER.error("Could not save locally: %s", e)
+
+
+def main() -> None:
+    config = CONFIG
+    config.validate()
+
+    scanner = MarketScanner(config)
+    research = ResearchEngine()
+    trade_setup = TradeSetup()
+    generator = GeminiGenerator(config)
+    publisher = PostPublisher(config)
+
+    # Get candidates from different categories
+    top_gainers = scanner.top_gainers(limit=5)
+    top_losers = scanner.top_losers(limit=5)
+    volume_spikes = scanner.volume_spikes(threshold=1.75)
+
+    # Combine all candidates with category info
+    all_candidates = []
+    for coin in top_gainers[:3]:
+        all_candidates.append(coin)
+    for coin in top_losers[:3]:
+        if coin.get("symbol") not in [c.get("symbol") for c in all_candidates]:
+            all_candidates.append(coin)
+    for coin in volume_spikes[:3]:
+        if coin.get("symbol") not in [c.get("symbol") for c in all_candidates]:
+            all_candidates.append(coin)
+
+    seen = set()
+    unique_candidates = []
+    for coin in all_candidates:
+        sym = coin.get("symbol")
+        price = float(coin.get("price", 0) or 0)
+        change = float(coin.get("change_24h", 0) or 0)
+        market_cap = float(coin.get("market_cap", 0) or 0)
+        volume_ratio = float(coin.get("volume_ratio", 1) or 1)
+        
+        if price <= 0 or price < 0.01:
+            continue
+        if abs(change) > 150:
+            continue
+        if market_cap > 0 and market_cap < 100000:
+            continue
+        if sym in seen:
+            continue
+        seen.add(sym)
+        unique_candidates.append(coin)
+
+    if not unique_candidates:
+        LOGGER.info("No candidates found. Exiting.")
+        return
+
+    # Random pick from all candidates for variety
+    top_pick = random.choice(unique_candidates)
+    
+    LOGGER.info("Selected %s - change: %.1f%%, vol: %.1fx", 
+                top_pick.get("symbol"),
+                float(top_pick.get("change_24h", 0) or 0),
+                float(top_pick.get("volume_ratio", 1) or 1))
+
+    analysis = research.analyze(top_pick)
+    setup = trade_setup.build(top_pick)
+
+    LOGGER.info("Generating post for %s...", top_pick.get("symbol"))
+    content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
+
+    publisher.publish(top_pick, content)
+    LOGGER.info("Done - post generated for %s", top_pick.get("symbol"))
+
+
+if __name__ == "__main__":
+    main()
