@@ -613,7 +613,7 @@ class GeminiGenerator:
         return prompt
 
     def _template_content(self, analysis, setup, coin, tone=None, keywords=None) -> str:
-        """Generate content using varied templates."""
+        """Generate content with hooks and emojis for engagement."""
         symbol = coin.get("symbol", "COIN")
         name = coin.get("name", symbol)
         price = coin.get("price", 0)
@@ -622,213 +622,103 @@ class GeminiGenerator:
         market_cap = coin.get("market_cap", 0)
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         direction = "UP" if change >= 0 else "DOWN"
-        
-        # Pick a random template style
-        template_id = random.randint(0, 2)
-        
+        is_pump = change > 5
+        is_dump = change < -5
+        high_vol = vol_ratio > 2.0
+
+        template_id = random.randint(0, 4)
+
         if template_id == 0:
-            # Price action focus
+            # Fire style for pumps
+            hook = chr(0x1f525) if is_pump else chr(0x1f4a1)
             lines = [
-                f"{'🚀' if change > 5 else '📉' if change < -3 else '📊'} ${symbol} - {abs(change):.1f}% {'SURGE' if change > 5 else 'DROP' if change < -3 else 'Move'} (24h)",
+                f"{hook} {chr(0x24c8) if high_vol else ''} ${symbol} {name} {change:+.1f}% | Vol {vol_ratio:.1f}x",
                 "",
-                f"💰 ${price:.4f} | 24h: {change:+.1f}% | Vol: {vol_ratio:.1f}x",
-                f"📊 Cap: ${market_cap:,.0f}",
+                f"{chr(0x1f4b0)} ${price:.4f} | 24h: {change:+.1f}% | Vol: {vol_ratio:.1f}x",
+                f"{chr(0x1f4ca)} MCap: ${market_cap:,.0f}",
                 "",
-                f"📌 {analysis.get('reason', 'Notable price action.')}",
-                f"  ✅ {analysis.get('bull_case', 'Momentum building.')}",
-                f"  ⚠️ {analysis.get('risk', 'Manage risk.')}",
+                f"{chr(0x1f4cc)} {analysis.get('reason', 'Price moving on volume.')}",
+                f"  {chr(0x2705)} {analysis.get('bull_case', 'Momentum building.')}",
+                f"  {chr(0x26a0)}{chr(0xfe0f)} {analysis.get('risk', 'Manage risk.')}",
                 "",
-                f"🎯 Entry: ${setup.get('entry', 'N/A')} | T1: ${setup.get('target1', 'N/A')} | Stop: ${setup.get('stop', 'N/A')}",
+                f"{chr(0x1f3af)} ${setup.get('entry', 'N/A')} {chr(0x2192)} ${setup.get('target1', 'N/A')} | SL: ${setup.get('stop', 'N/A')}",
                 "",
-                f"{'⚡ Strong momentum!' if abs(change) > 5 else '📊 Manage risk.'}",
-                f"⏰ {now_str}",
-                f"#{symbol} #Crypto #TradingSignals"
+                f"{chr(0x26a1)} Breaking out! {'High volume confirms!' if high_vol else 'Watch for confirmation.'}" if is_pump else f"{chr(0x1f4c9)} Dropping - wait for reversal." if is_dump else f"{chr(0x1f4ca)} Manage risk.",
+                f"{chr(0x23f0)} {now_str}",
+                f"#${symbol} #Crypto #TradingSignals"
             ]
         elif template_id == 1:
-            # News/update style
+            # FOMO/Hook style
             lines = [
-                f"📰 ${symbol} Update | {abs(change):.1f}% {direction.capitalize()}",
+                f"{chr(0x1f440)} ${symbol} {'PUMPING' if is_pump else 'DUMPING' if is_dump else 'MOVING'} {abs(change):.1f}%! {chr(0x1f4a8) if high_vol and is_pump else ''}",
                 "",
-                f"Price: ${price:.4f} | Vol: {vol_ratio:.1f}x above avg",
-                f"Sentiment: {'📈 Bullish' if change > 0 else '📉 Bearish'} | MCap: ${market_cap:,.0f}",
+                f"Price: ${price:.4f} | 24h: {change:+.1f}%",
+                f"Volume: {vol_ratio:.1f}x {chr(0x1f4a8) if high_vol else chr(0x1f4a7)}",
                 "",
-                f"🔍 Analysis: {analysis.get('reason', 'Moving with volume.')}",
-                f"✅ Bull: {analysis.get('bull_case', 'Upside potential.')}",
-                f"⚠️ Risk: {analysis.get('risk', 'Be cautious.')}",
+                f"{chr(0x1f50d)} {analysis.get('reason', 'Volume detected.')}",
+                f"{chr(0x2705)} {analysis.get('bull_case', 'Upside potential.')}",
+                f"{chr(0x26a0)}{chr(0xfe0f)} {analysis.get('risk', 'Stay cautious.')}",
                 "",
-                f"💵 Setup: ${setup.get('entry', 'N/A')} → ${setup.get('target1', 'N/A')} | SL: ${setup.get('stop', 'N/A')}",
+                f"{chr(0x1f3af)} ${setup.get('entry', 'N/A')} {chr(0x2192)} ${setup.get('target1', 'N/A')} | SL: ${setup.get('stop', 'N/A')}",
                 "",
-                f"⏰ {now_str}",
-                f"#{symbol} #Crypto #BinanceSquare"
+                f"{chr(0x26a1)} FOMO is real - volume confirms!" if high_vol else f"{chr(0x1f4ca)} Steady flow.",
+                f"{chr(0x23f0)} {now_str}",
+                f"#${symbol} #CryptoSignals #BinanceSquare"
+            ]
+        elif template_id == 2:
+            # Alert/Signal style
+            emoji = chr(0x1f4e1) if is_pump else chr(0x1f514) if is_dump else chr(0x1f535)
+            lines = [
+                f"{emoji} SIGNAL: ${symbol} {change:+.1f}% / Vol {vol_ratio:.1f}x",
+                "",
+                f"{chr(0x1f4b0)} ${price:.4f} | T1: ${setup.get('target1', 'N/A')} | SL: ${setup.get('stop', 'N/A')}",
+                f"{chr(0x1f4ca)} Vol: {vol_ratio:.1f}x | MCap: ${market_cap:,.0f}",
+                "",
+                f"{chr(0x1f4cc)} {analysis.get('reason', 'Volume-based move.')}",
+                f"  {chr(0x2705)} {analysis.get('bull_case', 'Upside.')}",
+                f"  {chr(0x26a0)}{chr(0xfe0f)} {analysis.get('risk', 'Set stops.')}",
+                "",
+                f"{chr(0x26a1)} High conviction!" if high_vol else f"{chr(0x1f4ca)} Monitor.",
+                f"{chr(0x23f0)} {now_str}",
+                f"#${symbol} #TradingSignals #Crypto"
+            ]
+        elif template_id == 3:
+            # Chart/Data style
+            trend = chr(0x1f4c8) if change > 0 else chr(0x1f4c9)
+            lines = [
+                f"{trend} ${symbol} {abs(change):.1f}% {direction} | Vol {vol_ratio:.1f}x {chr(0x1f4a8) if high_vol else ''}",
+                "",
+                f"{chr(0x1f4b0)} ${price:.4f} | Change: {change:+.1f}%",
+                f"{chr(0x1f4ca)} Vol Ratio: {vol_ratio:.1f}x | MCap: ${market_cap:,.0f}",
+                "",
+                f"{chr(0x1f50d)} {analysis.get('reason', 'Market activity.')}",
+                f"  {chr(0x2705)} {analysis.get('bull_case', 'Momentum.')}",
+                f"  {chr(0x26a0)}{chr(0xfe0f)} {analysis.get('risk', 'Discipline.')}",
+                "",
+                f"{chr(0x1f3af)} ${setup.get('entry', 'N/A')} {chr(0x2192)} ${setup.get('target1', 'N/A')} / ${setup.get('target2', 'N/A')}",
+                "",
+                f"{chr(0x26a1)} High probability!" if high_vol else f"{chr(0x1f4ca)} Normal conditions.",
+                f"{chr(0x23f0)} {now_str}",
+                f"#${symbol} #CryptoMarket #{symbol.upper()}"
             ]
         else:
-            # Signal/alert style  
+            # Moon/Engagement style
+            rocket = chr(0x1f680) if is_pump else chr(0x1f4ab)
             lines = [
-                f"{'🔴 ALERT' if abs(change) > 5 else '🔵 WATCH'} ${symbol} {change:+.1f}%",
+                f"{rocket} ${symbol} {name} {change:+.1f}% {chr(0x1f4a8) if high_vol else ''}",
                 "",
-                f"💰 ${price:.4f} | Volume spike: {vol_ratio:.1f}x",
-                f"📊 MCap: ${market_cap:,.0f}",
+                f"{chr(0x1f4b0)} Price: ${price:.4f} | Vol: {vol_ratio:.1f}x",
+                f"{chr(0x1f4ca)} MCap: ${market_cap:,.0f}",
                 "",
-                f"📌 {analysis.get('reason', 'Volume-based move detected.')}",
-                f"  ✅ {analysis.get('bull_case', 'Potential upside.')}",
-                f"  ⚠️ {analysis.get('risk', 'Set stops.')}",
+                f"{chr(0x1f4cc)} {analysis.get('reason', 'Price action.')}",
+                f"  {chr(0x2705)} {analysis.get('bull_case', 'Upside.')}",
+                f"  {chr(0x26a0)}{chr(0xfe0f)} {analysis.get('risk', 'Use stops.')}",
                 "",
-                f"🎯 Entry: ${setup.get('entry', 'N/A')} | Target: ${setup.get('target1', 'N/A')} | Stop: ${setup.get('stop', 'N/A')}",
+                f"{chr(0x1f3af)} ${setup.get('entry', 'N/A')} {chr(0x2192)} ${setup.get('target1', 'N/A')} | SL: ${setup.get('stop', 'N/A')}",
                 "",
-                f"⏰ {now_str}",
-                f"#{symbol} #Trading #CryptoSignals"
+                f"{chr(0x26a1)} Strong setup!" if high_vol else f"{chr(0x1f4ca)} Manage size.",
+                f"{chr(0x23f0)} {now_str}",
+                f"#${symbol} #BinanceSquare #CryptoSignals"
             ]
-        
+
         return "\n".join(lines)
-
-
-class PostPublisher:
-    def __init__(self, config: Config = CONFIG):
-        self.config = config
-        self.db = Database(config.database_path)
-
-    def publish(self, coin: Dict[str, Any], content: str) -> bool:
-        if self.config.dry_run:
-            LOGGER.info("[DRY-RUN] Would publish post for %s", coin.get("symbol"))
-            self._save_locally(coin, content, share_link="[DRY-RUN]")
-            return True
-
-        share_link = self._try_square_api(coin, content)
-        if share_link:
-            LOGGER.info("✅ Published successfully with link: %s", share_link)
-            self._save_locally(coin, content, share_link=share_link)
-        else:
-            LOGGER.warning("Square API failed, saving locally")
-            self._save_locally(coin, content, share_link=None)
-        return True
-
-    def _try_square_api(self, coin: Dict[str, Any], content: str) -> bool:
-        """Publish to Binance Square via official Creator Center API."""
-        square_key = self.config.square_api_key
-        if not square_key:
-            LOGGER.warning("No SQUARE_API_KEY set, saving locally")
-            return False
-
-        # Format content with symbol hashtags
-        symbol = coin.get("symbol", "")
-        body_text = content
-
-        payload = {
-            "contentType": 1,
-            "bodyTextOnly": body_text,
-        }
-        headers = {
-            "X-Square-OpenAPI-Key": square_key,
-            "Content-Type": "application/json",
-            "clienttype": "binanceSkill",
-        }
-
-        url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
-
-        try:
-            data_bytes = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=self.config.http_timeout_seconds) as resp:
-                resp_body = resp.read().decode("utf-8", errors="replace")
-
-            LOGGER.info("Square API response: HTTP %d %s", resp.status, resp_body[:300])
-            data = json.loads(resp_body)
-
-            if data.get("code") == "000000":
-                post_id = data.get("data", {}).get("id", "unknown")
-                share_link = data.get("data", {}).get("shareLink", "")
-                LOGGER.info("✅ Published to Square! ID: %s Link: %s", post_id, share_link)
-                return share_link
-            else:
-                LOGGER.warning("Square API error [%s]: %s", data.get("code"), data.get("message"))
-                return ""
-        except Exception as exc:
-            LOGGER.warning("Square API request failed: %s", exc)
-            return ""
-
-    def _save_locally(self, coin: Dict[str, Any], content: str, share_link: str = None) -> None:
-        """Save post to local file with share link if available."""
-        symbol = coin.get("symbol", "UNKNOWN")
-        posts_dir = Path("posts")
-        posts_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-        filename = f"post_{symbol}_{ts}.md"
-        path = posts_dir / filename
-        try:
-            # Add metadata header to the saved file
-            header = f"---\nSymbol: {symbol}\nTime: {ts} UTC\n"
-            if share_link:
-                header += f"Square Link: {share_link}\n"
-            header += "---\n\n"
-            path.write_text(header + content)
-            LOGGER.info("Saved post locally: %s (link: %s)", path, share_link or "N/A")
-        except Exception as e:
-            LOGGER.error("Could not save locally: %s", e)
-
-
-def main() -> None:
-    config = CONFIG
-    config.validate()
-
-    scanner = MarketScanner(config)
-    research = ResearchEngine()
-    trade_setup = TradeSetup()
-    generator = GeminiGenerator(config)
-    publisher = PostPublisher(config)
-
-    top_gainers = scanner.top_gainers(limit=3)
-    top_losers = scanner.top_losers(limit=3)
-    volume_spikes = scanner.volume_spikes(threshold=1.75)
-
-    all_candidates = top_gainers + top_losers + volume_spikes
-
-    seen = set()
-    unique_candidates = []
-    for coin in all_candidates:
-        sym = coin.get("symbol")
-        price = float(coin.get("price", 0) or 0)
-        change = float(coin.get("change_24h", 0) or 0)
-        market_cap = float(coin.get("market_cap", 0) or 0)
-        volume_ratio = float(coin.get("volume_ratio", 1) or 1)
-        # Skip coins with no price, extreme values, or very obscure coins
-        if price <= 0:
-            continue
-        if price < 0.01:
-            continue
-        if abs(change) > 150:
-            continue
-        if market_cap > 0 and market_cap < 100000:
-            continue
-        if sym in seen:
-            continue
-        seen.add(sym)
-        unique_candidates.append(coin)
-
-    scored = [(research.score(coin), coin) for coin in unique_candidates]
-    scored.sort(key=lambda x: x[0], reverse=True)
-
-    if not scored:
-        LOGGER.info("No candidates found. Exiting.")
-        return
-
-    # Pick from top 5 to avoid same coin every run
-    top_n = min(5, len(scored))
-    pick_idx = random.randint(0, top_n - 1)
-    top_pick = scored[pick_idx][1]
-    
-    LOGGER.info("Selected %s (rank %d/%d, score %.1f)", 
-                top_pick.get("symbol"), pick_idx + 1, len(scored), scored[pick_idx][0])
-
-    analysis = research.analyze(top_pick)
-    setup = trade_setup.build(top_pick)
-
-    LOGGER.info("Generating post for %s...", top_pick.get("symbol"))
-    content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
-
-    publisher.publish(top_pick, content)
-    LOGGER.info("✅ Done - post generated for %s", top_pick.get("symbol"))
-
-
-if __name__ == "__main__":
-    main()
-                    
