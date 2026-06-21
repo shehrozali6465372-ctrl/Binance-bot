@@ -695,9 +695,6 @@ class PostPublisher:
         # Format content with symbol hashtags
         symbol = coin.get("symbol", "")
         body_text = content
-        # Add symbol hashtag if not already present
-        if symbol and f"#{symbol}" not in content:
-            body_text = content + f"\n\n#{symbol}"
 
         payload = {
             "contentType": 1,
@@ -712,15 +709,14 @@ class PostPublisher:
         url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
 
         try:
-            import requests as req_lib
-            resp = req_lib.post(url, headers=headers, json=payload, timeout=self.config.http_timeout_seconds)
-            LOGGER.info("Square API response: HTTP %d %s", resp.status_code, resp.text[:300])
+            data_bytes = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=self.config.http_timeout_seconds) as resp:
+                resp_body = resp.read().decode("utf-8", errors="replace")
 
-            if resp.status_code != 200:
-                LOGGER.warning("Square API returned HTTP %d", resp.status_code)
-                return False
+            LOGGER.info("Square API response: HTTP %d %s", resp.status, resp_body[:300])
+            data = json.loads(resp_body)
 
-            data = resp.json()
             if data.get("code") == "000000":
                 post_id = data.get("data", {}).get("id", "unknown")
                 share_link = data.get("data", {}).get("shareLink", "")
