@@ -535,8 +535,9 @@ class GeminiGenerator:
             return self._template_content(analysis, setup, coin, tone, keywords)
 
         models_to_try = [
-            os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             "gemini-2.5-flash",
+            os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            "gemini-2.0-flash-lite",
             "gemini-2.0-flash",
         ]
         # Deduplicate
