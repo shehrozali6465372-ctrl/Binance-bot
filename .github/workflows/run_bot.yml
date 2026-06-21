@@ -30,7 +30,7 @@ jobs:
           LIVE_MARKET_DATA: 1
           POST_INTERVAL: 7200
           MAX_ITERATIONS: 1
-          GEMINI_MODEL: gemini-2.5-flash
+          GEMINI_MODEL: gemini-2.0-flash
           DATABASE_PATH: agent.db
           PUBLISH_LOG_PATH: published_posts.jsonl
         run: python main.py
