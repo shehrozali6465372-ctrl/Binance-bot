@@ -43,7 +43,7 @@ class Config:
             dry_run=os.getenv("DRY_RUN", "1").strip().lower() not in {"0", "false", "no"},
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             live_market_data=os.getenv("LIVE_MARKET_DATA", "0").strip().lower() in {"1", "true", "yes"},
-            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             http_timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "15")),
             gemini_temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.9")),
             gemini_top_p=float(os.getenv("GEMINI_TOP_P", "0.95")),
@@ -535,7 +535,9 @@ class GeminiGenerator:
             return self._template_content(analysis, setup, coin, tone, keywords)
 
         models_to_try = [
-            self.config.gemini_model,
+            os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
         ]
         # Deduplicate
         seen_models = set()
