@@ -398,6 +398,119 @@ class MarketScanner:
         return [c.as_dict() for c in universe if c.volume_ratio >= threshold]
 
 
+
+class BinanceAnnouncementEngine:
+    """Fetch real Binance announcements - new listings, news, delistings, airdrops."""
+    
+    CATALOGS = {
+        "new_listings": 48,
+        "latest_news": 49,
+        "delistings": 161,
+        "airdrops": 128,
+        "activities": 93,
+    }
+    
+    def __init__(self, config: Config = CONFIG):
+        self.config = config
+        self.base_url = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
+    
+    def fetch_announcements(self, catalog_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+        """Fetch announcements from a specific catalog."""
+        url = f"{self.base_url}?type=1&pageNo=1&pageSize={limit}&catalogId={catalog_id}"
+        try:
+            data = http_get_json(url, timeout=self.config.http_timeout_seconds)
+            if data.get("code") == "000000":
+                for cat in data.get("data", {}).get("catalogs", []):
+                    if cat.get("catalogId") == catalog_id:
+                        return cat.get("articles", [])
+            return []
+        except Exception:
+            return []
+    
+    def extract_symbols(self, title: str) -> List[str]:
+        """Extract coin symbols from announcement title."""
+        import re
+        # Find symbols in parentheses like (BTC), (ETH), (SOL)
+        paren_symbols = re.findall(r'\(([A-Z0-9]{2,10})\)', title)
+        # Find standalone symbols in title
+        known_coins = {"BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX","DOT","LINK",
+                       "MATIC","SHIB","TRX","ATOM","UNI","APT","ARB","OP","NEAR","FIL",
+                       "AAVE","MKR","PEPE","TIA","SEI","SUI","INJ","BONK","WIF","JUP",
+                       "FET","AGIX","RNDR","THETA","EGLD","EOS","XLM","VET","ALGO",
+                       "SAND","MANA","AXS","FTM","ICP","GRT","BLUR","STRK","JTO","RE"}
+        found = []
+        for s in paren_symbols:
+            if s in known_coins:
+                found.append(s)
+        # Also check words for known coins
+        words = title.upper().split()
+        for w in words:
+            w = w.strip(".,:;!?()[]{}")
+            if w in known_coins and w not in found:
+                found.append(w)
+        return found
+    
+    def get_trending_announcements(self) -> List[Dict[str, Any]]:
+        """Get announcements and identify market-moving events."""
+        results = []
+        
+        # Fetch new listings (most market-moving)
+        listings = self.fetch_announcements(self.CATALOGS["new_listings"], limit=5)
+        for art in listings:
+            symbols = self.extract_symbols(art.get("title", ""))
+            if symbols:
+                ts = art.get("releaseDate", 0) / 1000
+                results.append({
+                    "type": "new_listing",
+                    "title": art["title"],
+                    "symbols": symbols,
+                    "timestamp": ts,
+                    "impact": "high",
+                })
+        
+        # Fetch airdrops
+        airdrops = self.fetch_announcements(self.CATALOGS["airdrops"], limit=5)
+        for art in airdrops:
+            symbols = self.extract_symbols(art.get("title", ""))
+            if symbols:
+                ts = art.get("releaseDate", 0) / 1000
+                results.append({
+                    "type": "airdrop",
+                    "title": art["title"],
+                    "symbols": symbols,
+                    "timestamp": ts,
+                    "impact": "high",
+                })
+        
+        # Fetch delistings 
+        delistings = self.fetch_announcements(self.CATALOGS["delistings"], limit=5)
+        for art in delistings:
+            symbols = self.extract_symbols(art.get("title", ""))
+            if symbols:
+                results.append({
+                    "type": "delisting",
+                    "title": art["title"],
+                    "symbols": symbols,
+                    "timestamp": art.get("releaseDate", 0) / 1000,
+                    "impact": "negative",
+                })
+        
+        # Fetch latest news
+        news = self.fetch_announcements(self.CATALOGS["latest_news"], limit=5)
+        for art in news:
+            symbols = self.extract_symbols(art.get("title", ""))
+            if symbols:
+                results.append({
+                    "type": "news",
+                    "title": art["title"],
+                    "symbols": symbols,
+                    "timestamp": art.get("releaseDate", 0) / 1000,
+                    "impact": "medium",
+                })
+        
+        return results
+
+
 class ResearchEngine:
     def analyze(self, coin: Dict[str, Any]) -> Dict[str, str]:
         change = float(coin.get("change_24h", 0))
@@ -629,6 +742,12 @@ class GeminiGenerator:
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         direction = "up" if change >= 0 else "down"
 
+        # Check if there is a Binance announcement for this coin
+        announcement = analysis.get("announcement") if isinstance(analysis, dict) else None
+        has_announcement = announcement is not None
+        ann_type = announcement.get("type", "") if has_announcement else ""
+        ann_title = announcement.get("title", "") if has_announcement else ""
+
         # Pick template style - more variety with 6 styles
         template_id = random.randint(0, 5)
         abs_change = abs(change)
@@ -691,7 +810,7 @@ class GeminiGenerator:
                 f"${name} is showing some interesting price action today - currently at ${price:.4f} with a {change:+.1f}% move in the last 24 hours.",
                 f"Trading volume is at {vol_ratio:.1f}x compared to normal, which suggests {'something is brewing' if vol_ratio > 1.5 else 'steady trading conditions'}.",
                 "",
-                f"The way I see it: {analysis.get('reason', 'Price is reacting to market conditions.')}",
+                f'{"Binance just announced: " + ann_title[:100] + "..." if has_announcement else ("Volume just spiked to " + str(round(vol_ratio, 1)) + "x the average - something big is happening." if has_high_volume else "Price is reacting to market conditions with a " + str(round(abs_change, 1)) + "% move.")}',
                 "",
                 f"Bull case: {analysis.get('bull_case', 'If momentum continues, we could see further upside.')}",
                 f"Main risk: {analysis.get('risk', 'Be smart with your entries and exits.')}",
@@ -733,9 +852,9 @@ class GeminiGenerator:
         elif template_id == 4:
             # News / Event Driven style
             lines = [
-                f"\U0001f4a5 BREAKING: ${symbol} is making moves!",
+                f"\U0001f4a5 " + ('OFFICIAL: $' + symbol + ' ' + ann_type.replace("_", " ").upper() + '!' if has_announcement else f'BREAKING: $' + symbol + ' is making moves!'),
                 "",
-                f"{'Volume just spiked to ' + str(round(vol_ratio, 1)) + 'x the average - something big is happening.' if has_high_volume else 'Price is reacting to market conditions with a ' + str(round(abs_change, 1)) + '% move.'}",
+                f'{"Binance just announced: " + ann_title[:100] + "..." if has_announcement else ("Volume just spiked to " + str(round(vol_ratio, 1)) + "x the average - something big is happening." if has_high_volume else "Price is reacting to market conditions with a " + str(round(abs_change, 1)) + "% move.")}',
                 f"${symbol} currently at ${price:.4f} with {change:+.1f}% in 24h.",
                 "",
                 f"{analysis.get('reason', 'Notable price action with increasing interest.')}",
@@ -865,27 +984,62 @@ def main() -> None:
     config.validate()
 
     scanner = MarketScanner(config)
+    announcement_engine = BinanceAnnouncementEngine(config)
     research = ResearchEngine()
     trade_setup = TradeSetup()
     generator = GeminiGenerator(config)
     publisher = PostPublisher(config)
 
-    # Get candidates from different categories
-    top_gainers = scanner.top_gainers(limit=5)
-    top_losers = scanner.top_losers(limit=5)
+    # Fetch Binance announcements (real news data!)
+    announcements = []
+    try:
+        announcements = announcement_engine.get_trending_announcements()
+        for a in announcements[:5]:
+            LOGGER.info("Announcement: [%s] %s - symbols: %s", a["type"], a["title"][:60], a["symbols"])
+    except Exception as e:
+        LOGGER.warning("Could not fetch announcements: %s", e)
+
+    # Get candidates from market data
+    top_gainers = scanner.top_gainers(limit=7)
+    top_losers = scanner.top_losers(limit=7)
     volume_spikes = scanner.volume_spikes(threshold=1.75)
 
-    # Combine all candidates with category info
+    # Merge all candidates
     all_candidates = []
-    for coin in top_gainers[:3]:
+    for coin in top_gainers[:4]:
         all_candidates.append(coin)
-    for coin in top_losers[:3]:
+    for coin in top_losers[:4]:
         if coin.get("symbol") not in [c.get("symbol") for c in all_candidates]:
             all_candidates.append(coin)
-    for coin in volume_spikes[:3]:
+    for coin in volume_spikes[:4]:
         if coin.get("symbol") not in [c.get("symbol") for c in all_candidates]:
             all_candidates.append(coin)
 
+    # If announcements mention specific coins, add them with priority boost
+    announcement_symbols = set()
+    for a in announcements:
+        for sym in a.get("symbols", []):
+            announcement_symbols.add(sym)
+            found = False
+            for c in all_candidates:
+                if c.get("symbol") == sym:
+                    c["announcement_boost"] = True
+                    c["announcement_type"] = a.get("type", "news")
+                    c["announcement_title"] = a.get("title", "")
+                    found = True
+                    break
+            if not found:
+                universe = scanner._universe()
+                for c in universe:
+                    if c.symbol == sym:
+                        coin_dict = c.as_dict()
+                        coin_dict["announcement_boost"] = True
+                        coin_dict["announcement_type"] = a.get("type", "news")
+                        coin_dict["announcement_title"] = a.get("title", "")
+                        all_candidates.append(coin_dict)
+                        break
+
+    # Filter and deduplicate
     seen = set()
     unique_candidates = []
     for coin in all_candidates:
@@ -894,7 +1048,7 @@ def main() -> None:
         change = float(coin.get("change_24h", 0) or 0)
         market_cap = float(coin.get("market_cap", 0) or 0)
         volume_ratio = float(coin.get("volume_ratio", 1) or 1)
-        
+
         if price <= 0 or price < 0.01:
             continue
         if abs(change) > 150:
@@ -910,16 +1064,38 @@ def main() -> None:
         LOGGER.info("No candidates found. Exiting.")
         return
 
-    # Random pick from all candidates for variety
-    top_pick = random.choice(unique_candidates)
-    
-    LOGGER.info("Selected %s - change: %.1f%%, vol: %.1fx", 
+    # Score candidates: announcement boost + market data
+    for coin in unique_candidates:
+        change = abs(float(coin.get("change_24h", 0) or 0))
+        vol_ratio = float(coin.get("volume_ratio", 1) or 1)
+        score = change * 0.3 + vol_ratio * 10 * 0.3
+        if coin.get("announcement_boost"):
+            score += 30
+            if coin.get("announcement_type") == "new_listing":
+                score += 20
+            elif coin.get("announcement_type") == "airdrop":
+                score += 15
+        coin["_score"] = score
+
+    # Sort by score descending, pick from top
+    unique_candidates.sort(key=lambda c: c.get("_score", 0), reverse=True)
+    top_pick = random.choice(unique_candidates[:5])
+
+    LOGGER.info("Selected %s - change: %.1f%%, vol: %.1fx (score: %.1f)%s",
                 top_pick.get("symbol"),
                 float(top_pick.get("change_24h", 0) or 0),
-                float(top_pick.get("volume_ratio", 1) or 1))
+                float(top_pick.get("volume_ratio", 1) or 1),
+                top_pick.get("_score", 0),
+                " [ANNOUNCEMENT: " + top_pick.get("announcement_type", "") + "]" if top_pick.get("announcement_boost") else "")
 
     analysis = research.analyze(top_pick)
     setup = trade_setup.build(top_pick)
+
+    # Add announcement context to analysis
+    if top_pick.get("announcement_boost"):
+        ann_type = top_pick.get("announcement_type", "")
+        ann_title = top_pick.get("announcement_title", "")
+        analysis["announcement"] = {"type": ann_type, "title": ann_title}
 
     LOGGER.info("Generating post for %s...", top_pick.get("symbol"))
     content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
