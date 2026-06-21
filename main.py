@@ -613,7 +613,7 @@ class GeminiGenerator:
         return prompt
 
     def _template_content(self, analysis, setup, coin, tone=None, keywords=None) -> str:
-        """Generate content with hooks and emojis for engagement."""
+        """Generate human-like trading post (not spammy)."""
         symbol = coin.get("symbol", "COIN")
         name = coin.get("name", symbol)
         price = coin.get("price", 0)
@@ -621,104 +621,98 @@ class GeminiGenerator:
         vol_ratio = coin.get("volume_ratio", 1)
         market_cap = coin.get("market_cap", 0)
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        direction = "UP" if change >= 0 else "DOWN"
-        is_pump = change > 5
-        is_dump = change < -5
-        high_vol = vol_ratio > 2.0
-
-        template_id = random.randint(0, 4)
-
+        direction = "up" if change >= 0 else "down"
+        
+        # Pick template style
+        template_id = random.randint(0, 3)
+        abs_change = abs(change)
+        
         if template_id == 0:
-            # Fire style for pumps
-            hook = chr(0x1f525) if is_pump else chr(0x1f4a1)
+            # Bold prediction / Conviction style (like the example)
             lines = [
-                f"{hook} {chr(0x24c8) if high_vol else ''} ${symbol} {name} {change:+.1f}% | Vol {vol_ratio:.1f}x",
+                f"Guys.. Listen Carefully,",
                 "",
-                f"{chr(0x1f4b0)} ${price:.4f} | 24h: {change:+.1f}% | Vol: {vol_ratio:.1f}x",
-                f"{chr(0x1f4ca)} MCap: ${market_cap:,.0f}",
+                f"${symbol} has just begun its path towards the target ${setup.get('target1', '?')}, and the play is unfolding precisely as anticipated.",
+                f"The next target ${setup.get('target2', '?')} will also be smashed if momentum continues.",
                 "",
-                f"{chr(0x1f4cc)} {analysis.get('reason', 'Price moving on volume.')}",
-                f"  {chr(0x2705)} {analysis.get('bull_case', 'Momentum building.')}",
-                f"  {chr(0x26a0)}{chr(0xfe0f)} {analysis.get('risk', 'Manage risk.')}",
+                f"${symbol} is currently trading at ${price:.4f} with {change:+.1f}% in the last 24 hours and volume at {vol_ratio:.1f}x the baseline.",
+                f"{analysis.get('reason', 'The momentum is still in favor of the current trend.')}",
                 "",
-                f"{chr(0x1f3af)} ${setup.get('entry', 'N/A')} {chr(0x2192)} ${setup.get('target1', 'N/A')} | SL: ${setup.get('stop', 'N/A')}",
+                f"For those who missed the earlier signal - you can still participate. Just be careful during pullbacks and manage your risk properly.",
+                f"So long as the structure remains {'bullish' if change >= 0 else 'intact'}, these targets remain valid.",
                 "",
-                f"{chr(0x26a1)} Breaking out! {'High volume confirms!' if high_vol else 'Watch for confirmation.'}" if is_pump else f"{chr(0x1f4c9)} Dropping - wait for reversal." if is_dump else f"{chr(0x1f4ca)} Manage risk.",
-                f"{chr(0x23f0)} {now_str}",
-                f"#${symbol} #Crypto #TradingSignals"
+                f"{'Congratulations to everyone who caught this move early!' if abs_change > 3 else 'Patience is key in these market conditions.'}",
+                f"⏰ {now_str}",
+                f"#{symbol} #CryptoAnalysis #Trading",
             ]
+        
         elif template_id == 1:
-            # FOMO/Hook style
+            # Educational / Market Update style
             lines = [
-                f"{chr(0x1f440)} ${symbol} {'PUMPING' if is_pump else 'DUMPING' if is_dump else 'MOVING'} {abs(change):.1f}%! {chr(0x1f4a8) if high_vol and is_pump else ''}",
+                f"Quick ${symbol} Market Update for today,",
                 "",
-                f"Price: ${price:.4f} | 24h: {change:+.1f}%",
-                f"Volume: {vol_ratio:.1f}x {chr(0x1f4a8) if high_vol else chr(0x1f4a7)}",
+                f"Price: ${price:.4f} | 24h Change: {change:+.1f}%",
+                f"Volume is running at {vol_ratio:.1f}x the average, which tells us there's {'strong' if vol_ratio > 1.5 else 'moderate'} interest at these levels.",
                 "",
-                f"{chr(0x1f50d)} {analysis.get('reason', 'Volume detected.')}",
-                f"{chr(0x2705)} {analysis.get('bull_case', 'Upside potential.')}",
-                f"{chr(0x26a0)}{chr(0xfe0f)} {analysis.get('risk', 'Stay cautious.')}",
+                f"{analysis.get('reason', 'Price is showing interesting movement.')}",
+                f"",
+                f"On the upside: {analysis.get('bull_case', 'Structure remains positive.')}",
+                f"The risk to consider: {analysis.get('risk', 'Always manage your position size.')}",
                 "",
-                f"{chr(0x1f3af)} ${setup.get('entry', 'N/A')} {chr(0x2192)} ${setup.get('target1', 'N/A')} | SL: ${setup.get('stop', 'N/A')}",
+                f"Key levels to watch:",
+                f"  Entry Zone: ${setup.get('entry', '?')}",
+                f"  Target 1: ${setup.get('target1', '?')}",
+                f"  Target 2: ${setup.get('target2', '?')}",
+                f"  Stop: ${setup.get('stop', '?')}",
                 "",
-                f"{chr(0x26a1)} FOMO is real - volume confirms!" if high_vol else f"{chr(0x1f4ca)} Steady flow.",
-                f"{chr(0x23f0)} {now_str}",
-                f"#${symbol} #CryptoSignals #BinanceSquare"
+                f"{"The volume confirms the move - worth keeping on radar." if vol_ratio > 1.5 else "Let the market prove itself before committing."}",
+                f"⏰ {now_str}",
+                f"#{symbol} #CryptoMarket #Analysis",
             ]
+        
         elif template_id == 2:
-            # Alert/Signal style
-            emoji = chr(0x1f4e1) if is_pump else chr(0x1f514) if is_dump else chr(0x1f535)
+            # Friendly / Conversational style
             lines = [
-                f"{emoji} SIGNAL: ${symbol} {change:+.1f}% / Vol {vol_ratio:.1f}x",
+                f"Hey everyone, let's talk about ${symbol}.",
                 "",
-                f"{chr(0x1f4b0)} ${price:.4f} | T1: ${setup.get('target1', 'N/A')} | SL: ${setup.get('stop', 'N/A')}",
-                f"{chr(0x1f4ca)} Vol: {vol_ratio:.1f}x | MCap: ${market_cap:,.0f}",
+                f"${name} is showing some interesting price action today - currently at ${price:.4f} with a {change:+.1f}% move in the last 24 hours.",
+                f"Trading volume is at {vol_ratio:.1f}x compared to normal, which suggests {'something is brewing' if vol_ratio > 1.5 else 'steady trading conditions'}.",
                 "",
-                f"{chr(0x1f4cc)} {analysis.get('reason', 'Volume-based move.')}",
-                f"  {chr(0x2705)} {analysis.get('bull_case', 'Upside.')}",
-                f"  {chr(0x26a0)}{chr(0xfe0f)} {analysis.get('risk', 'Set stops.')}",
+                f"The way I see it: {analysis.get('reason', 'Price is reacting to market conditions.')}",
+                f"",
+                f"Bull case: {analysis.get('bull_case', 'If momentum continues, we could see further upside.')}",
+                f"Main risk: {analysis.get('risk', 'Be smart with your entries and exits.')}",
                 "",
-                f"{chr(0x26a1)} High conviction!" if high_vol else f"{chr(0x1f4ca)} Monitor.",
-                f"{chr(0x23f0)} {now_str}",
-                f"#${symbol} #TradingSignals #Crypto"
+                f"My setup for this one:",
+                f"  Look for entries near ${setup.get('entry', '?')}",
+                f"  First target: ${setup.get('target1', '?')}",
+                f"  Second target: ${setup.get('target2', '?')}",
+                f"  Stop loss: ${setup.get('stop', '?')}",
+                "",
+                f"{'Volume confirms the move here.' if vol_ratio > 1.5 else 'Not forcing the trade - waiting for confirmation.'}",
+                f"",
+                f"Remember - never risk more than you can afford to lose. Do your own research.",
+                f"⏰ {now_str}",
+                f"#{symbol} #Crypto #TradingView",
             ]
-        elif template_id == 3:
-            # Chart/Data style
-            trend = chr(0x1f4c8) if change > 0 else chr(0x1f4c9)
-            lines = [
-                f"{trend} ${symbol} {abs(change):.1f}% {direction} | Vol {vol_ratio:.1f}x {chr(0x1f4a8) if high_vol else ''}",
-                "",
-                f"{chr(0x1f4b0)} ${price:.4f} | Change: {change:+.1f}%",
-                f"{chr(0x1f4ca)} Vol Ratio: {vol_ratio:.1f}x | MCap: ${market_cap:,.0f}",
-                "",
-                f"{chr(0x1f50d)} {analysis.get('reason', 'Market activity.')}",
-                f"  {chr(0x2705)} {analysis.get('bull_case', 'Momentum.')}",
-                f"  {chr(0x26a0)}{chr(0xfe0f)} {analysis.get('risk', 'Discipline.')}",
-                "",
-                f"{chr(0x1f3af)} ${setup.get('entry', 'N/A')} {chr(0x2192)} ${setup.get('target1', 'N/A')} / ${setup.get('target2', 'N/A')}",
-                "",
-                f"{chr(0x26a1)} High probability!" if high_vol else f"{chr(0x1f4ca)} Normal conditions.",
-                f"{chr(0x23f0)} {now_str}",
-                f"#${symbol} #CryptoMarket #{symbol.upper()}"
-            ]
+        
         else:
-            # Moon/Engagement style
-            rocket = chr(0x1f680) if is_pump else chr(0x1f4ab)
+            # Short / Punchy style
             lines = [
-                f"{rocket} ${symbol} {name} {change:+.1f}% {chr(0x1f4a8) if high_vol else ''}",
+                f"${symbol} - {change:+.1f}% in 24h. Here's what I'm watching.",
                 "",
-                f"{chr(0x1f4b0)} Price: ${price:.4f} | Vol: {vol_ratio:.1f}x",
-                f"{chr(0x1f4ca)} MCap: ${market_cap:,.0f}",
+                f"Price: ${price:.4f} | Volume: {vol_ratio:.1f}x | Cap: ${market_cap:,.0f}",
                 "",
-                f"{chr(0x1f4cc)} {analysis.get('reason', 'Price action.')}",
-                f"  {chr(0x2705)} {analysis.get('bull_case', 'Upside.')}",
-                f"  {chr(0x26a0)}{chr(0xfe0f)} {analysis.get('risk', 'Use stops.')}",
-                "",
-                f"{chr(0x1f3af)} ${setup.get('entry', 'N/A')} {chr(0x2192)} ${setup.get('target1', 'N/A')} | SL: ${setup.get('stop', 'N/A')}",
-                "",
-                f"{chr(0x26a1)} Strong setup!" if high_vol else f"{chr(0x1f4ca)} Manage size.",
-                f"{chr(0x23f0)} {now_str}",
-                f"#${symbol} #BinanceSquare #CryptoSignals"
+                f"{analysis.get('reason', 'Price is moving with notable volume.')}",
+                f"",
+                f"Bull: {analysis.get('bull_case', 'Momentum is on the side of buyers.')}",
+                f"Risk: {analysis.get('risk', 'Always use a stop loss.')}",
+                f"",
+                f"Setup: ${setup.get('entry', '?')} → ${setup.get('target1', '?')} | Stop: ${setup.get('stop', '?')}",
+                f"",
+                f"{'This one has my attention.' if abs_change > 4 else 'Keeping it on the watchlist for now.'}",
+                f"⏰ {now_str}",
+                f"#{symbol} #CryptoSignals",
             ]
-
+        
         return "\n".join(lines)
