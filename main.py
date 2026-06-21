@@ -316,67 +316,20 @@ class MarketScanner:
         return sample
 
     def _live_universe(self) -> List[Coin]:
-        url = "https://api.binance.com/api/v3/ticker/24hr"
-        payload = http_get_json(url, timeout=self.config.http_timeout_seconds)
-        coins: List[Coin] = []
-
-        ranked = sorted(
-            [item for item in payload if str(item.get("symbol", "")).endswith("USDT")],
-            key=lambda item: float(item.get("quoteVolume", 0) or 0),
-            reverse=True,
-        )[:12]
-
-        for item in ranked:
-            symbol = item.get("symbol", "")
-            base_symbol = symbol[:-4]
-            try:
-                price = float(item.get("lastPrice", 0))
-                change_24h = float(item.get("priceChangePercent", 0))
-                volume_24h = float(item.get("quoteVolume", 0))
-                volume_ratio = max(1.0, float(item.get("count", 0)) / 1000.0)
-                market_cap = max(volume_24h * 10, price * 1e6)
-                history = self._live_history(symbol) or self._synthetic_history(price, change_24h)
-            except (TypeError, ValueError):
-                continue
-
-            coins.append(
-                Coin(
-                    base_symbol,
-                    base_symbol,
-                    price,
-                    change_24h,
-                    volume_24h,
-                    volume_ratio,
-                    market_cap,
-                    history,
-                )
-            )
-
-        return coins or self._build_universe()
-
-    def _live_history(self, symbol: str) -> List[float]:
-        url = f"https://api.binance.com/api/v3/klines?symbol={urllib.parse.quote(symbol)}&interval=1h&limit=24"
-        candles = http_get_json(url, timeout=self.config.http_timeout_seconds)
-        closes: List[float] = []
-        for candle in candles:
-            try:
-                closes.append(float(candle[4]))
-            except (TypeError, ValueError, IndexError):
-                continue
-        return closes
+        """Get live market data from CoinGecko (Binance API is geo-blocked from GHA)."""
+        return self._coingecko_universe()
 
     def _synthetic_history(self, price: float, change_24h: float) -> List[float]:
         steps = 10
-        if change_24h == 0:
-            start = price
-        else:
-            start = price / (1 + change_24h / 100.0)
+        if abs(change_24h) < 0.01:
+            return [round(price, 8)] * steps
+        start = price / (1 + change_24h / 100.0)
         return [round(start + (price - start) * (i / (steps - 1)), 8) for i in range(steps)]
 
 
     def _coingecko_universe(self) -> List[Coin]:
-        """Fallback to CoinGecko when Binance is blocked."""
-        url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=15&sparkline=true&price_change_percentage=24h"
+        """Get top coins by market cap from CoinGecko."""
+        url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=30&sparkline=true&price_change_percentage=24h"
         try:
             payload = http_get_json(url, timeout=self.config.http_timeout_seconds)
         except Exception:
@@ -391,7 +344,12 @@ class MarketScanner:
                 change_24h = float(item.get("price_change_percentage_24h") or 0)
                 volume_24h = float(item.get("total_volume") or 0)
                 market_cap = float(item.get("market_cap") or 0)
-                volume_ratio = min(max(0.5, volume_24h / max(market_cap, 1) * 100), 10.0)
+                # Only include coins with meaningful market data
+                if price <= 0 or market_cap < 1_000_000:
+                    continue
+                if abs(change_24h) > 100:
+                    continue
+                volume_ratio = min(max(0.3, volume_24h / max(market_cap, 1) * 100), 10.0)
                 sparkline = item.get("sparkline_in_7d", {}).get("price", [])
                 history = [float(p) for p in sparkline[-10:]] if sparkline else self._synthetic_history(price, change_24h)
             except (TypeError, ValueError, KeyError):
@@ -401,16 +359,21 @@ class MarketScanner:
         return coins or self._build_universe()
 
     _universe_cache = None
+    _cache_timestamp = 0
 
     def _universe(self) -> List[Coin]:
-        if MarketScanner._universe_cache is not None:
+        # Cache for 5 minutes to avoid hitting rate limits
+        now = time.time()
+        if MarketScanner._universe_cache is not None and (now - MarketScanner._cache_timestamp) < 300:
             return MarketScanner._universe_cache
         if self.config.live_market_data:
             with suppress(Exception):
                 coins = self._coingecko_universe()
                 MarketScanner._universe_cache = coins
+                MarketScanner._cache_timestamp = now
                 return coins
         MarketScanner._universe_cache = self.universe
+        MarketScanner._cache_timestamp = now
         return MarketScanner._universe_cache
 
     def top_gainers(self, limit: int = 3) -> List[Dict[str, Any]]:
@@ -469,11 +432,17 @@ class ResearchEngine:
     def score(self, coin: Dict[str, Any]) -> float:
         change = float(coin.get("change_24h", 0))
         volume_ratio = float(coin.get("volume_ratio", 1))
-        market_cap = float(coin.get("market_cap", 0))
-        momentum = max(-10.0, min(10.0, change))
-        liquidity = min(5.0, volume_ratio * 1.5)
-        cap_bonus = min(2.0, max(0.0, market_cap / 1e11))
-        return momentum + liquidity + cap_bonus
+        market_cap = float(coin.get("market_cap", 0) or 0)
+        price = float(coin.get("price", 0) or 0)
+        # Momentum score (capped at ±8)
+        momentum = max(-8.0, min(8.0, change))
+        # Volume score (cap at 4)
+        liquidity = min(4.0, volume_ratio * 1.2)
+        # Bigger cap = more established coin (bonus up to 3 points)
+        cap_bonus = min(3.0, market_cap / 5e10) if market_cap > 0 else -1.0
+        # Price stability bonus - avoid penny coins
+        stability = 1.0 if price >= 1.0 else (0.5 if price >= 0.1 else 0.0)
+        return momentum + liquidity + cap_bonus + stability
 
 
 class TradeSetup:
@@ -500,28 +469,28 @@ class EmotionEngine:
         if change > 5 and vol > 1.5:
             return {
                 "persona": "FOMO Bull",
-                "hook_emoji": "Ã°Å¸Å¡â‚¬Ã°Å¸â€™Â¥",
-                "bull_emoji": "Ã°Å¸â€œË†Ã°Å¸â€™Å½",
-                "bear_emoji": "Ã¢Å¡ Ã¯Â¸ÂÃ°Å¸Â§Å ",
-                "risk_emoji": "Ã°Å¸â€ºâ€˜Ã°Å¸â€™â‚¬",
+                "hook_emoji": "\U0001f680\U0001f4a5",
+                "bull_emoji": "\U0001f4c8\U0001f48e",
+                "bear_emoji": "\u26a0\ufe0f",
+                "risk_emoji": "\U0001f6e1\U0001f4b0",
                 "twist": "Excitement is high, but be careful! Greed can be dangerous.",
             }
         elif change < -3:
             return {
                 "persona": "Panic Bear",
-                "hook_emoji": "Ã°Å¸â€œâ€°Ã°Å¸ËœÂ¨",
-                "bull_emoji": "Ã°Å¸â€¢Å Ã¯Â¸ÂÃ°Å¸Ââ‚¬",
-                "bear_emoji": "Ã°Å¸ÂÂ»Ã°Å¸â€Âª",
-                "risk_emoji": "Ã°Å¸Å¡Â¨Ã°Å¸Â©Â¸",
+                "hook_emoji": "\U0001f525",
+                "bull_emoji": "\U0001f6c8",
+                "bear_emoji": "\U0001f43b",
+                "risk_emoji": "\u26a0\ufe0f",
                 "twist": "Blood is in the water, but smart people buy fear. Are you ready?",
             }
         else:
             return {
                 "persona": "Cold Analyst",
-                "hook_emoji": "Ã°Å¸Â§ÂÃ°Å¸â€œÅ ",
-                "bull_emoji": "Ã°Å¸â€œË†Ã°Å¸â€œÂ",
-                "bear_emoji": "Ã°Å¸â€œâ€°Ã°Å¸â€œÂ",
-                "risk_emoji": "Ã¢Å¡â€“Ã¯Â¸ÂÃ°Å¸â€ºÂ¡Ã¯Â¸Â",
+                "hook_emoji": "\U0001f9d0",
+                "bull_emoji": "\U0001f4c8",
+                "bear_emoji": "\U0001f4c9",
+                "risk_emoji": "\u2696\ufe0f",
                 "twist": "Leave emotions aside, only data speaks.",
             }
 
@@ -644,27 +613,31 @@ class GeminiGenerator:
         price = coin.get("price", 0)
         change = coin.get("change_24h", 0)
         vol_ratio = coin.get("volume_ratio", 1)
-        emotion = tone or self.emotion.get_tone(coin)
+        market_cap = coin.get("market_cap", 0)
+        direction = "📈 UP" if change >= 0 else "📉 DOWN"
+        sentiment = "bullish" if change > 3 else "bearish" if change < -3 else "neutral"
+        
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         
         lines = [
-            f"{emotion['hook_emoji']} {symbol} Update: {change:.1f}% in 24h!",
+            f"{'🚀' if change > 5 else '📊'} ${symbol} Market Update - {abs(change):.1f}% {'Gain' if change >= 0 else 'Loss'} (24h)",
             "",
-            f"${symbol} is currently trading at ${price:.4f} with a {change:+.1f}% change in the last 24 hours.",
-            f"Volume is {vol_ratio:.1f}x the baseline, showing {'strong' if vol_ratio > 1.5 else 'moderate'} participation.",
+            f"💰 Price: ${price:.4f} | 24h: {change:+.1f}% | Volume: {vol_ratio:.1f}x",
+            f"📊 Sentiment: {sentiment.capitalize()} | Market Cap: ${market_cap:,.0f}",
             "",
-            f"{emotion['bull_emoji']} **Bull Case:** {analysis.get('bull_case', 'Momentum is building.')}",
-            f"{emotion['bear_emoji']} **Bear Case:** {analysis.get('bear_case', 'Stay cautious.')}",
-            f"{emotion['risk_emoji']} **Risk:** {analysis.get('risk', 'Use proper risk management.')}",
+            f"📌 **Analysis:** {analysis.get('reason', 'Price is moving with notable volume.')}",
+            f"  ✅ Bull Case: {analysis.get('bull_case', 'Momentum could continue.')}",
+            f"  ⚠️ Risk: {analysis.get('risk', 'Use proper position sizing.')}",
             "",
-            f"**Setup:**",
+            f"🎯 **Trade Setup:**",
             f"  Entry: ${setup.get('entry', 'N/A')}",
-            f"  Target 1: ${setup.get('target1', 'N/A')}",
-            f"  Target 2: ${setup.get('target2', 'N/A')}",
+            f"  Target: ${setup.get('target1', 'N/A')} (T1) / ${setup.get('target2', 'N/A')} (T2)",
             f"  Stop: ${setup.get('stop', 'N/A')}",
             "",
-            f"{emotion['twist']}",
+            f"{'⚡ Momentum is strong - watch for continuation.' if abs(change) > 5 else '📊 Steady movement - manage risk accordingly.'}",
             "",
-            f"#crypto #{symbol} #trading #altcoin #defi"
+            f"⏰ {now_str}",
+            f"#{symbol} #Crypto #Trading #BinanceSquare"
         ]
         return "\n".join(lines)
 
@@ -677,12 +650,16 @@ class PostPublisher:
     def publish(self, coin: Dict[str, Any], content: str) -> bool:
         if self.config.dry_run:
             LOGGER.info("[DRY-RUN] Would publish post for %s", coin.get("symbol"))
-            self._save_locally(coin, content)
+            self._save_locally(coin, content, share_link="[DRY-RUN]")
             return True
 
-        published = self._try_square_api(coin, content)
-        if not published:
-            self._save_locally(coin, content)
+        share_link = self._try_square_api(coin, content)
+        if share_link:
+            LOGGER.info("✅ Published successfully with link: %s", share_link)
+            self._save_locally(coin, content, share_link=share_link)
+        else:
+            LOGGER.warning("Square API failed, saving locally")
+            self._save_locally(coin, content, share_link=None)
         return True
 
     def _try_square_api(self, coin: Dict[str, Any], content: str) -> bool:
@@ -721,24 +698,30 @@ class PostPublisher:
                 post_id = data.get("data", {}).get("id", "unknown")
                 share_link = data.get("data", {}).get("shareLink", "")
                 LOGGER.info("✅ Published to Square! ID: %s Link: %s", post_id, share_link)
-                return True
+                return share_link
             else:
                 LOGGER.warning("Square API error [%s]: %s", data.get("code"), data.get("message"))
-                return False
+                return ""
         except Exception as exc:
             LOGGER.warning("Square API request failed: %s", exc)
-            return False
+            return ""
 
-    def _save_locally(self, coin: Dict[str, Any], content: str) -> None:
-        """Save post to local file when remote publish fails."""
+    def _save_locally(self, coin: Dict[str, Any], content: str, share_link: str = None) -> None:
+        """Save post to local file with share link if available."""
         symbol = coin.get("symbol", "UNKNOWN")
         posts_dir = Path("posts")
         posts_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"post_{symbol}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.md"
+        ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        filename = f"post_{symbol}_{ts}.md"
         path = posts_dir / filename
         try:
-            path.write_text(content)
-            LOGGER.info("Saved post locally: %s", path)
+            # Add metadata header to the saved file
+            header = f"---\nSymbol: {symbol}\nTime: {ts} UTC\n"
+            if share_link:
+                header += f"Square Link: {share_link}\n"
+            header += "---\n\n"
+            path.write_text(header + content)
+            LOGGER.info("Saved post locally: %s (link: %s)", path, share_link or "N/A")
         except Exception as e:
             LOGGER.error("Could not save locally: %s", e)
 
