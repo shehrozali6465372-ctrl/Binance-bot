@@ -661,6 +661,7 @@ class GeminiGenerator:
                 seen_models.add(m)
                 models.append(m)
 
+        # Try Gemini API (fast: 1 attempt per model, then fallback to template)
         for model in models:
             url = (
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -678,15 +679,16 @@ class GeminiGenerator:
             }
 
             try:
-                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, retries=5)
+                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, retries=2)
                 text = resp["candidates"][0]["content"]["parts"][0]["text"]
                 if text and text.strip():
+                    LOGGER.info("Gemini %s generated post successfully", model)
                     return text.strip()
             except Exception as exc:
-                LOGGER.warning("Gemini model %s failed: %s", model, exc)
+                LOGGER.warning("Gemini %s failed: %s", model, exc)
                 continue
 
-        LOGGER.warning("All Gemini models failed; falling back to template-based content")
+        LOGGER.warning("Gemini API failed all models; using template fallback")
         return self._template_content(analysis, setup, coin, tone, keywords)
 
     def _build_prompt(
