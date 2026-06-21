@@ -328,8 +328,16 @@ class MarketScanner:
 
 
     def _coingecko_universe(self) -> List[Coin]:
-        """Get top coins by market cap from CoinGecko."""
-        url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=30&sparkline=true&price_change_percentage=24h"
+        """Get Binance-listed trending coins from CoinGecko."""
+        # Coins listed on Binance (major pairs)
+        BINANCE_LISTED = {
+            "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK",
+            "MATIC", "POL", "SHIB", "TRX", "ATOM", "UNI", "APT", "ARB", "OP", "NEAR",
+            "FIL", "ALGO", "AAVE", "MKR", "COMP", "SAND", "MANA", "AXS", "THETA", "FTM",
+            "ICP", "EOS", "XLM", "VET", "EGLD", "GRT", "RNDR", "FET", "AGIX", "PEPE",
+            "TIA", "SEI", "SUI", "INJ", "BLUR", "STRK", "BONK", "WIF", "JUP", "JTO",
+        }
+        url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=50&sparkline=true&price_change_percentage=24h"
         try:
             payload = http_get_json(url, timeout=self.config.http_timeout_seconds)
         except Exception:
@@ -339,12 +347,13 @@ class MarketScanner:
         for item in payload:
             try:
                 symbol = (item.get("symbol") or "").upper()
+                if symbol not in BINANCE_LISTED:
+                    continue
                 name = item.get("name") or symbol
                 price = float(item.get("current_price") or 0)
                 change_24h = float(item.get("price_change_percentage_24h") or 0)
                 volume_24h = float(item.get("total_volume") or 0)
                 market_cap = float(item.get("market_cap") or 0)
-                # Only include coins with meaningful market data
                 if price <= 0 or market_cap < 1_000_000:
                     continue
                 if abs(change_24h) > 100:
@@ -434,15 +443,12 @@ class ResearchEngine:
         volume_ratio = float(coin.get("volume_ratio", 1))
         market_cap = float(coin.get("market_cap", 0) or 0)
         price = float(coin.get("price", 0) or 0)
-        # Momentum score (capped at ±8)
-        momentum = max(-8.0, min(8.0, change))
-        # Volume score (cap at 4)
-        liquidity = min(4.0, volume_ratio * 1.2)
-        # Bigger cap = more established coin (bonus up to 3 points)
-        cap_bonus = min(3.0, market_cap / 5e10) if market_cap > 0 else -1.0
-        # Price stability bonus - avoid penny coins
-        stability = 1.0 if price >= 1.0 else (0.5 if price >= 0.1 else 0.0)
-        return momentum + liquidity + cap_bonus + stability
+        # Trending = momentum + volume (both positive = trending UP on volume)
+        momentum = max(-6.0, min(6.0, change))
+        volume_score = min(5.0, volume_ratio * 2.0)
+        # Cap bonus for established coins
+        cap_bonus = min(2.0, market_cap / 1e11) if market_cap > 0 else -1.0
+        return momentum + volume_score + cap_bonus
 
 
 class TradeSetup:
