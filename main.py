@@ -607,38 +607,72 @@ class GeminiGenerator:
         return prompt
 
     def _template_content(self, analysis, setup, coin, tone=None, keywords=None) -> str:
-        """Generate content using a template when Gemini API is unavailable."""
+        """Generate content using varied templates."""
         symbol = coin.get("symbol", "COIN")
         name = coin.get("name", symbol)
         price = coin.get("price", 0)
         change = coin.get("change_24h", 0)
         vol_ratio = coin.get("volume_ratio", 1)
         market_cap = coin.get("market_cap", 0)
-        direction = "📈 UP" if change >= 0 else "📉 DOWN"
-        sentiment = "bullish" if change > 3 else "bearish" if change < -3 else "neutral"
-        
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        direction = "UP" if change >= 0 else "DOWN"
         
-        lines = [
-            f"{'🚀' if change > 5 else '📊'} ${symbol} Market Update - {abs(change):.1f}% {'Gain' if change >= 0 else 'Loss'} (24h)",
-            "",
-            f"💰 Price: ${price:.4f} | 24h: {change:+.1f}% | Volume: {vol_ratio:.1f}x",
-            f"📊 Sentiment: {sentiment.capitalize()} | Market Cap: ${market_cap:,.0f}",
-            "",
-            f"📌 **Analysis:** {analysis.get('reason', 'Price is moving with notable volume.')}",
-            f"  ✅ Bull Case: {analysis.get('bull_case', 'Momentum could continue.')}",
-            f"  ⚠️ Risk: {analysis.get('risk', 'Use proper position sizing.')}",
-            "",
-            f"🎯 **Trade Setup:**",
-            f"  Entry: ${setup.get('entry', 'N/A')}",
-            f"  Target: ${setup.get('target1', 'N/A')} (T1) / ${setup.get('target2', 'N/A')} (T2)",
-            f"  Stop: ${setup.get('stop', 'N/A')}",
-            "",
-            f"{'⚡ Momentum is strong - watch for continuation.' if abs(change) > 5 else '📊 Steady movement - manage risk accordingly.'}",
-            "",
-            f"⏰ {now_str}",
-            f"#{symbol} #Crypto #Trading #BinanceSquare"
-        ]
+        # Pick a random template style
+        template_id = random.randint(0, 2)
+        
+        if template_id == 0:
+            # Price action focus
+            lines = [
+                f"{'🚀' if change > 5 else '📉' if change < -3 else '📊'} ${symbol} - {abs(change):.1f}% {'SURGE' if change > 5 else 'DROP' if change < -3 else 'Move'} (24h)",
+                "",
+                f"💰 ${price:.4f} | 24h: {change:+.1f}% | Vol: {vol_ratio:.1f}x",
+                f"📊 Cap: ${market_cap:,.0f}",
+                "",
+                f"📌 {analysis.get('reason', 'Notable price action.')}",
+                f"  ✅ {analysis.get('bull_case', 'Momentum building.')}",
+                f"  ⚠️ {analysis.get('risk', 'Manage risk.')}",
+                "",
+                f"🎯 Entry: ${setup.get('entry', 'N/A')} | T1: ${setup.get('target1', 'N/A')} | Stop: ${setup.get('stop', 'N/A')}",
+                "",
+                f"{'⚡ Strong momentum!' if abs(change) > 5 else '📊 Manage risk.'}",
+                f"⏰ {now_str}",
+                f"#{symbol} #Crypto #TradingSignals"
+            ]
+        elif template_id == 1:
+            # News/update style
+            lines = [
+                f"📰 ${symbol} Update | {abs(change):.1f}% {direction.capitalize()}",
+                "",
+                f"Price: ${price:.4f} | Vol: {vol_ratio:.1f}x above avg",
+                f"Sentiment: {'📈 Bullish' if change > 0 else '📉 Bearish'} | MCap: ${market_cap:,.0f}",
+                "",
+                f"🔍 Analysis: {analysis.get('reason', 'Moving with volume.')}",
+                f"✅ Bull: {analysis.get('bull_case', 'Upside potential.')}",
+                f"⚠️ Risk: {analysis.get('risk', 'Be cautious.')}",
+                "",
+                f"💵 Setup: ${setup.get('entry', 'N/A')} → ${setup.get('target1', 'N/A')} | SL: ${setup.get('stop', 'N/A')}",
+                "",
+                f"⏰ {now_str}",
+                f"#{symbol} #Crypto #BinanceSquare"
+            ]
+        else:
+            # Signal/alert style  
+            lines = [
+                f"{'🔴 ALERT' if abs(change) > 5 else '🔵 WATCH'} ${symbol} {change:+.1f}%",
+                "",
+                f"💰 ${price:.4f} | Volume spike: {vol_ratio:.1f}x",
+                f"📊 MCap: ${market_cap:,.0f}",
+                "",
+                f"📌 {analysis.get('reason', 'Volume-based move detected.')}",
+                f"  ✅ {analysis.get('bull_case', 'Potential upside.')}",
+                f"  ⚠️ {analysis.get('risk', 'Set stops.')}",
+                "",
+                f"🎯 Entry: ${setup.get('entry', 'N/A')} | Target: ${setup.get('target1', 'N/A')} | Stop: ${setup.get('stop', 'N/A')}",
+                "",
+                f"⏰ {now_str}",
+                f"#{symbol} #Trading #CryptoSignals"
+            ]
+        
         return "\n".join(lines)
 
 
@@ -767,10 +801,17 @@ def main() -> None:
     scored = [(research.score(coin), coin) for coin in unique_candidates]
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    top_pick = scored[0][1] if scored else None
-    if top_pick is None:
+    if not scored:
         LOGGER.info("No candidates found. Exiting.")
         return
+
+    # Pick from top 5 to avoid same coin every run
+    top_n = min(5, len(scored))
+    pick_idx = random.randint(0, top_n - 1)
+    top_pick = scored[pick_idx][1]
+    
+    LOGGER.info("Selected %s (rank %d/%d, score %.1f)", 
+                top_pick.get("symbol"), pick_idx + 1, len(scored), scored[pick_idx][0])
 
     analysis = research.analyze(top_pick)
     setup = trade_setup.build(top_pick)
