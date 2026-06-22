@@ -898,6 +898,8 @@ class GeminiGenerator:
         models_to_try = [
             "gemini-2.5-flash",
             os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
             "gemini-2.0-flash-lite",
             "gemini-2.0-flash",
         ]
@@ -927,7 +929,7 @@ class GeminiGenerator:
             }
 
             try:
-                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, retries=2)
+                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, retries=3)
                 text = resp["candidates"][0]["content"]["parts"][0]["text"]
                 if text and text.strip():
                     LOGGER.info("Gemini %s generated post successfully", model)
@@ -936,8 +938,20 @@ class GeminiGenerator:
                 LOGGER.warning("Gemini %s failed: %s", model, exc)
                 continue
 
-        LOGGER.warning("Gemini API failed all models; using template fallback")
-        return self._template_content(analysis, setup, coin, tone, keywords)
+        LOGGER.warning("Gemini API failed all models; will save draft locally only")
+        content = self._template_content(analysis, setup, coin, tone, keywords)
+        # Save draft locally but don't publish - quality wouldn't be good enough
+        try:
+            drafts_dir = Path("drafts")
+            drafts_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            draft_path = drafts_dir / f"draft_{coin.get('symbol', 'UNKNOWN')}_{ts}.md"
+            draft_path.write_text(f"# DRAFT - Template content (Gemini failed)\n\n" + content)
+            LOGGER.info("Saved draft to %s", draft_path)
+        except Exception:
+            pass
+        # Return template content but mark it so publisher knows not to publish
+        return "[DRAFT_TEMPLATE]" + content
 
     def _build_prompt(
         self,
@@ -1223,6 +1237,16 @@ class PostPublisher:
         self.db = Database(config.database_path)
 
     def publish(self, coin: Dict[str, Any], content: str) -> bool:
+        # Check if this is a draft template (Gemini failed) - don't publish low quality
+        if content.startswith("[DRAFT_TEMPLATE]"):
+            actual_content = content.replace("[DRAFT_TEMPLATE]", "", 1)
+            LOGGER.warning("Template fallback content - saving as draft only, not publishing to Square")
+            self._save_locally(coin, actual_content, share_link="[DRAFT-Skipped-Gemini-unavailable]")
+            try:
+                self.db.save_post({"content": actual_content, "coin_symbol": coin.get("symbol", "")})
+            except Exception:
+                pass
+            return True
         if self.config.dry_run:
             LOGGER.info("[DRY-RUN] Would publish post for %s", coin.get("symbol"))
             self._save_locally(coin, content, share_link="[DRY-RUN]")
@@ -1389,11 +1413,16 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
         vol_ratio = float(coin.get("volume_ratio", 1) or 1)
         score = change * 0.3 + vol_ratio * 10 * 0.3
         if coin.get("announcement_boost"):
-            score += 20  # Reduced from 30
-            if coin.get("announcement_type") == "new_listing":
-                score += 15  # Reduced from 20
-            elif coin.get("announcement_type") == "airdrop":
-                score += 10  # Reduced from 15
+            # Only boost if coin has some movement too
+            if abs(change) >= 1.0 or vol_ratio >= 1.0:
+                score += 15
+                if coin.get("announcement_type") == "new_listing":
+                    score += 10
+                elif coin.get("announcement_type") == "airdrop":
+                    score += 5
+            else:
+                # Minimal boost for stagnant coins
+                score += 5
         # Penalize recently posted coins to avoid repetition
         sym = coin.get("symbol", "")
         if sym in posted_symbols:
