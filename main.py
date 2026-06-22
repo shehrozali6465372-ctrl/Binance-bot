@@ -181,43 +181,78 @@ class Database:
     
     def _restore_from_artifact(self) -> None:
         """Download agent.db from the latest successful workflow artifact using gh CLI."""
+        # Only run inside GitHub Actions
+        if not os.getenv("GITHUB_ACTIONS"):
+            return
         try:
-            import subprocess, tempfile, zipfile, os
-            # gh CLI is pre-installed on GitHub Actions runners and auto-authenticated
+            import subprocess, tempfile, os, glob, json
+            # gh CLI uses GITHUB_TOKEN automatically on GitHub Actions runners
+            # Get runs (both schedule and manual) that have artifacts
             result = subprocess.run(
                 ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
-                 "--status", "success", "--event", "schedule",
-                 "--json", "databaseId", "--limit", "3", "-q", ".[].databaseId"],
+                 "--status", "success", "--limit", "10",
+                 "--json", "databaseId,event"],
                 capture_output=True, text=True, timeout=20
             )
-            if result.returncode != 0 or not result.stdout.strip():
+            if result.returncode != 0:
+                LOGGER.warning("gh run list failed (rc=%d): %s", result.returncode, result.stderr[:200])
                 return
-            run_ids = result.stdout.strip().split()
+            
+            import json as _json
+            try:
+                runs = _json.loads(result.stdout)
+            except _json.JSONDecodeError:
+                LOGGER.warning("Could not parse gh output")
+                return
+            
+            # Filter to schedule and workflow_dispatch events, get databaseIds
+            run_ids = [str(r["databaseId"]) for r in runs if r.get("event") in ("schedule", "workflow_dispatch")]
+            if not run_ids:
+                LOGGER.warning("No previous successful runs found (events: %s)", [r.get("event") for r in runs[:3]])
+                return
+            
+            LOGGER.info("Found %d previous runs: %s", len(run_ids), ", ".join(run_ids[:5]))
             for run_id in run_ids:
-                run_id = run_id.strip().strip('"')
+                run_id = run_id.strip('"')
                 if not run_id:
                     continue
-                # Download the artifact for this run
+                # Download artifact for this run
                 with tempfile.TemporaryDirectory() as tmpdir:
                     dl_result = subprocess.run(
                         ["gh", "run", "download", run_id, "--dir", tmpdir],
                         capture_output=True, text=True, timeout=30
                     )
                     if dl_result.returncode != 0:
+                        LOGGER.warning("gh run download %s failed: %s", run_id, dl_result.stderr[:200])
                         continue
-                    # Find agent.db in the downloaded artifacts
+                    # Find agent.db in downloaded artifacts
                     for root, dirs, files in os.walk(tmpdir):
                         for f in files:
                             if f == "agent.db":
                                 db_path = os.path.join(root, f)
-                                if os.path.getsize(db_path) > 100:
+                                size = os.path.getsize(db_path)
+                                if size > 100:
                                     with open(db_path, "rb") as src:
                                         with open(self.path, "wb") as dst:
                                             dst.write(src.read())
-                                    LOGGER.info("Restored agent.db from run %s (%d bytes)", run_id, os.path.getsize(db_path))
+                                    LOGGER.info("Restored agent.db from run %s (%d bytes, %d posts)", 
+                                               run_id, size, self._count_posts_db(db_path))
                                     return
+                                else:
+                                    LOGGER.warning("agent.db in run %s too small (%d bytes)", run_id, size)
+            LOGGER.warning("No valid agent.db found in any previous run")
         except Exception as exc:
-            LOGGER.debug("Could not restore database from artifacts: %s", exc)
+            LOGGER.warning("Could not restore database from artifacts: %s", exc)
+    
+    def _count_posts_db(self, db_path: str) -> int:
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cur = conn.execute("SELECT COUNT(*) FROM posts")
+            count = cur.fetchone()[0]
+            conn.close()
+            return count
+        except:
+            return 0
 
     def close(self) -> None:
         with suppress(Exception):
