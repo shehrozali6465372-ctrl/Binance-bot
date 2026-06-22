@@ -190,8 +190,12 @@ class Database:
             # Get runs (both schedule and manual) that have artifacts
             # gh CLI needs GH_TOKEN env var in GitHub Actions
             gh_env = os.environ.copy()
-            if "GITHUB_TOKEN" in gh_env and "GH_TOKEN" not in gh_env:
-                gh_env["GH_TOKEN"] = gh_env["GITHUB_TOKEN"]
+            # Try different token sources for gh CLI
+            if "GH_TOKEN" not in gh_env:
+                for token_var in ["GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"]:
+                    if token_var in gh_env and gh_env[token_var]:
+                        gh_env["GH_TOKEN"] = gh_env[token_var]
+                        break
             result = subprocess.run(
                 ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
                  "--status", "success", "--limit", "10",
