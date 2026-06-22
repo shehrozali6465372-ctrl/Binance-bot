@@ -861,7 +861,7 @@ class EmotionEngine:
                 "bear_emoji": "\U0001f4c9",
                 "risk_emoji": "\u2696\ufe0f",
                 "pro_tip_emoji": "💡",
-                "twist": "Leave emotions aside, only data speaks.",
+                "twist": "Use data to find the signal in the noise — the best trades are quiet before they explode.",
             }
 
 
@@ -983,9 +983,10 @@ class GeminiGenerator:
         
         # Build a clean, effective prompt
         parts = [
-            f"You are a 20-year veteran Wall Street crypto trader. Your current mood: {tone['persona']}. {tone['twist']}",
+            f"You are a 20-year veteran Wall Street crypto trader. Your current mood: {tone['persona']}.",
+            f"{tone['twist']}",
             "",
-            f"Write an engaging trading post about ${symbol} ({name}). Make it sound human, exciting, and NOT like AI.",
+            f"Write an engaging Binance Square post about ${symbol} ({name}). Sound human and exciting, NOT like AI.",
             "",
             "**Market Data:**",
             f"- Price: ${price:.4f} | 24h Change: {change:+.1f}% | Volume: {vol_ratio:.1f}x | Cap: ${market_cap:,.0f}",
@@ -1010,16 +1011,16 @@ class GeminiGenerator:
             parts.append(f"**Binance Announcement:** {announcement.get('title', '')}")
         
         parts.append("")
-        parts.append("**Requirements - FOLLOW STRICTLY:**")
-        parts.append("- Write a compelling 3-paragraph post (250-500 words total)")
-        parts.append("- Start with a strong hook/attention grabber")
-        parts.append("- Include relevant emojis naturally (🚀🔥📈💎📊💡)")
-        parts.append(f"- END with 5-7 hashtags on a new line, first one MUST be #{symbol}")
-        parts.append("- Sound like a real, experienced trader sharing genuine insights")
-        parts.append("- Include a specific pro tip or key insight in the last paragraph")
-        parts.append("- Never use robotic phrases like 'In the current market' or 'As of now'")
-        parts.append("- Mention specific numbers (price, %, volume) from the data")
-        parts.append(f"- {tone['twist']}")
+        parts.append("**CRITICAL FORMAT RULES - FOLLOW ALL:**")
+        parts.append("- FIRST SENTENCE MUST BE A STRONG HOOK that grabs attention (question, bold price callout, or surprising statement)")
+        parts.append("- Include AT LEAST 3 emojis naturally in the post body (use emojis like: 🚀🔥📈💎📊💡💰🎯✅📉🛑)")
+        parts.append("- Write 2-3 short paragraphs, very concise (max 250 words total)")
+        parts.append("- Include specific price levels, percentages, and volume data")
+        parts.append(f"- END with EXACTLY 5 hashtags on their own line, first one MUST be #{symbol}")
+        parts.append("- Sound like a real trader on Binance Square — not a robot, not a news article")
+        parts.append("- Include ONE specific trading tip or key insight in the last paragraph")
+        parts.append("- NEVER use phrases like: 'In the current market', 'As of now', 'It is important to', 'Please note'")
+        parts.append("- Make every sentence deliver value — no fluff, no filler")
         
         return "\n".join(parts)
 
@@ -1067,49 +1068,51 @@ class GeminiGenerator:
 
         if template_id == 0:
             # Bold prediction / Conviction style (like the example)
+            hook_emoji = "🚀" if change >= 5 else ("🔥" if change <= -3 else "🧐")
             lines = [
-                f"Guys.. Listen Carefully,",
+                f"{hook_emoji} Guys.. Listen Carefully, ${symbol} is making moves!",
                 "",
-                f"${symbol} has just begun its path towards the target ${setup.get('target1', '?')}, and the play is unfolding precisely as anticipated.",
-                f"The next target ${setup.get('target2', '?')} will also be smashed if momentum continues.",
+                f"{hook_emoji} ${symbol} has just begun its path towards the target ${setup.get('target1', '?')}, and the play is unfolding precisely as anticipated.",
+                f"🎯 The next target ${setup.get('target2', '?')} will also be smashed if momentum continues.",
                 "",
-                f"${symbol} is currently trading at ${price:.4f} with {change:+.1f}% in the last 24 hours and volume at {vol_ratio:.1f}x the baseline.",
+                f"📊 ${symbol} is currently trading at ${price:.4f} with {change:+.1f}% in the last 24 hours and volume at {vol_ratio:.1f}x the baseline.",
                 f"{analysis.get('reason', 'The momentum is still in favor of the current trend.')}",
                 "",
-                f"For those who missed the earlier signal - you can still participate. Just be careful during pullbacks and manage your risk properly.",
-                f"So long as the structure remains {'bullish' if change >= 0 else 'intact'}, these targets remain valid.",
+                f"💡 For those who missed the earlier signal - you can still participate. Just be careful during pullbacks and manage your risk properly.",
+                f"🚨 So long as the structure remains {'bullish' if change >= 0 else 'intact'}, these targets remain valid.",
                 "",
-                f"{'Congratulations to everyone who caught this move early!' if abs_change > 3 else 'Patience is key in these market conditions.'}",
+                f"{'🎉 Congratulations to everyone who caught this move early!' if abs_change > 3 else '💪 Patience is key in these market conditions.'}",
                 "",
-                f"\U0001f4a1 **Pro Tip:** {'Scale in gradually, do not go all-in at once. Use limit orders near the entry zone.' if vol_ratio > 1.5 else 'Wait for a pullback to the support zone before entering. Patience pays in trading.'}",
-                f"\u23f0 {now_str}",
-                f"#{symbol} #CryptoAnalysis #TradingSignals",
+                f"💡 **Pro Tip:** {'Scale in gradually, do not go all-in at once. Use limit orders near the entry zone.' if vol_ratio > 1.5 else 'Wait for a pullback to the support zone before entering. Patience pays in trading.'}",
+                f"⏰ {now_str}",
+                f"#{symbol} #CryptoSignals #TradingSetup #Altcoins #BinanceSquare",
             ]
 
         elif template_id == 1:
             # Educational / Market Update style
+            direction_emoji = "📈" if change >= 0 else "📉"
             lines = [
-                f"Quick ${symbol} Market Update for today,",
+                f"{direction_emoji} Quick ${symbol} Market Update - {change:+.1f}% in 24h!",
                 "",
-                f"Price: ${price:.4f} | 24h Change: {change:+.1f}%",
-                f"Volume is running at {vol_ratio:.1f}x the average, which tells us there is {'strong' if vol_ratio > 1.5 else 'moderate'} interest at these levels.",
+                f"📊 Price: ${price:.4f} | 24h Change: {change:+.1f}%",
+                f"📋 Volume is running at {vol_ratio:.1f}x the average, which tells us there is {'strong 🔴' if vol_ratio > 1.5 else 'moderate'} interest at these levels.",
                 "",
                 f"{analysis.get('reason', 'Price is showing interesting movement.')}",
                 "",
-                f"On the upside: {analysis.get('bull_case', 'Structure remains positive.')}",
-                f"The risk to consider: {analysis.get('risk', 'Always manage your position size.')}",
+                f"🟢 On the upside: {analysis.get('bull_case', 'Structure remains positive.')}",
+                f"🔴 The risk to consider: {analysis.get('risk', 'Always manage your position size.')}",
                 "",
-                f"Key levels to watch:",
-                f"  Entry Zone: ${setup.get('entry', '?')}",
-                f"  Target 1: ${setup.get('target1', '?')}",
-                f"  Target 2: ${setup.get('target2', '?')}",
-                f"  Stop: ${setup.get('stop', '?')}",
+                f"📍 Key levels to watch:",
+                f"  🔑 Entry Zone: ${setup.get('entry', '?')}",
+                f"  🎯 Target 1: ${setup.get('target1', '?')}",
+                f"  🎯 Target 2: ${setup.get('target2', '?')}",
+                f"  🛑 Stop: ${setup.get('stop', '?')}",
                 "",
-                f"{'The volume confirms the move - worth keeping on radar.' if vol_ratio > 1.5 else 'Let the market prove itself before committing.'}",
+                f"{'✅ The volume confirms the move - worth keeping on radar.' if vol_ratio > 1.5 else '⏳ Let the market prove itself before committing.'}",
                 "",
-                f"\U0001f4a1 **Pro Tip:** {'Use limit orders instead of market orders for better entry pricing. Tighten your stop as price approaches target 1.' if abs_change > 5 else 'Position size matters more than entry price. Never risk more than 2% on a single trade.'}",
-                f"\u23f0 {now_str}",
-                f"#{symbol} #CryptoMarket #TradeSetup",
+                f"💡 **Pro Tip:** {'Use limit orders instead of market orders for better entry pricing. Tighten your stop as price approaches target 1.' if abs_change > 5 else 'Position size matters more than entry price. Never risk more than 2% on a single trade.'}",
+                f"⏰ {now_str}",
+                f"#{symbol} #CryptoMarket #TradeSetup #BinanceSquare",
             ]
 
         elif template_id == 2:
@@ -1411,26 +1414,29 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
     for coin in unique_candidates:
         change = abs(float(coin.get("change_24h", 0) or 0))
         vol_ratio = float(coin.get("volume_ratio", 1) or 1)
-        score = change * 0.3 + vol_ratio * 10 * 0.3
+        score = change * 0.5 + vol_ratio * 10 * 0.4
         if coin.get("announcement_boost"):
-            # Only boost if coin has some movement too
-            if abs(change) >= 1.0 or vol_ratio >= 1.0:
-                score += 15
+            if abs(change) >= 0.5 or vol_ratio >= 0.8:
+                score += 8
                 if coin.get("announcement_type") == "new_listing":
-                    score += 10
-                elif coin.get("announcement_type") == "airdrop":
                     score += 5
+                elif coin.get("announcement_type") == "airdrop":
+                    score += 3
             else:
-                # Minimal boost for stagnant coins
-                score += 5
-        # Penalize recently posted coins to avoid repetition
+                score += 2
+        # Strong penalty for recently posted coins
         sym = coin.get("symbol", "")
         if sym in posted_symbols:
-            score *= 0.3
+            score *= 0.15
         coin["_score"] = score
 
     unique_candidates.sort(key=lambda c: c.get("_score", 0), reverse=True)
-    top_pick = unique_candidates[0]
+    # Pick top candidate with some randomization for variety
+    top_n = min(3, len(unique_candidates))
+    if top_n > 1 and unique_candidates[0].get("symbol", "") in posted_symbols:
+        top_pick = unique_candidates[1] if unique_candidates[1].get("_score", 0) > 0 else unique_candidates[0]
+    else:
+        top_pick = unique_candidates[0]
 
     LOGGER.info("Selected %s - change: %.1f%%, vol: %.1fx (score: %.1f)%s",
                 top_pick.get("symbol"),
