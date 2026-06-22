@@ -181,11 +181,11 @@ class Database:
     
     def _restore_from_artifact(self) -> None:
         """Download agent.db from the latest successful workflow artifact using gh CLI."""
-        # Only run inside GitHub Actions
-        if not os.getenv("GITHUB_ACTIONS"):
-            return
         try:
-            import subprocess, tempfile, os, glob, json
+            import subprocess, tempfile, glob, json, os as _os
+            # Only run inside GitHub Actions
+            if not _os.getenv("GITHUB_ACTIONS"):
+                return
             # gh CLI uses GITHUB_TOKEN automatically on GitHub Actions runners
             # Get runs (both schedule and manual) that have artifacts
             result = subprocess.run(
