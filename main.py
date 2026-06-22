@@ -180,37 +180,32 @@ class Database:
         self._init_schema()
 
     def _restore_from_artifact(self) -> None:
-        """Download agent.db from the latest successful workflow artifact using GitHub API."""
+        """Download agent.db from the latest workflow artifact using GitHub API."""
         if not os.getenv("GITHUB_ACTIONS"):
             return
-            return
-        # Try to get an API token from environment
-        api_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or os.getenv("ACTIONS_RUNTIME_TOKEN")
+        runtime_token = os.getenv("ACTIONS_RUNTIME_TOKEN", "")
+        gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN", "")
         repo = os.getenv("GITHUB_REPOSITORY", "")
+        api_token = gh_token or runtime_token
         if not api_token or not repo:
-            LOGGER.debug("No API token or repo available for artifact restore")
+            LOGGER.info("No API token available for artifact restore (GITHUB_TOKEN not set in env)")
             return
         try:
             import urllib.request, zipfile, io, json as _json
-            
-            # Step 1: List successful workflow runs (last 5)
-            api_url = f"https://api.github.com/repos/{repo}/actions/runs?status=success&per_page=5&event=workflow_dispatch&event=schedule"
-            # Use GH API v3 which accepts multiple event params
-            api_url = f"https://api.github.com/repos/{repo}/actions/runs?status=success&per_page=5"
-            req = urllib.request.Request(api_url, headers={
+            runs_url = f"https://api.github.com/repos/{repo}/actions/runs?status=success&per_page=5"
+            req = urllib.request.Request(runs_url, headers={
                 "Authorization": f"Bearer {api_token}",
                 "Accept": "application/vnd.github+json",
                 "User-Agent": "binance-bot"
             })
             with urllib.request.urlopen(req, timeout=15) as resp:
                 runs_data = _json.loads(resp.read().decode("utf-8"))
-            
+            LOGGER.info("Found %d workflow runs via API", len(runs_data.get("workflow_runs", [])))
             for run in runs_data.get("workflow_runs", []):
                 run_id = run.get("id")
                 event = run.get("event", "")
                 if event not in ("workflow_dispatch", "schedule"):
                     continue
-                # Step 2: List artifacts for this run
                 art_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts"
                 req2 = urllib.request.Request(art_url, headers={
                     "Authorization": f"Bearer {api_token}",
@@ -219,10 +214,8 @@ class Database:
                 })
                 with urllib.request.urlopen(req2, timeout=15) as resp2:
                     art_data = _json.loads(resp2.read().decode("utf-8"))
-                
                 for artifact in art_data.get("artifacts", []):
                     if "agent-output" in artifact.get("name", ""):
-                        # Step 3: Download the artifact zip
                         dl_url = artifact.get("archive_download_url", "")
                         if not dl_url:
                             continue
@@ -234,16 +227,18 @@ class Database:
                             zip_data = io.BytesIO(resp3.read())
                             with zipfile.ZipFile(zip_data) as zf:
                                 for name in zf.namelist():
-                                    if name.endswith("agent.db") or name == "agent.db":
+                                    if name == "agent.db":
                                         db_bytes = zf.read(name)
                                         if len(db_bytes) > 100:
                                             with open(self.path, "wb") as f_out:
                                                 f_out.write(db_bytes)
-                                            LOGGER.info("Restored agent.db from artifact run %s (%d bytes)", run_id, len(db_bytes))
+                                            LOGGER.info("Restored agent.db from run %s (%d bytes)", run_id, len(db_bytes))
                                             return
-            LOGGER.debug("No valid agent.db found in recent artifacts")
+            LOGGER.info("No valid agent.db found in recent artifacts")
+        except urllib.error.HTTPError as exc:
+            LOGGER.info("Artifact API error: HTTP %d %s", exc.code, exc.reason)
         except Exception as exc:
-            LOGGER.debug("Artifact restore failed: %s", exc)
+            LOGGER.info("Artifact restore failed: %s", exc)
     def _count_posts_db(self, db_path: str) -> int:
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
