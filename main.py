@@ -122,7 +122,7 @@ def _http_json_with_retry(
                 LOGGER.warning("HTTP 451 %s %s blocked by geo-restriction, skipping retries", method, url)
                 raise
             if exc.code == 429:
-                sleep_for = min(2 ** attempt * 5 + random.uniform(0, 5), 60)
+                sleep_for = min(15 * (2 ** attempt) + random.uniform(0, 10), 90)
                 LOGGER.warning("HTTP 429 %s %s rate limited (retrying in %ss, attempt %d/%d)", method, url, round(sleep_for, 1), attempt + 1, retries)
             else:
                 sleep_for = min(2 ** attempt + random.uniform(0, 2), 30)
@@ -939,11 +939,7 @@ class GeminiGenerator:
             return self._template_content(analysis, setup, coin, tone, keywords)
 
         models_to_try = [
-            "gemini-2.5-flash",
             os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-2.0-flash-lite",
             "gemini-2.0-flash",
         ]
         # Deduplicate
@@ -972,7 +968,7 @@ class GeminiGenerator:
             }
 
             try:
-                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, retries=3)
+                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, retries=4)
                 text = resp["candidates"][0]["content"]["parts"][0]["text"]
                 if text and text.strip():
                     LOGGER.info("Gemini %s generated post successfully", model)
