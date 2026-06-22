@@ -47,7 +47,7 @@ class Config:
             http_timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "15")),
             gemini_temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.9")),
             gemini_top_p=float(os.getenv("GEMINI_TOP_P", "0.95")),
-            gemini_max_output_tokens=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "512")),
+            gemini_max_output_tokens=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "2048")),
         )
 
     def validate(self) -> None:
@@ -268,6 +268,32 @@ class Database:
                 }
             )
         return rows
+
+    def get_posted_symbols(self, hours: int = 48) -> set:
+        """Get symbols posted recently to avoid repetition."""
+        try:
+            cur = self.conn.execute(
+                "SELECT coin_symbol, created_at FROM posts ORDER BY id DESC LIMIT 100"
+            )
+            posted = set()
+            for row in cur.fetchall():
+                if row["coin_symbol"]:
+                    posted.add(row["coin_symbol"].upper())
+            return posted
+        except sqlite3.OperationalError:
+            return set()
+
+    def get_post_count_for_symbol(self, symbol: str, hours: int = 48) -> int:
+        """Count how many times a symbol was posted recently."""
+        try:
+            cur = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM posts WHERE coin_symbol = ? ORDER BY id DESC LIMIT 50",
+                (symbol.upper(),),
+            )
+            row = cur.fetchone()
+            return row["cnt"] if row else 0
+        except sqlite3.OperationalError:
+            return 0
 
     def save_run(self, status: str, summary: Dict[str, Any]) -> None:
         with self.conn:
@@ -923,51 +949,63 @@ class GeminiGenerator:
         tone: Optional[Dict[str, Any]] = None,
         keywords: Optional[List[str]] = None,
     ) -> str:
+        """Build a concise prompt for Gemini to generate a high-quality trading post."""
         symbol = coin.get("symbol", "COIN")
-        keyword_block = ", ".join(keywords) if keywords else "none"
-        examples_text = "\n---\n".join(past_examples or []) if past_examples else "No past examples available, but you are an expert."
+        name = coin.get("name", symbol)
+        price = coin.get("price", 0)
+        change = coin.get("change_24h", 0)
+        vol_ratio = coin.get("volume_ratio", 1)
+        market_cap = coin.get("market_cap", 0)
         tone = tone or self.emotion.get_tone(coin)
-        memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
-        memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
-
-        # Extract enhanced research context
+        
+        # Extract context
+        reason = analysis.get("reason", "") if isinstance(analysis, dict) else str(analysis)
+        bull_case = analysis.get("bull_case", "") if isinstance(analysis, dict) else ""
+        bear_case = analysis.get("bear_case", "") if isinstance(analysis, dict) else ""
+        risk = analysis.get("risk", "") if isinstance(analysis, dict) else ""
         category = analysis.get("category", "") if isinstance(analysis, dict) else ""
-        tech = analysis.get("technical", {}) if isinstance(analysis, dict) else {}
-        vol = analysis.get("volume_analysis", {}) if isinstance(analysis, dict) else {}
         narrative = analysis.get("narrative", "") if isinstance(analysis, dict) else ""
-        risk_level = analysis.get("risk_level", "") if isinstance(analysis, dict) else ""
-
-        lines = [
-            "You are a 20-year veteran Wall Street trader.",
-            f"Your current mood: {tone['persona']}",
+        announcement = analysis.get("announcement") if isinstance(analysis, dict) else None
+        
+        # Build a clean, effective prompt
+        parts = [
+            f"You are a 20-year veteran Wall Street crypto trader. Your current mood: {tone['persona']}. {tone['twist']}",
             "",
-            "**Learn from your past viral posts and improve:**",
-            f"{examples_text}",
+            f"Write an engaging trading post about ${symbol} ({name}). Make it sound human, exciting, and NOT like AI.",
             "",
-            f"**Now write for {symbol} in the same human style, with emojis and depth.**",
-            "Market Data:",
-            f"- 24h Change: {coin.get('change_24h', 0):.2f}%",
-            f"- Volume: {coin.get('volume_ratio', 1):.1f}x",
-            f"- Market Cap: ${coin.get('market_cap', 0):,.0f}",
-            "" if not category else f"- Category: {category} ({narrative})",
-            "" if not tech.get('pattern') else f"- Chart Pattern: {tech['pattern']}",
-            "" if not tech.get('trend') else f"- Trend: {tech['trend']} (strength: {tech.get('strength', 0.5):.0%})",
-            "" if not risk_level else f"- Risk Level: {risk_level.upper()}",
-            f"- Analysis: {analysis['reason']}",
-            f"- Bull Case: {analysis['bull_case']}",
-            f"- Bear Case: {analysis['bear_case']}",
-            f"- Risk: {analysis['risk']}",
-            f"- Entry: {setup['entry']}",
-            f"- Target 1: {setup['target1']}",
-            f"- Target 2: {setup['target2']}",
-            f"- Stop: {setup['stop']}",
-            f"- Keywords: {keyword_block}",
+            "**Market Data:**",
+            f"- Price: ${price:.4f} | 24h Change: {change:+.1f}% | Volume: {vol_ratio:.1f}x | Cap: ${market_cap:,.0f}",
         ]
-        # Filter out empty lines
-        lines = [l for l in lines if l]
-
-        prompt = "\n".join(lines)
-        return prompt
+        
+        if category:
+            parts.append(f"- Category: {category} ({narrative})")
+        
+        parts.append("")
+        parts.append(f"**Analysis:** {reason}")
+        parts.append(f"**Bull Case:** {bull_case}")
+        parts.append(f"**Bear Case:** {bear_case}") 
+        parts.append(f"**Risk:** {risk}")
+        parts.append("")
+        parts.append("**Trading Setup:**")
+        parts.append(f"- Entry: ${setup['entry']}")
+        parts.append(f"- Target 1: ${setup['target1']} | Target 2: ${setup['target2']}")
+        parts.append(f"- Stop: ${setup['stop']}")
+        
+        if announcement:
+            parts.append("")
+            parts.append(f"**Binance Announcement:** {announcement.get('title', '')}")
+        
+        parts.append("")
+        parts.append("**Requirements:**")
+        parts.append("- Write 2-3 paragraphs (200-400 words)")
+        parts.append("- Include relevant emojis (but don't overdo it)")
+        parts.append(f"- Add 4-6 hashtags at the end including ${symbol}")
+        parts.append("- Sound like a real trader sharing insights, not a bot")
+        parts.append("- Include a pro tip or key insight")
+        parts.append("- Do NOT use phrases like 'as of now' or 'in the current market conditions'")
+        parts.append(f"- {tone['twist']}")
+        
+        return "\n".join(parts)
 
     def _template_content(self, analysis, setup, coin, tone=None, keywords=None) -> str:
         """Generate human-like trading post (not spammy)."""
@@ -1005,7 +1043,7 @@ class GeminiGenerator:
             category_hook = "Layer 1 fundamentals strong! "
 
         # Pick template style - more variety with 6 styles
-        template_id = random.randint(0, 5)
+        template_id = random.randint(0, 7)
         abs_change = abs(change)
         direction_word = "surge" if change >= 5 else ("drop" if change <= -5 else ("uptick" if change > 0 else "dip"))
         excitement = "explosive" if abs_change > 8 else ("strong" if abs_change > 4 else "notable")
@@ -1105,7 +1143,7 @@ class GeminiGenerator:
                 f"#{symbol} #CryptoSignals #Altcoins",
             ]
 
-        elif template_id == 4:
+        elif template_id == 4 or template_id == 6:
             # News / Event Driven style
             lines = [
                 f"\U0001f4a5 " + ('OFFICIAL: $' + symbol + ' ' + ann_type.replace("_", " ").upper() + '!' if has_announcement else f'BREAKING: $' + symbol + ' is making moves!'),
@@ -1153,6 +1191,27 @@ class GeminiGenerator:
                 f"#{symbol} #CryptoAlerts #TradingSetup",
             ]
 
+        elif template_id == 7:
+            # Short punchy variant
+            symbol = coin.get("symbol", "COIN")
+            price = coin.get("price", 0)
+            change = coin.get("change_24h", 0)
+            vol_ratio = coin.get("volume_ratio", 1)
+            abs_change = abs(change)
+            lines = [
+                "$" + symbol + " | " + "{:+.1f}%".format(change) + " | Vol: " + "{:.1f}x".format(vol_ratio),
+                "",
+                str(analysis.get("reason", "Price action is notable today.")) if isinstance(analysis, dict) else str(analysis),
+                "",
+                str(analysis.get("bull_case", "Structure favors buyers.")) if isinstance(analysis, dict) else "Bullish structure.",
+                "⚠️ " + (str(analysis.get("risk", "Manage your risk.")) if isinstance(analysis, dict) else "Manage your risk."),
+                "",
+                "💡 " + (str(analysis.get("bear_case", "")) if isinstance(analysis, dict) else ""),
+                "⏰ " + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                "#" + symbol + " #Crypto #Trading",
+            ]
+
+
         return "\n".join(lines)
 
 
@@ -1165,6 +1224,10 @@ class PostPublisher:
         if self.config.dry_run:
             LOGGER.info("[DRY-RUN] Would publish post for %s", coin.get("symbol"))
             self._save_locally(coin, content, share_link="[DRY-RUN]")
+            try:
+                self.db.save_post({"content": content, "coin_symbol": coin.get("symbol", "")})
+            except Exception as e:
+                LOGGER.warning("Could not save post to DB: %s", e)
             return True
 
         share_link = self._try_square_api(coin, content)
@@ -1174,6 +1237,11 @@ class PostPublisher:
         else:
             LOGGER.warning("Square API failed, saving locally")
             self._save_locally(coin, content, share_link=None)
+        # Save to database for tracking
+        try:
+            self.db.save_post({"content": content, "coin_symbol": coin.get("symbol", "")})
+        except Exception as e:
+            LOGGER.warning("Could not save post to database: %s", e)
         return True
 
     def _try_square_api(self, coin: Dict[str, Any], content: str) -> str:
@@ -1235,18 +1303,9 @@ class PostPublisher:
             LOGGER.error("Could not save locally: %s", e)
 
 
-def main() -> None:
-    config = CONFIG
-    config.validate()
-
-    scanner = MarketScanner(config)
-    announcement_engine = BinanceAnnouncementEngine(config)
-    research = ResearchEngine()
-    trade_setup = TradeSetup()
-    generator = GeminiGenerator(config)
-    publisher = PostPublisher(config)
-
-    # Fetch Binance announcements (real news data!)
+def run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols) -> bool:
+    """Run one iteration of post generation and publishing."""
+    # Fetch Binance announcements
     announcements = []
     try:
         announcements = announcement_engine.get_trending_announcements()
@@ -1271,11 +1330,9 @@ def main() -> None:
         if coin.get("symbol") not in [c.get("symbol") for c in all_candidates]:
             all_candidates.append(coin)
 
-    # If announcements mention specific coins, add them with priority boost
-    announcement_symbols = set()
+    # Announcement priority boost
     for a in announcements:
         for sym in a.get("symbols", []):
-            announcement_symbols.add(sym)
             found = False
             for c in all_candidates:
                 if c.get("symbol") == sym:
@@ -1317,10 +1374,10 @@ def main() -> None:
         unique_candidates.append(coin)
 
     if not unique_candidates:
-        LOGGER.info("No candidates found. Exiting.")
-        return
+        LOGGER.info("No candidates found.")
+        return False
 
-    # Score candidates: announcement boost + market data
+    # Score candidates - penalize recently posted
     for coin in unique_candidates:
         change = abs(float(coin.get("change_24h", 0) or 0))
         vol_ratio = float(coin.get("volume_ratio", 1) or 1)
@@ -1331,11 +1388,14 @@ def main() -> None:
                 score += 20
             elif coin.get("announcement_type") == "airdrop":
                 score += 15
+        # Penalize recently posted coins to avoid repetition
+        sym = coin.get("symbol", "")
+        if sym in posted_symbols:
+            score *= 0.3
         coin["_score"] = score
 
-    # Sort by score descending, pick from top
     unique_candidates.sort(key=lambda c: c.get("_score", 0), reverse=True)
-    top_pick = random.choice(unique_candidates[:5])
+    top_pick = unique_candidates[0]
 
     LOGGER.info("Selected %s - change: %.1f%%, vol: %.1fx (score: %.1f)%s",
                 top_pick.get("symbol"),
@@ -1344,7 +1404,6 @@ def main() -> None:
                 top_pick.get("_score", 0),
                 " [ANNOUNCEMENT: " + top_pick.get("announcement_type", "") + "]" if top_pick.get("announcement_boost") else "")
 
-    # Pass announcement data to research engine if available
     ann_data = None
     if top_pick.get("announcement_boost"):
         ann_data = {
@@ -1354,13 +1413,91 @@ def main() -> None:
     analysis = research.analyze(top_pick, announcement=ann_data)
     setup = trade_setup.build(top_pick)
 
-
     LOGGER.info("Generating post for %s...", top_pick.get("symbol"))
     content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
 
     publisher.publish(top_pick, content)
     LOGGER.info("Done - post generated for %s", top_pick.get("symbol"))
+    return True
+
+
+def main_loop() -> None:
+    """Main loop that runs continuously with configured interval."""
+    config = CONFIG
+    config.validate()
+    
+    interval = config.post_interval
+    max_iter = config.max_iterations
+    
+    scanner = MarketScanner(config)
+    announcement_engine = BinanceAnnouncementEngine(config)
+    research = ResearchEngine()
+    trade_setup = TradeSetup()
+    generator = GeminiGenerator(config)
+    publisher_db = Database(config.database_path)
+    publisher = PostPublisher(config)
+    publisher.db = publisher_db
+    
+    iteration = 0
+    posted_symbols = set()
+    
+    LOGGER.info("=" * 60)
+    LOGGER.info("Binance Square Auto Poster started")
+    LOGGER.info("Interval: %d seconds (%.1f hours)", interval, interval / 3600)
+    LOGGER.info("Max iterations: %s", "unlimited" if max_iter <= 0 else str(max_iter))
+    LOGGER.info("Live market data: %s", config.live_market_data)
+    LOGGER.info("Dry run: %s", config.dry_run)
+    LOGGER.info("=" * 60)
+    
+    while True:
+        iteration += 1
+        LOGGER.info("--- Iteration %d ---", iteration)
+        
+        try:
+            posted_symbols = publisher_db.get_posted_symbols(hours=48)
+        except Exception:
+            posted_symbols = set()
+        
+        try:
+            run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols)
+        except Exception as e:
+            LOGGER.error("Iteration %d failed: %s", iteration, e)
+            import traceback
+            LOGGER.error(traceback.format_exc())
+        
+        if 0 < max_iter <= iteration:
+            LOGGER.info("Reached max_iterations=%d, stopping.", max_iter)
+            break
+        
+        LOGGER.info("Waiting %d seconds (%.1f hours) until next post...", interval, interval / 3600)
+        sleep_chunk = min(interval, 60)
+        slept = 0
+        while slept < interval:
+            time.sleep(sleep_chunk)
+            slept += sleep_chunk
+
+
+def main() -> None:
+    """Single run mode - for cron/scheduled usage."""
+    config = CONFIG
+    config.validate()
+    
+    scanner = MarketScanner(config)
+    announcement_engine = BinanceAnnouncementEngine(config)
+    research = ResearchEngine()
+    trade_setup = TradeSetup()
+    generator = GeminiGenerator(config)
+    publisher_db = Database(config.database_path)
+    publisher = PostPublisher(config)
+    publisher.db = publisher_db
+    
+    posted_symbols = publisher_db.get_posted_symbols(hours=48)
+    run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols)
 
 
 if __name__ == "__main__":
-    main()
+    # If post_interval > 0, run in loop mode
+    if CONFIG.post_interval > 0:
+        main_loop()
+    else:
+        main()
