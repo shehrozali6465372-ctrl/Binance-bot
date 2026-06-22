@@ -1342,47 +1342,76 @@ class PostPublisher:
         return True
 
     def _try_square_api(self, coin: Dict[str, Any], content: str) -> str:
-        """Publish to Binance Square via official Creator Center API."""
+        """Publish to Binance Square via Node.js post-text.mjs script."""
         square_key = self.config.square_api_key
         if not square_key:
             LOGGER.warning("No SQUARE_API_KEY set, saving locally")
             return ""
 
-        payload = {
-            "contentType": 1,
-            "bodyTextOnly": content,
-        }
+        import subprocess, shlex, os
+        
+        script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "post-text.mjs")
+        if not os.path.exists(script_path):
+            LOGGER.warning("Node.js script not found at %s, falling back to direct API", script_path)
+            return self._try_square_api_direct(coin, content)
+
+        env = os.environ.copy()
+        env["BINANCE_SQUARE_OPENAPI_KEY"] = square_key
+
+        try:
+            result = subprocess.run(
+                ["node", script_path, "--text", content],
+                capture_output=True, text=True, timeout=30,
+                env=env
+            )
+
+            if result.returncode == 0 and result.stdout.strip():
+                data = json.loads(result.stdout)
+                if data.get("success"):
+                    share_link = data.get("shareLink", "")
+                    post_id = data.get("postId", "unknown")
+                    LOGGER.info("Published via Node.js! ID: %s Link: %s", post_id, share_link)
+                    return share_link
+                else:
+                    LOGGER.warning("Node.js script error: %s", data.get("message", data.get("error", "unknown")))
+                    return ""
+            else:
+                stderr = result.stderr.strip()
+                stdout = result.stdout.strip()
+                LOGGER.warning("Node.js script failed (rc=%d): %s | %s", result.returncode, stdout[:300], stderr[:200])
+                return ""
+        except subprocess.TimeoutExpired:
+            LOGGER.warning("Node.js script timed out")
+            return ""
+        except Exception as exc:
+            LOGGER.warning("Node.js script error: %s", exc)
+            return ""
+
+    def _try_square_api_direct(self, coin: Dict[str, Any], content: str) -> str:
+        """Fallback: Direct Square API call if Node.js script is unavailable."""
+        square_key = self.config.square_api_key
+        payload = {"contentType": 1, "bodyTextOnly": content}
         headers = {
             "X-Square-OpenAPI-Key": square_key,
             "Content-Type": "application/json",
             "clienttype": "binanceSkill",
         }
-
         url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
-
         try:
             data_bytes = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=self.config.http_timeout_seconds) as resp:
                 resp_body = resp.read().decode("utf-8", errors="replace")
-
-            LOGGER.info("Square API response: HTTP %d %s", resp.status, resp_body[:500])
             data = json.loads(resp_body)
-
             if data.get("code") == "000000":
-                post_id = data.get("data", {}).get("id", "unknown")
                 share_link = data.get("data", {}).get("shareLink", "")
-                # Check if post is in review/blocked
-                post_status = data.get("data", {}).get("status", "live")
-                if post_status and post_status != "live":
-                    LOGGER.warning("Post status is '%s' - may not be visible immediately", post_status)
-                LOGGER.info("Published to Square! ID: %s Status: %s Link: %s", post_id, post_status, share_link)
+                LOGGER.info("Published via direct API! Link: %s", share_link)
                 return share_link
             else:
-                LOGGER.warning("Square API error [%s]: %s - full: %s", data.get("code"), data.get("message"), resp_body[:500])
+                LOGGER.warning("Direct API error [%s]: %s", data.get("code"), data.get("message"))
                 return ""
         except Exception as exc:
-            LOGGER.warning("Square API request failed: %s", exc)
+            LOGGER.warning("Direct API failed: %s", exc)
             return ""
 
     def _save_locally(self, coin: Dict[str, Any], content: str, share_link: str = None) -> None:
