@@ -512,56 +512,278 @@ class BinanceAnnouncementEngine:
 
 
 class ResearchEngine:
-    def analyze(self, coin: Dict[str, Any]) -> Dict[str, str]:
-        change = float(coin.get("change_24h", 0))
-        volume_ratio = float(coin.get("volume_ratio", 1))
-        market_cap = float(coin.get("market_cap", 0))
-        price = float(coin.get("price", 0))
+    """Multi-dimensional research engine: technical, narrative, risk, and market context."""
 
-        reason = (
-            f"{coin.get('symbol')} is trending with {change:.1f}% 24h move "
-            f"and {volume_ratio:.1f}x volume versus baseline."
-        )
+    # Coin categories / narratives
+    CATEGORIES = {
+        "AI": {"FET", "AGIX", "RNDR", "NEAR", "ARB", "OP", "GRT", "FET", "AGIX", "OCEAN"},
+        "MEME": {"DOGE", "SHIB", "PEPE", "BONK", "WIF", "FLOKI", "MEME"},
+        "L1": {"SOL", "AVAX", "ADA", "DOT", "APT", "SUI", "SEI", "INJ", "TIA"},
+        "DeFi": {"AAVE", "MKR", "UNI", "LINK", "COMP", "CRV", "CAKE"},
+        "L2": {"ARB", "OP", "MATIC", "POL", "STRK"},
+        "RWA": {"MKR", "COMP", "LINK", "POL"},
+        "GAMING": {"AXS", "SAND", "MANA", "THETA", "ENJ"},
+        "INFRA": {"ICP", "FIL", "ALGO", "EOS", "XLM", "VET", "TRX"},
+        "EXCHANGE": {"BNB", "LEO", "OKB", "CRO"},
+    }
 
-        if change >= 8:
-            bull_case = "Strong momentum and aggressive participation suggest continuation if volume holds."
-        elif change >= 0:
-            bull_case = "Price is advancing with constructive flow; continuation is possible above the recent range."
+    def analyze(self, coin: Dict[str, Any], announcement: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Full research analysis on a coin."""
+        symbol = coin.get("symbol", "")
+        price = float(coin.get("price", 0) or 0)
+        change = float(coin.get("change_24h", 0) or 0)
+        volume_ratio = float(coin.get("volume_ratio", 1) or 1)
+        volume_24h = float(coin.get("volume_24h", 0) or 0)
+        market_cap = float(coin.get("market_cap", 0) or 0)
+        history = coin.get("history", [])
+        abs_change = abs(change)
+        
+        # 1. Category / Narrative detection
+        category, narrative = self._detect_narrative(symbol)
+        
+        # 2. Technical signals
+        tech = self._technical_analysis(history, price, change)
+        
+        # 3. Volume analysis
+        vol_analysis = self._volume_analysis(volume_ratio, volume_24h, market_cap)
+        
+        # 4. Risk assessment
+        risk_level, risk_factors = self._risk_assessment(price, market_cap, volume_ratio, change, category)
+        
+        # 5. Market context
+        context = self._market_context(change, volume_ratio, category)
+        
+        # 6. Generate reason text
+        reason_parts = []
+        if announcement:
+            ann_type = announcement.get("type", "")
+            ann_title = announcement.get("title", "")
+            if ann_type == "new_listing":
+                reason_parts.append(f"${symbol} was just LISTED on Binance!")
+            elif ann_type == "airdrop":
+                reason_parts.append(f"${symbol} has an active Binance airdrop campaign!")
+            elif ann_type == "delisting":
+                reason_parts.append(f"${symbol} is under delisting monitoring on Binance.")
+            else:
+                reason_parts.append(f"${symbol} trending on Binance announcements.")
+        
+        reason_parts.append(f"${symbol} is showing a {change:+.1f}% {'surge' if change > 0 else 'drop'} with {volume_ratio:.1f}x volume.")
+        
+        if tech.get("pattern"):
+            reason_parts.append(f"Chart pattern: {tech['pattern']}.")
+        
+        if vol_analysis.get("verdict"):
+            reason_parts.append(vol_analysis["verdict"])
+        
+        reason = " ".join(reason_parts)
+
+        # 7. Bull case
+        bull_parts = []
+        if tech.get("trend") == "bullish":
+            bull_parts.append(f"Technical structure is {'strong' if tech.get('strength', 0) > 0.6 else 'improving'}.")
+        if vol_analysis.get("bullish"):
+            bull_parts.append(vol_analysis["bullish"])
+        if change > 5:
+            bull_parts.append("Strong momentum suggests continuation potential.")
+        elif change > 0:
+            bull_parts.append("Gradual accumulation phase with constructive price action.")
         else:
-            bull_case = "Oversold conditions can attract a bounce if sellers exhaust."
+            bull_parts.append("Oversold conditions historically attract dip-buyers.")
+        if category:
+            bull_parts.append(f"The {category} narrative is gaining traction.")
+        bull_case = " ".join(bull_parts)
 
+        # 8. Bear case
+        bear_parts = []
+        if tech.get("trend") == "bearish":
+            bear_parts.append("Technical structure is weakening.")
+        if vol_analysis.get("bearish"):
+            bear_parts.append(vol_analysis["bearish"])
         if market_cap > 1e11:
-            bear_case = "Large caps can still reverse quickly; upside may be slower and more range-bound."
-        elif change < 0:
-            bear_case = "Downtrend risk remains elevated until price reclaims prior resistance."
+            bear_parts.append("Large caps move slower; upside may be capped.")
+        elif change < -5:
+            bear_parts.append("Downtrend intact until price reclaims key resistance.")
         else:
-            bear_case = "Low conviction could fade if volume drops or broader market weakens."
+            bear_parts.append("Momentum could fade if volume drops off.")
+        bear_case = " ".join(bear_parts)
 
-        if price < 1:
-            risk = "Penny-like pricing can create outsized percentage swings and wider slippage."
-        elif volume_ratio < 1.2:
-            risk = "Volume is not strong enough to confirm the move."
+        # 9. Risk note
+        if risk_level == "high":
+            risk = f"⚠️ High Risk: {risk_factors[0] if risk_factors else 'Use strict position sizing.'}"
+        elif risk_level == "medium":
+            risk = f"⚡ Medium Risk: {risk_factors[0] if risk_factors else 'Manage position size carefully.'}"
         else:
-            risk = "Use a defined stop because momentum names can retrace sharply."
+            risk = f"✓ Low Risk: {risk_factors[0] if risk_factors else 'Established asset with good liquidity.'}"
 
         return {
             "reason": reason,
             "bull_case": bull_case,
             "bear_case": bear_case,
             "risk": risk,
+            "technical": tech,
+            "volume_analysis": vol_analysis,
+            "category": category,
+            "narrative": narrative,
+            "risk_level": risk_level,
+            "risk_factors": risk_factors,
+            "context": context,
+            "announcement": announcement,
         }
 
-    def score(self, coin: Dict[str, Any]) -> float:
+    def _detect_narrative(self, symbol: str) -> tuple:
+        """Detect coin category and narrative."""
+        symbol_upper = symbol.upper()
+        for category, coins in self.CATEGORIES.items():
+            if symbol_upper in coins:
+                return category, f"{category} narrative"
+        return "", ""
+
+    def _technical_analysis(self, history: List[float], price: float, change: float) -> Dict[str, Any]:
+        """Basic technical analysis from price history."""
+        result = {
+            "pattern": "",
+            "trend": "neutral",
+            "strength": 0.5,
+            "volatility": "medium",
+        }
+        
+        if len(history) >= 5:
+            prices = history[-5:]
+            # Simple trend detection
+            if prices[-1] > prices[0] * 1.05:
+                result["trend"] = "bullish"
+                result["strength"] = min(1.0, (prices[-1] / prices[0] - 1) * 5)
+                if change > 5:
+                    result["pattern"] = "Breakout from recent range"
+                else:
+                    result["pattern"] = "Steady uptrend with higher lows"
+            elif prices[-1] < prices[0] * 0.95:
+                result["trend"] = "bearish"
+                result["strength"] = min(1.0, abs(prices[-1] / prices[0] - 1) * 3)
+                if change < -5:
+                    result["pattern"] = "Sharp selloff with momentum"
+                else:
+                    result["pattern"] = "Gradual distribution phase"
+            else:
+                if abs(change) < 2:
+                    result["pattern"] = "Consolidation / ranging"
+                else:
+                    result["pattern"] = "Slight bias " + ("up" if change > 0 else "down")
+            
+            # Volatility estimate
+            max_move = max(prices) / min(prices) - 1 if min(prices) > 0 else 0.05
+            result["volatility"] = "high" if max_move > 0.08 else ("medium" if max_move > 0.03 else "low")
+        
+        return result
+
+    def _volume_analysis(self, volume_ratio: float, volume_24h: float, market_cap: float) -> Dict[str, Any]:
+        """Analyze volume patterns."""
+        result = {
+            "bullish": "",
+            "bearish": "",
+            "verdict": "",
+        }
+        
+        if volume_ratio > 2.0:
+            result["bullish"] = "Volume is 2x+ normal - strong participation."
+            result["verdict"] = "Volume spike confirms active interest."
+        elif volume_ratio > 1.5:
+            result["bullish"] = "Above-average volume supporting the move."
+            result["verdict"] = "Volume above baseline - notable activity."
+        elif volume_ratio < 0.5:
+            result["bearish"] = "Volume drying up - low conviction."
+            result["verdict"] = "Thin volume - move may lack sustainability."
+        elif volume_ratio < 1.0:
+            result["bearish"] = "Below-average volume - weak participation."
+            result["verdict"] = "Volume lagging - wait for confirmation."
+        else:
+            result["verdict"] = "Volume at normal levels - healthy market."        
+        # Liquidity check
+        if market_cap > 0 and volume_24h / market_cap < 0.01:
+            result["bearish"] += " Low liquidity relative to market cap."
+        
+        return result
+
+    def _risk_assessment(self, price: float, market_cap: float, volume_ratio: float, change: float, category: str) -> tuple:
+        """Assess risk level and factors."""
+        risk_factors = []
+        
+        if price < 0.1:
+            risk_factors.append("Micro-cap pricing - extreme volatility possible.")
+        elif price < 1:
+            risk_factors.append("Low price point - percentage swings amplify.")
+        
+        if market_cap > 0 and market_cap < 10_000_000:
+            risk_factors.append("Small market cap - higher downside risk.")
+        elif market_cap > 10_000_000_000:
+            risk_factors.append("")  # No risk for large caps
+        
+        if volume_ratio < 0.8:
+            risk_factors.append("Thin volume - slippage risk on entry/exit.")
+        
+        if abs(change) > 20:
+            risk_factors.append("Extreme daily move - potential reversal.")
+        
+        if category == "MEME":
+            risk_factors.append("Meme coins have higher volatility and lower fundamentals.")
+        
+        # Clean up empty strings
+        risk_factors = [f for f in risk_factors if f]
+        
+        if not risk_factors:
+            risk_factors.append("Standard market risk - use proper position sizing.")
+        
+        # Determine risk level
+        risk_score = len(risk_factors)
+        if price < 0.1:
+            risk_score += 1
+        if abs(change) > 15:
+            risk_score += 1
+        
+        if risk_score >= 3:
+            return "high", risk_factors
+        elif risk_score >= 1:
+            return "medium", risk_factors
+        return "low", risk_factors
+
+    def _market_context(self, change: float, volume_ratio: float, category: str) -> str:
+        """Generate market context sentence."""
+        if change > 8:
+            return f"{'Sector momentum' if category else 'Market'} is strongly bullish."
+        elif change > 3:
+            return f"Positive price action with {'sector' if category else 'market'} participation."
+        elif change > 0:
+            return "Mild bullish bias - wait for volume confirmation."
+        elif change > -3:
+            return "Slight bearish pressure - holding key support levels."
+        elif change > -8:
+            return f"Bearish momentum in {'the ' + category + ' sector' if category else 'this asset'}."
+        else:
+            return "Strong selling pressure - watch for capitulation or reversal."
+
+    def score(self, coin: Dict[str, Any], category: str = "") -> float:
+        """Score a coin for trending/posting priority."""
         change = float(coin.get("change_24h", 0))
         volume_ratio = float(coin.get("volume_ratio", 1))
         market_cap = float(coin.get("market_cap", 0) or 0)
         price = float(coin.get("price", 0) or 0)
-        # Trending = momentum + volume (both positive = trending UP on volume)
-        momentum = max(-6.0, min(6.0, change))
-        volume_score = min(5.0, volume_ratio * 2.0)
-        # Cap bonus for established coins
-        cap_bonus = min(2.0, market_cap / 1e11) if market_cap > 0 else -1.0
-        return momentum + volume_score + cap_bonus
+        
+        market_score = max(-5.0, min(5.0, change)) * 0.3
+        volume_score = min(5.0, volume_ratio * 1.5) * 0.3
+        cap_score = min(3.0, market_cap / 1e11) * 0.2
+        interest_score = (abs(change) / 10 + volume_ratio / 2) * 0.2
+        
+        # Category bonus
+        cat_bonus = 0
+        if category == "AI":
+            cat_bonus = 2.0
+        elif category == "MEME":
+            cat_bonus = 1.5
+        elif category == "L1":
+            cat_bonus = 1.0
+        
+        total = market_score + volume_score + cap_score + interest_score + cat_bonus
+        return max(0, total)
 
 
 class TradeSetup:
@@ -708,6 +930,13 @@ class GeminiGenerator:
         memory_keywords = ", ".join([word for word, _ in (memory_summary or {}).get("top_keywords", [])[:8]]) or "none"
         memory_hashtags = ", ".join([tag for tag, _ in (memory_summary or {}).get("top_hashtags", [])[:5]]) or "none"
 
+        # Extract enhanced research context
+        category = analysis.get("category", "") if isinstance(analysis, dict) else ""
+        tech = analysis.get("technical", {}) if isinstance(analysis, dict) else {}
+        vol = analysis.get("volume_analysis", {}) if isinstance(analysis, dict) else {}
+        narrative = analysis.get("narrative", "") if isinstance(analysis, dict) else ""
+        risk_level = analysis.get("risk_level", "") if isinstance(analysis, dict) else ""
+
         lines = [
             "You are a 20-year veteran Wall Street trader.",
             f"Your current mood: {tone['persona']}",
@@ -719,6 +948,11 @@ class GeminiGenerator:
             "Market Data:",
             f"- 24h Change: {coin.get('change_24h', 0):.2f}%",
             f"- Volume: {coin.get('volume_ratio', 1):.1f}x",
+            f"- Market Cap: ${coin.get('market_cap', 0):,.0f}",
+            "" if not category else f"- Category: {category} ({narrative})",
+            "" if not tech.get('pattern') else f"- Chart Pattern: {tech['pattern']}",
+            "" if not tech.get('trend') else f"- Trend: {tech['trend']} (strength: {tech.get('strength', 0.5):.0%})",
+            "" if not risk_level else f"- Risk Level: {risk_level.upper()}",
             f"- Analysis: {analysis['reason']}",
             f"- Bull Case: {analysis['bull_case']}",
             f"- Bear Case: {analysis['bear_case']}",
@@ -729,6 +963,8 @@ class GeminiGenerator:
             f"- Stop: {setup['stop']}",
             f"- Keywords: {keyword_block}",
         ]
+        # Filter out empty lines
+        lines = [l for l in lines if l]
 
         prompt = "\n".join(lines)
         return prompt
@@ -749,6 +985,24 @@ class GeminiGenerator:
         has_announcement = announcement is not None
         ann_type = announcement.get("type", "") if has_announcement else ""
         ann_title = announcement.get("title", "") if has_announcement else ""
+
+        # Extract enhanced research data
+        coin_category = analysis.get("category", "") if isinstance(analysis, dict) else ""
+        tech_pattern = analysis.get("technical", {}).get("pattern", "") if isinstance(analysis, dict) else ""
+        tech_trend = analysis.get("technical", {}).get("trend", "") if isinstance(analysis, dict) else ""
+        risk_level = analysis.get("risk_level", "") if isinstance(analysis, dict) else ""
+        narrative = analysis.get("narrative", "") if isinstance(analysis, dict) else ""
+
+        # Category-based hook modifiers
+        category_hook = ""
+        if coin_category == "AI":
+            category_hook = "AI narrative is heating up! "
+        elif coin_category == "MEME":
+            category_hook = "Community momentum building! "
+        elif coin_category == "DeFi":
+            category_hook = "DeFi ecosystem growing! "
+        elif coin_category == "L1":
+            category_hook = "Layer 1 fundamentals strong! "
 
         # Pick template style - more variety with 6 styles
         template_id = random.randint(0, 5)
@@ -1090,14 +1344,16 @@ def main() -> None:
                 top_pick.get("_score", 0),
                 " [ANNOUNCEMENT: " + top_pick.get("announcement_type", "") + "]" if top_pick.get("announcement_boost") else "")
 
-    analysis = research.analyze(top_pick)
+    # Pass announcement data to research engine if available
+    ann_data = None
+    if top_pick.get("announcement_boost"):
+        ann_data = {
+            "type": top_pick.get("announcement_type", "news"),
+            "title": top_pick.get("announcement_title", ""),
+        }
+    analysis = research.analyze(top_pick, announcement=ann_data)
     setup = trade_setup.build(top_pick)
 
-    # Add announcement context to analysis
-    if top_pick.get("announcement_boost"):
-        ann_type = top_pick.get("announcement_type", "")
-        ann_title = top_pick.get("announcement_title", "")
-        analysis["announcement"] = {"type": ann_type, "title": ann_title}
 
     LOGGER.info("Generating post for %s...", top_pick.get("symbol"))
     content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
