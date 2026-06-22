@@ -170,11 +170,54 @@ class Database:
     def __init__(self, path: str):
         self.path = path
         ensure_parent(self.path)
+        # Try to restore database from previous GitHub Actions artifact
+        if not os.path.exists(self.path) or os.path.getsize(self.path) < 100:
+            self._restore_from_artifact()
         self.conn = sqlite3.connect(self.path, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+    
+    def _restore_from_artifact(self) -> None:
+        """Download agent.db from the latest successful workflow artifact using gh CLI."""
+        try:
+            import subprocess, tempfile, zipfile, os
+            # gh CLI is pre-installed on GitHub Actions runners and auto-authenticated
+            result = subprocess.run(
+                ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
+                 "--status", "success", "--event", "schedule",
+                 "--json", "databaseId", "--limit", "3", "-q", ".[].databaseId"],
+                capture_output=True, text=True, timeout=20
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return
+            run_ids = result.stdout.strip().split()
+            for run_id in run_ids:
+                run_id = run_id.strip().strip('"')
+                if not run_id:
+                    continue
+                # Download the artifact for this run
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    dl_result = subprocess.run(
+                        ["gh", "run", "download", run_id, "--dir", tmpdir],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    if dl_result.returncode != 0:
+                        continue
+                    # Find agent.db in the downloaded artifacts
+                    for root, dirs, files in os.walk(tmpdir):
+                        for f in files:
+                            if f == "agent.db":
+                                db_path = os.path.join(root, f)
+                                if os.path.getsize(db_path) > 100:
+                                    with open(db_path, "rb") as src:
+                                        with open(self.path, "wb") as dst:
+                                            dst.write(src.read())
+                                    LOGGER.info("Restored agent.db from run %s (%d bytes)", run_id, os.path.getsize(db_path))
+                                    return
+        except Exception as exc:
+            LOGGER.debug("Could not restore database from artifacts: %s", exc)
 
     def close(self) -> None:
         with suppress(Exception):
@@ -1414,7 +1457,9 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
     for coin in unique_candidates:
         change = abs(float(coin.get("change_24h", 0) or 0))
         vol_ratio = float(coin.get("volume_ratio", 1) or 1)
-        score = change * 0.5 + vol_ratio * 10 * 0.4
+        # Cap volume ratio to avoid one coin dominating the score
+        capped_vol = min(vol_ratio, 3.0)
+        score = change * 0.6 + capped_vol * 10 * 0.3
         if coin.get("announcement_boost"):
             if abs(change) >= 0.5 or vol_ratio >= 0.8:
                 score += 8
@@ -1427,16 +1472,17 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
         # Strong penalty for recently posted coins
         sym = coin.get("symbol", "")
         if sym in posted_symbols:
-            score *= 0.15
+            score *= 0.05  # Almost eliminate repeats
         coin["_score"] = score
 
     unique_candidates.sort(key=lambda c: c.get("_score", 0), reverse=True)
-    # Pick top candidate with some randomization for variety
-    top_n = min(3, len(unique_candidates))
-    if top_n > 1 and unique_candidates[0].get("symbol", "") in posted_symbols:
-        top_pick = unique_candidates[1] if unique_candidates[1].get("_score", 0) > 0 else unique_candidates[0]
-    else:
-        top_pick = unique_candidates[0]
+    # Pick top candidate with diversity check
+    top_pick = unique_candidates[0]
+    # If top candidate was recently posted, try others
+    for candidate in unique_candidates[:5]:
+        if candidate.get("symbol", "") not in posted_symbols:
+            top_pick = candidate
+            break
 
     LOGGER.info("Selected %s - change: %.1f%%, vol: %.1fx (score: %.1f)%s",
                 top_pick.get("symbol"),
