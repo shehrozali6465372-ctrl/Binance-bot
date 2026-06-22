@@ -188,11 +188,16 @@ class Database:
                 return
             # gh CLI uses GITHUB_TOKEN automatically on GitHub Actions runners
             # Get runs (both schedule and manual) that have artifacts
+            # gh CLI needs GH_TOKEN env var in GitHub Actions
+            gh_env = os.environ.copy()
+            if "GITHUB_TOKEN" in gh_env and "GH_TOKEN" not in gh_env:
+                gh_env["GH_TOKEN"] = gh_env["GITHUB_TOKEN"]
             result = subprocess.run(
                 ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
                  "--status", "success", "--limit", "10",
                  "--json", "databaseId,event"],
-                capture_output=True, text=True, timeout=20
+                capture_output=True, text=True, timeout=20,
+                env=gh_env
             )
             if result.returncode != 0:
                 LOGGER.warning("gh run list failed (rc=%d): %s", result.returncode, result.stderr[:200])
@@ -220,7 +225,8 @@ class Database:
                 with tempfile.TemporaryDirectory() as tmpdir:
                     dl_result = subprocess.run(
                         ["gh", "run", "download", run_id, "--dir", tmpdir],
-                        capture_output=True, text=True, timeout=30
+                        capture_output=True, text=True, timeout=30,
+                        env=gh_env
                     )
                     if dl_result.returncode != 0:
                         LOGGER.warning("gh run download %s failed: %s", run_id, dl_result.stderr[:200])
@@ -691,6 +697,19 @@ class ResearchEngine:
             "context": context,
             "announcement": announcement,
         }
+
+    CATEGORIES = {
+        "AI": {"FET", "AGIX", "RNDR", "THETA", "GRT", "ICP", "AR", "OCEAN", "NMR"},
+        "MEME": {"DOGE", "SHIB", "PEPE", "BONK", "WIF", "FLOKI", "MEME"},
+        "DeFi": {"AAVE", "MKR", "COMP", "UNI", "CAKE", "CRV", "BAL", "SUSHI"},
+        "L1": {"SOL", "ADA", "AVAX", "DOT", "NEAR", "APT", "SUI", "SEI", "INJ", "TIA"},
+        "L2": {"MATIC", "POL", "ARB", "OP", "METIS"},
+        "Exchange": {"BNB", "CRO", "LEO", "OKB", "GT"},
+        "Gaming": {"AXS", "SAND", "MANA", "GALA", "ENJ"},
+        "DePIN": {"FIL", "HNT", "IOTX"},
+        "RWA": {"ONDO"},
+        "BTC Ecosystem": {"STX", "ORDI"},
+    }
 
     def _detect_narrative(self, symbol: str) -> tuple:
         """Detect coin category and narrative."""
