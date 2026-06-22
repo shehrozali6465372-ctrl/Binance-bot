@@ -11,8 +11,7 @@
  *   BINANCE_SQUARE_OPENAPI_KEY - API key from Binance Square Creator Center
  */
 
-const https = require('https');
-const http = require('http');
+import { request as httpsRequest } from 'https';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -29,23 +28,21 @@ function parseArgs() {
 function makeRequest(url, method, headers, body) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
-    const client = urlObj.protocol === 'https:' ? https : http;
     const options = {
       hostname: urlObj.hostname,
-      port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+      port: 443,
       path: urlObj.pathname + urlObj.search,
       method,
       headers,
       timeout: 30000,
     };
-    const req = client.request(options, (res) => {
+    const req = httpsRequest(options, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         resolve({
           status: res.statusCode,
           body: data,
-          headers: res.headers,
         });
       });
     });
