@@ -586,6 +586,9 @@ class BinanceAnnouncementEngine:
 
 
 
+
+class ResearchEngine:
+
     def analyze(self, coin: Dict[str, Any], announcement: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Full research analysis on a coin."""
         symbol = coin.get("symbol", "")
