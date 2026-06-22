@@ -1,46 +1,48 @@
 name: Binance Square Auto Poster
-
-on:
-  schedule:
-    - cron: '0 */2 * * *'
-  workflow_dispatch:
-
-jobs:
-  run-agent:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies (if any)
-        run: |
-          pip install --upgrade pip
-
-      - name: Run Crypto Agent
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          SQUARE_API_KEY: ${{ secrets.SQUARE_API_KEY }}
-          DRY_RUN: 0
-          LIVE_MARKET_DATA: 1
-          POST_INTERVAL: 7200
-          MAX_ITERATIONS: 1
-          GEMINI_MODEL: gemini-2.5-flash
-          DATABASE_PATH: agent.db
-          PUBLISH_LOG_PATH: published_posts.jsonl
-        run: python main.py
-
-      - name: Upload logs and database
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent-output-${{ github.run_id }}
-          path: |
-            published_posts.jsonl
-            agent.db
-            charts/
+‎
+‎on:
+‎  schedule:
+‎    - cron: '0 */2 * * *'
+‎  workflow_dispatch:
+‎
+‎jobs:
+‎  run-agent:
+‎    runs-on: ubuntu-latest
+‎
+‎    steps:
+‎      - name: Checkout code
+‎        uses: actions/checkout@v4
+‎
+‎      - name: Set up Python
+‎        uses: actions/setup-python@v5
+‎        with:
+‎          python-version: '3.11'
+‎
+‎      - name: Install dependencies (if any)
+‎        run: |
+‎          pip install --upgrade pip
+‎
+‎      - name: Run Crypto Agent
+‎        env:
+‎          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+‎          SQUARE_API_KEY: ${{ secrets.SQUARE_API_KEY }}
+‎          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+‎          DRY_RUN: 0
+‎          LIVE_MARKET_DATA: 1
+‎          POST_INTERVAL: 7200
+‎          MAX_ITERATIONS: 1
+‎          GEMINI_MODEL: gemini-2.5-flash
+‎          DATABASE_PATH: agent.db
+‎          PUBLISH_LOG_PATH: published_posts.jsonl
+‎        run: python main.py
+‎
+‎      - name: Upload logs and database
+‎        if: always()
+‎        uses: actions/upload-artifact@v4
+‎        with:
+‎          name: agent-output-${{ github.run_id }}
+‎          path: |
+‎            published_posts.jsonl
+‎            agent.db
+‎            charts/
+‎
