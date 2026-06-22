@@ -178,82 +178,72 @@ class Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
-    
+
     def _restore_from_artifact(self) -> None:
-        """Download agent.db from the latest successful workflow artifact using gh CLI."""
+        """Download agent.db from the latest successful workflow artifact using GitHub API."""
+        if not os.getenv("GITHUB_ACTIONS"):
+            return
+            return
+        # Try to get an API token from environment
+        api_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or os.getenv("ACTIONS_RUNTIME_TOKEN")
+        repo = os.getenv("GITHUB_REPOSITORY", "")
+        if not api_token or not repo:
+            LOGGER.debug("No API token or repo available for artifact restore")
+            return
         try:
-            import subprocess, tempfile, glob, json, os as _os
-            # Only run inside GitHub Actions
-            if not _os.getenv("GITHUB_ACTIONS"):
-                return
-            # gh CLI uses GITHUB_TOKEN automatically on GitHub Actions runners
-            # Get runs (both schedule and manual) that have artifacts
-            # gh CLI needs GH_TOKEN env var in GitHub Actions
-            gh_env = os.environ.copy()
-            # Try different token sources for gh CLI
-            if "GH_TOKEN" not in gh_env:
-                for token_var in ["GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"]:
-                    if token_var in gh_env and gh_env[token_var]:
-                        gh_env["GH_TOKEN"] = gh_env[token_var]
-                        break
-            result = subprocess.run(
-                ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
-                 "--status", "success", "--limit", "10",
-                 "--json", "databaseId,event"],
-                capture_output=True, text=True, timeout=20,
-                env=gh_env
-            )
-            if result.returncode != 0:
-                LOGGER.warning("gh run list failed (rc=%d): %s", result.returncode, result.stderr[:200])
-                return
+            import urllib.request, zipfile, io, json as _json
             
-            import json as _json
-            try:
-                runs = _json.loads(result.stdout)
-            except _json.JSONDecodeError:
-                LOGGER.warning("Could not parse gh output")
-                return
+            # Step 1: List successful workflow runs (last 5)
+            api_url = f"https://api.github.com/repos/{repo}/actions/runs?status=success&per_page=5&event=workflow_dispatch&event=schedule"
+            # Use GH API v3 which accepts multiple event params
+            api_url = f"https://api.github.com/repos/{repo}/actions/runs?status=success&per_page=5"
+            req = urllib.request.Request(api_url, headers={
+                "Authorization": f"Bearer {api_token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "binance-bot"
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                runs_data = _json.loads(resp.read().decode("utf-8"))
             
-            # Filter to schedule and workflow_dispatch events, get databaseIds
-            run_ids = [str(r["databaseId"]) for r in runs if r.get("event") in ("schedule", "workflow_dispatch")]
-            if not run_ids:
-                LOGGER.warning("No previous successful runs found (events: %s)", [r.get("event") for r in runs[:3]])
-                return
-            
-            LOGGER.info("Found %d previous runs: %s", len(run_ids), ", ".join(run_ids[:5]))
-            for run_id in run_ids:
-                run_id = run_id.strip('"')
-                if not run_id:
+            for run in runs_data.get("workflow_runs", []):
+                run_id = run.get("id")
+                event = run.get("event", "")
+                if event not in ("workflow_dispatch", "schedule"):
                     continue
-                # Download artifact for this run
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    dl_result = subprocess.run(
-                        ["gh", "run", "download", run_id, "--dir", tmpdir],
-                        capture_output=True, text=True, timeout=30,
-                        env=gh_env
-                    )
-                    if dl_result.returncode != 0:
-                        LOGGER.warning("gh run download %s failed: %s", run_id, dl_result.stderr[:200])
-                        continue
-                    # Find agent.db in downloaded artifacts
-                    for root, dirs, files in os.walk(tmpdir):
-                        for f in files:
-                            if f == "agent.db":
-                                db_path = os.path.join(root, f)
-                                size = os.path.getsize(db_path)
-                                if size > 100:
-                                    with open(db_path, "rb") as src:
-                                        with open(self.path, "wb") as dst:
-                                            dst.write(src.read())
-                                    LOGGER.info("Restored agent.db from run %s (%d bytes, %d posts)", 
-                                               run_id, size, self._count_posts_db(db_path))
-                                    return
-                                else:
-                                    LOGGER.warning("agent.db in run %s too small (%d bytes)", run_id, size)
-            LOGGER.warning("No valid agent.db found in any previous run")
+                # Step 2: List artifacts for this run
+                art_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts"
+                req2 = urllib.request.Request(art_url, headers={
+                    "Authorization": f"Bearer {api_token}",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "binance-bot"
+                })
+                with urllib.request.urlopen(req2, timeout=15) as resp2:
+                    art_data = _json.loads(resp2.read().decode("utf-8"))
+                
+                for artifact in art_data.get("artifacts", []):
+                    if "agent-output" in artifact.get("name", ""):
+                        # Step 3: Download the artifact zip
+                        dl_url = artifact.get("archive_download_url", "")
+                        if not dl_url:
+                            continue
+                        req3 = urllib.request.Request(dl_url, headers={
+                            "Authorization": f"Bearer {api_token}",
+                            "User-Agent": "binance-bot"
+                        })
+                        with urllib.request.urlopen(req3, timeout=30) as resp3:
+                            zip_data = io.BytesIO(resp3.read())
+                            with zipfile.ZipFile(zip_data) as zf:
+                                for name in zf.namelist():
+                                    if name.endswith("agent.db") or name == "agent.db":
+                                        db_bytes = zf.read(name)
+                                        if len(db_bytes) > 100:
+                                            with open(self.path, "wb") as f_out:
+                                                f_out.write(db_bytes)
+                                            LOGGER.info("Restored agent.db from artifact run %s (%d bytes)", run_id, len(db_bytes))
+                                            return
+            LOGGER.debug("No valid agent.db found in recent artifacts")
         except Exception as exc:
-            LOGGER.warning("Could not restore database from artifacts: %s", exc)
-    
+            LOGGER.debug("Artifact restore failed: %s", exc)
     def _count_posts_db(self, db_path: str) -> int:
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
