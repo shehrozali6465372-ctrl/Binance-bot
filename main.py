@@ -996,13 +996,15 @@ class GeminiGenerator:
             parts.append(f"**Binance Announcement:** {announcement.get('title', '')}")
         
         parts.append("")
-        parts.append("**Requirements:**")
-        parts.append("- Write 2-3 paragraphs (200-400 words)")
-        parts.append("- Include relevant emojis (but don't overdo it)")
-        parts.append(f"- Add 4-6 hashtags at the end including ${symbol}")
-        parts.append("- Sound like a real trader sharing insights, not a bot")
-        parts.append("- Include a pro tip or key insight")
-        parts.append("- Do NOT use phrases like 'as of now' or 'in the current market conditions'")
+        parts.append("**Requirements - FOLLOW STRICTLY:**")
+        parts.append("- Write a compelling 3-paragraph post (250-500 words total)")
+        parts.append("- Start with a strong hook/attention grabber")
+        parts.append("- Include relevant emojis naturally (🚀🔥📈💎📊💡)")
+        parts.append(f"- END with 5-7 hashtags on a new line, first one MUST be #{symbol}")
+        parts.append("- Sound like a real, experienced trader sharing genuine insights")
+        parts.append("- Include a specific pro tip or key insight in the last paragraph")
+        parts.append("- Never use robotic phrases like 'In the current market' or 'As of now'")
+        parts.append("- Mention specific numbers (price, %, volume) from the data")
         parts.append(f"- {tone['twist']}")
         
         return "\n".join(parts)
@@ -1370,6 +1372,10 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
             continue
         if sym in seen:
             continue
+        # Skip coins with no real movement unless they have an announcement
+        if not coin.get("announcement_boost"):
+            if abs(change) < 1.5 and volume_ratio < 0.8:
+                continue
         seen.add(sym)
         unique_candidates.append(coin)
 
@@ -1383,11 +1389,11 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
         vol_ratio = float(coin.get("volume_ratio", 1) or 1)
         score = change * 0.3 + vol_ratio * 10 * 0.3
         if coin.get("announcement_boost"):
-            score += 30
+            score += 20  # Reduced from 30
             if coin.get("announcement_type") == "new_listing":
-                score += 20
+                score += 15  # Reduced from 20
             elif coin.get("announcement_type") == "airdrop":
-                score += 15
+                score += 10  # Reduced from 15
         # Penalize recently posted coins to avoid repetition
         sym = coin.get("symbol", "")
         if sym in posted_symbols:
