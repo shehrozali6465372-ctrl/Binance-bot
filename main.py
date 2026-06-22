@@ -469,14 +469,11 @@ class MarketScanner:
 
 
 class BinanceAnnouncementEngine:
-    """Fetch real Binance announcements - new listings, news, delistings, airdrops."""
+    """Fetch real Binance announcements - airdrops and delistings."""
     
     CATALOGS = {
-        "new_listings": 48,
-        "latest_news": 49,
-        "delistings": 161,
         "airdrops": 128,
-        "activities": 93,
+        "delistings": 161,
     }
     
     def __init__(self, config: Config = CONFIG):
@@ -518,24 +515,10 @@ class BinanceAnnouncementEngine:
             if w in known_coins and w not in found:
                 found.append(w)
         return found
-    
+
     def get_trending_announcements(self) -> List[Dict[str, Any]]:
-        """Get announcements and identify market-moving events."""
+        """Get announcements - only airdrops and delistings."""
         results = []
-        
-        # Fetch new listings (most market-moving)
-        listings = self.fetch_announcements(self.CATALOGS["new_listings"], limit=5)
-        for art in listings:
-            symbols = self.extract_symbols(art.get("title", ""))
-            if symbols:
-                ts = art.get("releaseDate", 0) / 1000
-                results.append({
-                    "type": "new_listing",
-                    "title": art["title"],
-                    "symbols": symbols,
-                    "timestamp": ts,
-                    "impact": "high",
-                })
         
         # Fetch airdrops
         airdrops = self.fetch_announcements(self.CATALOGS["airdrops"], limit=5)
@@ -564,37 +547,9 @@ class BinanceAnnouncementEngine:
                     "impact": "negative",
                 })
         
-        # Fetch latest news
-        news = self.fetch_announcements(self.CATALOGS["latest_news"], limit=5)
-        for art in news:
-            symbols = self.extract_symbols(art.get("title", ""))
-            if symbols:
-                results.append({
-                    "type": "news",
-                    "title": art["title"],
-                    "symbols": symbols,
-                    "timestamp": art.get("releaseDate", 0) / 1000,
-                    "impact": "medium",
-                })
-        
         return results
 
 
-class ResearchEngine:
-    """Multi-dimensional research engine: technical, narrative, risk, and market context."""
-
-    # Coin categories / narratives
-    CATEGORIES = {
-        "AI": {"FET", "AGIX", "RNDR", "NEAR", "ARB", "OP", "GRT", "FET", "AGIX", "OCEAN"},
-        "MEME": {"DOGE", "SHIB", "PEPE", "BONK", "WIF", "FLOKI", "MEME"},
-        "L1": {"SOL", "AVAX", "ADA", "DOT", "APT", "SUI", "SEI", "INJ", "TIA"},
-        "DeFi": {"AAVE", "MKR", "UNI", "LINK", "COMP", "CRV", "CAKE"},
-        "L2": {"ARB", "OP", "MATIC", "POL", "STRK"},
-        "RWA": {"MKR", "COMP", "LINK", "POL"},
-        "GAMING": {"AXS", "SAND", "MANA", "THETA", "ENJ"},
-        "INFRA": {"ICP", "FIL", "ALGO", "EOS", "XLM", "VET", "TRX"},
-        "EXCHANGE": {"BNB", "LEO", "OKB", "CRO"},
-    }
 
     def analyze(self, coin: Dict[str, Any], announcement: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Full research analysis on a coin."""
