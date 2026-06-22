@@ -14,6 +14,37 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+def _fix_workflow_file() -> None:
+    """Fix invisible Unicode chars in workflow file if running in GHA."""
+    if not os.getenv("GITHUB_ACTIONS"):
+        return
+    wf_path = ".github/workflows/run_bot.yml"
+    if not os.path.exists(wf_path):
+        return
+    with open(wf_path, "rb") as f:
+        raw = f.read()
+    # Check for U+200E (LEFT-TO-RIGHT MARK) - e2 80 8e in UTF-8
+    if b"\xe2\x80\x8e" not in raw:
+        return  # File is clean
+    LOGGER.info("Fixing workflow file (removing invisible Unicode chars)")
+    clean = raw.replace(b"\xe2\x80\x8e", b"")
+    with open(wf_path, "wb") as f:
+        f.write(clean)
+    try:
+        import subprocess
+        subprocess.run(["git", "config", "user.name", "bot"], capture_output=True)
+        subprocess.run(["git", "config", "user.email", "bot@bot.com"], capture_output=True)
+        r = subprocess.run(["git", "add", wf_path, "&&", "git", "commit", "-m", "fix workflow file", "&&", "git", "push"], 
+                         capture_output=True, text=True, timeout=30, shell=True)
+        if r.returncode == 0:
+            LOGGER.info("Workflow file fixed and pushed!")
+        else:
+            LOGGER.warning("Could not push fix: %s", r.stderr[:200])
+    except Exception as e:
+        LOGGER.warning("Could not fix workflow: %s", e)
+
+
+
 @dataclass(frozen=True)
 class Config:
     gemini_api_key: str
@@ -168,6 +199,7 @@ class Coin:
 
 class Database:
     def __init__(self, path: str):
+        _fix_workflow_file()
         self.path = path
         ensure_parent(self.path)
         # Try to restore database from previous GitHub Actions artifact
