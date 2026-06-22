@@ -1001,10 +1001,8 @@ class GeminiGenerator:
         parts.append(f"**Bear Case:** {bear_case}") 
         parts.append(f"**Risk:** {risk}")
         parts.append("")
-        parts.append("**Trading Setup:**")
-        parts.append(f"- Entry: ${setup['entry']}")
-        parts.append(f"- Target 1: ${setup['target1']} | Target 2: ${setup['target2']}")
-        parts.append(f"- Stop: ${setup['stop']}")
+        parts.append("**Key Levels:**")
+        parts.append(f"- Current support around ${setup.get('stop', '?')} and resistance near ${setup.get('target1', '?')}")
         
         if announcement:
             parts.append("")
@@ -1013,13 +1011,13 @@ class GeminiGenerator:
         parts.append("")
         parts.append("**CRITICAL FORMAT RULES - FOLLOW ALL:**")
         parts.append("- FIRST SENTENCE MUST BE A STRONG HOOK that grabs attention (question, bold price callout, or surprising statement)")
-        parts.append("- Include AT LEAST 3 emojis naturally in the post body (use emojis like: 🚀🔥📈💎📊💡💰🎯✅📉🛑)")
-        parts.append("- Write 2-3 short paragraphs, very concise (max 250 words total)")
-        parts.append("- Include specific price levels, percentages, and volume data")
-        parts.append(f"- END with EXACTLY 5 hashtags on their own line, first one MUST be #{symbol}")
-        parts.append("- Sound like a real trader on Binance Square — not a robot, not a news article")
-        parts.append("- Include ONE specific trading tip or key insight in the last paragraph")
-        parts.append("- NEVER use phrases like: 'In the current market', 'As of now', 'It is important to', 'Please note'")
+        parts.append("- Include AT LEAST 2 emojis naturally in the post body")
+        parts.append("- Write 1-2 short paragraphs, very concise (max 150 words total)")
+        parts.append("- Mention price action and volume trends - DO NOT give direct buy/sell advice or price targets")
+        parts.append("- Focus on market OBSERVATION and ANALYSIS, not trading signals")
+        parts.append(f"- END with exactly 3 hashtags on the last line, first MUST be #{symbol}")
+        parts.append("- Sound like an analyst sharing market insights — professional, not hype")
+        parts.append("- NEVER use: price targets, 'buy', 'sell', 'entry', 'stop loss', 'target', financial advice")
         parts.append("- Make every sentence deliver value — no fluff, no filler")
         
         return "\n".join(parts)
@@ -1072,8 +1070,7 @@ class GeminiGenerator:
             lines = [
                 f"{hook_emoji} Guys.. Listen Carefully, ${symbol} is making moves!",
                 "",
-                f"{hook_emoji} ${symbol} has just begun its path towards the target ${setup.get('target1', '?')}, and the play is unfolding precisely as anticipated.",
-                f"🎯 The next target ${setup.get('target2', '?')} will also be smashed if momentum continues.",
+                f"${symbol} is showing strong momentum with {change:+.1f}% and {vol_ratio:.1f}x volume - worth watching closely.",
                 "",
                 f"📊 ${symbol} is currently trading at ${price:.4f} with {change:+.1f}% in the last 24 hours and volume at {vol_ratio:.1f}x the baseline.",
                 f"{analysis.get('reason', 'The momentum is still in favor of the current trend.')}",
@@ -1083,9 +1080,9 @@ class GeminiGenerator:
                 "",
                 f"{'🎉 Congratulations to everyone who caught this move early!' if abs_change > 3 else '💪 Patience is key in these market conditions.'}",
                 "",
-                f"💡 **Pro Tip:** {'Scale in gradually, do not go all-in at once. Use limit orders near the entry zone.' if vol_ratio > 1.5 else 'Wait for a pullback to the support zone before entering. Patience pays in trading.'}",
+                f"💡 **Key Insight:** {'Volume confirms the move - accumulation is real.' if vol_ratio > 1.5 else 'Wait for confirmation before acting.'}",
                 f"⏰ {now_str}",
-                f"#{symbol} #CryptoSignals #TradingSetup #Altcoins #BinanceSquare",
+                f"#{symbol} #CryptoMarket #BinanceSquare",
             ]
 
         elif template_id == 1:
@@ -1103,16 +1100,15 @@ class GeminiGenerator:
                 f"🔴 The risk to consider: {analysis.get('risk', 'Always manage your position size.')}",
                 "",
                 f"📍 Key levels to watch:",
-                f"  🔑 Entry Zone: ${setup.get('entry', '?')}",
-                f"  🎯 Target 1: ${setup.get('target1', '?')}",
-                f"  🎯 Target 2: ${setup.get('target2', '?')}",
-                f"  🛑 Stop: ${setup.get('stop', '?')}",
+                f"  📊 Price: ${price:.4f}",
+                f"  📈 Volume: {vol_ratio:.1f}x normal",
+                f"  💰 Market Cap: ${market_cap:,.0f}",
                 "",
                 f"{'✅ The volume confirms the move - worth keeping on radar.' if vol_ratio > 1.5 else '⏳ Let the market prove itself before committing.'}",
                 "",
-                f"💡 **Pro Tip:** {'Use limit orders instead of market orders for better entry pricing. Tighten your stop as price approaches target 1.' if abs_change > 5 else 'Position size matters more than entry price. Never risk more than 2% on a single trade.'}",
+                f"💡 **Key Insight:** {'Smart money moves during high volume - watch for the trend to confirm.' if abs_change > 5 else 'Patience and discipline beat emotion in trading.'}",
                 f"⏰ {now_str}",
-                f"#{symbol} #CryptoMarket #TradeSetup #BinanceSquare",
+                f"#{symbol} #MarketUpdate #BinanceSquare",
             ]
 
         elif template_id == 2:
@@ -1298,16 +1294,20 @@ class PostPublisher:
             with urllib.request.urlopen(req, timeout=self.config.http_timeout_seconds) as resp:
                 resp_body = resp.read().decode("utf-8", errors="replace")
 
-            LOGGER.info("Square API response: HTTP %d %s", resp.status, resp_body[:300])
+            LOGGER.info("Square API response: HTTP %d %s", resp.status, resp_body[:500])
             data = json.loads(resp_body)
 
             if data.get("code") == "000000":
                 post_id = data.get("data", {}).get("id", "unknown")
                 share_link = data.get("data", {}).get("shareLink", "")
-                LOGGER.info("Published to Square! ID: %s Link: %s", post_id, share_link)
+                # Check if post is in review/blocked
+                post_status = data.get("data", {}).get("status", "live")
+                if post_status and post_status != "live":
+                    LOGGER.warning("Post status is '%s' - may not be visible immediately", post_status)
+                LOGGER.info("Published to Square! ID: %s Status: %s Link: %s", post_id, post_status, share_link)
                 return share_link
             else:
-                LOGGER.warning("Square API error [%s]: %s", data.get("code"), data.get("message"))
+                LOGGER.warning("Square API error [%s]: %s - full: %s", data.get("code"), data.get("message"), resp_body[:500])
                 return ""
         except Exception as exc:
             LOGGER.warning("Square API request failed: %s", exc)
