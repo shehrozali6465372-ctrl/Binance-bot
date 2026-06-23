@@ -8,7 +8,14 @@ on:
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-
+    jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    permissions:              
+      contents: write
+      actions: write          
+    steps:
+      - name: Checkout code
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -30,7 +37,7 @@ jobs:
           DRY_RUN: "0"
           LIVE_MARKET_DATA: "1"
           POST_INTERVAL: "7200"
-          MAX_ITERATIONS: "1"
+          MAX_ITERATIONS: "2"
           GEMINI_MODEL: "gemini-2.5-flash"
           DATABASE_PATH: "agent.db"
           PUBLISH_LOG_PATH: "published_posts.jsonl"
