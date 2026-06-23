@@ -26,3 +26,9 @@ jobs:
         BINANCE_SQUARE_KEY: ${{ secrets.BINANCE_SQUARE_KEY }}
       run: python main.py
       
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      
+      actions: write
