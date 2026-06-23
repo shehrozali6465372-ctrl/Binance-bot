@@ -1728,6 +1728,26 @@ def main_loop() -> None:
             time.sleep(sleep_chunk)
             slept += sleep_chunk
 
+    # After all iterations complete, trigger the next GHA run automatically
+    if os.getenv("GITHUB_ACTIONS"):
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["gh", "workflow", "run", "Binance Square Auto Poster"],
+                capture_output=True, text=True, timeout=20
+            )
+            if result.returncode == 0:
+                LOGGER.info("Automatically triggered next workflow run")
+            else:
+                LOGGER.warning("Could not trigger next run: %s", result.stderr[:200])
+        except Exception as exc:
+            LOGGER.warning("Self-trigger failed: %s", exc)
+
+
+
+
+
+
 
 def main() -> None:
     """Single run mode - for cron/scheduled usage."""
