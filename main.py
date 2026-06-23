@@ -1669,6 +1669,12 @@ def main_loop() -> None:
     interval = config.post_interval
     max_iter = config.max_iterations
     
+    # In GitHub Actions, ensure at least 3 posts per run (every 2 hours)
+    # This handles cases where GHA cron doesn't fire reliably
+    if os.getenv("GITHUB_ACTIONS") and max_iter < 3:
+        LOGGER.info("GHA detected: overriding max_iterations from %d to 3 for reliability", max_iter)
+        max_iter = 3
+    
     scanner = MarketScanner(config)
     announcement_engine = BinanceAnnouncementEngine(config)
     research = ResearchEngine()
