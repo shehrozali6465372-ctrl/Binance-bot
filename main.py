@@ -384,6 +384,19 @@ class Database:
             for row in cur.fetchall():
                 if row["coin_symbol"]:
                     posted.add(row["coin_symbol"].upper())
+            if posted and hours > 0:
+                # Only keep symbols posted within the time window
+                from datetime import datetime, timezone, timedelta
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+                recent = set()
+                cur2 = self.conn.execute(
+                    "SELECT DISTINCT coin_symbol FROM posts WHERE created_at >= ?",
+                    (cutoff.isoformat(),)
+                )
+                for row2 in cur2.fetchall():
+                    if row2["coin_symbol"]:
+                        recent.add(row2["coin_symbol"].upper())
+                return recent
             return posted
         except sqlite3.OperationalError:
             return set()
@@ -399,6 +412,73 @@ class Database:
             return row["cnt"] if row else 0
         except sqlite3.OperationalError:
             return 0
+
+class PostedSymbolsTracker:
+    """Track posted symbols across GHA runs using a JSON file committed to repo."""
+    FILE_NAME = "posted_symbols.json"
+    
+    def __init__(self):
+        self.file_path = Path(self.FILE_NAME)
+        self.data = self._load()
+    
+    def _load(self) -> Dict[str, str]:
+        """Load posted symbols with timestamps."""
+        if self.file_path.exists():
+            try:
+                return json.loads(self.file_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+    
+    def save(self) -> None:
+        """Save to file and commit+push if in GHA."""
+        try:
+            self.file_path.write_text(json.dumps(self.data, indent=2))
+        except OSError as e:
+            LOGGER.warning("Could not save posted symbols: %s", e)
+            return
+        # Commit and push if running in GitHub Actions
+        if os.getenv("GITHUB_ACTIONS"):
+            import subprocess
+            try:
+                subprocess.run(["git", "add", self.FILE_NAME],
+                             capture_output=True, timeout=10)
+                r = subprocess.run(["git", "diff", "--cached", "--quiet", self.FILE_NAME],
+                                 capture_output=True, timeout=10)
+                if r.returncode != 0:
+                    subprocess.run(["git", "commit", "-m", f"update {self.FILE_NAME} [skip ci]"],
+                                 capture_output=True, timeout=10,
+                                 env={**os.environ, "GIT_AUTHOR_NAME": "bot", "GIT_AUTHOR_EMAIL": "bot@bot.com"})
+                    push = subprocess.run(["git", "push"],
+                                        capture_output=True, timeout=30)
+                    if push.returncode == 0:
+                        LOGGER.info("Pushed posted_symbols.json to repo")
+                    else:
+                        stderr = push.stderr.decode()[:200] if isinstance(push.stderr, bytes) else str(push.stderr)[:200]
+                        LOGGER.warning("Could not push: %s", stderr)
+            except Exception as e:
+                LOGGER.warning("Git commit/push failed: %s", e)
+    
+    def mark_posted(self, symbol: str) -> None:
+        """Mark a symbol as posted with current timestamp."""
+        self.data[symbol.upper()] = utc_now()
+        self.save()
+    
+    def get_posted_symbols(self, hours: int = 48) -> set:
+        """Get symbols posted within the given hours."""
+        if hours <= 0:
+            return set()
+        from datetime import datetime, timezone, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        recent = set()
+        for sym, ts_str in self.data.items():
+            try:
+                ts = datetime.fromisoformat(ts_str)
+                if ts >= cutoff:
+                    recent.add(sym)
+            except (ValueError, TypeError):
+                recent.add(sym)
+        return recent
 
     def save_run(self, status: str, summary: Dict[str, Any]) -> None:
         with self.conn:
@@ -558,19 +638,16 @@ class BinanceAnnouncementEngine:
     def extract_symbols(self, title: str) -> List[str]:
         """Extract coin symbols from announcement title."""
         import re
-        # Find symbols in parentheses like (BTC), (ETH), (SOL)
+        # Find symbols in parentheses like (LAYER), (AVNT), (SHELL)
         paren_symbols = re.findall(r'\(([A-Z0-9]{2,10})\)', title)
-        # Find standalone symbols in title
+        # Accept all parenthesized symbols - they are coin tickers in Binance announcements
+        found = [s for s in paren_symbols if s.isalpha() and len(s) >= 2]
+        # Also check standalone words for known major coins (second pass)
         known_coins = {"BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX","DOT","LINK",
                        "MATIC","SHIB","TRX","ATOM","UNI","APT","ARB","OP","NEAR","FIL",
                        "AAVE","MKR","PEPE","TIA","SEI","SUI","INJ","BONK","WIF","JUP",
                        "FET","AGIX","RNDR","THETA","EGLD","EOS","XLM","VET","ALGO",
                        "SAND","MANA","AXS","FTM","ICP","GRT","BLUR","STRK","JTO","RE"}
-        found = []
-        for s in paren_symbols:
-            if s in known_coins:
-                found.append(s)
-        # Also check words for known coins
         words = title.upper().split()
         for w in words:
             w = w.strip(".,:;!?()[]{}")
@@ -1082,15 +1159,17 @@ class GeminiGenerator:
         
         parts.append("")
         parts.append("**CRITICAL FORMAT RULES - FOLLOW ALL:**")
-        parts.append("- FIRST SENTENCE MUST BE A STRONG HOOK that grabs attention (question, bold price callout, or surprising statement)")
-        parts.append("- Include AT LEAST 2 emojis naturally in the post body")
-        parts.append("- Write 1-2 short paragraphs, very concise (max 150 words total)")
-        parts.append("- Mention price action and volume trends - DO NOT give direct buy/sell advice or price targets")
-        parts.append("- Focus on market OBSERVATION and ANALYSIS, not trading signals")
-        parts.append(f"- END with exactly 3 hashtags on the last line, first MUST be #{symbol}")
-        parts.append("- Sound like an analyst sharing market insights — professional, not hype")
-        parts.append("- NEVER use: price targets, 'buy', 'sell', 'entry', 'stop loss', 'target', financial advice")
-        parts.append("- Make every sentence deliver value — no fluff, no filler")
+        parts.append("- FIRST SENTENCE MUST BE A STRONG HOOK: one sentence that grabs attention (bold price callout, surprising fact, or rhetorical question)")
+        parts.append("- Include AT LEAST 3-4 emojis naturally throughout the post body (🔥🚀📈📊💎👀💡📉⚠️🛑✅)")
+        parts.append("- Write 2-3 short punchy paragraphs, very concise (max 120 words total)")
+        parts.append("- Cover these in order: (1) Hook about current price action, (2) Volume/momentum insight, (3) What to watch for next")
+        parts.append("- Provide MARKET OBSERVATION only - talk about what the chart/volume shows, what traders are doing")
+        parts.append(f"- END with exactly 3 relevant hashtags on the last line, first MUST be #{symbol}")
+        parts.append("- Sound like an experienced crypto analyst sharing timely market insights - professional but engaging tone")
+        parts.append("- You can mention price levels and market structure, but frame as observation not advice")
+        parts.append("- Make every sentence deliver value - no fluff, no generic statements")
+        parts.append("- Vary sentence structure between posts - do NOT start every post the same way")
+        parts.append("- **IMPORTANT: Your post will be read by real crypto traders on Binance Square. Make it interesting and worth their time!**")
         
         return "\n".join(parts)
 
@@ -1137,24 +1216,21 @@ class GeminiGenerator:
         has_high_volume = vol_ratio > 1.5
 
         if template_id == 0:
-            # Bold prediction / Conviction style (like the example)
-            hook_emoji = "🚀" if change >= 5 else ("🔥" if change <= -3 else "🧐")
+            # Bold prediction / Conviction style 
+            hook_emoji = "🚀" if change >= 5 else ("🔥" if change <= -3 else "👀")
+            price_action = "surge" if change > 0 else "drop"
             lines = [
-                f"{hook_emoji} Guys.. Listen Carefully, ${symbol} is making moves!",
+                f"{hook_emoji} ${symbol} is painting a {'beautiful' if abs(change) > 5 else 'notable'} chart pattern right now! {change:+.1f}% with {vol_ratio:.1f}x volume - the market is waking up.",
                 "",
-                f"${symbol} is showing strong momentum with {change:+.1f}% and {vol_ratio:.1f}x volume - worth watching closely.",
+                f"{analysis.get('reason', 'Momentum is building for this asset.')} Volume at {vol_ratio:.1f}x the average confirms {'strong participation' if vol_ratio > 1.5 else 'healthy activity'}.",
                 "",
-                f"📊 ${symbol} is currently trading at ${price:.4f} with {change:+.1f}% in the last 24 hours and volume at {vol_ratio:.1f}x the baseline.",
-                f"{analysis.get('reason', 'The momentum is still in favor of the current trend.')}",
+                f"📊 Price: ${price:.4f} | 24h Change: {change:+.1f}% | Volume Ratio: {vol_ratio:.1f}x",
                 "",
-                f"💡 For those who missed the earlier signal - you can still participate. Just be careful during pullbacks and manage your risk properly.",
-                f"🚨 So long as the structure remains {'bullish' if change >= 0 else 'intact'}, these targets remain valid.",
+                f"{'🎯 Key support forming near current levels - watch for continuation.' if change > 0 else '⚠️ Buyers need to step in soon to defend this zone.'}",
+                f"{'💎 Smart money often accumulates during moves like this.' if vol_ratio > 1.5 else '⏳ Patience - let the setup develop before acting.'}",
                 "",
-                f"{'🎉 Congratulations to everyone who caught this move early!' if abs_change > 3 else '💪 Patience is key in these market conditions.'}",
-                "",
-                f"💡 **Key Insight:** {'Volume confirms the move - accumulation is real.' if vol_ratio > 1.5 else 'Wait for confirmation before acting.'}",
-                f"⏰ {now_str}",
-                f"#{symbol} #CryptoMarket #BinanceSquare",
+                f"Keep {symbol} on your radar today {'traders' if abs_change > 3 else 'everyone'}!",
+                f"#{symbol} #BinanceSquare #CryptoSignals",
             ]
 
         elif template_id == 1:
@@ -1530,17 +1606,28 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
         # Strong penalty for recently posted coins
         sym = coin.get("symbol", "")
         if sym in posted_symbols:
-            score *= 0.05  # Almost eliminate repeats
+            score *= 0.1  # Almost eliminate repeats (but keep slight chance)
+        # Add diversity noise - small random factor so same coins don't always win
+        score += random.uniform(-1.5, 1.5)
         coin["_score"] = score
 
     unique_candidates.sort(key=lambda c: c.get("_score", 0), reverse=True)
-    # Pick top candidate with diversity check
-    top_pick = unique_candidates[0]
-    # If top candidate was recently posted, try others
-    for candidate in unique_candidates[:5]:
-        if candidate.get("symbol", "") not in posted_symbols:
-            top_pick = candidate
-            break
+    # Pick from top 3 with weighted randomness for diversity
+    top_n = min(3, len(unique_candidates))
+    weights = [max(0.1, unique_candidates[i].get("_score", 0)) for i in range(top_n)]
+    total_w = sum(weights)
+    if total_w > 0:
+        weights = [w / total_w for w in weights]
+        top_idx = random.choices(range(top_n), weights=weights, k=1)[0]
+    else:
+        top_idx = 0
+    top_pick = unique_candidates[top_idx]
+    # Extra diversity: if top pick was recently posted, try others
+    if top_pick.get("symbol", "") in posted_symbols:
+        for candidate in unique_candidates[:5]:
+            if candidate.get("symbol", "") not in posted_symbols:
+                top_pick = candidate
+                break
 
     LOGGER.info("Selected %s - change: %.1f%%, vol: %.1fx (score: %.1f)%s",
                 top_pick.get("symbol"),
@@ -1562,6 +1649,14 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
     content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
 
     publisher.publish(top_pick, content)
+    # Track the posted symbol for cross-run persistence
+    sym = top_pick.get("symbol", "")
+    if sym and not content.startswith("[DRAFT_TEMPLATE]"):
+        try:
+            tracker = PostedSymbolsTracker()
+            tracker.mark_posted(sym)
+        except Exception as e:
+            LOGGER.warning("Could not track posted symbol: %s", e)
     LOGGER.info("Done - post generated for %s", top_pick.get("symbol"))
     return True
 
@@ -1582,9 +1677,9 @@ def main_loop() -> None:
     publisher_db = Database(config.database_path)
     publisher = PostPublisher(config)
     publisher.db = publisher_db
+    tracker = PostedSymbolsTracker()
     
     iteration = 0
-    posted_symbols = set()
     
     LOGGER.info("=" * 60)
     LOGGER.info("Binance Square Auto Poster started")
@@ -1599,12 +1694,18 @@ def main_loop() -> None:
         LOGGER.info("--- Iteration %d ---", iteration)
         
         try:
-            posted_symbols = publisher_db.get_posted_symbols(hours=48)
+            db_posted = publisher_db.get_posted_symbols(hours=48)
+            tracker_posted = tracker.get_posted_symbols(hours=48)
+            posted_symbols = db_posted | tracker_posted
         except Exception:
-            posted_symbols = set()
+            try:
+                posted_symbols = tracker.get_posted_symbols(hours=48)
+            except Exception:
+                posted_symbols = set()
         
+        success = False
         try:
-            run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols)
+            success = run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols)
         except Exception as e:
             LOGGER.error("Iteration %d failed: %s", iteration, e)
             import traceback
@@ -1635,8 +1736,11 @@ def main() -> None:
     publisher_db = Database(config.database_path)
     publisher = PostPublisher(config)
     publisher.db = publisher_db
+    tracker = PostedSymbolsTracker()
     
-    posted_symbols = publisher_db.get_posted_symbols(hours=48)
+    db_posted = publisher_db.get_posted_symbols(hours=48)
+    tracker_posted = tracker.get_posted_symbols(hours=48)
+    posted_symbols = db_posted | tracker_posted
     run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols)
 
 

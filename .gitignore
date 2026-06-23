@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+agent-output-*/
+main.py.bak
+drafts/
+posts/
+charts/
