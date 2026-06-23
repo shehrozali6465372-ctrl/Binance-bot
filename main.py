@@ -1671,10 +1671,36 @@ def main_loop() -> None:
     
     # In GitHub Actions, ensure at least 3 posts per run (every 2 hours)
     # This handles cases where GHA cron doesn't fire reliably
-    if os.getenv("GITHUB_ACTIONS") and max_iter < 3:
-        LOGGER.info("GHA detected: overriding max_iterations from %d to 3 for reliability", max_iter)
-        max_iter = 3
+    if os.getenv("GITHUB_ACTIONS") and max_iter < 2:
+        LOGGER.info("GHA detected: overriding max_iterations from %d to 2 for reliability", max_iter)
+        max_iter = 2
     
+    # In GHA, check if another run is already active and exit if so
+    if os.getenv("GITHUB_ACTIONS"):
+        try:
+            import subprocess, json as _json
+            gh_check = subprocess.run(
+                ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
+                 "--limit", "5", "--json", "status,databaseId,createdAt"],
+                capture_output=True, text=True, timeout=15
+            )
+            if gh_check.returncode == 0 and gh_check.stdout.strip():
+                runs = _json.loads(gh_check.stdout)
+                our_id = os.getenv("GITHUB_RUN_ID", "")
+                our_created = os.getenv("GITHUB_RUN_CREATED_AT", "")
+                active = [r for r in runs if r.get("status") in ("in_progress", "queued", "waiting")
+                         and str(r.get("databaseId", "")) != our_id]
+                if active:
+                    older = [r for r in active if r.get("createdAt", "") < our_created]
+                    if older:
+                        LOGGER.info("Run %s already active (started before us), exiting to avoid overlap", older[0].get("databaseId"))
+                        return
+                    else:
+                        LOGGER.info("Newer run %s active (started after us), continuing but will skip self-trigger", active[0].get("databaseId"))
+        except Exception as exc:
+            LOGGER.warning("Could not check active runs at startup: %s", exc)
+    
+
     scanner = MarketScanner(config)
     announcement_engine = BinanceAnnouncementEngine(config)
     research = ResearchEngine()
@@ -1730,7 +1756,26 @@ def main_loop() -> None:
 
     # After all iterations complete, trigger the next GHA run automatically
     if os.getenv("GITHUB_ACTIONS"):
-        import subprocess
+        import subprocess, json as _json
+        # First check if any run is already in progress
+        try:
+            gh_check = subprocess.run(
+                ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
+                 "--limit", "3", "--json", "status,databaseId"],
+                capture_output=True, text=True, timeout=15
+            )
+            if gh_check.returncode == 0 and gh_check.stdout.strip():
+                runs = _json.loads(gh_check.stdout)
+                active = [r for r in runs if r.get("status") in ("in_progress", "queued", "waiting")]
+                # Exclude self from active check (our run is still "in_progress" since loop finished)
+                our_id = os.getenv("GITHUB_RUN_ID", "")
+                active = [r for r in active if str(r.get("databaseId", "")) != our_id]
+                if active:
+                    LOGGER.info("Another run already active (ID: %s), skipping self-trigger", active[0].get("databaseId"))
+                    return
+        except Exception as exc:
+            LOGGER.warning("Could not check active runs: %s", exc)
+        
         try:
             result = subprocess.run(
                 ["gh", "workflow", "run", "Binance Square Auto Poster"],
@@ -1766,6 +1811,33 @@ def main() -> None:
     
     db_posted = publisher_db.get_posted_symbols(hours=48)
     tracker_posted = tracker.get_posted_symbols(hours=48)
+
+    # In GHA, check if another run is already active and exit if so
+    if os.getenv("GITHUB_ACTIONS"):
+        try:
+            import subprocess, json as _json
+            gh_check = subprocess.run(
+                ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
+                 "--limit", "5", "--json", "status,databaseId,createdAt"],
+                capture_output=True, text=True, timeout=15
+            )
+            if gh_check.returncode == 0 and gh_check.stdout.strip():
+                runs = _json.loads(gh_check.stdout)
+                our_id = os.getenv("GITHUB_RUN_ID", "")
+                our_created = os.getenv("GITHUB_RUN_CREATED_AT", "")
+                active = [r for r in runs if r.get("status") in ("in_progress", "queued", "waiting")
+                         and str(r.get("databaseId", "")) != our_id]
+                if active:
+                    older = [r for r in active if r.get("createdAt", "") < our_created]
+                    if older:
+                        LOGGER.info("Run %s already active (started before us), exiting to avoid overlap", older[0].get("databaseId"))
+                        return
+                    else:
+                        LOGGER.info("Newer run %s active (started after us), continuing but will skip self-trigger", active[0].get("databaseId"))
+        except Exception as exc:
+            LOGGER.warning("Could not check active runs at startup: %s", exc)
+    
+
     posted_symbols = db_posted | tracker_posted
     run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols)
 
