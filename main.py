@@ -34,7 +34,7 @@ def _fix_workflow_file() -> None:
         import subprocess
         subprocess.run(["git", "config", "user.name", "bot"], capture_output=True)
         subprocess.run(["git", "config", "user.email", "bot@bot.com"], capture_output=True)
-        r = subprocess.run(["git", "add", wf_path, "&&", "git", "commit", "-m", "fix workflow file", "&&", "git", "push"], 
+        r = subprocess.run(["git", "add", wf_path, "&&", "git", "commit", "-m", "fix workflow file", "&&", "git", "push", "https://x-access-token:" + os.environ.get("GITHUB_TOKEN","") + "@github.com/" + os.environ.get("GITHUB_REPOSITORY","") + ".git"], 
                          capture_output=True, text=True, timeout=30, shell=True)
         if r.returncode == 0:
             LOGGER.info("Workflow file fixed and pushed!")
@@ -449,7 +449,7 @@ class PostedSymbolsTracker:
                     subprocess.run(["git", "commit", "-m", f"update {self.FILE_NAME} [skip ci]"],
                                  capture_output=True, timeout=10,
                                  env={**os.environ, "GIT_AUTHOR_NAME": "bot", "GIT_AUTHOR_EMAIL": "bot@bot.com"})
-                    push = subprocess.run(["git", "push"],
+                    push = subprocess.run(["git", "push", "https://x-access-token:" + os.environ.get("GITHUB_TOKEN","") + "@github.com/" + os.environ.get("GITHUB_REPOSITORY","") + ".git"],
                                         capture_output=True, timeout=30)
                     if push.returncode == 0:
                         LOGGER.info("Pushed posted_symbols.json to repo")
@@ -1672,8 +1672,8 @@ def main_loop() -> None:
     # In GitHub Actions, ensure at least 3 posts per run (every 2 hours)
     # This handles cases where GHA cron doesn't fire reliably
     if os.getenv("GITHUB_ACTIONS") and max_iter < 2:
-        LOGGER.info("GHA detected: overriding max_iterations from %d to 2 for reliability", max_iter)
-        max_iter = 2
+        LOGGER.info("GHA detected: overriding max_iterations from %d to 6 for reliability", max_iter)
+        max_iter = 6
     
     # In GHA, check if another run is already active and exit if so
     if os.getenv("GITHUB_ACTIONS"):
@@ -1682,7 +1682,8 @@ def main_loop() -> None:
             gh_check = subprocess.run(
                 ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
                  "--limit", "5", "--json", "status,databaseId,createdAt"],
-                capture_output=True, text=True, timeout=15
+                capture_output=True, text=True, timeout=15,
+                env={**os.environ, "GH_TOKEN": os.environ.get("GITHUB_TOKEN", "")}
             )
             if gh_check.returncode == 0 and gh_check.stdout.strip():
                 runs = _json.loads(gh_check.stdout)
@@ -1762,7 +1763,8 @@ def main_loop() -> None:
             gh_check = subprocess.run(
                 ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
                  "--limit", "3", "--json", "status,databaseId"],
-                capture_output=True, text=True, timeout=15
+                capture_output=True, text=True, timeout=15,
+                env={**os.environ, "GH_TOKEN": os.environ.get("GITHUB_TOKEN", "")}
             )
             if gh_check.returncode == 0 and gh_check.stdout.strip():
                 runs = _json.loads(gh_check.stdout)
@@ -1779,7 +1781,8 @@ def main_loop() -> None:
         try:
             result = subprocess.run(
                 ["gh", "workflow", "run", "Binance Square Auto Poster"],
-                capture_output=True, text=True, timeout=20
+                capture_output=True, text=True, timeout=20,
+                env={**os.environ, "GH_TOKEN": os.environ.get("GITHUB_TOKEN", "")}
             )
             if result.returncode == 0:
                 LOGGER.info("Automatically triggered next workflow run")
@@ -1819,7 +1822,8 @@ def main() -> None:
             gh_check = subprocess.run(
                 ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
                  "--limit", "5", "--json", "status,databaseId,createdAt"],
-                capture_output=True, text=True, timeout=15
+                capture_output=True, text=True, timeout=15,
+                env={**os.environ, "GH_TOKEN": os.environ.get("GITHUB_TOKEN", "")}
             )
             if gh_check.returncode == 0 and gh_check.stdout.strip():
                 runs = _json.loads(gh_check.stdout)
