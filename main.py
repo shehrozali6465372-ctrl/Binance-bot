@@ -1673,7 +1673,7 @@ def main_loop() -> None:
     # This handles cases where GHA cron doesn't fire reliably
     if os.getenv("GITHUB_ACTIONS") and max_iter < 2:
         LOGGER.info("GHA detected: overriding max_iterations from %d to 6 for reliability", max_iter)
-        max_iter = 6
+        max_iter = 3
     
     # In GHA, check if another run is already active and exit if so
     if os.getenv("GITHUB_ACTIONS"):
