@@ -1669,37 +1669,29 @@ def main_loop() -> None:
     interval = config.post_interval
     max_iter = config.max_iterations
     
-    # In GitHub Actions, ensure at least 3 posts per run (every 2 hours)
-    # This handles cases where GHA cron doesn't fire reliably
-    if os.getenv("GITHUB_ACTIONS") and max_iter < 2:
-        LOGGER.info("GHA detected: overriding max_iterations from %d to 6 for reliability", max_iter)
-        max_iter = 3
+    # In GHA, respect MAX_ITERATIONS env var (default 1 post per run)
+    # Cron fires every 2 hours, so 1 post per run is sufficient
+    if os.getenv("GITHUB_ACTIONS") and max_iter < 1:
+        max_iter = 1
     
-    # In GHA, check if another run is already active and exit if so
+    # In GHA, simple overlap prevention: check if posted_symbols.json was updated in last 2h
     if os.getenv("GITHUB_ACTIONS"):
         try:
-            import subprocess, json as _json
-            gh_check = subprocess.run(
-                ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
-                 "--limit", "5", "--json", "status,databaseId,createdAt"],
-                capture_output=True, text=True, timeout=15,
-                env={**os.environ, "GH_TOKEN": os.environ.get("GITHUB_TOKEN", "")}
-            )
-            if gh_check.returncode == 0 and gh_check.stdout.strip():
-                runs = _json.loads(gh_check.stdout)
-                our_id = os.getenv("GITHUB_RUN_ID", "")
-                our_created = os.getenv("GITHUB_RUN_CREATED_AT", "")
-                active = [r for r in runs if r.get("status") in ("in_progress", "queued", "waiting")
-                         and str(r.get("databaseId", "")) != our_id]
-                if active:
-                    older = [r for r in active if r.get("createdAt", "") < our_created]
-                    if older:
-                        LOGGER.info("Run %s already active (started before us), exiting to avoid overlap", older[0].get("databaseId"))
-                        return
-                    else:
-                        LOGGER.info("Newer run %s active (started after us), continuing but will skip self-trigger", active[0].get("databaseId"))
+            posted_file = Path("posted_symbols.json")
+            if posted_file.exists():
+                mtime = datetime.fromtimestamp(posted_file.stat().st_mtime, tz=timezone.utc)
+                age_hours = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
+                if age_hours < 2:
+                    # Check how many symbols were posted - if >= 1, skip to avoid overlap
+                    try:
+                        posted_data = json.loads(posted_file.read_text() or "{}")
+                        if len(posted_data) > 0:
+                            LOGGER.info("posted_symbols.json updated %.1fh ago with %d symbols - another run already active, skipping", age_hours, len(posted_data))
+                            return
+                    except (json.JSONDecodeError, OSError):
+                        pass
         except Exception as exc:
-            LOGGER.warning("Could not check active runs at startup: %s", exc)
+            LOGGER.warning("Overlap check failed: %s", exc)
     
 
     scanner = MarketScanner(config)
@@ -1755,41 +1747,9 @@ def main_loop() -> None:
             time.sleep(sleep_chunk)
             slept += sleep_chunk
 
-    # After all iterations complete, trigger the next GHA run automatically
+    # All iterations complete - just log and exit
     if os.getenv("GITHUB_ACTIONS"):
-        import subprocess, json as _json
-        # First check if any run is already in progress
-        try:
-            gh_check = subprocess.run(
-                ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
-                 "--limit", "3", "--json", "status,databaseId"],
-                capture_output=True, text=True, timeout=15,
-                env={**os.environ, "GH_TOKEN": os.environ.get("GITHUB_TOKEN", "")}
-            )
-            if gh_check.returncode == 0 and gh_check.stdout.strip():
-                runs = _json.loads(gh_check.stdout)
-                active = [r for r in runs if r.get("status") in ("in_progress", "queued", "waiting")]
-                # Exclude self from active check (our run is still "in_progress" since loop finished)
-                our_id = os.getenv("GITHUB_RUN_ID", "")
-                active = [r for r in active if str(r.get("databaseId", "")) != our_id]
-                if active:
-                    LOGGER.info("Another run already active (ID: %s), skipping self-trigger", active[0].get("databaseId"))
-                    return
-        except Exception as exc:
-            LOGGER.warning("Could not check active runs: %s", exc)
-        
-        try:
-            result = subprocess.run(
-                ["gh", "workflow", "run", "Binance Square Auto Poster"],
-                capture_output=True, text=True, timeout=20,
-                env={**os.environ, "GH_TOKEN": os.environ.get("GITHUB_TOKEN", "")}
-            )
-            if result.returncode == 0:
-                LOGGER.info("Automatically triggered next workflow run")
-            else:
-                LOGGER.warning("Could not trigger next run: %s", result.stderr[:200])
-        except Exception as exc:
-            LOGGER.warning("Self-trigger failed: %s", exc)
+        LOGGER.info("Run complete. Next run will be triggered by cron or manual dispatch.")
 
 
 
@@ -1815,31 +1775,24 @@ def main() -> None:
     db_posted = publisher_db.get_posted_symbols(hours=48)
     tracker_posted = tracker.get_posted_symbols(hours=48)
 
-    # In GHA, check if another run is already active and exit if so
+    # In GHA, simple overlap prevention: check if posted_symbols.json was updated in last 2h
     if os.getenv("GITHUB_ACTIONS"):
         try:
-            import subprocess, json as _json
-            gh_check = subprocess.run(
-                ["gh", "run", "list", "--workflow", "Binance Square Auto Poster",
-                 "--limit", "5", "--json", "status,databaseId,createdAt"],
-                capture_output=True, text=True, timeout=15,
-                env={**os.environ, "GH_TOKEN": os.environ.get("GITHUB_TOKEN", "")}
-            )
-            if gh_check.returncode == 0 and gh_check.stdout.strip():
-                runs = _json.loads(gh_check.stdout)
-                our_id = os.getenv("GITHUB_RUN_ID", "")
-                our_created = os.getenv("GITHUB_RUN_CREATED_AT", "")
-                active = [r for r in runs if r.get("status") in ("in_progress", "queued", "waiting")
-                         and str(r.get("databaseId", "")) != our_id]
-                if active:
-                    older = [r for r in active if r.get("createdAt", "") < our_created]
-                    if older:
-                        LOGGER.info("Run %s already active (started before us), exiting to avoid overlap", older[0].get("databaseId"))
-                        return
-                    else:
-                        LOGGER.info("Newer run %s active (started after us), continuing but will skip self-trigger", active[0].get("databaseId"))
+            posted_file = Path("posted_symbols.json")
+            if posted_file.exists():
+                mtime = datetime.fromtimestamp(posted_file.stat().st_mtime, tz=timezone.utc)
+                age_hours = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
+                if age_hours < 2:
+                    # Check how many symbols were posted - if >= 1, skip to avoid overlap
+                    try:
+                        posted_data = json.loads(posted_file.read_text() or "{}")
+                        if len(posted_data) > 0:
+                            LOGGER.info("posted_symbols.json updated %.1fh ago with %d symbols - another run already active, skipping", age_hours, len(posted_data))
+                            return
+                    except (json.JSONDecodeError, OSError):
+                        pass
         except Exception as exc:
-            LOGGER.warning("Could not check active runs at startup: %s", exc)
+            LOGGER.warning("Overlap check failed: %s", exc)
     
 
     posted_symbols = db_posted | tracker_posted
