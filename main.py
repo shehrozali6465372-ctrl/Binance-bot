@@ -1679,10 +1679,11 @@ def main_loop() -> None:
     interval = config.post_interval
     max_iter = config.max_iterations
     
-    # In GHA, respect MAX_ITERATIONS env var (default 1 post per run)
-    # Cron fires every 2 hours, so 1 post per run is sufficient
-    if os.getenv("GITHUB_ACTIONS") and max_iter < 1:
-        max_iter = 1
+    # In GHA: 2 iterations per run (2h apart, safe within 6h limit)
+    # This handles cases where GHA cron doesn't fire reliably
+    if os.getenv("GITHUB_ACTIONS") and max_iter < 2:
+        LOGGER.info("GHA: max_iterations=%d, using 2 iterations per run for reliability", max_iter)
+        max_iter = 2
     
     # In GHA, simple overlap prevention: check if posted_symbols.json was updated in last 2h
     if os.getenv("GITHUB_ACTIONS"):
