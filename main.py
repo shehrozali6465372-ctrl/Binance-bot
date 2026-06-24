@@ -34,7 +34,9 @@ def _fix_workflow_file() -> None:
         import subprocess
         subprocess.run(["git", "config", "user.name", "bot"], capture_output=True)
         subprocess.run(["git", "config", "user.email", "bot@bot.com"], capture_output=True)
-        r = subprocess.run(["git", "add", wf_path, "&&", "git", "commit", "-m", "fix workflow file", "&&", "git", "push", "https://x-access-token:" + os.environ.get("GITHUB_TOKEN","") + "@github.com/" + os.environ.get("GITHUB_REPOSITORY","") + ".git"], 
+        repo_url = "https://x-access-token:" + os.environ.get("GITHUB_TOKEN","") + "@github.com/" + os.environ.get("GITHUB_REPOSITORY","") + ".git"
+        subprocess.run(["git", "remote", "set-url", "origin", repo_url], capture_output=True, timeout=10)
+        r = subprocess.run(["git", "add", wf_path, "&&", "git", "commit", "-m", "fix workflow file", "&&", "git", "push", "origin", "main"], 
                          capture_output=True, text=True, timeout=30, shell=True)
         if r.returncode == 0:
             LOGGER.info("Workflow file fixed and pushed!")
@@ -153,7 +155,7 @@ def _http_json_with_retry(
                 LOGGER.warning("HTTP 451 %s %s blocked by geo-restriction, skipping retries", method, url)
                 raise
             if exc.code == 429:
-                sleep_for = min(15 * (2 ** attempt) + random.uniform(0, 10), 90)
+                sleep_for = min(20 * (2 ** attempt) + random.uniform(0, 15), 120)
                 LOGGER.warning("HTTP 429 %s %s rate limited (retrying in %ss, attempt %d/%d)", method, url, round(sleep_for, 1), attempt + 1, retries)
             else:
                 sleep_for = min(2 ** attempt + random.uniform(0, 2), 30)
@@ -449,7 +451,11 @@ class PostedSymbolsTracker:
                     subprocess.run(["git", "commit", "-m", f"update {self.FILE_NAME} [skip ci]"],
                                  capture_output=True, timeout=10,
                                  env={**os.environ, "GIT_AUTHOR_NAME": "bot", "GIT_AUTHOR_EMAIL": "bot@bot.com"})
-                    push = subprocess.run(["git", "push", "https://x-access-token:" + os.environ.get("GITHUB_TOKEN","") + "@github.com/" + os.environ.get("GITHUB_REPOSITORY","") + ".git"],
+                    # Set remote URL to use GITHUB_TOKEN and push
+                    repo_url = "https://x-access-token:" + os.environ.get("GITHUB_TOKEN","") + "@github.com/" + os.environ.get("GITHUB_REPOSITORY","") + ".git"
+                    subprocess.run(["git", "remote", "set-url", "origin", repo_url],
+                                 capture_output=True, timeout=10)
+                    push = subprocess.run(["git", "push", "origin", "main"],
                                         capture_output=True, timeout=30)
                     if push.returncode == 0:
                         LOGGER.info("Pushed posted_symbols.json to repo")
@@ -1048,9 +1054,12 @@ class GeminiGenerator:
             LOGGER.warning("No GEMINI_API_KEY set; using template-based content")
             return self._template_content(analysis, setup, coin, tone, keywords)
 
+        # Multiple model fallbacks to handle rate limits
         models_to_try = [
             os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
         ]
         # Deduplicate
         seen_models = set()
@@ -1060,7 +1069,8 @@ class GeminiGenerator:
                 seen_models.add(m)
                 models.append(m)
 
-        # Try Gemini API (fast: 1 attempt per model, then fallback to template)
+        LOGGER.info("Trying Gemini models: %s", models)
+        # Try each model with retries
         for model in models:
             url = (
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
