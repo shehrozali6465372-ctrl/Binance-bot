@@ -1676,11 +1676,13 @@ class PostPublisher:
             "bodyTextOnly": content,
         }
         
-        # Add image URL if available (verified or not - Binance handles gracefully)
+        # Add image URL if available
         if isinstance(coin, dict):
             image_url = coin.get("_image_url", "")
             if image_url:
+                symbol = coin.get("symbol", "")
                 payload["contentType"] = 2
+                payload["title"] = "$" + symbol + " Market Analysis"
                 payload["images"] = [image_url]
                 verified = coin.get("_image_verified", False)
                 LOGGER.info("Including image in Square post (verified=%s): %s", verified, image_url)
