@@ -8,6 +8,7 @@ on:
 jobs:
   run-agent:
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
       actions: write
@@ -22,17 +23,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          echo "Node $(node --version), Python $(python --version)"
+      - name: Install Pillow
+        run: pip install Pillow
 
       - name: Run Crypto Agent
         env:
@@ -44,17 +38,15 @@ jobs:
           POST_INTERVAL: "7200"
           MAX_ITERATIONS: "1"
           GEMINI_MODEL: "gemini-2.5-flash"
-          DATABASE_PATH: "agent.db"
-          PUBLISH_LOG_PATH: "published_posts.jsonl"
         run: python main.py
 
-      - name: Upload logs and database
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: agent-output-${{ github.run_id }}
           path: |
-            published_posts.jsonl
+            posts/
+            images/
             agent.db
-            posted_symbols.json
-            charts/
+            published_posts.jsonl
