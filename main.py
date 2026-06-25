@@ -2,6 +2,7 @@ import json
 import os
 import random
 import logging
+import re
 import sqlite3
 import time
 import urllib.error
@@ -12,39 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-
-def _fix_workflow_file() -> None:
-    """Fix invisible Unicode chars in workflow file if running in GHA."""
-    if not os.getenv("GITHUB_ACTIONS"):
-        return
-    wf_path = ".github/workflows/run_bot.yml"
-    if not os.path.exists(wf_path):
-        return
-    with open(wf_path, "rb") as f:
-        raw = f.read()
-    # Check for U+200E (LEFT-TO-RIGHT MARK) - e2 80 8e in UTF-8
-    if b"\xe2\x80\x8e" not in raw:
-        return  # File is clean
-    LOGGER.info("Fixing workflow file (removing invisible Unicode chars)")
-    clean = raw.replace(b"\xe2\x80\x8e", b"")
-    with open(wf_path, "wb") as f:
-        f.write(clean)
-    try:
-        import subprocess
-        subprocess.run(["git", "config", "user.name", "bot"], capture_output=True)
-        subprocess.run(["git", "config", "user.email", "bot@bot.com"], capture_output=True)
-        repo_url = "https://x-access-token:" + os.environ.get("GITHUB_TOKEN","") + "@github.com/" + os.environ.get("GITHUB_REPOSITORY","") + ".git"
-        subprocess.run(["git", "remote", "set-url", "origin", repo_url], capture_output=True, timeout=10)
-        r = subprocess.run(["git", "add", wf_path, "&&", "git", "commit", "-m", "fix workflow file", "&&", "git", "push", "origin", "main"], 
-                         capture_output=True, text=True, timeout=30, shell=True)
-        if r.returncode == 0:
-            LOGGER.info("Workflow file fixed and pushed!")
-        else:
-            LOGGER.warning("Could not push fix: %s", r.stderr[:200])
-    except Exception as e:
-        LOGGER.warning("Could not fix workflow: %s", e)
-
+from image_engine import ImageIntelligenceEngine, ImageUploader
 
 
 @dataclass(frozen=True)
@@ -155,7 +124,7 @@ def _http_json_with_retry(
                 LOGGER.warning("HTTP 451 %s %s blocked by geo-restriction, skipping retries", method, url)
                 raise
             if exc.code == 429:
-                sleep_for = min(20 * (2 ** attempt) + random.uniform(0, 15), 120)
+                sleep_for = min(2 ** attempt * 5 + random.uniform(0, 5), 60)
                 LOGGER.warning("HTTP 429 %s %s rate limited (retrying in %ss, attempt %d/%d)", method, url, round(sleep_for, 1), attempt + 1, retries)
             else:
                 sleep_for = min(2 ** attempt + random.uniform(0, 2), 30)
@@ -201,87 +170,13 @@ class Coin:
 
 class Database:
     def __init__(self, path: str):
-        _fix_workflow_file()
         self.path = path
         ensure_parent(self.path)
-        # Try to restore database from previous GitHub Actions artifact
-        if not os.path.exists(self.path) or os.path.getsize(self.path) < 100:
-            self._restore_from_artifact()
         self.conn = sqlite3.connect(self.path, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
-
-    def _restore_from_artifact(self) -> None:
-        """Download agent.db from the latest workflow artifact using GitHub API."""
-        if not os.getenv("GITHUB_ACTIONS"):
-            return
-        runtime_token = os.getenv("ACTIONS_RUNTIME_TOKEN", "")
-        gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN", "")
-        repo = os.getenv("GITHUB_REPOSITORY", "")
-        api_token = gh_token or runtime_token
-        if not api_token or not repo:
-            LOGGER.info("No API token available for artifact restore (GITHUB_TOKEN not set in env)")
-            return
-        try:
-            import urllib.request, zipfile, io, json as _json
-            runs_url = f"https://api.github.com/repos/{repo}/actions/runs?status=success&per_page=5"
-            req = urllib.request.Request(runs_url, headers={
-                "Authorization": f"Bearer {api_token}",
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "binance-bot"
-            })
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                runs_data = _json.loads(resp.read().decode("utf-8"))
-            LOGGER.info("Found %d workflow runs via API", len(runs_data.get("workflow_runs", [])))
-            for run in runs_data.get("workflow_runs", []):
-                run_id = run.get("id")
-                event = run.get("event", "")
-                if event not in ("workflow_dispatch", "schedule"):
-                    continue
-                art_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts"
-                req2 = urllib.request.Request(art_url, headers={
-                    "Authorization": f"Bearer {api_token}",
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": "binance-bot"
-                })
-                with urllib.request.urlopen(req2, timeout=15) as resp2:
-                    art_data = _json.loads(resp2.read().decode("utf-8"))
-                for artifact in art_data.get("artifacts", []):
-                    if "agent-output" in artifact.get("name", ""):
-                        dl_url = artifact.get("archive_download_url", "")
-                        if not dl_url:
-                            continue
-                        req3 = urllib.request.Request(dl_url, headers={
-                            "Authorization": f"Bearer {api_token}",
-                            "User-Agent": "binance-bot"
-                        })
-                        with urllib.request.urlopen(req3, timeout=30) as resp3:
-                            zip_data = io.BytesIO(resp3.read())
-                            with zipfile.ZipFile(zip_data) as zf:
-                                for name in zf.namelist():
-                                    if name == "agent.db":
-                                        db_bytes = zf.read(name)
-                                        if len(db_bytes) > 100:
-                                            with open(self.path, "wb") as f_out:
-                                                f_out.write(db_bytes)
-                                            LOGGER.info("Restored agent.db from run %s (%d bytes)", run_id, len(db_bytes))
-                                            return
-            LOGGER.info("No valid agent.db found in recent artifacts")
-        except urllib.error.HTTPError as exc:
-            LOGGER.info("Artifact API error: HTTP %d %s", exc.code, exc.reason)
-        except Exception as exc:
-            LOGGER.info("Artifact restore failed: %s", exc)
-    def _count_posts_db(self, db_path: str) -> int:
-        try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            cur = conn.execute("SELECT COUNT(*) FROM posts")
-            count = cur.fetchone()[0]
-            conn.close()
-            return count
-        except:
-            return 0
 
     def close(self) -> None:
         with suppress(Exception):
@@ -386,19 +281,6 @@ class Database:
             for row in cur.fetchall():
                 if row["coin_symbol"]:
                     posted.add(row["coin_symbol"].upper())
-            if posted and hours > 0:
-                # Only keep symbols posted within the time window
-                from datetime import datetime, timezone, timedelta
-                cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-                recent = set()
-                cur2 = self.conn.execute(
-                    "SELECT DISTINCT coin_symbol FROM posts WHERE created_at >= ?",
-                    (cutoff.isoformat(),)
-                )
-                for row2 in cur2.fetchall():
-                    if row2["coin_symbol"]:
-                        recent.add(row2["coin_symbol"].upper())
-                return recent
             return posted
         except sqlite3.OperationalError:
             return set()
@@ -415,76 +297,28 @@ class Database:
         except sqlite3.OperationalError:
             return 0
 
-class PostedSymbolsTracker:
-    """Track posted symbols across GHA runs using a JSON file committed to repo."""
-    FILE_NAME = "posted_symbols.json"
-    
-    def __init__(self):
-        self.file_path = Path(self.FILE_NAME)
-        self.data = self._load()
-    
-    def _load(self) -> Dict[str, str]:
-        """Load posted symbols with timestamps."""
-        if self.file_path.exists():
-            try:
-                return json.loads(self.file_path.read_text())
-            except (json.JSONDecodeError, OSError):
-                return {}
-        return {}
-    
-    def save(self) -> None:
-        """Save to file and commit+push if in GHA."""
+    def get_posted_hours_dict(self, hours: int = 72) -> Dict[str, float]:
+        """Get dict of symbol -> hours_ago for recently posted coins."""
+        now = datetime.now(timezone.utc)
         try:
-            self.file_path.write_text(json.dumps(self.data, indent=2))
-        except OSError as e:
-            LOGGER.warning("Could not save posted symbols: %s", e)
-            return
-        # Commit and push if running in GitHub Actions
-        if os.getenv("GITHUB_ACTIONS"):
-            import subprocess
-            try:
-                subprocess.run(["git", "add", self.FILE_NAME],
-                             capture_output=True, timeout=10)
-                r = subprocess.run(["git", "diff", "--cached", "--quiet", self.FILE_NAME],
-                                 capture_output=True, timeout=10)
-                if r.returncode != 0:
-                    subprocess.run(["git", "commit", "-m", f"update {self.FILE_NAME} [skip ci]"],
-                                 capture_output=True, timeout=10,
-                                 env={**os.environ, "GIT_AUTHOR_NAME": "bot", "GIT_AUTHOR_EMAIL": "bot@bot.com"})
-                    # Set remote URL to use GITHUB_TOKEN and push
-                    repo_url = "https://x-access-token:" + os.environ.get("GITHUB_TOKEN","") + "@github.com/" + os.environ.get("GITHUB_REPOSITORY","") + ".git"
-                    subprocess.run(["git", "remote", "set-url", "origin", repo_url],
-                                 capture_output=True, timeout=10)
-                    push = subprocess.run(["git", "push", "origin", "main"],
-                                        capture_output=True, timeout=30)
-                    if push.returncode == 0:
-                        LOGGER.info("Pushed posted_symbols.json to repo")
-                    else:
-                        stderr = push.stderr.decode()[:200] if isinstance(push.stderr, bytes) else str(push.stderr)[:200]
-                        LOGGER.warning("Could not push: %s", stderr)
-            except Exception as e:
-                LOGGER.warning("Git commit/push failed: %s", e)
-    
-    def mark_posted(self, symbol: str) -> None:
-        """Mark a symbol as posted with current timestamp."""
-        self.data[symbol.upper()] = utc_now()
-        self.save()
-    
-    def get_posted_symbols(self, hours: int = 48) -> set:
-        """Get symbols posted within the given hours."""
-        if hours <= 0:
-            return set()
-        from datetime import datetime, timezone, timedelta
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        recent = set()
-        for sym, ts_str in self.data.items():
-            try:
-                ts = datetime.fromisoformat(ts_str)
-                if ts >= cutoff:
-                    recent.add(sym)
-            except (ValueError, TypeError):
-                recent.add(sym)
-        return recent
+            cur = self.conn.execute(
+                "SELECT coin_symbol, created_at FROM posts WHERE created_at IS NOT NULL ORDER BY id DESC LIMIT 200"
+            )
+            result = {}
+            for row in cur.fetchall():
+                sym = row["coin_symbol"]
+                if not sym:
+                    continue
+                try:
+                    posted_time = datetime.fromisoformat(row["created_at"])
+                    delta = (now - posted_time).total_seconds() / 3600.0
+                    if sym.upper() not in result or delta < result[sym.upper()]:
+                        result[sym.upper()] = delta
+                except (ValueError, TypeError):
+                    continue
+            return result
+        except sqlite3.OperationalError:
+            return {}
 
     def save_run(self, status: str, summary: Dict[str, Any]) -> None:
         with self.conn:
@@ -617,11 +451,14 @@ class MarketScanner:
 
 
 class BinanceAnnouncementEngine:
-    """Fetch real Binance announcements - airdrops and delistings."""
+    """Fetch real Binance announcements - new listings, news, delistings, airdrops."""
     
     CATALOGS = {
-        "airdrops": 128,
+        "new_listings": 48,
+        "latest_news": 49,
         "delistings": 161,
+        "airdrops": 128,
+        "activities": 93,
     }
     
     def __init__(self, config: Config = CONFIG):
@@ -644,26 +481,43 @@ class BinanceAnnouncementEngine:
     def extract_symbols(self, title: str) -> List[str]:
         """Extract coin symbols from announcement title."""
         import re
-        # Find symbols in parentheses like (LAYER), (AVNT), (SHELL)
+        # Find symbols in parentheses like (BTC), (ETH), (SOL)
         paren_symbols = re.findall(r'\(([A-Z0-9]{2,10})\)', title)
-        # Accept all parenthesized symbols - they are coin tickers in Binance announcements
-        found = [s for s in paren_symbols if s.isalpha() and len(s) >= 2]
-        # Also check standalone words for known major coins (second pass)
+        # Find standalone symbols in title
         known_coins = {"BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX","DOT","LINK",
                        "MATIC","SHIB","TRX","ATOM","UNI","APT","ARB","OP","NEAR","FIL",
                        "AAVE","MKR","PEPE","TIA","SEI","SUI","INJ","BONK","WIF","JUP",
                        "FET","AGIX","RNDR","THETA","EGLD","EOS","XLM","VET","ALGO",
                        "SAND","MANA","AXS","FTM","ICP","GRT","BLUR","STRK","JTO","RE"}
+        found = []
+        for s in paren_symbols:
+            if s in known_coins:
+                found.append(s)
+        # Also check words for known coins
         words = title.upper().split()
         for w in words:
             w = w.strip(".,:;!?()[]{}")
             if w in known_coins and w not in found:
                 found.append(w)
         return found
-
+    
     def get_trending_announcements(self) -> List[Dict[str, Any]]:
-        """Get announcements - only airdrops and delistings."""
+        """Get announcements and identify market-moving events."""
         results = []
+        
+        # Fetch new listings (most market-moving)
+        listings = self.fetch_announcements(self.CATALOGS["new_listings"], limit=5)
+        for art in listings:
+            symbols = self.extract_symbols(art.get("title", ""))
+            if symbols:
+                ts = art.get("releaseDate", 0) / 1000
+                results.append({
+                    "type": "new_listing",
+                    "title": art["title"],
+                    "symbols": symbols,
+                    "timestamp": ts,
+                    "impact": "high",
+                })
         
         # Fetch airdrops
         airdrops = self.fetch_announcements(self.CATALOGS["airdrops"], limit=5)
@@ -692,12 +546,390 @@ class BinanceAnnouncementEngine:
                     "impact": "negative",
                 })
         
+        # Fetch latest news
+        news = self.fetch_announcements(self.CATALOGS["latest_news"], limit=5)
+        for art in news:
+            symbols = self.extract_symbols(art.get("title", ""))
+            if symbols:
+                results.append({
+                    "type": "news",
+                    "title": art["title"],
+                    "symbols": symbols,
+                    "timestamp": art.get("releaseDate", 0) / 1000,
+                    "impact": "medium",
+                })
+        
         return results
 
 
+class HotSearchEngine:
+    """Binance Hot Search Intelligence Engine - multi-provider architecture.
+    
+    Provider 1: CoinGecko Trending API (free, no key required)
+    Provider 2: Binance Announcements (existing data, extract trending topics)
+    Provider 3: Market-derived trending (volume/price spikes)
+    Provider 4: Synthetic narrative feed (hardcoded topic-to-coin mapping)
+    
+    Never breaks the pipeline - if all providers fail, returns empty data.
+    """
+    
+    # Comprehensive topic-to-coin mapping
+    TOPIC_COIN_MAP = {
+        # AI & AI Agents
+        "AI": ["FET", "AGIX", "RNDR", "NEAR", "GRT", "OCEAN", "TAO", "AKT"],
+        "AGENT": ["FET", "AGIX", "VIRTUAL", "AI16Z", "ARC"],
+        "AI Agent": ["FET", "AGIX", "VIRTUAL", "AI16Z", "ARC"],
+        
+        # Meme Coins
+        "MEME": ["DOGE", "SHIB", "PEPE", "BONK", "WIF", "FLOKI", "MEME"],
+        "DOGE": ["DOGE"],
+        "PEPE": ["PEPE"],
+        "SHIB": ["SHIB"],
+        
+        # Layer 1
+        "L1": ["SOL", "AVAX", "ADA", "DOT", "APT", "SUI", "SEI", "INJ", "TIA", "NEAR"],
+        "SOL": ["SOL"],
+        "AVAX": ["AVAX"],
+        "SUI": ["SUI"],
+        "APT": ["APT"],
+        
+        # Layer 2
+        "L2": ["ARB", "OP", "MATIC", "POL", "STRK", "METIS"],
+        
+        # DeFi
+        "DeFi": ["AAVE", "MKR", "UNI", "LINK", "COMP", "CRV", "CAKE", "PENDLE"],
+        "RWA": ["ONDO", "MKR", "COMP", "LINK", "POL", "CFG"],
+        
+        # Gaming / Metaverse
+        "GAMING": ["AXS", "SAND", "MANA", "THETA", "ENJ", "GALA", "IMX"],
+        "METAVERSE": ["SAND", "MANA", "AXS", "THETA"],
+        
+        # DePIN
+        "DePIN": ["FIL", "ICP", "HNT", "MOBILE", "IOTX"],
+        "INFRA": ["ICP", "FIL", "ALGO", "EOS", "XLM", "VET", "TRX", "HBAR"],
+        
+        # Exchange Tokens
+        "EXCHANGE": ["BNB", "LEO", "OKB", "CRO", "GT"],
+        "BNB": ["BNB"],
+        
+        # BTC Ecosystem
+        "BTC": ["BTC", "BTCB", "STX"],
+        "BITCOIN": ["BTC"],
+        
+        # ETF / Regulation
+        "ETF": ["BTC", "ETH"],
+        "REGULATION": ["BTC", "ETH", "XRP"],
+        
+        # Stablecoins
+        "STABLE": ["USDT", "USDC", "DAI", "FDUSD"],
+        
+        # Specific narratives
+        "AIRDROP": ["LAYER", "AVNT", "SHELL", "STRK", "ARB", "OP", "APT"],
+        "LISTING": ["LAYER", "AVNT", "SHELL", "NOT", "DOGS", "HMSTR"],
+        "RESTAKE": ["ETHFI", "EIGEN", "REZ"],
+        "LIQUID": ["LDO", "SSV", "PRL"],
+    }
+    
+    # Known narrative categories (for scoring)
+    NARRATIVE_CATEGORIES = [
+        "AI", "AGENT", "MEME", "L1", "L2", "DeFi", "RWA", "GAMING",
+        "DePIN", "INFRA", "EXCHANGE", "BTC", "ETF", "AIRDROP", "LISTING"
+    ]
+    
+    def __init__(self, config: "Config" = None):
+        self.config = config
+        self._cache = []
+        self._cache_time = 0
+        self._provider_status = {}  # Track which providers work
+    
+    def get_trending(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """Get trending topics from all available providers. Returns merged, ranked list."""
+        now = time.time()
+        if not force_refresh and self._cache and (now - self._cache_time) < 300:
+            return self._cache
+        
+        all_topics = []
+        
+        # Try Provider 1: Binance Announcements (always available)
+        try:
+            ann_topics = self._from_announcements()
+            all_topics.extend(ann_topics)
+            self._provider_status["announcements"] = len(ann_topics) > 0
+        except Exception:
+            self._provider_status["announcements"] = False
+        
+        # Try Provider 2: CoinGecko Trending
+        try:
+            cg_topics = self._from_coingecko_trending()
+            all_topics.extend(cg_topics)
+            self._provider_status["coingecko"] = len(cg_topics) > 0
+        except Exception:
+            self._provider_status["coingecko"] = False
+        
+        # Try Provider 3: Market-derived (uses existing MarketScanner data pattern)
+        try:
+            market_topics = self._from_market_data()
+            all_topics.extend(market_topics)
+            self._provider_status["market"] = len(market_topics) > 0
+        except Exception:
+            self._provider_status["market"] = False
+        
+        # Provider 4: Synthetic / narrative-based (always available as fallback)
+        try:
+            synth_topics = self._synthetic_topics()
+            all_topics.extend(synth_topics)
+            self._provider_status["synthetic"] = len(synth_topics) > 0
+        except Exception:
+            self._provider_status["synthetic"] = False
+        
+        # Merge and deduplicate by topic name
+        seen_topics = set()
+        merged = []
+        for topic in all_topics:
+            key = topic.get("topic", "").lower().strip()
+            if key and key not in seen_topics:
+                seen_topics.add(key)
+                merged.append(topic)
+        
+        # Sort by rank (lower = better)
+        merged.sort(key=lambda t: t.get("rank", 99))
+        
+        # Log provider status
+        working = [k for k, v in self._provider_status.items() if v]
+        LOGGER.info("HotSearch providers active: %s (%d topics)", 
+                    ", ".join(working) if working else "NONE", len(merged))
+        
+        self._cache = merged
+        self._cache_time = now
+        return merged
+    
+    def _from_announcements(self) -> List[Dict[str, Any]]:
+        """Extract trending topics from Binance announcements."""
+        topics = []
+        try:
+            engine = BinanceAnnouncementEngine(self.config)
+            announcements = engine.get_trending_announcements()
+            
+            # Group announcements by type for topic extraction
+            topic_counts = {}
+            for ann in announcements:
+                ann_type = ann.get("type", "news")
+                title = ann.get("title", "")
+                symbols = ann.get("symbols", [])
+                
+                # Extract narrative from title
+                title_lower = title.lower()
+                for narrative in self.NARRATIVE_CATEGORIES:
+                    if narrative.lower() in title_lower:
+                        topic_counts[narrative] = topic_counts.get(narrative, 0) + 1
+                
+                # Also add individual symbols as topics if they appear
+                for sym in symbols:
+                    topic_counts[sym] = topic_counts.get(sym, 0) + 1
+            
+            for i, (topic, count) in enumerate(sorted(topic_counts.items(), key=lambda x: -x[1])):
+                affected = self._topic_to_coins(topic)
+                topics.append({
+                    "topic": topic,
+                    "rank": i + 1,
+                    "trend_strength": min(10.0, count * 2.5),
+                    "source": "announcement",
+                    "affected_coins": affected,
+                    "narrative": self._detect_narrative(topic),
+                    "hot_search_score": min(10.0, 5.0 + count * 1.5),
+                })
+        except Exception:
+            pass
+        return topics
+    
+    def _from_coingecko_trending(self) -> List[Dict[str, Any]]:
+        """Fetch trending coins from CoinGecko (no API key needed)."""
+        topics = []
+        try:
+            data = http_get_json(
+                "https://api.coingecko.com/api/v3/search/trending",
+                timeout=self.config.http_timeout_seconds if self.config else 10
+            )
+            coins = data.get("coins", [])
+            for i, entry in enumerate(coins[:15]):
+                item = entry.get("item", {})
+                symbol = (item.get("symbol", "") or "").upper()
+                name = item.get("name", "")
+                score = item.get("score", i)
+                
+                # CoinGecko score: 0 = most trending
+                trend_strength = max(1.0, 10.0 - score * 0.7)
+                affected = self._topic_to_coins(symbol) or [symbol]
+                
+                topics.append({
+                    "topic": symbol,
+                    "name": name,
+                    "rank": i + 1,
+                    "trend_strength": trend_strength,
+                    "source": "coingecko_trending",
+                    "affected_coins": [symbol],
+                    "narrative": self._detect_narrative(symbol),
+                    "hot_search_score": min(10.0, trend_strength),
+                })
+        except Exception:
+            pass
+        return topics
+    
+    def _from_market_data(self) -> List[Dict[str, Any]]:
+        """Derive trending topics from market data patterns."""
+        topics = []
+        try:
+            scanner = MarketScanner(self.config)
+            universe = scanner._universe()
+            
+            if not universe:
+                return topics
+            
+            # Top gainers
+            gainers = sorted(universe, key=lambda c: c.change_24h, reverse=True)[:3]
+            for i, coin in enumerate(gainers):
+                if coin.change_24h > 3:
+                    topics.append({
+                        "topic": f"{coin.symbol}_SURGE",
+                        "rank": i + 1,
+                        "trend_strength": min(10.0, 5.0 + abs(coin.change_24h) * 0.3),
+                        "source": "market_gainer",
+                        "affected_coins": [coin.symbol],
+                        "narrative": self._detect_narrative(coin.symbol),
+                        "hot_search_score": min(10.0, 4.0 + abs(coin.change_24h) * 0.3),
+                    })
+            
+            # Volume spikes
+            high_vol = [c for c in universe if c.volume_ratio > 2.0]
+            for i, coin in enumerate(high_vol[:3]):
+                topics.append({
+                    "topic": f"{coin.symbol}_VOLUME",
+                    "rank": 10 + i + 1,
+                    "trend_strength": min(10.0, 3.0 + coin.volume_ratio * 2),
+                    "source": "market_volume",
+                    "affected_coins": [coin.symbol],
+                    "narrative": self._detect_narrative(coin.symbol),
+                    "hot_search_score": min(10.0, 3.0 + coin.volume_ratio * 1.5),
+                })
+        except Exception:
+            pass
+        return topics
+    
+    def _synthetic_topics(self) -> List[Dict[str, Any]]:
+        """Fallback synthetic topics based on known narratives (always available)."""
+        # Return a diverse set of narrative-based topics
+        base_topics = [
+            ("AI", "Artificial Intelligence", 9.0, "AI"),
+            ("MEME", "Meme Coin Season", 7.5, "MEME"),
+            ("DeFi", "DeFi Renaissance", 7.0, "DeFi"),
+            ("L1", "Layer 1 Rally", 7.5, "L1"),
+            ("RWA", "Real World Assets", 6.5, "RWA"),
+            ("GAMING", "Web3 Gaming", 6.0, "GAMING"),
+            ("DePIN", "DePIN Infrastructure", 6.0, "DePIN"),
+            ("ETF", "ETF Inflows", 8.0, "ETF"),
+            ("AIRDROP", "Airdrop Season", 7.0, "AIRDROP"),
+        ]
+        topics = []
+        for i, (topic, name, strength, narrative) in enumerate(base_topics):
+            affected = self._topic_to_coins(topic)
+            topics.append({
+                "topic": topic,
+                "name": name,
+                "rank": i + 1,
+                "trend_strength": strength,
+                "source": "synthetic",
+                "affected_coins": affected,
+                "narrative": narrative,
+                "hot_search_score": strength,
+            })
+        return topics
+    
+    def _topic_to_coins(self, topic: str) -> List[str]:
+        """Map a topic to affected coin symbols."""
+        topic_upper = topic.upper().strip()
+        # Direct match
+        if topic_upper in self.TOPIC_COIN_MAP:
+            return self.TOPIC_COIN_MAP[topic_upper]
+        # Partial match
+        for key, coins in self.TOPIC_COIN_MAP.items():
+            if key in topic_upper or topic_upper in key:
+                return coins
+        # If topic itself looks like a coin symbol
+        if re.match(r'^[A-Z]{2,10}$', topic_upper):
+            return [topic_upper]
+        return []
+    
+    def _detect_narrative(self, symbol_or_topic: str) -> str:
+        """Detect narrative category from symbol or topic."""
+        s = symbol_or_topic.upper().strip()
+        for narrative, coins in self.TOPIC_COIN_MAP.items():
+            if s in coins or s == narrative:
+                return narrative
+        return "GENERAL"
+    
+    def get_hot_search_score(self, symbol: str) -> float:
+        """Get hot search score for a specific coin symbol (0-10)."""
+        trending = self.get_trending()
+        symbol_upper = symbol.upper().strip()
+        max_score = 0.0
+        
+        for topic in trending:
+            affected = topic.get("affected_coins", [])
+            if symbol_upper in [c.upper() for c in affected]:
+                score = topic.get("hot_search_score", 0)
+                if score > max_score:
+                    max_score = score
+            # Also check if topic name matches symbol
+            if topic.get("topic", "").upper() == symbol_upper:
+                score = topic.get("hot_search_score", 0)
+                if score > max_score:
+                    max_score = score
+        
+        return max_score
+    
+    def get_top_trending(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Get top trending topics (ranked by strength)."""
+        trending = self.get_trending()
+        return [t for t in trending if t.get("source") != "synthetic"][:limit] or trending[:limit]
+    
+    def get_narrative_summary(self) -> str:
+        """Get a one-line summary of current narratives for prompt injection."""
+        trending = self.get_trending()
+        if not trending:
+            return ""
+        
+        top = trending[:5]
+        parts = []
+        for t in top:
+            topic = t.get("topic", "")
+            strength = t.get("trend_strength", 5)
+            coins = t.get("affected_coins", [])
+            coin_str = ", ".join([f"${c}" for c in coins[:3]]) if coins else ""
+            parts.append(f"{topic}:{strength:.0f}/10{ ' (' + coin_str + ')' if coin_str else ''}")
+        
+        return " | ".join(parts)
 
+
+# CoinGecko trending endpoint has rate limits - cache aggressively
+_HOT_CACHE = None
+_HOT_CACHE_TS = 0
 
 class ResearchEngine:
+    """Multi-dimensional research engine: technical, narrative, risk, and market context."""
+
+    # Coin categories / narratives
+    CATEGORIES = {
+        "AI": {"FET", "AGIX", "RNDR", "NEAR", "ARB", "OP", "GRT", "FET", "AGIX", "OCEAN", "TAO", "AKT"},
+        "MEME": {"DOGE", "SHIB", "PEPE", "BONK", "WIF", "FLOKI", "MEME"},
+        "L1": {"SOL", "AVAX", "ADA", "DOT", "APT", "SUI", "SEI", "INJ", "TIA", "NEAR"},
+        "BTC": {"BTC", "STX", "ORDI", "SATS", "RUNE"},
+        "DeFi": {"AAVE", "MKR", "UNI", "LINK", "COMP", "CRV", "CAKE"},
+        "L2": {"ARB", "OP", "MATIC", "POL", "STRK"},
+        "RWA": {"MKR", "COMP", "LINK", "POL"},
+        "GAMING": {"AXS", "SAND", "MANA", "THETA", "ENJ", "GALA", "IMX"},
+        "INFRA": {"ICP", "FIL", "ALGO", "EOS", "XLM", "VET", "TRX", "HBAR"},
+        "EXCHANGE": {"BNB", "LEO", "OKB", "CRO"},
+    }
 
     def analyze(self, coin: Dict[str, Any], announcement: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Full research analysis on a coin."""
@@ -727,6 +959,7 @@ class ResearchEngine:
         
         # 6. Generate reason text
         reason_parts = []
+        
         if announcement:
             ann_type = announcement.get("type", "")
             ann_title = announcement.get("title", "")
@@ -802,187 +1035,49 @@ class ResearchEngine:
             "announcement": announcement,
         }
 
-    CATEGORIES = {
-        "AI": {"FET", "AGIX", "RNDR", "THETA", "GRT", "ICP", "AR", "OCEAN", "NMR", "WLD", "TAO", "AKT", "MASA"},
-        "MEME": {"DOGE", "SHIB", "PEPE", "BONK", "WIF", "FLOKI", "MEME", "MOG", "MEW", "POPCAT", "BOME"},
-        "DeFi": {"AAVE", "MKR", "COMP", "UNI", "CAKE", "CRV", "BAL", "SUSHI", "PENDLE", "LDO", "CVX", "YFI", "SNX", "DYDX"},
-        "L1": {"SOL", "ADA", "AVAX", "DOT", "NEAR", "APT", "SUI", "SEI", "INJ", "TIA", "ALGO", "ATOM", "FTM"},
-        "L2": {"MATIC", "POL", "ARB", "OP", "METIS", "SKL", "MNT"},
-        "Exchange": {"BNB", "CRO", "LEO", "OKB", "GT", "BGB"},
-        "Gaming": {"AXS", "SAND", "MANA", "GALA", "ENJ", "IMX", "MAGIC", "YGG", "PRIME"},
-        "DePIN": {"HNT", "FIL", "AKT", "IOTX", "LPT", "THETA"},
-        "RWA": {"ONDO", "POLYX", "CFG", "MPL"},
-        "Infrastructure": {"LINK", "ATOM", "ALGO", "CHR", "BAND", "PYTH"},
-        "BTC Ecosystem": {"STX", "ORDI", "SATS", "RIF", "RUNE"},
-    }
-
     def _detect_narrative(self, symbol: str) -> tuple:
-        """Detect coin category and narrative with confidence score."""
+        """Detect coin category and narrative."""
         symbol_upper = symbol.upper()
         for category, coins in self.CATEGORIES.items():
             if symbol_upper in coins:
                 return category, f"{category} narrative"
-        # Dynamic narrative detection by keyword/suffix
-        for keyword, label in [("AI", "AI"), ("BOT", "AI"), ("GPT", "AI"),
-                                ("DOGE", "MEME"), ("SHIB", "MEME"), ("PEPE", "MEME"),
-                                ("ETH", "L1"), ("BTC", "BTC Ecosystem"),
-                                ("BNB", "Exchange")]:
-            if keyword in symbol_upper:
-                return label, f"{label} (keyword match)"
         return "", ""
 
     def _technical_analysis(self, history: List[float], price: float, change: float) -> Dict[str, Any]:
-        """Full technical analysis: RSI, MACD, EMA, Bollinger, ATR, support/resistance."""
-        result: Dict[str, Any] = {
+        """Basic technical analysis from price history."""
+        result = {
+            "pattern": "",
             "trend": "neutral",
             "strength": 0.5,
-            "pattern": "",
             "volatility": "medium",
-            "rsi": 50.0,
-            "macd": 0,
-            "macd_signal": 0,
-            "ema20": price,
-            "ema50": price,
-            "bollinger_upper": price,
-            "bollinger_lower": price,
-            "atr": 0,
-            "support": price * 0.95,
-            "resistance": price * 1.05,
-            "momentum_score": 0,
-            "trend_score": 0,
-            "breakout": False,
-            "breakdown": False,
-            "reversal": False,
         }
         
-        closes = list(history)
-        m = len(closes)
-        if m < 5:
-            return result
-        
-        # --- EMA helper ---
-        def _ema(data, period):
-            if len(data) < period:
-                return data[-1] if data else price
-            k = 2.0 / (period + 1)
-            val = data[0]
-            for i in range(1, len(data)):
-                val = data[i] * k + val * (1 - k)
-            return val
-        
-        # --- EMA20 / EMA50 ---
-        ema20_val = _ema(closes, min(20, m))
-        ema50_val = _ema(closes, min(50, m))
-        result["ema20"] = round(ema20_val, 8)
-        result["ema50"] = round(ema50_val, 8)
-        
-        # --- RSI (14) ---
-        period = min(14, m - 1)
-        if period >= 5:
-            gains, losses = [], []
-            for i in range(max(0, m - period * 2), m):
-                if i > 0:
-                    d = closes[i] - closes[i-1]
-                    gains.append(max(0, d))
-                    losses.append(max(0, -d))
-            avg_g = sum(gains[-period:]) / period if gains else 0
-            avg_l = sum(losses[-period:]) / period if losses else 0
-            rsi_val = 100.0 if avg_l == 0 else 100.0 - 100.0 / (1.0 + avg_g / max(avg_l, 0.0001))
-            result["rsi"] = round(rsi_val, 1)
-        
-        # --- MACD (12,26,9) ---
-        if m >= 26:
-            ema12 = _ema(closes, 12)
-            ema26 = _ema(closes, 26)
-            macd_line = ema12 - ema26
-            signal = _ema(closes[-9:], 9) if len(closes) >= 9 else macd_line
-            result["macd"] = round(macd_line, 8)
-            result["macd_signal"] = round(signal, 8)
-        
-        # --- Bollinger Bands (20,2) ---
-        bb_n = min(20, m)
-        if bb_n >= 5:
-            band = closes[-bb_n:]
-            mu = sum(band) / len(band)
-            sd = (sum((x - mu) ** 2 for x in band) / len(band)) ** 0.5
-            result["bollinger_upper"] = round(mu + 2 * sd, 8)
-            result["bollinger_lower"] = round(mu - 2 * sd, 8)
-        
-        # --- ATR (14) ---
-        atr_n = min(14, m - 1)
-        if atr_n >= 3:
-            ranges = []
-            for i in range(m - atr_n, m):
-                h = max(closes[i], closes[i-1])
-                l = min(closes[i], closes[i-1])
-                ranges.append(h - l)
-            result["atr"] = round(sum(ranges) / len(ranges), 8)
-        
-        # --- Support / Resistance ---
-        if m >= 10:
-            r10 = closes[-10:]
-            result["support"] = round(min(r10), 8)
-            result["resistance"] = round(max(r10), 8)
-        
-        # --- Trend / Momentum from RSI ---
-        rsi = result["rsi"]
-        if rsi > 65:
-            result["trend"] = "bullish"
-            result["strength"] = min(1.0, (rsi - 65) / 35)
-            result["momentum_score"] = min(10, (rsi - 50) / 5)
-        elif rsi < 35:
-            result["trend"] = "bearish"
-            result["strength"] = min(1.0, (35 - rsi) / 35)
-            result["momentum_score"] = max(-10, (rsi - 50) / 5)
-        else:
-            only_change = "bullish" if change > 3 else ("bearish" if change < -3 else "neutral")
-            result["trend"] = only_change
-            result["strength"] = min(1.0, abs(change) / 15)
-            result["momentum_score"] = max(-5, min(5, change / 3))
-        result["trend_score"] = abs(change) * 0.4 + abs(result.get("momentum_score", 0)) * 0.6
-        
-        # --- Pattern Detection ---
-        bb_u = result["bollinger_upper"]
-        bb_l = result["bollinger_lower"]
-        macd = result["macd"]
-        macd_s = result["macd_signal"]
-        patterns = []
-        
-        if change > 5 and rsi > 60 and price > bb_u * 0.98:
-            result["breakout"] = True
-            patterns.append("Bullish breakout above upper Bollinger Band")
-        elif change > 8:
-            result["breakout"] = True
-            patterns.append("Strong bullish momentum")
-        if change < -5 and rsi < 40 and price < bb_l * 1.02:
-            result["breakdown"] = True
-            patterns.append("Bearish breakdown below lower Bollinger Band")
-        elif change < -8:
-            result["breakdown"] = True
-            patterns.append("Sharp selling pressure")
-        if rsi > 78 and change > 0:
-            result["reversal"] = True
-            patterns.append("Overbought - possible mean reversion")
-        elif rsi < 22 and change < 0:
-            result["reversal"] = True
-            patterns.append("Oversold - possible bounce incoming")
-        if macd > macd_s and abs(macd - macd_s) > 0.001:
-            patterns.append("MACD bullish crossover")
-        elif macd_s > macd and abs(macd_s - macd) > 0.001:
-            patterns.append("MACD bearish crossover")
-        if not patterns:
-            if abs(change) < 2:
-                patterns.append("Consolidation near key levels")
-            elif change > 0:
-                patterns.append("Steady uptrend with controlled buying")
+        if len(history) >= 5:
+            prices = history[-5:]
+            # Simple trend detection
+            if prices[-1] > prices[0] * 1.05:
+                result["trend"] = "bullish"
+                result["strength"] = min(1.0, (prices[-1] / prices[0] - 1) * 5)
+                if change > 5:
+                    result["pattern"] = "Breakout from recent range"
+                else:
+                    result["pattern"] = "Steady uptrend with higher lows"
+            elif prices[-1] < prices[0] * 0.95:
+                result["trend"] = "bearish"
+                result["strength"] = min(1.0, abs(prices[-1] / prices[0] - 1) * 3)
+                if change < -5:
+                    result["pattern"] = "Sharp selloff with momentum"
+                else:
+                    result["pattern"] = "Gradual distribution phase"
             else:
-                patterns.append("Gradual decline, watching for support")
-        
-        result["pattern"] = ", ".join(patterns[:2])
-        
-        # Volatility
-        mx = max(closes) / min(closes) - 1 if min(closes) > 0 else 0.05
-        result["volatility"] = "high" if mx > 0.08 else ("medium" if mx > 0.03 else "low")
+                if abs(change) < 2:
+                    result["pattern"] = "Consolidation / ranging"
+                else:
+                    result["pattern"] = "Slight bias " + ("up" if change > 0 else "down")
+            
+            # Volatility estimate
+            max_move = max(prices) / min(prices) - 1 if min(prices) > 0 else 0.05
+            result["volatility"] = "high" if max_move > 0.08 else ("medium" if max_move > 0.03 else "low")
         
         return result
 
@@ -1145,7 +1240,7 @@ class EmotionEngine:
                 "bear_emoji": "\U0001f4c9",
                 "risk_emoji": "\u2696\ufe0f",
                 "pro_tip_emoji": "💡",
-                "twist": "Use data to find the signal in the noise — the best trades are quiet before they explode.",
+                "twist": "Leave emotions aside, only data speaks.",
             }
 
 
@@ -1163,6 +1258,7 @@ class GeminiGenerator:
         past_examples: Optional[List[str]] = None,
         tone: Optional[Dict[str, Any]] = None,
         keywords: Optional[List[str]] = None,
+        hot_search: Optional[str] = None,
     ) -> str:
         """Build a prompt and call the Gemini API to generate a post."""
         prompt = self._build_prompt(
@@ -1173,18 +1269,20 @@ class GeminiGenerator:
             past_examples=past_examples,
             tone=tone,
             keywords=keywords,
+            hot_search=hot_search,
         )
 
         if not self.config.gemini_api_key:
             LOGGER.warning("No GEMINI_API_KEY set; using template-based content")
             return self._template_content(analysis, setup, coin, tone, keywords)
 
-        # Multiple model fallbacks to handle rate limits
         models_to_try = [
+            "gemini-2.5-flash",
             os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-            "gemini-2.0-flash",
             "gemini-1.5-flash",
             "gemini-1.5-pro",
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash",
         ]
         # Deduplicate
         seen_models = set()
@@ -1194,8 +1292,7 @@ class GeminiGenerator:
                 seen_models.add(m)
                 models.append(m)
 
-        LOGGER.info("Trying Gemini models: %s", models)
-        # Try each model with retries
+        # Try Gemini API (fast: 1 attempt per model, then fallback to template)
         for model in models:
             url = (
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -1213,7 +1310,7 @@ class GeminiGenerator:
             }
 
             try:
-                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, retries=4)
+                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, retries=3)
                 text = resp["candidates"][0]["content"]["parts"][0]["text"]
                 if text and text.strip():
                     LOGGER.info("Gemini %s generated post successfully", model)
@@ -1246,6 +1343,7 @@ class GeminiGenerator:
         past_examples: Optional[List[str]] = None,
         tone: Optional[Dict[str, Any]] = None,
         keywords: Optional[List[str]] = None,
+        hot_search: Optional[str] = None,
     ) -> str:
         """Build a concise prompt for Gemini to generate a high-quality trading post."""
         symbol = coin.get("symbol", "COIN")
@@ -1267,10 +1365,9 @@ class GeminiGenerator:
         
         # Build a clean, effective prompt
         parts = [
-            f"You are a 20-year veteran Wall Street crypto trader. Your current mood: {tone['persona']}.",
-            f"{tone['twist']}",
+            f"You are a 20-year veteran Wall Street crypto trader. Your current mood: {tone['persona']}. {tone['twist']}",
             "",
-            f"Write an engaging Binance Square post about ${symbol} ({name}). Sound human and exciting, NOT like AI.",
+            f"Write an engaging trading post about ${symbol} ({name}). Make it sound human, exciting, and NOT like AI.",
             "",
             "**Market Data:**",
             f"- Price: ${price:.4f} | 24h Change: {change:+.1f}% | Volume: {vol_ratio:.1f}x | Cap: ${market_cap:,.0f}",
@@ -1285,46 +1382,32 @@ class GeminiGenerator:
         parts.append(f"**Bear Case:** {bear_case}") 
         parts.append(f"**Risk:** {risk}")
         parts.append("")
-        parts.append("**Key Levels:**")
-        parts.append(f"- Current support around ${setup.get('stop', '?')} and resistance near ${setup.get('target1', '?')}")
+        parts.append("**Trading Setup:**")
+        parts.append(f"- Entry: ${setup['entry']}")
+        parts.append(f"- Target 1: ${setup['target1']} | Target 2: ${setup['target2']}")
+        parts.append(f"- Stop: ${setup['stop']}")
+        
+        
+        if hot_search:
+            parts.append("")
+            parts.append("**Binance Hot Search Trends:**")
+            parts.append(hot_search)
         
         if announcement:
             parts.append("")
             parts.append(f"**Binance Announcement:** {announcement.get('title', '')}")
         
         parts.append("")
-        parts.append("**CRITICAL FORMAT RULES - FOLLOW ALL:**")
-        parts.append("- FIRST SENTENCE MUST BE A STRONG HOOK: one sentence that grabs attention (bold price callout, surprising fact, or rhetorical question)")
-        parts.append("- Include AT LEAST 3-4 emojis naturally throughout the post body (🔥🚀📈📊💎👀💡📉⚠️🛑✅)")
-        parts.append("- Write 2-3 short punchy paragraphs, very concise (max 120 words total)")
-        parts.append("- Cover these in order: (1) Hook about current price action, (2) Volume/momentum insight, (3) What to watch for next")
-        parts.append("- Provide MARKET OBSERVATION only - talk about what the chart/volume shows, what traders are doing")
-        parts.append(f"- END with exactly 3 relevant hashtags on the last line, first MUST be #{symbol}")
-        parts.append("- Sound like an experienced crypto analyst sharing timely market insights - professional but engaging tone")
-        parts.append("- You can mention price levels and market structure, but frame as observation not advice")
-        parts.append("- Make every sentence deliver value - no fluff, no generic statements")
-        parts.append("- Vary sentence structure between posts - do NOT start every post the same way")
-        parts.append("- **IMPORTANT: Your post will be read by real crypto traders on Binance Square. Make it interesting and worth their time!**")
-        parts.append("")
-        parts.append("**HOOK OPTIONS** (choose ONE style that fits the data best):")
-        parts.append("- **Curiosity Hook**: Start with an intriguing observation or question about price action")
-        parts.append("- **FOMO Hook**: Highlight urgency of the current move and what's at stake")
-        parts.append("- **Contrarian Hook**: Challenge the prevailing sentiment with data-backed counterpoint")
-        parts.append("- **Data Hook**: Lead with a striking statistic or technical signal")
-        parts.append("- **Narrative Hook**: Tie the move to a bigger story (AI season, DeFi revival, etc.)")
-        parts.append("")
-        parts.append("**POST STRUCTURE** (follow this flow):")
-        parts.append("1. STRONG HOOK (1 sentence) — grab attention immediately")
-        parts.append("2. CONTEXT (2-3 sentences) — what is happening, why it matters")
-        parts.append("3. INSIGHT (1-2 sentences) — what traders should watch next")
-        parts.append("4. SIGN-OFF (1 sentence) — strong closing thought + 3 hashtags")
-        parts.append("")
-        parts.append("**VITAL** — Do NOT use these AI-sounding phrases:")
-        parts.append('- Avoid: "Let me break this down" / "Here is the thing"')
-        parts.append('- Avoid: "In the world of crypto" / "It is important to note"')
-        parts.append('- Avoid: "Based on the data" / "According to analysis"')
-        parts.append('- Avoid: "As always" / "Remember to" / "Do not forget to"')
-        parts.append("Write like a real trader sharing real-time observations, not a content farm.")
+        parts.append("**Requirements - FOLLOW STRICTLY:**")
+        parts.append("- Write a compelling 3-paragraph post (250-500 words total)")
+        parts.append("- Start with a strong hook/attention grabber")
+        parts.append("- Include relevant emojis naturally (🚀🔥📈💎📊💡)")
+        parts.append(f"- END with 5-7 hashtags on a new line, first one MUST be #{symbol}")
+        parts.append("- Sound like a real, experienced trader sharing genuine insights")
+        parts.append("- Include a specific pro tip or key insight in the last paragraph")
+        parts.append("- Never use robotic phrases like 'In the current market' or 'As of now'")
+        parts.append("- Mention specific numbers (price, %, volume) from the data")
+        parts.append(f"- {tone['twist']}")
         
         return "\n".join(parts)
 
@@ -1371,47 +1454,50 @@ class GeminiGenerator:
         has_high_volume = vol_ratio > 1.5
 
         if template_id == 0:
-            # Bold prediction / Conviction style 
-            hook_emoji = "🚀" if change >= 5 else ("🔥" if change <= -3 else "👀")
-            price_action = "surge" if change > 0 else "drop"
+            # Bold prediction / Conviction style (like the example)
             lines = [
-                f"{hook_emoji} ${symbol} is painting a {'beautiful' if abs(change) > 5 else 'notable'} chart pattern right now! {change:+.1f}% with {vol_ratio:.1f}x volume - the market is waking up.",
+                f"Guys.. Listen Carefully,",
                 "",
-                f"{analysis.get('reason', 'Momentum is building for this asset.')} Volume at {vol_ratio:.1f}x the average confirms {'strong participation' if vol_ratio > 1.5 else 'healthy activity'}.",
+                f"${symbol} has just begun its path towards the target ${setup.get('target1', '?')}, and the play is unfolding precisely as anticipated.",
+                f"The next target ${setup.get('target2', '?')} will also be smashed if momentum continues.",
                 "",
-                f"📊 Price: ${price:.4f} | 24h Change: {change:+.1f}% | Volume Ratio: {vol_ratio:.1f}x",
+                f"${symbol} is currently trading at ${price:.4f} with {change:+.1f}% in the last 24 hours and volume at {vol_ratio:.1f}x the baseline.",
+                f"{analysis.get('reason', 'The momentum is still in favor of the current trend.')}",
                 "",
-                f"{'🎯 Key support forming near current levels - watch for continuation.' if change > 0 else '⚠️ Buyers need to step in soon to defend this zone.'}",
-                f"{'💎 Smart money often accumulates during moves like this.' if vol_ratio > 1.5 else '⏳ Patience - let the setup develop before acting.'}",
+                f"For those who missed the earlier signal - you can still participate. Just be careful during pullbacks and manage your risk properly.",
+                f"So long as the structure remains {'bullish' if change >= 0 else 'intact'}, these targets remain valid.",
                 "",
-                f"Keep {symbol} on your radar today {'traders' if abs_change > 3 else 'everyone'}!",
-                f"#{symbol} #BinanceSquare #CryptoSignals",
+                f"{'Congratulations to everyone who caught this move early!' if abs_change > 3 else 'Patience is key in these market conditions.'}",
+                "",
+                f"\U0001f4a1 **Pro Tip:** {'Scale in gradually, do not go all-in at once. Use limit orders near the entry zone.' if vol_ratio > 1.5 else 'Wait for a pullback to the support zone before entering. Patience pays in trading.'}",
+                f"\u23f0 {now_str}",
+                f"#{symbol} #CryptoAnalysis #TradingSignals",
             ]
 
         elif template_id == 1:
             # Educational / Market Update style
-            direction_emoji = "📈" if change >= 0 else "📉"
             lines = [
-                f"{direction_emoji} Quick ${symbol} Market Update - {change:+.1f}% in 24h!",
+                f"Quick ${symbol} Market Update for today,",
                 "",
-                f"📊 Price: ${price:.4f} | 24h Change: {change:+.1f}%",
-                f"📋 Volume is running at {vol_ratio:.1f}x the average, which tells us there is {'strong 🔴' if vol_ratio > 1.5 else 'moderate'} interest at these levels.",
+                f"Price: ${price:.4f} | 24h Change: {change:+.1f}%",
+                f"Volume is running at {vol_ratio:.1f}x the average, which tells us there is {'strong' if vol_ratio > 1.5 else 'moderate'} interest at these levels.",
                 "",
                 f"{analysis.get('reason', 'Price is showing interesting movement.')}",
                 "",
-                f"🟢 On the upside: {analysis.get('bull_case', 'Structure remains positive.')}",
-                f"🔴 The risk to consider: {analysis.get('risk', 'Always manage your position size.')}",
+                f"On the upside: {analysis.get('bull_case', 'Structure remains positive.')}",
+                f"The risk to consider: {analysis.get('risk', 'Always manage your position size.')}",
                 "",
-                f"📍 Key levels to watch:",
-                f"  📊 Price: ${price:.4f}",
-                f"  📈 Volume: {vol_ratio:.1f}x normal",
-                f"  💰 Market Cap: ${market_cap:,.0f}",
+                f"Key levels to watch:",
+                f"  Entry Zone: ${setup.get('entry', '?')}",
+                f"  Target 1: ${setup.get('target1', '?')}",
+                f"  Target 2: ${setup.get('target2', '?')}",
+                f"  Stop: ${setup.get('stop', '?')}",
                 "",
-                f"{'✅ The volume confirms the move - worth keeping on radar.' if vol_ratio > 1.5 else '⏳ Let the market prove itself before committing.'}",
+                f"{'The volume confirms the move - worth keeping on radar.' if vol_ratio > 1.5 else 'Let the market prove itself before committing.'}",
                 "",
-                f"💡 **Key Insight:** {'Smart money moves during high volume - watch for the trend to confirm.' if abs_change > 5 else 'Patience and discipline beat emotion in trading.'}",
-                f"⏰ {now_str}",
-                f"#{symbol} #MarketUpdate #BinanceSquare",
+                f"\U0001f4a1 **Pro Tip:** {'Use limit orders instead of market orders for better entry pricing. Tighten your stop as price approaches target 1.' if abs_change > 5 else 'Position size matters more than entry price. Never risk more than 2% on a single trade.'}",
+                f"\u23f0 {now_str}",
+                f"#{symbol} #CryptoMarket #TradeSetup",
             ]
 
         elif template_id == 2:
@@ -1537,6 +1623,8 @@ class PostPublisher:
     def __init__(self, config: Config = CONFIG):
         self.config = config
         self.db = Database(config.database_path)
+        self.image_engine = ImageIntelligenceEngine(config)
+        self.image_uploader = ImageUploader(config)
 
     def publish(self, coin: Dict[str, Any], content: str) -> bool:
         # Check if this is a draft template (Gemini failed) - don't publish low quality
@@ -1552,12 +1640,16 @@ class PostPublisher:
         if self.config.dry_run:
             LOGGER.info("[DRY-RUN] Would publish post for %s", coin.get("symbol"))
             self._save_locally(coin, content, share_link="[DRY-RUN]")
+            self._generate_post_image(coin)
             try:
                 self.db.save_post({"content": content, "coin_symbol": coin.get("symbol", "")})
             except Exception as e:
                 LOGGER.warning("Could not save post to DB: %s", e)
             return True
 
+        # Generate and upload image before posting
+        self._generate_post_image(coin)
+        
         share_link = self._try_square_api(coin, content)
         if share_link:
             LOGGER.info("\U0001f4e1 Published successfully with link: %s", share_link)
@@ -1573,76 +1665,52 @@ class PostPublisher:
         return True
 
     def _try_square_api(self, coin: Dict[str, Any], content: str) -> str:
-        """Publish to Binance Square via Node.js post-text.mjs script."""
+        """Publish to Binance Square via official Creator Center API."""
         square_key = self.config.square_api_key
         if not square_key:
             LOGGER.warning("No SQUARE_API_KEY set, saving locally")
             return ""
 
-        import subprocess, shlex, os
+        payload = {
+            "contentType": 1,
+            "bodyTextOnly": content,
+        }
         
-        script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "post-text.mjs")
-        if not os.path.exists(script_path):
-            LOGGER.warning("Node.js script not found at %s, falling back to direct API", script_path)
-            return self._try_square_api_direct(coin, content)
-
-        env = os.environ.copy()
-        env["BINANCE_SQUARE_OPENAPI_KEY"] = square_key
-
-        try:
-            result = subprocess.run(
-                ["node", script_path, "--text", content],
-                capture_output=True, text=True, timeout=30,
-                env=env
-            )
-
-            if result.returncode == 0 and result.stdout.strip():
-                data = json.loads(result.stdout)
-                if data.get("success"):
-                    share_link = data.get("shareLink", "")
-                    post_id = data.get("postId", "unknown")
-                    LOGGER.info("Published via Node.js! ID: %s Link: %s", post_id, share_link)
-                    return share_link
-                else:
-                    LOGGER.warning("Node.js script error: %s", data.get("message", data.get("error", "unknown")))
-                    return ""
-            else:
-                stderr = result.stderr.strip()
-                stdout = result.stdout.strip()
-                LOGGER.warning("Node.js script failed (rc=%d): %s | %s", result.returncode, stdout[:300], stderr[:200])
-                return ""
-        except subprocess.TimeoutExpired:
-            LOGGER.warning("Node.js script timed out")
-            return ""
-        except Exception as exc:
-            LOGGER.warning("Node.js script error: %s", exc)
-            return ""
-
-    def _try_square_api_direct(self, coin: Dict[str, Any], content: str) -> str:
-        """Fallback: Direct Square API call if Node.js script is unavailable."""
-        square_key = self.config.square_api_key
-        payload = {"contentType": 1, "bodyTextOnly": content}
+        # Add image URL if available (verified or not - Binance handles gracefully)
+        if isinstance(coin, dict):
+            image_url = coin.get("_image_url", "")
+            if image_url:
+                payload["contentType"] = 2
+                payload["images"] = [image_url]
+                verified = coin.get("_image_verified", False)
+                LOGGER.info("Including image in Square post (verified=%s): %s", verified, image_url)
         headers = {
             "X-Square-OpenAPI-Key": square_key,
             "Content-Type": "application/json",
             "clienttype": "binanceSkill",
         }
+
         url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
+
         try:
             data_bytes = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=self.config.http_timeout_seconds) as resp:
                 resp_body = resp.read().decode("utf-8", errors="replace")
+
+            LOGGER.info("Square API response: HTTP %d %s", resp.status, resp_body[:300])
             data = json.loads(resp_body)
+
             if data.get("code") == "000000":
+                post_id = data.get("data", {}).get("id", "unknown")
                 share_link = data.get("data", {}).get("shareLink", "")
-                LOGGER.info("Published via direct API! Link: %s", share_link)
+                LOGGER.info("Published to Square! ID: %s Link: %s", post_id, share_link)
                 return share_link
             else:
-                LOGGER.warning("Direct API error [%s]: %s", data.get("code"), data.get("message"))
+                LOGGER.warning("Square API error [%s]: %s", data.get("code"), data.get("message"))
                 return ""
         except Exception as exc:
-            LOGGER.warning("Direct API failed: %s", exc)
+            LOGGER.warning("Square API request failed: %s", exc)
             return ""
 
     def _save_locally(self, coin: Dict[str, Any], content: str, share_link: str = None) -> None:
@@ -1663,8 +1731,423 @@ class PostPublisher:
         except Exception as e:
             LOGGER.error("Could not save locally: %s", e)
 
+    def _generate_post_image(self, coin: Dict[str, Any]) -> None:
+        """Generate professional trading image for a post."""
+        try:
+            v5_data = coin.get("_v5", {})
+            if not v5_data:
+                v5_data = None
+            
+            analysis_data = coin.get("_analysis", {})
+            if not analysis_data:
+                analysis_data = self._build_analysis_for_image(coin)
+            
+            setup_data = coin.get("_setup", {})
+            if not setup_data:
+                from main import TradeSetup
+                setup_data = TradeSetup().build(coin)
+            
+            # Generate image
+            img_path = self.image_engine.generate(coin, analysis_data, setup_data, v5_data)
+            
+            # Try to upload image and get public URL
+            if img_path:
+                img_url, img_verified = self.image_uploader.upload(img_path)
+                if img_url:
+                    coin["_image_url"] = img_url
+                    coin["_image_verified"] = img_verified
+                    if img_verified:
+                        LOGGER.info("Image URL verified for post: %s", img_url)
+                    else:
+                        LOGGER.info("Image URL (unverified): %s", img_url)
+                else:
+                    coin["_image_url"] = ""
+                    coin["_image_verified"] = False
+        except Exception as e:
+            LOGGER.debug("Image generation skipped: %s", e)
 
-def run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols) -> bool:
+    def _build_analysis_for_image(self, coin: Dict[str, Any]) -> Dict[str, Any]:
+        """Build simple analysis dict for image generation when full analysis unavailable."""
+        change = float(coin.get("change_24h", 0) or 0)
+        return {
+            "reason": f"{coin.get('symbol')} showing {change:+.1f}% move with notable volume.",
+            "bull_case": "Bullish structure with momentum.",
+            "bear_case": "Standard market risks apply.",
+            "risk": "Use proper position sizing.",
+            "category": coin.get("narrative", ""),
+            "narrative": coin.get("narrative", ""),
+        }
+
+
+
+class ScoringEngineV5:
+    """BINANCE SQUARE CREATOR AGENT V5 ELITE
+    Reward-Optimized Scoring Engine (10/10)
+    
+    Selects the coin with highest probability of:
+    - Binance Square visibility
+    - Engagement & ranking
+    - Creator rewards
+    
+    Final Score = Market(10) + Volume(10) + Technical(10) + Momentum(5) 
+                + Narrative(15) + Announcement(15) + HotSearch(15) 
+                + CrowdInterest(5) + CreatorOpportunity(10) + EngagementPrediction(5) 
+                - RiskPenalty(0-20)
+    
+    Max = 100
+    """
+    
+    # Announcement score mapping
+    ANNOUNCEMENT_SCORES = {
+        "new_listing": 15,
+        "launchpool": 14,
+        "megadrop": 14,
+        "airdrop": 13,
+        "delisting": 10,
+        "news": 5,
+    }
+    
+    # Narrative score mapping
+    NARRATIVE_SCORES = {
+        "AI": 15, "AGENT": 15,
+        "MEME": 13,
+        "L1": 12, "L2": 10,
+        "DeFi": 11, "RWA": 12,
+        "GAMING": 9, "DEPIN": 10,
+        "INFRA": 8, "EXCHANGE": 7,
+        "BTC": 12, "ETF": 13,
+        "AIRDROP": 14, "LISTING": 15,
+    }
+    
+    # Emergency override event types (always enter top candidates)
+    EMERGENCY_EVENTS = {"new_listing", "launchpool", "megadrop", "airdrop"}
+    
+    def __init__(self, research: "ResearchEngine", hot_search: "HotSearchEngine" = None):
+        self.research = research
+        self.hot_search = hot_search
+    
+    def compute(
+        self,
+        coin: Dict[str, Any],
+        announcement: Optional[Dict[str, Any]] = None,
+        posted_hours_ago: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Compute full V5 score for a single coin candidate."""
+        result = {
+            "market_score": 0.0,
+            "volume_score": 0.0,
+            "technical_score": 0.0,
+            "momentum_score": 0.0,
+            "narrative_score": 0.0,
+            "announcement_score": 0.0,
+            "hot_search_score": 0.0,
+            "crowd_interest_score": 0.0,
+            "creator_opportunity_score": 0.0,
+            "engagement_prediction_score": 0.0,
+            "risk_penalty": 0.0,
+            "final_score": 0.0,
+            "emergency_override": False,
+        }
+        
+        symbol = coin.get("symbol", "")
+        price = float(coin.get("price", 0) or 0)
+        change = float(coin.get("change_24h", 0) or 0)
+        volume_ratio = float(coin.get("volume_ratio", 1) or 1)
+        volume_24h = float(coin.get("volume_24h", 0) or 0)
+        market_cap = float(coin.get("market_cap", 0) or 0)
+        abs_change = abs(change)
+        history = coin.get("history", [])
+        
+        # Detect narrative
+        category, narrative_str = self.research._detect_narrative(symbol)
+        
+        # Run technical analysis
+        tech = self.research._technical_analysis(history, price, change)
+        
+        # --------------------------------------------------
+        # 1. MARKET SCORE (0-10)
+        # --------------------------------------------------
+        # Change contribution (0-7)
+        if abs_change >= 15:
+            market_score = 10.0
+        elif abs_change >= 10:
+            market_score = 8.0
+        elif abs_change >= 8:
+            market_score = 7.0
+        elif abs_change >= 5:
+            market_score = 5.0
+        elif abs_change >= 3:
+            market_score = 4.0
+        elif abs_change >= 1.5:
+            market_score = 2.0
+        else:
+            market_score = 0.0
+        
+        # Volatility bonus (0-3 extra)
+        if tech.get("volatility") == "high":
+            market_score = min(10.0, market_score + 2.0)
+        elif tech.get("volatility") == "low":
+            market_score = max(0.0, market_score - 1.0)
+        
+        result["market_score"] = round(market_score, 1)
+        
+        # --------------------------------------------------
+        # 2. VOLUME SCORE (0-10)
+        # --------------------------------------------------
+        if volume_ratio >= 3.0:
+            volume_score = 10.0
+        elif volume_ratio >= 2.5:
+            volume_score = 9.0
+        elif volume_ratio >= 2.0:
+            volume_score = 7.0
+        elif volume_ratio >= 1.5:
+            volume_score = 5.0
+        elif volume_ratio >= 1.0:
+            volume_score = 3.0
+        else:
+            volume_score = 1.0
+        
+        # Liquidity bonus (high market cap = more liquid)
+        if market_cap > 1e9:
+            volume_score = min(10.0, volume_score + 1.0)
+        
+        result["volume_score"] = round(volume_score, 1)
+        
+        # --------------------------------------------------
+        # 3. TECHNICAL SCORE (0-10)
+        # --------------------------------------------------
+        tech_score = 5.0  # Default neutral
+        pattern = tech.get("pattern", "")
+        trend = tech.get("trend", "neutral")
+        strength = tech.get("strength", 0.5)
+        
+        if trend == "bullish":
+            tech_score = 5.0 + strength * 5.0
+        elif trend == "bearish":
+            tech_score = 5.0 - strength * 3.0
+        
+        # Pattern bonuses
+        if "Breakout" in pattern:
+            tech_score = min(10.0, tech_score + 2.0)
+        elif "selloff" in pattern.lower():
+            tech_score = max(0.0, tech_score - 1.0)
+        elif "Consolidation" in pattern:
+            tech_score = max(1.0, tech_score - 2.0)
+        elif "uptrend" in pattern.lower() or "rally" in pattern.lower():
+            tech_score = min(10.0, tech_score + 1.5)
+        
+        result["technical_score"] = round(tech_score, 1)
+        
+        # --------------------------------------------------
+        # 4. MOMENTUM SCORE (0-5)
+        # --------------------------------------------------
+        momentum_score = 0.0
+        
+        # Breakout detection
+        if "Breakout" in pattern:
+            momentum_score += 2.0
+        if "buyers" in str(tech.get("trend", "")).lower() or "bull" in str(tech.get("trend", "")).lower():
+            momentum_score += 1.0
+        
+        # Change-based momentum
+        if abs_change > 8:
+            momentum_score += 1.5
+        elif abs_change > 5:
+            momentum_score += 1.0
+        elif abs_change > 3:
+            momentum_score += 0.5
+        
+        # Volume confirmation
+        if volume_ratio > 2.0 and abs_change > 3:
+            momentum_score += 1.0
+        
+        # Reversal potential
+        if trend == "bearish" and abs_change > 5 and volume_ratio > 2.0:
+            momentum_score += 1.5  # Potential reversal
+        
+        result["momentum_score"] = round(min(5.0, momentum_score), 1)
+        
+        # --------------------------------------------------
+        # 5. NARRATIVE SCORE (0-15)
+        # --------------------------------------------------
+        narrative_score = 0.0
+        if category and category in self.NARRATIVE_SCORES:
+            narrative_score = self.NARRATIVE_SCORES[category]
+        else:
+            narrative_score = 3.0 if category else 1.0
+        
+        # Boost if announcement matches narrative
+        if announcement and category:
+            ann_type = announcement.get("type", "")
+            if ann_type in ("new_listing", "airdrop") and category in ("AI", "MEME", "L1"):
+                narrative_score = min(15.0, narrative_score + 2.0)
+        
+        result["narrative_score"] = round(narrative_score, 1)
+        
+        # --------------------------------------------------
+        # 6. ANNOUNCEMENT SCORE (0-15)
+        # --------------------------------------------------
+        ann_score = 0.0
+        ann_type = ""
+        if announcement:
+            ann_type = announcement.get("type", "news")
+            ann_score = self.ANNOUNCEMENT_SCORES.get(ann_type, 5.0)
+            
+            # Flag emergency override
+            if ann_type in self.EMERGENCY_EVENTS:
+                result["emergency_override"] = True
+        elif coin.get("announcement_boost"):
+            raw_type = coin.get("announcement_type", "news")
+            ann_score = self.ANNOUNCEMENT_SCORES.get(raw_type, 5.0)
+            if raw_type in self.EMERGENCY_EVENTS:
+                result["emergency_override"] = True
+        
+        result["announcement_score"] = round(ann_score, 1)
+        
+        # --------------------------------------------------
+        # 7. HOT SEARCH SCORE (0-15)
+        # --------------------------------------------------
+        hs_score = 0.0
+        if self.hot_search is not None:
+            try:
+                hs_raw = self.hot_search.get_hot_search_score(symbol)
+                # Map 0-10 to 0-15
+                hs_score = hs_raw * 1.5
+            except Exception:
+                pass
+        else:
+            # Fallback: narrative-based estimation
+            if category and category in self.NARRATIVE_SCORES:
+                hs_score = self.NARRATIVE_SCORES[category] * 0.7
+        
+        result["hot_search_score"] = round(hs_score, 1)
+        
+        # --------------------------------------------------
+        # 8. CROWD INTEREST SCORE (0-5)
+        # --------------------------------------------------
+        crowd_score = 0.0
+        
+        # Derived from hot search + volume + narrative
+        if hs_score > 10:
+            crowd_score += 2.0
+        if volume_ratio > 2.0:
+            crowd_score += 1.0
+        if abs_change > 5:
+            crowd_score += 1.0
+        if category in ("AI", "MEME", "L1"):
+            crowd_score += 1.0
+        if coin.get("announcement_boost"):
+            crowd_score += 1.0
+        
+        result["crowd_interest_score"] = round(min(5.0, crowd_score), 1)
+        
+        # --------------------------------------------------
+        # 9. CREATOR OPPORTUNITY SCORE (0-10)
+        # --------------------------------------------------
+        opp_score = 0.0
+        
+        # Narrative strength (0-3)
+        if category:
+            opp_score += min(3.0, self.NARRATIVE_SCORES.get(category, 1) / 5.0)
+        
+        # Search/trend potential (0-3)
+        if hs_score > 7:
+            opp_score += 3.0
+        elif hs_score > 3:
+            opp_score += 2.0
+        else:
+            opp_score += 0.5
+        
+        # Visibility potential (0-2)
+        if market_cap > 1e9:
+            opp_score += 1.0
+        if volume_ratio > 1.5:
+            opp_score += 1.0
+        
+        # Discussion potential (0-2)
+        if abs_change > 5:
+            opp_score += 1.0
+        if announcement:
+            opp_score += 1.0
+        
+        result["creator_opportunity_score"] = round(min(10.0, opp_score), 1)
+        
+        # --------------------------------------------------
+        # 10. ENGAGEMENT PREDICTION SCORE (0-5)
+        # --------------------------------------------------
+        engage_score = 0.0
+        
+        # Predicted engagement based on:
+        # - Change magnitude (people engage with big moves)
+        engage_score += min(1.5, abs_change / 10.0)
+        
+        # - Volume (active discussion)
+        engage_score += min(1.0, volume_ratio / 3.0)
+        
+        # - Narrative (trending topics get more engagement)
+        if category and category in self.NARRATIVE_SCORES:
+            engage_score += min(1.5, self.NARRATIVE_SCORES[category] / 10.0)
+        
+        # - Hot search (already searched = engaged)
+        engage_score += min(1.0, hs_score / 15.0)
+        
+        result["engagement_prediction_score"] = round(min(5.0, engage_score), 1)
+        
+        # --------------------------------------------------
+        # RISK PENALTY (0 to -20)
+        # --------------------------------------------------
+        risk_penalty = 0.0
+        
+        if price < 0.1:
+            risk_penalty += 4.0
+        elif price < 1.0:
+            risk_penalty += 2.0
+        
+        if market_cap > 0:
+            if market_cap < 10_000_000:
+                risk_penalty += 5.0
+            elif market_cap < 50_000_000:
+                risk_penalty += 3.0
+            elif market_cap < 200_000_000:
+                risk_penalty += 1.0
+        
+        if volume_ratio < 0.8:
+            risk_penalty += 3.0
+        
+        if abs_change > 20:
+            risk_penalty += 3.0
+        elif abs_change > 12:
+            risk_penalty += 1.0
+        
+        if category == "MEME" and market_cap < 100_000_000:
+            risk_penalty += 2.0
+        
+        result["risk_penalty"] = round(min(20.0, risk_penalty), 1)
+        
+        # --------------------------------------------------
+        # FINAL SCORE CALCULATION
+        # --------------------------------------------------
+        final = (
+            result["market_score"] * 1.0            # 10%
+            + result["volume_score"] * 1.0          # 10%
+            + result["technical_score"] * 1.0       # 10%
+            + result["momentum_score"] * 1.0        # 5%  (max 5)
+            + result["narrative_score"] * 1.0       # 15% (max 15)
+            + result["announcement_score"] * 1.0    # 15% (max 15)
+            + result["hot_search_score"] * 1.0      # 15% (max 15)
+            + result["crowd_interest_score"] * 1.0  # 5%  (max 5)
+            + result["creator_opportunity_score"] * 1.0  # 10% (max 10)
+            + result["engagement_prediction_score"] * 1.0  # 5% (max 5)
+            - result["risk_penalty"]
+        )
+        
+        result["final_score"] = round(max(0.0, final), 1)
+        
+        return result
+
+
+
+def run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols, hot_search_engine=None) -> bool:
     """Run one iteration of post generation and publishing."""
     # Fetch Binance announcements
     announcements = []
@@ -1690,13 +2173,6 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
     for coin in volume_spikes[:4]:
         if coin.get("symbol") not in [c.get("symbol") for c in all_candidates]:
             all_candidates.append(coin)
-
-    # Detect narratives for all candidates
-    research_temp = ResearchEngine()
-    for coin in all_candidates:
-        category, narrative = research_temp._detect_narrative(coin.get("symbol", ""))
-        coin["_narrative"] = category
-        coin["_narrative_label"] = narrative
 
     # Announcement priority boost
     for a in announcements:
@@ -1749,93 +2225,83 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
         LOGGER.info("No candidates found.")
         return False
 
-    # Score candidates using Advanced Scoring Engine V4
+    # --------------------------------------------------
+    # V5 ELITE SCORING ENGINE
+    # --------------------------------------------------
+    # Get posted hours dict for precision penalty
+    posted_hours_data = {}
+    try:
+        if hasattr(publisher, 'db') and publisher.db is not None:
+            posted_hours_data = publisher.db.get_posted_hours_dict(hours=72)
+    except Exception:
+        posted_hours_data = {}
+    
+    # Initialize V5 scoring engine
+    v5_engine = ScoringEngineV5(research, hot_search_engine)
+    
+    # Calculate V5 scores for all candidates
+    scored_candidates = []
     for coin in unique_candidates:
-        change = float(coin.get("change_24h", 0) or 0)
-        abs_change = abs(change)
-        vol_ratio = float(coin.get("volume_ratio", 1) or 1)
-        market_cap = float(coin.get("market_cap", 0) or 0)
-        price = float(coin.get("price", 0) or 0)
-        
-        # Market Score: price action strength
-        market_score = max(-10, min(10, change)) * 0.5
-        
-        # Volume Score: higher volume = more conviction
-        capped_vol = min(vol_ratio, 5.0)
-        volume_score = capped_vol * 2.0
-        
-        # Momentum Score: combination of change and volume
-        momentum_score = (abs_change * 0.3 + capped_vol * 1.5)
-        
-        # Narrative Score: certain categories get bonus
-        cat = coin.get("_narrative", "")
-        narrative_bonus = {
-            "AI": 3.0, "MEME": 2.5, "DePIN": 2.0, "RWA": 2.5,
-            "BTC Ecosystem": 2.0, "L1": 1.5, "Gaming": 1.5,
-            "DeFi": 1.0, "L2": 1.0, "Exchange": 0.5,
-        }.get(cat, 0)
-        narrative_score = narrative_bonus
-        
-        # Announcement Score: big boost for official news
-        announcement_score = 0
-        if coin.get("announcement_boost"):
-            if coin.get("announcement_type") == "new_listing":
-                announcement_score = 15
-            elif coin.get("announcement_type") == "airdrop":
-                announcement_score = 10
-            elif coin.get("announcement_type") == "delisting":
-                announcement_score = 8
-            else:
-                announcement_score = 5
-        
-        # Risk Penalty: lower score for risky coins
-        risk_penalty = 0
-        if market_cap > 0 and market_cap < 10_000_000:
-            risk_penalty += 3
-        if vol_ratio < 0.5:
-            risk_penalty += 2
-        if price < 0.1:
-            risk_penalty += 2
-        if abs_change > 30:
-            risk_penalty += 2  # Too volatile
-        
-        # Final Score
-        score = (market_score * 0.25 
-                 + volume_score * 0.20 
-                 + momentum_score * 0.15 
-                 + narrative_score * 0.15 
-                 + announcement_score * 0.25 
-                 - risk_penalty * 0.10)
-        
-        # Cap extreme values
-        score = max(0, min(30, score))
-        
-        # Strong penalty for recently posted coins
         sym = coin.get("symbol", "")
-        if sym in posted_symbols:
-            score *= 0.1
-        # Diversity noise
-        score += random.uniform(-1.0, 1.0)
-        coin["_score"] = score
-
+        
+        # Build announcement data if present
+        ann_data = None
+        if coin.get("announcement_boost"):
+            ann_data = {
+                "type": coin.get("announcement_type", "news"),
+                "title": coin.get("announcement_title", ""),
+            }
+        
+        # Get hours ago if recently posted
+        hours_ago = posted_hours_data.get(sym.upper(), None)
+        
+        # Compute V5 score
+        score_result = v5_engine.compute(coin, announcement=ann_data, posted_hours_ago=hours_ago)
+        
+        # Apply post repetition penalty
+        final = score_result["final_score"]
+        if hours_ago is not None:
+            if hours_ago < 24:
+                final *= 0.2
+                score_result["repetition_penalty"] = "CRITICAL (<24h)"
+            elif hours_ago < 48:
+                final *= 0.5
+                score_result["repetition_penalty"] = "HIGH (<48h)"
+            elif hours_ago < 72:
+                final *= 0.7
+                score_result["repetition_penalty"] = "MEDIUM (<72h)"
+            else:
+                score_result["repetition_penalty"] = "NONE"
+        else:
+            score_result["repetition_penalty"] = "NONE"
+        
+        score_result["final_score"] = round(final, 1)
+        coin["_score"] = final
+        coin["_v5"] = score_result
+        coin["hot_search_score"] = score_result["hot_search_score"]
+        scored_candidates.append((coin, score_result))
+    
+    # Sort by final score
     unique_candidates.sort(key=lambda c: c.get("_score", 0), reverse=True)
-    # Pick from top 3 with weighted randomness for diversity
-    top_n = min(3, len(unique_candidates))
-    weights = [max(0.1, unique_candidates[i].get("_score", 0)) for i in range(top_n)]
-    total_w = sum(weights)
-    if total_w > 0:
-        weights = [w / total_w for w in weights]
-        top_idx = random.choices(range(top_n), weights=weights, k=1)[0]
-    else:
-        top_idx = 0
-    top_pick = unique_candidates[top_idx]
-    # Extra diversity: if top pick was recently posted, try others
-    if top_pick.get("symbol", "") in posted_symbols:
-        for candidate in unique_candidates[:5]:
-            if candidate.get("symbol", "") not in posted_symbols:
-                top_pick = candidate
-                break
-
+    top_pick = unique_candidates[0]
+    
+    # Log V5 score breakdown for top pick
+    v5 = top_pick.get("_v5", {})
+    LOGGER.info("V5 SCORE: %.1f/100 | Mkt=%.1f Vol=%.1f Tech=%.1f Mom=%.1f Narr=%.1f Ann=%.1f HS=%.1f Crowd=%.1f Opp=%.1f Eng=%.1f Risk=%.1f %s",
+                top_pick.get("_score", 0),
+                v5.get("market_score", 0),
+                v5.get("volume_score", 0),
+                v5.get("technical_score", 0),
+                v5.get("momentum_score", 0),
+                v5.get("narrative_score", 0),
+                v5.get("announcement_score", 0),
+                v5.get("hot_search_score", 0),
+                v5.get("crowd_interest_score", 0),
+                v5.get("creator_opportunity_score", 0),
+                v5.get("engagement_prediction_score", 0),
+                v5.get("risk_penalty", 0),
+                v5.get("repetition_penalty", ""))
+    
     LOGGER.info("Selected %s - change: %.1f%%, vol: %.1fx (score: %.1f)%s",
                 top_pick.get("symbol"),
                 float(top_pick.get("change_24h", 0) or 0),
@@ -1851,22 +2317,31 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
         }
     analysis = research.analyze(top_pick, announcement=ann_data)
     setup = trade_setup.build(top_pick)
+    
+    # Store analysis and setup on coin for image generation
+    top_pick["_analysis"] = analysis if isinstance(analysis, dict) else {}
+    top_pick["_setup"] = setup
+
+    # Get hot search context
+    hot_search_str = None
+    if hot_search_engine is not None:
+        try:
+            hs_narrative = hot_search_engine.get_narrative_summary()
+            if hs_narrative:
+                sym = top_pick.get("symbol", "")
+                hs_score = top_pick.get("hot_search_score", 0)
+                if hs_score > 0:
+                    hot_search_str = f"${sym} is hot on Binance (score: {hs_score:.0f}/10). Current narratives: {hs_narrative}"
+                else:
+                    hot_search_str = f"Current trending narratives: {hs_narrative}"
+                LOGGER.info("Hot search context: %s", hot_search_str[:120])
+        except Exception as e:
+            LOGGER.debug("Hot search context unavailable: %s", e)
 
     LOGGER.info("Generating post for %s...", top_pick.get("symbol"))
-    content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
+    content = generator.generate(analysis=analysis, setup=setup, coin=top_pick, hot_search=hot_search_str)
 
-    # Quality check
-    quality_ok = True
-    if quality_ok:
-        publisher.publish(top_pick, content)
-    # Track the posted symbol for cross-run persistence
-    sym = top_pick.get("symbol", "")
-    if sym and not content.startswith("[DRAFT_TEMPLATE]"):
-        try:
-            tracker = PostedSymbolsTracker()
-            tracker.mark_posted(sym)
-        except Exception as e:
-            LOGGER.warning("Could not track posted symbol: %s", e)
+    publisher.publish(top_pick, content)
     LOGGER.info("Done - post generated for %s", top_pick.get("symbol"))
     return True
 
@@ -1879,43 +2354,18 @@ def main_loop() -> None:
     interval = config.post_interval
     max_iter = config.max_iterations
     
-    # In GHA: 2 iterations per run (2h apart, safe within 6h limit)
-    # This handles cases where GHA cron doesn't fire reliably
-    if os.getenv("GITHUB_ACTIONS") and max_iter < 2:
-        LOGGER.info("GHA: max_iterations=%d, using 2 iterations per run for reliability", max_iter)
-        max_iter = 2
-    
-    # In GHA, simple overlap prevention: check if posted_symbols.json was updated in last 2h
-    if os.getenv("GITHUB_ACTIONS"):
-        try:
-            posted_file = Path("posted_symbols.json")
-            if posted_file.exists():
-                mtime = datetime.fromtimestamp(posted_file.stat().st_mtime, tz=timezone.utc)
-                age_hours = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
-                if age_hours < 2:
-                    # Check how many symbols were posted - if >= 1, skip to avoid overlap
-                    try:
-                        posted_data = json.loads(posted_file.read_text() or "{}")
-                        if len(posted_data) > 0:
-                            LOGGER.info("posted_symbols.json updated %.1fh ago with %d symbols - another run already active, skipping", age_hours, len(posted_data))
-                            return
-                    except (json.JSONDecodeError, OSError):
-                        pass
-        except Exception as exc:
-            LOGGER.warning("Overlap check failed: %s", exc)
-    
-
     scanner = MarketScanner(config)
     announcement_engine = BinanceAnnouncementEngine(config)
+    hot_search_engine = HotSearchEngine(config)
     research = ResearchEngine()
     trade_setup = TradeSetup()
     generator = GeminiGenerator(config)
     publisher_db = Database(config.database_path)
     publisher = PostPublisher(config)
     publisher.db = publisher_db
-    tracker = PostedSymbolsTracker()
     
     iteration = 0
+    posted_symbols = set()
     
     LOGGER.info("=" * 60)
     LOGGER.info("Binance Square Auto Poster started")
@@ -1930,18 +2380,12 @@ def main_loop() -> None:
         LOGGER.info("--- Iteration %d ---", iteration)
         
         try:
-            db_posted = publisher_db.get_posted_symbols(hours=48)
-            tracker_posted = tracker.get_posted_symbols(hours=48)
-            posted_symbols = db_posted | tracker_posted
+            posted_symbols = publisher_db.get_posted_symbols(hours=48)
         except Exception:
-            try:
-                posted_symbols = tracker.get_posted_symbols(hours=48)
-            except Exception:
-                posted_symbols = set()
+            posted_symbols = set()
         
-        success = False
         try:
-            success = run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols)
+            run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols, hot_search_engine)
         except Exception as e:
             LOGGER.error("Iteration %d failed: %s", iteration, e)
             import traceback
@@ -1958,15 +2402,6 @@ def main_loop() -> None:
             time.sleep(sleep_chunk)
             slept += sleep_chunk
 
-    # All iterations complete - just log and exit
-    if os.getenv("GITHUB_ACTIONS"):
-        LOGGER.info("Run complete. Next run will be triggered by cron or manual dispatch.")
-
-
-
-
-
-
 
 def main() -> None:
     """Single run mode - for cron/scheduled usage."""
@@ -1975,38 +2410,15 @@ def main() -> None:
     
     scanner = MarketScanner(config)
     announcement_engine = BinanceAnnouncementEngine(config)
+    hot_search_engine = HotSearchEngine(config)
     research = ResearchEngine()
     trade_setup = TradeSetup()
     generator = GeminiGenerator(config)
     publisher_db = Database(config.database_path)
     publisher = PostPublisher(config)
     publisher.db = publisher_db
-    tracker = PostedSymbolsTracker()
     
-    db_posted = publisher_db.get_posted_symbols(hours=48)
-    tracker_posted = tracker.get_posted_symbols(hours=48)
-
-    # In GHA, simple overlap prevention: check if posted_symbols.json was updated in last 2h
-    if os.getenv("GITHUB_ACTIONS"):
-        try:
-            posted_file = Path("posted_symbols.json")
-            if posted_file.exists():
-                mtime = datetime.fromtimestamp(posted_file.stat().st_mtime, tz=timezone.utc)
-                age_hours = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
-                if age_hours < 2:
-                    # Check how many symbols were posted - if >= 1, skip to avoid overlap
-                    try:
-                        posted_data = json.loads(posted_file.read_text() or "{}")
-                        if len(posted_data) > 0:
-                            LOGGER.info("posted_symbols.json updated %.1fh ago with %d symbols - another run already active, skipping", age_hours, len(posted_data))
-                            return
-                    except (json.JSONDecodeError, OSError):
-                        pass
-        except Exception as exc:
-            LOGGER.warning("Overlap check failed: %s", exc)
-    
-
-    posted_symbols = db_posted | tracker_posted
+    posted_symbols = publisher_db.get_posted_symbols(hours=48)
     run_once(config, scanner, announcement_engine, research, trade_setup, generator, publisher, posted_symbols)
 
 
