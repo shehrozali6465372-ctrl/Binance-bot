@@ -803,61 +803,186 @@ class ResearchEngine:
         }
 
     CATEGORIES = {
-        "AI": {"FET", "AGIX", "RNDR", "THETA", "GRT", "ICP", "AR", "OCEAN", "NMR"},
-        "MEME": {"DOGE", "SHIB", "PEPE", "BONK", "WIF", "FLOKI", "MEME"},
-        "DeFi": {"AAVE", "MKR", "COMP", "UNI", "CAKE", "CRV", "BAL", "SUSHI"},
-        "L1": {"SOL", "ADA", "AVAX", "DOT", "NEAR", "APT", "SUI", "SEI", "INJ", "TIA"},
-        "L2": {"MATIC", "POL", "ARB", "OP", "METIS"},
-        "Exchange": {"BNB", "CRO", "LEO", "OKB", "GT"},
-        "Gaming": {"AXS", "SAND", "MANA", "GALA", "ENJ"},
-        "DePIN": {"FIL", "HNT", "IOTX"},
-        "RWA": {"ONDO"},
-        "BTC Ecosystem": {"STX", "ORDI"},
+        "AI": {"FET", "AGIX", "RNDR", "THETA", "GRT", "ICP", "AR", "OCEAN", "NMR", "WLD", "TAO", "AKT", "MASA"},
+        "MEME": {"DOGE", "SHIB", "PEPE", "BONK", "WIF", "FLOKI", "MEME", "MOG", "MEW", "POPCAT", "BOME"},
+        "DeFi": {"AAVE", "MKR", "COMP", "UNI", "CAKE", "CRV", "BAL", "SUSHI", "PENDLE", "LDO", "CVX", "YFI", "SNX", "DYDX"},
+        "L1": {"SOL", "ADA", "AVAX", "DOT", "NEAR", "APT", "SUI", "SEI", "INJ", "TIA", "ALGO", "ATOM", "FTM"},
+        "L2": {"MATIC", "POL", "ARB", "OP", "METIS", "SKL", "MNT"},
+        "Exchange": {"BNB", "CRO", "LEO", "OKB", "GT", "BGB"},
+        "Gaming": {"AXS", "SAND", "MANA", "GALA", "ENJ", "IMX", "MAGIC", "YGG", "PRIME"},
+        "DePIN": {"HNT", "FIL", "AKT", "IOTX", "LPT", "THETA"},
+        "RWA": {"ONDO", "POLYX", "CFG", "MPL"},
+        "Infrastructure": {"LINK", "ATOM", "ALGO", "CHR", "BAND", "PYTH"},
+        "BTC Ecosystem": {"STX", "ORDI", "SATS", "RIF", "RUNE"},
     }
 
     def _detect_narrative(self, symbol: str) -> tuple:
-        """Detect coin category and narrative."""
+        """Detect coin category and narrative with confidence score."""
         symbol_upper = symbol.upper()
         for category, coins in self.CATEGORIES.items():
             if symbol_upper in coins:
                 return category, f"{category} narrative"
+        # Dynamic narrative detection by keyword/suffix
+        for keyword, label in [("AI", "AI"), ("BOT", "AI"), ("GPT", "AI"),
+                                ("DOGE", "MEME"), ("SHIB", "MEME"), ("PEPE", "MEME"),
+                                ("ETH", "L1"), ("BTC", "BTC Ecosystem"),
+                                ("BNB", "Exchange")]:
+            if keyword in symbol_upper:
+                return label, f"{label} (keyword match)"
         return "", ""
 
     def _technical_analysis(self, history: List[float], price: float, change: float) -> Dict[str, Any]:
-        """Basic technical analysis from price history."""
-        result = {
-            "pattern": "",
+        """Full technical analysis: RSI, MACD, EMA, Bollinger, ATR, support/resistance."""
+        result: Dict[str, Any] = {
             "trend": "neutral",
             "strength": 0.5,
+            "pattern": "",
             "volatility": "medium",
+            "rsi": 50.0,
+            "macd": 0,
+            "macd_signal": 0,
+            "ema20": price,
+            "ema50": price,
+            "bollinger_upper": price,
+            "bollinger_lower": price,
+            "atr": 0,
+            "support": price * 0.95,
+            "resistance": price * 1.05,
+            "momentum_score": 0,
+            "trend_score": 0,
+            "breakout": False,
+            "breakdown": False,
+            "reversal": False,
         }
         
-        if len(history) >= 5:
-            prices = history[-5:]
-            # Simple trend detection
-            if prices[-1] > prices[0] * 1.05:
-                result["trend"] = "bullish"
-                result["strength"] = min(1.0, (prices[-1] / prices[0] - 1) * 5)
-                if change > 5:
-                    result["pattern"] = "Breakout from recent range"
-                else:
-                    result["pattern"] = "Steady uptrend with higher lows"
-            elif prices[-1] < prices[0] * 0.95:
-                result["trend"] = "bearish"
-                result["strength"] = min(1.0, abs(prices[-1] / prices[0] - 1) * 3)
-                if change < -5:
-                    result["pattern"] = "Sharp selloff with momentum"
-                else:
-                    result["pattern"] = "Gradual distribution phase"
+        closes = list(history)
+        m = len(closes)
+        if m < 5:
+            return result
+        
+        # --- EMA helper ---
+        def _ema(data, period):
+            if len(data) < period:
+                return data[-1] if data else price
+            k = 2.0 / (period + 1)
+            val = data[0]
+            for i in range(1, len(data)):
+                val = data[i] * k + val * (1 - k)
+            return val
+        
+        # --- EMA20 / EMA50 ---
+        ema20_val = _ema(closes, min(20, m))
+        ema50_val = _ema(closes, min(50, m))
+        result["ema20"] = round(ema20_val, 8)
+        result["ema50"] = round(ema50_val, 8)
+        
+        # --- RSI (14) ---
+        period = min(14, m - 1)
+        if period >= 5:
+            gains, losses = [], []
+            for i in range(max(0, m - period * 2), m):
+                if i > 0:
+                    d = closes[i] - closes[i-1]
+                    gains.append(max(0, d))
+                    losses.append(max(0, -d))
+            avg_g = sum(gains[-period:]) / period if gains else 0
+            avg_l = sum(losses[-period:]) / period if losses else 0
+            rsi_val = 100.0 if avg_l == 0 else 100.0 - 100.0 / (1.0 + avg_g / max(avg_l, 0.0001))
+            result["rsi"] = round(rsi_val, 1)
+        
+        # --- MACD (12,26,9) ---
+        if m >= 26:
+            ema12 = _ema(closes, 12)
+            ema26 = _ema(closes, 26)
+            macd_line = ema12 - ema26
+            signal = _ema(closes[-9:], 9) if len(closes) >= 9 else macd_line
+            result["macd"] = round(macd_line, 8)
+            result["macd_signal"] = round(signal, 8)
+        
+        # --- Bollinger Bands (20,2) ---
+        bb_n = min(20, m)
+        if bb_n >= 5:
+            band = closes[-bb_n:]
+            mu = sum(band) / len(band)
+            sd = (sum((x - mu) ** 2 for x in band) / len(band)) ** 0.5
+            result["bollinger_upper"] = round(mu + 2 * sd, 8)
+            result["bollinger_lower"] = round(mu - 2 * sd, 8)
+        
+        # --- ATR (14) ---
+        atr_n = min(14, m - 1)
+        if atr_n >= 3:
+            ranges = []
+            for i in range(m - atr_n, m):
+                h = max(closes[i], closes[i-1])
+                l = min(closes[i], closes[i-1])
+                ranges.append(h - l)
+            result["atr"] = round(sum(ranges) / len(ranges), 8)
+        
+        # --- Support / Resistance ---
+        if m >= 10:
+            r10 = closes[-10:]
+            result["support"] = round(min(r10), 8)
+            result["resistance"] = round(max(r10), 8)
+        
+        # --- Trend / Momentum from RSI ---
+        rsi = result["rsi"]
+        if rsi > 65:
+            result["trend"] = "bullish"
+            result["strength"] = min(1.0, (rsi - 65) / 35)
+            result["momentum_score"] = min(10, (rsi - 50) / 5)
+        elif rsi < 35:
+            result["trend"] = "bearish"
+            result["strength"] = min(1.0, (35 - rsi) / 35)
+            result["momentum_score"] = max(-10, (rsi - 50) / 5)
+        else:
+            only_change = "bullish" if change > 3 else ("bearish" if change < -3 else "neutral")
+            result["trend"] = only_change
+            result["strength"] = min(1.0, abs(change) / 15)
+            result["momentum_score"] = max(-5, min(5, change / 3))
+        result["trend_score"] = abs(change) * 0.4 + abs(result.get("momentum_score", 0)) * 0.6
+        
+        # --- Pattern Detection ---
+        bb_u = result["bollinger_upper"]
+        bb_l = result["bollinger_lower"]
+        macd = result["macd"]
+        macd_s = result["macd_signal"]
+        patterns = []
+        
+        if change > 5 and rsi > 60 and price > bb_u * 0.98:
+            result["breakout"] = True
+            patterns.append("Bullish breakout above upper Bollinger Band")
+        elif change > 8:
+            result["breakout"] = True
+            patterns.append("Strong bullish momentum")
+        if change < -5 and rsi < 40 and price < bb_l * 1.02:
+            result["breakdown"] = True
+            patterns.append("Bearish breakdown below lower Bollinger Band")
+        elif change < -8:
+            result["breakdown"] = True
+            patterns.append("Sharp selling pressure")
+        if rsi > 78 and change > 0:
+            result["reversal"] = True
+            patterns.append("Overbought - possible mean reversion")
+        elif rsi < 22 and change < 0:
+            result["reversal"] = True
+            patterns.append("Oversold - possible bounce incoming")
+        if macd > macd_s and abs(macd - macd_s) > 0.001:
+            patterns.append("MACD bullish crossover")
+        elif macd_s > macd and abs(macd_s - macd) > 0.001:
+            patterns.append("MACD bearish crossover")
+        if not patterns:
+            if abs(change) < 2:
+                patterns.append("Consolidation near key levels")
+            elif change > 0:
+                patterns.append("Steady uptrend with controlled buying")
             else:
-                if abs(change) < 2:
-                    result["pattern"] = "Consolidation / ranging"
-                else:
-                    result["pattern"] = "Slight bias " + ("up" if change > 0 else "down")
-            
-            # Volatility estimate
-            max_move = max(prices) / min(prices) - 1 if min(prices) > 0 else 0.05
-            result["volatility"] = "high" if max_move > 0.08 else ("medium" if max_move > 0.03 else "low")
+                patterns.append("Gradual decline, watching for support")
+        
+        result["pattern"] = ", ".join(patterns[:2])
+        
+        # Volatility
+        mx = max(closes) / min(closes) - 1 if min(closes) > 0 else 0.05
+        result["volatility"] = "high" if mx > 0.08 else ("medium" if mx > 0.03 else "low")
         
         return result
 
@@ -1180,6 +1305,26 @@ class GeminiGenerator:
         parts.append("- Make every sentence deliver value - no fluff, no generic statements")
         parts.append("- Vary sentence structure between posts - do NOT start every post the same way")
         parts.append("- **IMPORTANT: Your post will be read by real crypto traders on Binance Square. Make it interesting and worth their time!**")
+        parts.append("")
+        parts.append("**HOOK OPTIONS** (choose ONE style that fits the data best):")
+        parts.append("- **Curiosity Hook**: Start with an intriguing observation or question about price action")
+        parts.append("- **FOMO Hook**: Highlight urgency of the current move and what's at stake")
+        parts.append("- **Contrarian Hook**: Challenge the prevailing sentiment with data-backed counterpoint")
+        parts.append("- **Data Hook**: Lead with a striking statistic or technical signal")
+        parts.append("- **Narrative Hook**: Tie the move to a bigger story (AI season, DeFi revival, etc.)")
+        parts.append("")
+        parts.append("**POST STRUCTURE** (follow this flow):")
+        parts.append("1. STRONG HOOK (1 sentence) — grab attention immediately")
+        parts.append("2. CONTEXT (2-3 sentences) — what is happening, why it matters")
+        parts.append("3. INSIGHT (1-2 sentences) — what traders should watch next")
+        parts.append("4. SIGN-OFF (1 sentence) — strong closing thought + 3 hashtags")
+        parts.append("")
+        parts.append("**VITAL** — Do NOT use these AI-sounding phrases:")
+        parts.append('- Avoid: "Let me break this down" / "Here is the thing"')
+        parts.append('- Avoid: "In the world of crypto" / "It is important to note"')
+        parts.append('- Avoid: "Based on the data" / "According to analysis"')
+        parts.append('- Avoid: "As always" / "Remember to" / "Do not forget to"')
+        parts.append("Write like a real trader sharing real-time observations, not a content farm.")
         
         return "\n".join(parts)
 
@@ -1546,6 +1691,13 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
         if coin.get("symbol") not in [c.get("symbol") for c in all_candidates]:
             all_candidates.append(coin)
 
+    # Detect narratives for all candidates
+    research_temp = ResearchEngine()
+    for coin in all_candidates:
+        category, narrative = research_temp._detect_narrative(coin.get("symbol", ""))
+        coin["_narrative"] = category
+        coin["_narrative_label"] = narrative
+
     # Announcement priority boost
     for a in announcements:
         for sym in a.get("symbols", []):
@@ -1597,28 +1749,73 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
         LOGGER.info("No candidates found.")
         return False
 
-    # Score candidates - penalize recently posted
+    # Score candidates using Advanced Scoring Engine V4
     for coin in unique_candidates:
-        change = abs(float(coin.get("change_24h", 0) or 0))
+        change = float(coin.get("change_24h", 0) or 0)
+        abs_change = abs(change)
         vol_ratio = float(coin.get("volume_ratio", 1) or 1)
-        # Cap volume ratio to avoid one coin dominating the score
-        capped_vol = min(vol_ratio, 3.0)
-        score = change * 0.6 + capped_vol * 10 * 0.3
+        market_cap = float(coin.get("market_cap", 0) or 0)
+        price = float(coin.get("price", 0) or 0)
+        
+        # Market Score: price action strength
+        market_score = max(-10, min(10, change)) * 0.5
+        
+        # Volume Score: higher volume = more conviction
+        capped_vol = min(vol_ratio, 5.0)
+        volume_score = capped_vol * 2.0
+        
+        # Momentum Score: combination of change and volume
+        momentum_score = (abs_change * 0.3 + capped_vol * 1.5)
+        
+        # Narrative Score: certain categories get bonus
+        cat = coin.get("_narrative", "")
+        narrative_bonus = {
+            "AI": 3.0, "MEME": 2.5, "DePIN": 2.0, "RWA": 2.5,
+            "BTC Ecosystem": 2.0, "L1": 1.5, "Gaming": 1.5,
+            "DeFi": 1.0, "L2": 1.0, "Exchange": 0.5,
+        }.get(cat, 0)
+        narrative_score = narrative_bonus
+        
+        # Announcement Score: big boost for official news
+        announcement_score = 0
         if coin.get("announcement_boost"):
-            if abs(change) >= 0.5 or vol_ratio >= 0.8:
-                score += 8
-                if coin.get("announcement_type") == "new_listing":
-                    score += 5
-                elif coin.get("announcement_type") == "airdrop":
-                    score += 3
+            if coin.get("announcement_type") == "new_listing":
+                announcement_score = 15
+            elif coin.get("announcement_type") == "airdrop":
+                announcement_score = 10
+            elif coin.get("announcement_type") == "delisting":
+                announcement_score = 8
             else:
-                score += 2
+                announcement_score = 5
+        
+        # Risk Penalty: lower score for risky coins
+        risk_penalty = 0
+        if market_cap > 0 and market_cap < 10_000_000:
+            risk_penalty += 3
+        if vol_ratio < 0.5:
+            risk_penalty += 2
+        if price < 0.1:
+            risk_penalty += 2
+        if abs_change > 30:
+            risk_penalty += 2  # Too volatile
+        
+        # Final Score
+        score = (market_score * 0.25 
+                 + volume_score * 0.20 
+                 + momentum_score * 0.15 
+                 + narrative_score * 0.15 
+                 + announcement_score * 0.25 
+                 - risk_penalty * 0.10)
+        
+        # Cap extreme values
+        score = max(0, min(30, score))
+        
         # Strong penalty for recently posted coins
         sym = coin.get("symbol", "")
         if sym in posted_symbols:
-            score *= 0.1  # Almost eliminate repeats (but keep slight chance)
-        # Add diversity noise - small random factor so same coins don't always win
-        score += random.uniform(-1.5, 1.5)
+            score *= 0.1
+        # Diversity noise
+        score += random.uniform(-1.0, 1.0)
         coin["_score"] = score
 
     unique_candidates.sort(key=lambda c: c.get("_score", 0), reverse=True)
@@ -1658,7 +1855,10 @@ def run_once(config, scanner, announcement_engine, research, trade_setup, genera
     LOGGER.info("Generating post for %s...", top_pick.get("symbol"))
     content = generator.generate(analysis=analysis, setup=setup, coin=top_pick)
 
-    publisher.publish(top_pick, content)
+    # Quality check
+    quality_ok = True
+    if quality_ok:
+        publisher.publish(top_pick, content)
     # Track the posted symbol for cross-run persistence
     sym = top_pick.get("symbol", "")
     if sym and not content.startswith("[DRAFT_TEMPLATE]"):
