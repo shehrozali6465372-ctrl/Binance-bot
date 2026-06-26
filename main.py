@@ -1676,16 +1676,19 @@ class PostPublisher:
             "bodyTextOnly": self._limit_hashtags(content),
         }
         
-        # Add image URL if available
+        # Add image as markdown in text body (contentType:1 = text post)
         if isinstance(coin, dict):
             image_url = coin.get("_image_url", "")
             if image_url:
                 symbol = coin.get("symbol", "")
-                payload["contentType"] = 2
-                payload["title"] = "$" + symbol + " Market Analysis"
-                payload["images"] = [image_url]
+                # Prepend image markdown to content
+                img_md = "![" + symbol + " Chart](" + image_url + ")\n\n"
+                payload["bodyTextOnly"] = img_md + payload["bodyTextOnly"]
+                # Re-apply hashtag limit since we added content
+                if len(payload["bodyTextOnly"]) > 0:
+                    payload["bodyTextOnly"] = self._limit_hashtags(payload["bodyTextOnly"])
                 verified = coin.get("_image_verified", False)
-                LOGGER.info("Including image in Square post (verified=%s): %s", verified, image_url)
+                LOGGER.info("Added image markdown to post (verified=%s): %s", verified, image_url)
         headers = {
             "X-Square-OpenAPI-Key": square_key,
             "Content-Type": "application/json",
