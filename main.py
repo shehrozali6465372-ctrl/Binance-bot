@@ -1345,72 +1345,114 @@ class GeminiGenerator:
         keywords: Optional[List[str]] = None,
         hot_search: Optional[str] = None,
     ) -> str:
-        """Build a concise prompt for Gemini to generate a high-quality trading post."""
+        """Build a professional Write-to-Earn optimized prompt for Gemini."""
         symbol = coin.get("symbol", "COIN")
         name = coin.get("name", symbol)
-        price = coin.get("price", 0)
-        change = coin.get("change_24h", 0)
-        vol_ratio = coin.get("volume_ratio", 1)
-        market_cap = coin.get("market_cap", 0)
+        price = float(coin.get("price", 0) or 0)
+        change = float(coin.get("change_24h", 0) or 0)
+        vol_ratio = float(coin.get("volume_ratio", 1) or 1)
+        volume_24h = float(coin.get("volume_24h", 0) or 0)
+        market_cap = float(coin.get("market_cap", 0) or 0)
         tone = tone or self.emotion.get_tone(coin)
         
-        # Extract context
         reason = analysis.get("reason", "") if isinstance(analysis, dict) else str(analysis)
         bull_case = analysis.get("bull_case", "") if isinstance(analysis, dict) else ""
         bear_case = analysis.get("bear_case", "") if isinstance(analysis, dict) else ""
-        risk = analysis.get("risk", "") if isinstance(analysis, dict) else ""
+        risk_text = analysis.get("risk", "") if isinstance(analysis, dict) else ""
         category = analysis.get("category", "") if isinstance(analysis, dict) else ""
-        narrative = analysis.get("narrative", "") if isinstance(analysis, dict) else ""
         announcement = analysis.get("announcement") if isinstance(analysis, dict) else None
         
-        # Build a clean, effective prompt
+        # Build catalyst from analysis
+        catalyst_parts = []
+        abs_change = abs(change)
+        if announcement:
+            ann_type = announcement.get("type", "news")
+            catalyst_parts.append(f"Binance {ann_type.upper()}")
+        if abs_change >= 8:
+            catalyst_parts.append(f"Explosive {change:+.1f}% move")
+        elif abs_change >= 4:
+            catalyst_parts.append(f"Strong {change:+.1f}% momentum")
+        if vol_ratio >= 2.5:
+            catalyst_parts.append(f"Volume {vol_ratio:.1f}x above average")
+        elif vol_ratio >= 1.8:
+            catalyst_parts.append("Volume spike confirming move")
+        if category:
+            catalyst_parts.append(f"{category} narrative")
+        if "Breakout" in reason:
+            catalyst_parts.append("Resistance breakout")
+        if pattern_match := __import__('re').search(r'(EMA|support|resistance|bounce)', reason.lower()):
+            catalyst_parts.append(pattern_match.group(1).title())
+        
+        catalyst = " | ".join(catalyst_parts[:4]) if catalyst_parts else "Market momentum"
+        if not catalyst:
+            catalyst = "Market momentum"
+        
+        # Direction indicator
+        direction = "BULLISH" if change >= 0 else "BEARISH"
+        
+        # Build prompt
         parts = [
-            f"You are a 20-year veteran Wall Street crypto trader. Your current mood: {tone['persona']}. {tone['twist']}",
+            f"You are a professional Binance Square crypto analyst and top Write-to-Earn creator.",
+            f"Your only goal is to write a HIGH CTR, HIGH CONVERSION post about ${symbol}.",
             "",
-            f"Write an engaging trading post about ${symbol} ({name}). Make it sound human, exciting, and NOT like AI.",
+            "**STRICT RULES:**",
+            f"- Total length: 80-110 words exactly.",
+            "- Never sound like AI. Fresh style every time.",
+            "- Use short lines with spacing. No long paragraphs.",
+            "- Sound like a professional crypto trader sharing real insights.",
             "",
-            "**Market Data:**",
-            f"- Price: ${price:.4f} | 24h Change: {change:+.1f}% | Volume: {vol_ratio:.1f}x | Cap: ${market_cap:,.0f}",
+            "**MARKET DATA:**",
+            f"- ${symbol}: ${price:.4f} | 24h: {change:+.1f}% | Vol: {vol_ratio:.1f}x | Cap: ${market_cap:,.0f}",
+            f"- Catalyst: {catalyst}",
         ]
         
         if category:
-            parts.append(f"- Category: {category} ({narrative})")
-        
-        parts.append("")
-        parts.append(f"**Analysis:** {reason}")
-        parts.append(f"**Bull Case:** {bull_case}")
-        parts.append(f"**Bear Case:** {bear_case}") 
-        parts.append(f"**Risk:** {risk}")
-        parts.append("")
-        parts.append("**Trading Setup:**")
-        parts.append(f"- Entry: ${setup['entry']}")
-        parts.append(f"- Target 1: ${setup['target1']} | Target 2: ${setup['target2']}")
-        parts.append(f"- Stop: ${setup['stop']}")
-        
+            parts.append(f"- Sector: {category}")
         
         if hot_search:
-            parts.append("")
-            parts.append("**Binance Hot Search Trends:**")
-            parts.append(hot_search)
-        
-        if announcement:
-            parts.append("")
-            parts.append(f"**Binance Announcement:** {announcement.get('title', '')}")
+            parts.append(f"- Trending: {hot_search}")
         
         parts.append("")
-        parts.append("**Requirements - FOLLOW STRICTLY:**")
-        parts.append("- Write a compelling 3-paragraph post (250-500 words total)")
-        parts.append("- Start with a strong hook/attention grabber")
-        parts.append("- Include relevant emojis naturally (🚀🔥📈💎📊💡)")
-        parts.append(f"- END with 5-7 hashtags on a new line, first one MUST be #{symbol}")
-        parts.append("- Sound like a real, experienced trader sharing genuine insights")
-        parts.append("- Include a specific pro tip or key insight in the last paragraph")
-        parts.append("- Never use robotic phrases like 'In the current market' or 'As of now'")
-        parts.append("- Mention specific numbers (price, %, volume) from the data")
-        parts.append(f"- {tone['twist']}")
+        parts.append("**REQUIRED STRUCTURE (follow exactly):**")
+        parts.append("")
+        parts.append("PART 1 — HOOK (3 short lines):")
+        parts.append("Write the strongest reason behind the move.")
+        parts.append("Example style:")
+        parts.append(f"🚀 ${symbol} explodes {change:+.1f}% in 24H!")
+        parts.append(f"📈 Volume {vol_ratio:.1f}x as smart money keeps buying.")
+        parts.append(f"{'⚠️' if abs_change > 5 else '📊'} {catalyst}")
+        parts.append("")
+        parts.append("PART 2 — TRADE SETUP:")
+        parts.append(f"💰 Entry: ${setup['entry']}")
+        parts.append(f"🎯 Target 1: ${setup['target1']} | Target 2: ${setup['target2']}")
+        parts.append(f"🛑 Stop: ${setup['stop']}")
+        parts.append("")
+        parts.append("PART 3 — WHY TAKE THIS TRADE? (2-3 lines):")
+        if announcement:
+            parts.append(f"• {announcement.get('title', 'Binance announcement catalyst')[:80]}")
+        if vol_ratio > 1.8:
+            parts.append(f"• Volume confirms the move at {vol_ratio:.1f}x average")
+        if abs_change > 5:
+            parts.append(f"• Strong {direction.lower()} momentum with conviction")
+        if category:
+            parts.append(f"• {category} narrative gaining traction on Binance")
+        parts.append("• Smart money positioning for the next leg")
+        parts.append("")
+        parts.append("PART 4 — PRO TRADER TIP (exactly 2 lines):")
+        if abs_change > 5:
+            parts.append(f"💡 Wait for a pullback instead of chasing green candles.")
+        else:
+            parts.append(f"💡 Breakout entries work best after volume confirmation.")
+        parts.append("Protect every trade with a stop loss. Risk < 2% per trade.")
+        parts.append("")
+        parts.append("**FINAL REQUIREMENTS:**")
+        parts.append(f"- Include ${symbol} cashtag")
+        parts.append("- End with 3-5 relevant hashtags")
+        parts.append("- Mention real catalyst: " + catalyst[:60])
+        parts.append("- Professional, clean spacing, emoji-rich")
+        parts.append("- No motivational text, no fake hype, no AI-sounding sentences")
         
         return "\n".join(parts)
-
     def _template_content(self, analysis, setup, coin, tone=None, keywords=None) -> str:
         """Generate human-like trading post (not spammy)."""
         symbol = coin.get("symbol", "COIN")
