@@ -45,7 +45,7 @@ def _maybe_update_workflow():
             LOGGER.info("Workflow already up to date")
             return
         
-        LOGGER.info("Updating workflow to 5-min schedule...")
+        LOGGER.info("Updating workflow to 5-min schedule for repo=%s path=%s...", repo_name, workflow_path)
         payload = json.dumps({
             "message": "Auto-update: 5-minute opportunity scan model",
             "content": expected_b64,
@@ -61,7 +61,7 @@ def _maybe_update_workflow():
         result = json.loads(resp2.read())
         LOGGER.info("Workflow updated! Commit: " + result.get("commit", {}).get("sha", "?"))
     except Exception as e:
-        LOGGER.debug("Workflow update skipped: " + str(e))
+        LOGGER.warning("Workflow update attempt failed: " + str(e)[:200])
 
 
 
