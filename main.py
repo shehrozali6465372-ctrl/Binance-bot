@@ -2607,9 +2607,10 @@ def main_loop() -> None:
     # In GHA: each run handles ~2 hours of 5-min scanning
     in_gha = os.getenv("GITHUB_ACTIONS", "").lower() == "true"
     if in_gha:
-        # Use 300s intervals with enough iterations for 2h window
-        interval = max(config.post_interval, 300)
+        # Force 300s interval for 5-min scanning (workflow env is 7200)
+        interval = 300
         max_iter = min(config.max_iterations or 24, 24)
+        LOGGER.info("GHA 5-min mode: %d scans at %ds intervals (override %ds)", max_iter, interval, config.post_interval)
         LOGGER.info("GHA mode: %d scans at %ds intervals", max_iter, interval)
     else:
         interval = max(config.post_interval, 60)
