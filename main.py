@@ -31,6 +31,15 @@ class Config:
     gemini_temperature: float
     gemini_top_p: float
     gemini_max_output_tokens: int
+    
+    # --- Performance tuning (env configurable) ---
+    min_word_count: int
+    min_hashtags: int
+    min_candidates: int
+    repetition_hard_hours: int
+    repetition_soft_hours: int
+    save_research_packages: bool
+    min_cap_for_safety: int
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -49,6 +58,15 @@ class Config:
             gemini_temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.9")),
             gemini_top_p=float(os.getenv("GEMINI_TOP_P", "0.95")),
             gemini_max_output_tokens=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "2048")),
+            
+            # Performance tuning defaults
+            min_word_count=int(os.getenv("MIN_WORD_COUNT", "50")),
+            min_hashtags=int(os.getenv("MIN_HASHTAGS", "3")),
+            min_candidates=int(os.getenv("MIN_CANDIDATES", "3")),
+            repetition_hard_hours=int(os.getenv("REPETITION_HARD_HOURS", "12")),
+            repetition_soft_hours=int(os.getenv("REPETITION_SOFT_HOURS", "24")),
+            save_research_packages=os.getenv("SAVE_RESEARCH_PACKAGES", "1").strip().lower() in {"1", "true", "yes"},
+            min_cap_for_safety=int(os.getenv("MIN_CAP_FOR_SAFETY", "500000")),
         )
 
     def validate(self) -> None:
@@ -64,6 +82,12 @@ class Config:
             raise ValueError("GEMINI_TOP_P must be between 0 and 1")
         if self.gemini_max_output_tokens <= 0:
             raise ValueError("GEMINI_MAX_OUTPUT_TOKENS must be > 0")
+        if self.min_word_count < 30:
+            raise ValueError("MIN_WORD_COUNT must be >= 30")
+        if self.min_hashtags < 2:
+            raise ValueError("MIN_HASHTAGS must be >= 2")
+        if self.min_candidates < 2:
+            raise ValueError("MIN_CANDIDATES must be >= 2")
 
 
 CONFIG = Config.from_env()
@@ -166,17 +190,21 @@ def _passes_objective_filters(
 ) -> bool:
     '''Deterministic, non-negotiable checks every candidate must pass.
     
-    This is the first gate. Only coins that pass this enter the AI evaluation stage.
+    Every rejection is logged with a reason. This creates an audit trail
+    for decision optimization.
     '''
-    # 1. Must be a valid asset
-    if not symbol or price <= 0 or price < 0.01:
-        return False
-    if market_cap > 0 and market_cap < 500_000:
-        return False
+    reject_reason = None
     
-    # 2. Not too extreme (likely data error or meme spike)
-    if abs(change_24h) > 150:
-        return False
+    # 1. Must be a valid asset
+    if not symbol:
+        reject_reason = "empty symbol"
+    elif price <= 0 or price < 0.01:
+        reject_reason = "price too low: $%.6f" % price
+    elif market_cap > 0 and market_cap < CONFIG.min_cap_for_safety:
+        reject_reason = "market cap too low: $%.0f" % market_cap
+    
+    if not reject_reason and abs(change_24h) > 150:
+        reject_reason = "extreme move: %.1f%%" % change_24h
     
     # 3. Must have a FRESH catalyst
     has_announcement = False
@@ -189,27 +217,34 @@ def _passes_objective_filters(
     
     has_movement = abs(change_24h) > 2.5 or volume_ratio > 1.5
     
-    if not has_announcement and not has_movement:
-        return False
+    if not reject_reason and not has_announcement and not has_movement:
+        reject_reason = "no catalyst (change=%.1f%%, vol=%.1fx)" % (change_24h, volume_ratio)
     
     # 4. Repetition check
-    if symbol in posted_hours_data:
+    if not reject_reason and symbol in posted_hours_data:
         hours_ago = posted_hours_data[symbol]
-        if hours_ago < 12:
-            return False
-        if hours_ago < 24 and not has_announcement:
-            return False
-        if hours_ago < 48 and not has_announcement and abs(change_24h) < 5:
-            return False
+        hard = CONFIG.repetition_hard_hours
+        soft = CONFIG.repetition_soft_hours
+        if hours_ago < hard:
+            reject_reason = "recently posted (%.0fh ago, hard limit %dh)" % (hours_ago, hard)
+        elif hours_ago < soft and not has_announcement:
+            reject_reason = "recently posted (%.0fh ago, no new catalyst, soft limit %dh)" % (hours_ago, soft)
+        elif hours_ago < 48 and not has_announcement and abs(change_24h) < 5:
+            reject_reason = "recently posted (%.0fh ago, weak move %.1f%%)" % (hours_ago, change_24h)
     
     # 5. Top 5 coins — only with exceptional catalyst
-    if symbol in TOP_5_COINS:
+    if not reject_reason and symbol in TOP_5_COINS:
         exceptional = has_announcement and ann_type in ("new_listing", "launchpool", "megadrop")
-        if not exceptional and abs(change_24h) < 5:
-            return False
         if not exceptional:
-            return False
+            reject_reason = "top 5 coin without exceptional catalyst"
+        elif abs(change_24h) < 5:
+            reject_reason = "top 5 coin with weak move (%.1f%%)" % change_24h
     
+    if reject_reason:
+        LOGGER.debug("Filtered out $%s: %s", symbol, reject_reason)
+        return False
+    
+    LOGGER.debug("Passed filters: $%s (%.1f%%, %.1fx vol)", symbol, change_24h, volume_ratio)
     return True
 
 
@@ -1982,39 +2017,57 @@ class GeminiGenerator:
         return "\n".join(parts)
     
     def _build_writing_prompt(self, coin: Dict[str, Any], research_package: str) -> str:
-        """Build Phase 2 prompt: Gemini writes the post."""
+        """Build Phase 2 prompt: Gemini writes the post.
+        
+        Optimized for:
+        - High relevance to Binance Square audience
+        - Strong Write-to-Earn potential
+        - Natural trader language (not AI-sounding)
+        - Actionable trade information
+        """
         symbol = coin.get("symbol", "COIN")
         name = coin.get("name", symbol)
+        price = float(coin.get("price", 0) or 0)
+        change = float(coin.get("change_24h", 0) or 0)
+        direction = "BULLISH" if change >= 0 else "BEARISH"
         
         parts = [
             "You are a professional Binance Square Write-to-Earn creator.",
             "",
-            "Write a high-CTR, high-engagement post about $%s (%s) based on this research:" % (symbol, name),
+            "Write a post about $%s (%s) based on this research." % (symbol, name),
             "",
             "━" * 50,
-            "RESEARCH PACKAGE:",
+            "RESEARCH:",
             research_package,
             "━" * 50,
             "",
-            "REQUIREMENTS:",
-            "- 80-110 words exactly",
-            "- Professional crypto trader tone (not AI, not robotic)",
-            "- Strong hook that grabs attention in first 3 lines",
-            "- Include trade setup: entry, targets, stop loss",
-            "- Include $%s cashtag" % symbol,
-            "- Include 3-5 relevant hashtags at the end",
-            "- One hashtag must be #Write2Earn",
-            "- Emoji-rich but not spammy",
-            "- Every sentence must provide real value to traders",
-            "- No motivational fluff, no generic statements",
-            "- Sound like a real trader sharing a real opportunity",
+            "POST REQUIREMENTS:",
             "",
-            "STRUCTURE:",
-            "[HOOK] — 3 short lines with emojis (catalyst + why now)",
-            "[TRADE SETUP] — Entry, Target 1, Target 2, Stop Loss",
-            "[WHY THIS TRADE] — 2-3 lines of data-driven reasoning",
-            "[PRO TIP] — 2 lines of professional trading advice",
-            "[HASHTAGS] — 3-5 relevant, include #Write2Earn",
+            "1. LENGTH: 80-110 words exactly.",
+            "2. TONE: Professional crypto trader sharing real insights. Never AI-sounding.",
+            "3. HOOK: First 3 lines must make traders stop scrolling.",
+            "4. SETUP: Include entry, 2 targets, and stop loss. Make it tradeable.",
+            "5. CASHTAG: Include $%s in the post body." % symbol,
+            "6. HASHTAGS: Exactly 3-5 relevant hashtags. Include #Write2Earn.",
+            "7. EMOJIS: Use naturally, don't force them.",
+            "8. VALUE: Every sentence must help a trader make a decision.",
+            "",
+            "STRUCTURE (follow exactly):",
+            "",
+            "Line 1-3: HOOK — The catalyst + why right now (3 lines, emoji-rich)",
+            "Line 4-6: SETUP — Entry at $X, Target 1 $X, Target 2 $X, Stop $X",
+            "Line 7-9: WHY — 2-3 lines of real trading logic based on the data",
+            "Line 10-11: PRO TIP — 2 lines of genuine professional advice",
+            "Line 12: HASHTAGS — 3-5 tags on one line",
+            "",
+            "BINANCE SQUARE WRITE-TO-EARN TIPS:",
+            "- $%s is %s right now. Traders want to know WHY and WHAT TO DO." % (symbol, direction),
+            "- Give a clear, actionable trade setup.",
+            "- The catalyst (reason for the move) must be obvious in the first 3 lines.",
+            "- End with a pro tip that shows real trading experience.",
+            "- Do NOT use phrases like 'in conclusion', 'to summarize', 'in summary'.",
+            "- Do NOT say 'this is not financial advice'. It wastes words.",
+            "- Do NOT add motivational quotes or generic crypto wisdom.",
             "",
             "Write the post now:",
         ]
@@ -2285,8 +2338,23 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
             continue
     
     if len(research_packages) < 3:
-        LOGGER.info("Only %d research packages built (need 3).", len(research_packages))
+        LOGGER.info("Only %d research packages built (need %d).", len(research_packages), CONFIG.min_candidates)
         return False
+    
+    # Save research packages to files (for post-hoc review)
+    if CONFIG.save_research_packages:
+        try:
+            research_dir = Path("research")
+            research_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            for coin_dict, pkg in research_packages:
+                sym = coin_dict.get("symbol", "UNKNOWN")
+                pkg_path = research_dir / "pkg_%s_%s.md" % (sym, ts)
+                header = "---\nSymbol: %s\nTime: %s UTC\n---\n\n" % (sym, ts)
+                pkg_path.write_text(header + pkg)
+            LOGGER.info("Saved %d research packages to research/", len(research_packages))
+        except Exception as e:
+            LOGGER.debug("Could not save research packages: %s", e)
     
     # ──────────────────────────────────────────────
     # 4. GEMINI PHASE 1: DECISION
@@ -2331,7 +2399,25 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         best_coin, best_package = research_packages[0]
         LOGGER.info("Falling back to $%s", best_coin["symbol"])
     
-    LOGGER.info("Selected $%s for publishing (Gemini #1 pick)", best_coin["symbol"])
+    decision_reason = rankings[0].get("reason", "") if rankings else ""
+    catalyst_info = best_coin.get("announcement_type", "market_move")
+    if best_coin.get("announcement_boost"):
+        catalyst_info = best_coin.get("announcement_type", "announcement")
+    
+    LOGGER.info("=" * 60)
+    LOGGER.info("DECISION: Publish $%s", best_coin["symbol"])
+    LOGGER.info("  Catalyst: %s", catalyst_info)
+    LOGGER.info("  Price: $%.4f | 24h: %+.1f%% | Vol: %.1fx", 
+                float(best_coin.get("price", 0)), 
+                float(best_coin.get("change_24h", 0)),
+                float(best_coin.get("volume_ratio", 1)))
+    LOGGER.info("  Gemini reason: %s", decision_reason[:200] if decision_reason else "N/A")
+    LOGGER.info("  Ranked #1 of %d candidates", len(rankings))
+    
+    # Log why other candidates were rejected
+    for i, r in enumerate(rankings[1:], 2):
+        LOGGER.info("  Rejected #%d: $%s — %s", i, r.get("symbol", "?"), r.get("reason", "")[:120])
+    LOGGER.info("=" * 60)
     
     # Run full research analysis (for logging/detail)
     ann_data = None
@@ -2357,6 +2443,59 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     if not content:
         LOGGER.warning("Phase 2 writing failed for $%s — no post published", best_coin["symbol"])
         return False
+    
+    # Save final Gemini prompt for review
+    if CONFIG.save_research_packages and content:
+        try:
+            prompts_dir = Path("prompts")
+            prompts_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            sym = best_coin.get("symbol", "UNKNOWN")
+            prompt_path = prompts_dir / "prompt_%s_%s.txt" % (sym, ts)
+            prompt_text = generator._build_writing_prompt(best_coin, best_package)
+            prompt_path.write_text(prompt_text)
+        except Exception as e:
+            LOGGER.debug("Could not save prompt: %s", e)
+    
+    # ─── QUALITY GATE ───
+    # Never publish low-confidence or low-quality content
+    quality_issues = []
+    import re
+    # Check for $cashtag
+    cashtags = re.findall(r'\$[A-Za-z0-9]+', content)
+    if not cashtags:
+        quality_issues.append("no $cashtag found")
+    elif best_coin.get("symbol", "").upper() not in [t.upper().lstrip('$') for t in cashtags]:
+        quality_issues.append("$%s cashtag missing from post" % best_coin.get("symbol", ""))
+    
+    # Check for minimum hashtags
+    hashtags = re.findall(r'#[A-Za-z0-9_]+', content)
+    if len(hashtags) < CONFIG.min_hashtags:
+        quality_issues.append("only %d hashtags (need %d)" % (len(hashtags), CONFIG.min_hashtags))
+    
+    # Check for minimum word count
+    word_count = len(content.split())
+    if word_count < CONFIG.min_word_count:
+        quality_issues.append("only %d words (need %d)" % (word_count, CONFIG.min_word_count))
+    
+    if quality_issues:
+        LOGGER.warning("QUALITY GATE: post for $%s FAILED: %s",
+                       best_coin["symbol"], "; ".join(quality_issues))
+        LOGGER.warning("Post content:\n%s", content[:300])
+        # Save as draft for review instead of publishing
+        try:
+            drafts_dir = Path("drafts")
+            drafts_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            draft_path = drafts_dir / "REJECTED_%s_%s.md" % (best_coin["symbol"], ts)
+            draft_path.write_text(content)
+            LOGGER.info("Saved rejected post to %s", draft_path)
+        except Exception:
+            pass
+        return False
+    
+    LOGGER.info("Quality gate PASSED for $%s (%d words, %d hashtags)",
+                best_coin["symbol"], word_count, len(hashtags))
     
     # ──────────────────────────────────────────────
     # 7. PUBLISH
