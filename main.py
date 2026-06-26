@@ -306,6 +306,34 @@ class Database:
                 )
                 """
             )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS post_analytics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    post_id INTEGER,
+                    coin_symbol TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    catalyst_type TEXT,
+                    narrative TEXT,
+                    hook_style TEXT,
+                    trade_setup_style TEXT,
+                    decision_reason TEXT,
+                    word_count INTEGER,
+                    hashtags TEXT,
+                    gemini_decision TEXT,
+                    square_post_link TEXT,
+                    views INTEGER,
+                    likes INTEGER,
+                    comments INTEGER,
+                    shares INTEGER,
+                    eligible_traders INTEGER,
+                    reward_earned REAL,
+                    metrics_updated_at TEXT,
+                    is_analyzed INTEGER DEFAULT 0,
+                    FOREIGN KEY(post_id) REFERENCES posts(id) ON DELETE SET NULL
+                )
+                """
+            )
 
     def save_post(self, post: Any) -> int:
         if isinstance(post, dict):
@@ -414,20 +442,300 @@ class Database:
             )
 
     def get_top_performers(self, limit: int = 2) -> List[str]:
+        """Get top performing symbols from analytics."""
         try:
-            cur = self.conn.execute(
+            rows = self.conn.execute(
                 """
-                SELECT p.content
-                FROM posts p
-                JOIN metrics m ON m.post_id = p.id
-                ORDER BY (COALESCE(m.views, 0) + COALESCE(m.traders, 0) * 5) DESC
+                SELECT coin_symbol, AVG(views) as avg_views
+                FROM post_analytics
+                WHERE views IS NOT NULL
+                GROUP BY coin_symbol
+                ORDER BY avg_views DESC
                 LIMIT ?
                 """,
-                (limit,),
-            )
-            return [row["content"] for row in cur.fetchall()]
-        except sqlite3.OperationalError:
+                (limit,)
+            ).fetchall()
+            return [row[0] for row in rows if row[0]]
+        except Exception:
             return []
+
+
+class PerformanceAnalyzer:
+    """Performance Intelligence Layer.
+    
+    Stores detailed post metadata and learns from historical performance.
+    Uses real data to improve Research Packages and Gemini prompts.
+    
+    For every published post:
+    - Store all metadata (catalyst, narrative, hook style, word count, etc.)
+    - After 24-72h: update with views, likes, comments, shares, rewards
+    - Analyze historical data to find winning patterns
+    - Feed insights back into Research Packages and prompts
+    
+    Metrics update: Since Binance Square has no read API yet,
+    metrics can be updated via update_metrics.py or manual entry.
+    The structural analysis (catalyst, narrative, timing) works immediately.
+    """
+    
+    def __init__(self, db: Database):
+        self.db = db
+    
+    def record_publish(
+        self,
+        coin: Dict[str, Any],
+        post_content: str,
+        decision_reason: str = "",
+        square_link: str = "",
+    ) -> None:
+        """Store full metadata for a published post."""
+        symbol = coin.get("symbol", "")
+        catalyst_type = coin.get("announcement_type", "market_move")
+        narrative = coin.get("narrative", "")
+        
+        if not narrative:
+            # Try to extract from announcements
+            ann_type = coin.get("announcement_type", "")
+            if ann_type in ("new_listing", "launchpool", "megadrop"):
+                narrative = "listing"
+            elif ann_type == "airdrop":
+                narrative = "airdrop"
+            elif ann_type == "delisting":
+                narrative = "delisting"
+        
+        hook_style = self._detect_hook_style(post_content)
+        word_count = len(post_content.split())
+        hashtags_list = self._extract_hashtags(post_content)
+        hashtags_str = ",".join(hashtags_list)
+        trade_style = self._detect_trade_setup_style(post_content)
+        
+        try:
+            with self.db.conn:
+                self.db.conn.execute(
+                    """
+                    INSERT INTO post_analytics (
+                        coin_symbol, created_at, catalyst_type, narrative,
+                        hook_style, trade_setup_style, decision_reason,
+                        word_count, hashtags, square_post_link
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        symbol,
+                        utc_now(),
+                        catalyst_type,
+                        narrative,
+                        hook_style,
+                        trade_style,
+                        (decision_reason or "")[:200],
+                        word_count,
+                        hashtags_str,
+                        square_link,
+                    )
+                )
+            LOGGER.info("Analytics: stored $%s (%s, %s, %d words)",
+                        symbol, catalyst_type, hook_style, word_count)
+        except Exception as e:
+            LOGGER.debug("Analytics storage: %s", e)
+    
+    def update_metrics(
+        self,
+        coin_symbol: str,
+        views: int = None,
+        likes: int = None,
+        comments: int = None,
+        shares: int = None,
+        traders: int = None,
+        reward: float = None,
+    ) -> bool:
+        """Update performance metrics for the latest post of a coin."""
+        try:
+            with self.db.conn:
+                cursor = self.db.conn.execute(
+                    """
+                    SELECT id FROM post_analytics
+                    WHERE coin_symbol = ? AND views IS NULL
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (coin_symbol.upper(),)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    LOGGER.warning("No pending metrics row for $%s", coin_symbol)
+                    return False
+                
+                post_id = row[0]
+                updates = []
+                params = []
+                if views is not None:
+                    updates.append("views = ?")
+                    params.append(views)
+                if likes is not None:
+                    updates.append("likes = ?")
+                    params.append(likes)
+                if comments is not None:
+                    updates.append("comments = ?")
+                    params.append(comments)
+                if shares is not None:
+                    updates.append("shares = ?")
+                    params.append(shares)
+                if traders is not None:
+                    updates.append("eligible_traders = ?")
+                    params.append(traders)
+                if reward is not None:
+                    updates.append("reward_earned = ?")
+                    params.append(reward)
+                
+                updates.append("metrics_updated_at = ?")
+                params.append(utc_now())
+                params.append(post_id)
+                
+                sql = "UPDATE post_analytics SET " + ", ".join(updates) + " WHERE id = ?"
+                self.db.conn.execute(sql, params)
+                
+            LOGGER.info("Metrics updated for $%s", coin_symbol)
+            return True
+        except Exception as e:
+            LOGGER.warning("Metrics update failed: %s", e)
+            return False
+    
+    def get_insights_summary(self) -> str:
+        """Analyze historical posts and return actionable insights.
+        
+        Returns a text summary for enhancing Research Packages.
+        Works with available data (metrics may be partial).
+        """
+        insights = []
+        
+        # 1. Best catalyst type
+        try:
+            rows = self.db.conn.execute(
+                """
+                SELECT catalyst_type, COUNT(*) as cnt,
+                       AVG(CASE WHEN views IS NOT NULL THEN views ELSE NULL END) as avg_views
+                FROM post_analytics
+                GROUP BY catalyst_type
+                ORDER BY cnt DESC
+                LIMIT 5
+                """
+            ).fetchall()
+            if rows:
+                best = rows[0]
+                info = "Most used catalyst: %s (%d posts)" % (best[0], best[1])
+                if best[2]:
+                    info += ", avg views: %.0f" % best[2]
+                insights.append(info)
+        except Exception:
+            pass
+        
+        # 2. Narrative coverage
+        try:
+            rows = self.db.conn.execute(
+                """
+                SELECT narrative, COUNT(*) as cnt
+                FROM post_analytics
+                WHERE narrative IS NOT NULL AND narrative != ''
+                GROUP BY narrative
+                ORDER BY cnt DESC
+                LIMIT 5
+                """
+            ).fetchall()
+            if rows:
+                items = ["%s (%d)" % (r[0], r[1]) for r in rows[:3]]
+                insights.append("Narratives: " + ", ".join(items))
+        except Exception:
+            pass
+        
+        # 3. Hook styles used
+        try:
+            rows = self.db.conn.execute(
+                """
+                SELECT hook_style, COUNT(*) as cnt
+                FROM post_analytics
+                WHERE hook_style IS NOT NULL AND hook_style != ''
+                GROUP BY hook_style
+                ORDER BY cnt DESC
+                LIMIT 5
+                """
+            ).fetchall()
+            if rows:
+                items = ["%s (%d)" % (r[0], r[1]) for r in rows[:3]]
+                insights.append("Hook styles: " + ", ".join(items))
+        except Exception:
+            pass
+        
+        # 4. Average word count
+        try:
+            row = self.db.conn.execute(
+                "SELECT AVG(word_count) FROM post_analytics WHERE word_count IS NOT NULL"
+            ).fetchone()
+            if row and row[0]:
+                insights.append("Avg length: %.0f words" % row[0])
+        except Exception:
+            pass
+        
+        # 5. Posting hours
+        try:
+            rows = self.db.conn.execute(
+                """
+                SELECT CAST(strftime('%%H', created_at) AS INTEGER) as h, COUNT(*) as cnt
+                FROM post_analytics
+                GROUP BY h
+                ORDER BY cnt DESC
+                LIMIT 3
+                """
+            ).fetchall()
+            if rows:
+                hours = ["%d:00 UTC (%d)" % (r[0], r[1]) for r in rows]
+                insights.append("Peak hours: " + ", ".join(hours))
+        except Exception:
+            pass
+        
+        if not insights:
+            insights.append("Analytics DB building — insights will grow with each post.")
+        
+        return "\n".join(insights)
+    
+    @staticmethod
+    def _detect_hook_style(content: str) -> str:
+        """Analyze first lines to determine hook style."""
+        lines = [l.strip() for l in content.split('\n') if l.strip()]
+        first = ' '.join(lines[:3]).lower() if lines else ''
+        
+        if any(w in first for w in ['🚀', 'explod', 'surge', 'pump', 'blast', 'moon']):
+            return 'breakout_fomo'
+        elif any(w in first for w in ['⚠️', 'warning', 'crash', 'dump', 'plunge']):
+            return 'warning_alert'
+        elif any(w in first for w in ['whale', 'smart money', 'accum', 'buying']):
+            return 'smart_money'
+        elif any(w in first for w in ['listing', 'launchpool', 'airdrop', 'new on binance']):
+            return 'listing_news'
+        elif any(w in first for w in ['ai', 'narrative', 'sector']):
+            return 'narrative_driven'
+        elif '?' in first:
+            return 'question_hook'
+        elif any(w in first for w in ['entry', 'target', 'setup', '🛑']):
+            return 'trade_setup'
+        else:
+            return 'data_led'
+    
+    @staticmethod
+    def _extract_hashtags(content: str) -> List[str]:
+        import re
+        return re.findall(r'#[A-Za-z0-9_]+', content)
+    
+    @staticmethod
+    def _detect_trade_setup_style(content: str) -> str:
+        lower = content.lower()
+        has_entry = any(w in lower for w in ['entry', 'enter'])
+        has_target = any(w in lower for w in ['target', 'tp', '🎯'])
+        has_stop = any(w in lower for w in ['stop', '🛑', 'sl'])
+        if has_entry and has_target and has_stop:
+            return 'full_setup'
+        elif has_entry and has_target:
+            return 'entry_target'
+        elif has_target:
+            return 'target_only'
+        else:
+            return 'analysis_only'
 
 
 class MarketScanner:
@@ -1757,7 +2065,7 @@ class PostPublisher:
         self.config = config
         self.db = Database(config.database_path)
 
-    def publish(self, coin: Dict[str, Any], content: str) -> bool:
+    def publish(self, coin: Dict[str, Any], content: str) -> str:
         # Check if this is a draft template (Gemini failed) - don't publish low quality
         if content.startswith("[DRAFT_TEMPLATE]"):
             actual_content = content.replace("[DRAFT_TEMPLATE]", "", 1)
@@ -1767,7 +2075,7 @@ class PostPublisher:
                 self.db.save_post({"content": actual_content, "coin_symbol": coin.get("symbol", "")})
             except Exception:
                 pass
-            return True
+            return ""
         if self.config.dry_run:
             LOGGER.info("[DRY-RUN] Would publish post for %s", coin.get("symbol"))
             self._save_locally(coin, content, share_link="[DRY-RUN]")
@@ -1775,7 +2083,7 @@ class PostPublisher:
                 self.db.save_post({"content": content, "coin_symbol": coin.get("symbol", "")})
             except Exception as e:
                 LOGGER.warning("Could not save post to DB: %s", e)
-            return True
+            return "[DRY-RUN]"
 
         share_link = self._try_square_api(coin, content)
         if share_link:
@@ -1789,7 +2097,7 @@ class PostPublisher:
             self.db.save_post({"content": content, "coin_symbol": coin.get("symbol", "")})
         except Exception as e:
             LOGGER.warning("Could not save post to database: %s", e)
-        return True
+        return share_link or ""
 
     def _try_square_api(self, coin: Dict[str, Any], content: str) -> str:
         """Publish to Binance Square via official Creator Center API."""
@@ -2054,7 +2362,21 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # 7. PUBLISH
     # ──────────────────────────────────────────────
     
-    publisher.publish(best_coin, content)
+    link = publisher.publish(best_coin, content)
+    # Record performance analytics
+    try:
+        decision_reason = ""
+        if rankings:
+            decision_reason = rankings[0].get("reason", "")
+        performance = PerformanceAnalyzer(publisher.db)
+        performance.record_publish(
+            coin=best_coin,
+            post_content=content,
+            decision_reason=decision_reason,
+            square_link=link or "",
+        )
+    except Exception as e:
+        LOGGER.debug("Analytics recording: %s", e)
     LOGGER.info("Done — post published for $%s", best_coin["symbol"])
     return True
 
