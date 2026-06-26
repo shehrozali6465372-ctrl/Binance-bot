@@ -1851,6 +1851,7 @@ class PostPublisher:
         except Exception as e:
             LOGGER.error("Could not save locally: %s", e)
 
+    @staticmethod
     def _limit_hashtags(content: str, max_tags: int = 5) -> str:
         """Limit hashtags in content to max_tags. Binance Square allows ~5 max."""
         import re
