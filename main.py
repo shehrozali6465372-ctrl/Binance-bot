@@ -39,6 +39,7 @@ class Config:
     repetition_hard_hours: int
     repetition_soft_hours: int
     save_research_packages: bool
+    max_daily_posts: int
     min_cap_for_safety: int
 
     @classmethod
@@ -66,6 +67,7 @@ class Config:
             repetition_hard_hours=int(os.getenv("REPETITION_HARD_HOURS", "12")),
             repetition_soft_hours=int(os.getenv("REPETITION_SOFT_HOURS", "24")),
             save_research_packages=os.getenv("SAVE_RESEARCH_PACKAGES", "1").strip().lower() in {"1", "true", "yes"},
+            max_daily_posts=int(os.getenv("MAX_DAILY_POSTS", "8")),
             min_cap_for_safety=int(os.getenv("MIN_CAP_FOR_SAFETY", "500000")),
         )
 
@@ -260,6 +262,20 @@ def _extract_catalyst_for_coin(symbol: str, announcements: List[Dict[str, Any]])
                 best_priority = p
                 best = a
     return best
+
+
+def _get_today_post_count(db) -> int:
+    """Count how many posts have been published today (UTC)."""
+    today_before = utc_now()[:10]  # YYYY-MM-DD
+    try:
+        rows = db.conn.execute(
+            "SELECT COUNT(*) FROM post_analytics WHERE created_at >= ?",
+            (today_before,)
+        ).fetchall()
+        return rows[0][0] if rows else 0
+    except Exception:
+        return 0
+
 
 
 @dataclass
@@ -2231,6 +2247,31 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     6. Gemini Phase 2 → write the post
     7. Publish
     """
+    # ─── DAILY POST CAP CHECK ───
+    # Exit early if we already published enough posts today
+    today_count = _get_today_post_count(publisher.db)
+    remaining = config.max_daily_posts - today_count
+    if remaining <= 0:
+        LOGGER.info("Daily post limit reached (%d/%d). Skipping.", today_count, config.max_daily_posts)
+        return False
+    
+    # ─── FAST EXIT IF RECENTLY CHECKED ───
+    # Skip full scan if we checked within last 30s (prevents redundant runs)
+    check_file = Path(CONFIG.database_path).parent / ".last_scan_check"
+    if check_file.exists():
+        try:
+            last_check = float(check_file.read_text().strip())
+            if time.time() - last_check < 25:
+                LOGGER.debug("Skipped scan (checked %.0fs ago)", time.time() - last_check)
+                return False
+        except Exception:
+            pass
+    try:
+        check_file.parent.mkdir(parents=True, exist_ok=True)
+        check_file.write_text(str(time.time()))
+    except Exception:
+        pass
+    
     # ──────────────────────────────────────────────
     # 1. COLLECT DATA
     # ──────────────────────────────────────────────
@@ -2282,8 +2323,9 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
             LOGGER.debug("Filter error for %s: %s", coin.symbol, e)
             continue
     
-    if len(candidates) < 3:
-        LOGGER.info("Only %d candidates passed objective filters (need 3). No publish opportunity.", len(candidates))
+    if len(candidates) < CONFIG.min_candidates:
+        LOGGER.info("[%s] Scan complete: %d/%d candidates passed — insufficient for Phase 1.",
+                     utc_now()[:16], len(candidates), len(raw_candidates))
         for c in candidates:
             LOGGER.info("  Passed: %s (%.1f%%, %.1fx vol)", c.symbol, c.change_24h, c.volume_ratio)
         return False
@@ -2323,8 +2365,8 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
             LOGGER.debug("Research package failed for %s: %s", coin.symbol, e)
             continue
     
-    if len(research_packages) < 3:
-        LOGGER.info("Only %d research packages built (need %d).", len(research_packages), CONFIG.min_candidates)
+    if len(research_packages) < CONFIG.min_candidates:
+        LOGGER.info("[%s] Scan: %d packages built — insufficient for Phase 1.", utc_now()[:16], len(research_packages))
         return False
     
     # Save research packages to files (for post-hoc review)
@@ -2399,6 +2441,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                 float(best_coin.get("volume_ratio", 1)))
     LOGGER.info("  Gemini reason: %s", decision_reason[:200] if decision_reason else "N/A")
     LOGGER.info("  Ranked #1 of %d candidates", len(rankings))
+    LOGGER.info("  Daily posts: %d/%d (%d remaining)", today_count, config.max_daily_posts, remaining)
     
     # Log why other candidates were rejected
     for i, r in enumerate(rankings[1:], 2):
