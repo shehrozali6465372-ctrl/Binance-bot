@@ -2019,57 +2019,43 @@ class GeminiGenerator:
     def _build_writing_prompt(self, coin: Dict[str, Any], research_package: str) -> str:
         """Build Phase 2 prompt: Gemini writes the post.
         
-        Optimized for:
-        - High relevance to Binance Square audience
-        - Strong Write-to-Earn potential
-        - Natural trader language (not AI-sounding)
-        - Actionable trade information
+        Optimized for Write-to-Earn: relevance, actionability, trader-first.
         """
         symbol = coin.get("symbol", "COIN")
         name = coin.get("name", symbol)
         price = float(coin.get("price", 0) or 0)
         change = float(coin.get("change_24h", 0) or 0)
-        direction = "BULLISH" if change >= 0 else "BEARISH"
         
         parts = [
-            "You are a professional Binance Square Write-to-Earn creator.",
+            "ROLE: Professional Binance Square Write-to-Earn creator.",
             "",
-            "Write a post about $%s (%s) based on this research." % (symbol, name),
+            "TASK: Write a 80-110 word post about $%s (%s)." % (symbol, name),
             "",
             "━" * 50,
             "RESEARCH:",
             research_package,
             "━" * 50,
             "",
-            "POST REQUIREMENTS:",
+            "WRITE THE POST. STRICT RULES:",
             "",
-            "1. LENGTH: 80-110 words exactly.",
-            "2. TONE: Professional crypto trader sharing real insights. Never AI-sounding.",
-            "3. HOOK: First 3 lines must make traders stop scrolling.",
-            "4. SETUP: Include entry, 2 targets, and stop loss. Make it tradeable.",
-            "5. CASHTAG: Include $%s in the post body." % symbol,
-            "6. HASHTAGS: Exactly 3-5 relevant hashtags. Include #Write2Earn.",
-            "7. EMOJIS: Use naturally, don't force them.",
-            "8. VALUE: Every sentence must help a trader make a decision.",
+            "1. 80-110 WORDS. Count before finishing.",
+            "2. Include $%s cashtag in body." % symbol,
+            "3. Include these hashtags: #%s #Write2Earn plus 1-3 more relevant tags." % symbol,
+            "4. STRUCTURE:",
+            "   - HOOK (2-3 lines): Why now? Catalyst + emoji.",
+            "   - SETUP: Entry, 2 targets, stop loss.",
+            "   - REASON: 2 lines. Why this trade makes sense.",
+            "   - TIP: 1-2 lines. Real trader advice.",
+            "   - HASHTAGS: One line, 3-5 tags.",
             "",
-            "STRUCTURE (follow exactly):",
+            "RULES:",
+            "- Sound like a real trader, not an AI.",
+            "- Every sentence must help someone trade.",
+            "- No fluff, no motivation, no 'not financial advice'.",
+            "- Fresh language every time. Never reuse hooks.",
+            "- Emojis welcome but only where natural.",
             "",
-            "Line 1-3: HOOK — The catalyst + why right now (3 lines, emoji-rich)",
-            "Line 4-6: SETUP — Entry at $X, Target 1 $X, Target 2 $X, Stop $X",
-            "Line 7-9: WHY — 2-3 lines of real trading logic based on the data",
-            "Line 10-11: PRO TIP — 2 lines of genuine professional advice",
-            "Line 12: HASHTAGS — 3-5 tags on one line",
-            "",
-            "BINANCE SQUARE WRITE-TO-EARN TIPS:",
-            "- $%s is %s right now. Traders want to know WHY and WHAT TO DO." % (symbol, direction),
-            "- Give a clear, actionable trade setup.",
-            "- The catalyst (reason for the move) must be obvious in the first 3 lines.",
-            "- End with a pro tip that shows real trading experience.",
-            "- Do NOT use phrases like 'in conclusion', 'to summarize', 'in summary'.",
-            "- Do NOT say 'this is not financial advice'. It wastes words.",
-            "- Do NOT add motivational quotes or generic crypto wisdom.",
-            "",
-            "Write the post now:",
+            "POST NOW:",
         ]
         
         return "\n".join(parts)
