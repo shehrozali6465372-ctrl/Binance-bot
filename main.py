@@ -1673,7 +1673,7 @@ class PostPublisher:
 
         payload = {
             "contentType": 1,
-            "bodyTextOnly": content,
+            "bodyTextOnly": self._limit_hashtags(content),
         }
         
         # Add image URL if available
@@ -1779,6 +1779,25 @@ class PostPublisher:
             "category": coin.get("narrative", ""),
             "narrative": coin.get("narrative", ""),
         }
+
+    @staticmethod
+    def _limit_hashtags(content: str, max_tags: int = 5) -> str:
+        """Limit hashtags in content to max_tags. Binance Square allows ~5 max."""
+        import re
+        # Extract all hashtags
+        tags = re.findall(r'#[A-Za-z0-9_]+', content)
+        if len(tags) <= max_tags:
+            return content
+        
+        # Remove all hashtags from content
+        text = re.sub(r'#[A-Za-z0-9_]+', '', content)
+        # Clean up extra spaces
+        text = re.sub(r' +', ' ', text).strip()
+        # Keep only first max_tags hashtags
+        keep_tags = tags[:max_tags]
+        # Add back at the end
+        return text + '\n' + ' '.join(keep_tags)
+
 
 
 
