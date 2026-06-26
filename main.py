@@ -1676,16 +1676,14 @@ class PostPublisher:
             "bodyTextOnly": self._limit_hashtags(content),
         }
         
-        # Add image caption at end (Binance Square may render <img> tags)
+        # Append image URL as plain text link (Binance Square renders clickable URLs)
         if isinstance(coin, dict):
             image_url = coin.get("_image_url", "")
             if image_url:
                 symbol = coin.get("symbol", "")
-                # Use HTML img tag or simple text link as fallback
-                img_html = "\n\n<img src=\"" + image_url + "\" alt=\"" + symbol + " Chart\" />\n\n📊 Chart: " + image_url
-                payload["bodyTextOnly"] += img_html
+                payload["bodyTextOnly"] += "\n\n📊 Chart: " + image_url
                 verified = coin.get("_image_verified", False)
-                LOGGER.info("Added image HTML to post (verified=%s): %s", verified, image_url)
+                LOGGER.info("Added image link to post (verified=%s): %s", verified, image_url)
         headers = {
             "X-Square-OpenAPI-Key": square_key,
             "Content-Type": "application/json",
