@@ -1718,14 +1718,12 @@ class PostPublisher:
             "bodyTextOnly": self._limit_hashtags(content),
         }
         
-        # Append image URL as plain text link (Binance Square renders clickable URLs)
+        # Image URL is saved to GitHub repo (not added to post text)
         if isinstance(coin, dict):
             image_url = coin.get("_image_url", "")
             if image_url:
-                symbol = coin.get("symbol", "")
-                payload["bodyTextOnly"] += "\n\n📊 Chart: " + image_url
                 verified = coin.get("_image_verified", False)
-                LOGGER.info("Added image link to post (verified=%s): %s", verified, image_url)
+                LOGGER.info("Image saved to repo (verified=%s): %s", verified, image_url)
         headers = {
             "X-Square-OpenAPI-Key": square_key,
             "Content-Type": "application/json",
