@@ -97,10 +97,10 @@ class Config:
         return cls(
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
             square_api_key=os.getenv("SQUARE_API_KEY", ""),
-            post_interval=int(os.getenv("POST_INTERVAL", "7200")),
+            post_interval=int(os.getenv("POST_INTERVAL", "300")),
             database_path=os.getenv("DATABASE_PATH", "agent.db"),
             publish_log_path=os.getenv("PUBLISH_LOG_PATH", "published_posts.jsonl"),
-            max_iterations=int(os.getenv("MAX_ITERATIONS", "1")),
+            max_iterations=int(os.getenv("MAX_ITERATIONS", "24")),
             dry_run=os.getenv("DRY_RUN", "1").strip().lower() not in {"0", "false", "no"},
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             live_market_data=os.getenv("LIVE_MARKET_DATA", "0").strip().lower() in {"1", "true", "yes"},
@@ -2604,8 +2604,16 @@ def main_loop() -> None:
     config = CONFIG
     config.validate()
     
-    interval = config.post_interval
-    max_iter = config.max_iterations
+    # In GHA: each run handles ~2 hours of 5-min scanning
+    in_gha = os.getenv("GITHUB_ACTIONS", "").lower() == "true"
+    if in_gha:
+        # Use 300s intervals with enough iterations for 2h window
+        interval = max(config.post_interval, 300)
+        max_iter = min(config.max_iterations or 24, 24)
+        LOGGER.info("GHA mode: %d scans at %ds intervals", max_iter, interval)
+    else:
+        interval = max(config.post_interval, 60)
+        max_iter = config.max_iterations
     
     scanner = MarketScanner(config)
     announcement_engine = BinanceAnnouncementEngine(config)
