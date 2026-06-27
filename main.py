@@ -568,11 +568,24 @@ def _verify_persistence_integrity() -> bool:
                 )
                 _git_size = len(_size_check.stdout.strip())
                 if _git_size > 0:
-                    # Git had content but local file is empty — corruption
-                    LOGGER.warning("INTEGRITY FAILURE: %s had %d bytes in git but is empty locally. "
-                                  "FAILING CLOSED — cannot guarantee history.",
-                                  _POST_HISTORY_FILE, _git_size)
-                    return False
+                    # Git has content — cache likely overwrote checkout with stale 0-byte.
+                    # Restore from git instead of failing closed.
+                    LOGGER.warning("INTEGRITY RESTORE: %s is empty locally but has %d bytes in git. "
+                                   "Restoring from git (cache overwrote checkout).",
+                                   _POST_HISTORY_FILE, _git_size)
+                    restored_content = _size_check.stdout
+                    if isinstance(restored_content, bytes):
+                        restored_content = restored_content.decode("utf-8", errors="replace")
+                    try:
+                        path.write_text(restored_content, encoding="utf-8")
+                        new_size = path.stat().st_size
+                        LOGGER.info("INTEGRITY RESTORE OK: Restored %s from git (%d bytes)",
+                                    _POST_HISTORY_FILE, new_size)
+                        return True
+                    except Exception as restore_err:
+                        LOGGER.warning("INTEGRITY RESTORE FAILED: Could not restore %s: %s. "
+                                       "Failing closed.", _POST_HISTORY_FILE, restore_err)
+                        return False
                 else:
                     # File was always empty in git — fresh deployment, safe
                     LOGGER.info("INTEGRITY: %s is empty in git too — fresh deployment, safe to proceed",
@@ -601,11 +614,28 @@ def _verify_persistence_integrity() -> bool:
             capture_output=True, timeout=10
         )
         if git_log.stdout.strip():
-            # File existed in git but is not in checkout + no cache
-            # This means BOTH git checkout AND cache restore failed
-            LOGGER.warning("INTEGRITY FAILURE: %s exists in git history but is missing from checkout. "
-                          "FAILING CLOSED — no publish this cycle.", _POST_HISTORY_FILE)
-            return False
+            # File existed in git but is not in checkout — cache or cache restore may have failed.
+            # Restore from git instead of failing closed.
+            LOGGER.warning("INTEGRITY RESTORE: %s exists in git history but is missing from checkout. "
+                           "Restoring from git.", _POST_HISTORY_FILE)
+            try:
+                git_content = subprocess.run(
+                    ["git", "show", "HEAD:published_posts.jsonl"],
+                    capture_output=True, timeout=10
+                )
+                restored = git_content.stdout
+                if isinstance(restored, bytes):
+                    restored = restored.decode("utf-8", errors="replace")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(restored, encoding="utf-8")
+                new_size = path.stat().st_size
+                LOGGER.info("INTEGRITY RESTORE OK: Restored %s from git (%d bytes)",
+                            _POST_HISTORY_FILE, new_size)
+                return True
+            except Exception as restore_err:
+                LOGGER.warning("INTEGRITY RESTORE FAILED: Could not restore %s: %s. "
+                               "Failing closed.", _POST_HISTORY_FILE, restore_err)
+                return False
         else:
             # Never committed — brand new repo, first run
             LOGGER.info("INTEGRITY: %s has no git history — assuming first run ever", _POST_HISTORY_FILE)
