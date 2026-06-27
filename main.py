@@ -394,7 +394,7 @@ def _try_git_push(max_retries: int = 3) -> bool:
                     LOGGER.debug("Git commit had no effect (nothing new to commit)")
                 else:
                     LOGGER.debug("Git commit skipped: %s", stderr.strip()[:100])
-                return False  # Nothing to push — no error
+                    return False  # Nothing to push — no error
             
             push_url = f"https://x-access-token:{token}@github.com/{repo}.git"
             push_result = subprocess.run(
@@ -513,6 +513,8 @@ def _verify_persistence_integrity() -> bool:
         try:
             size = path.stat().st_size
             if size > 0:
+                LOGGER.info("INTEGRITY OK: %s has %d bytes (%d lines) — history loaded",
+                           _POST_HISTORY_FILE, size, len(path.read_text().strip().split(chr(10))) if size > 0 else 0)
                 return True  # Has content — history is usable
             
             # File exists but is EMPTY — possibly truncated
@@ -728,10 +730,12 @@ def _passes_objective_filters(
             reject_reason = "top 5 coin with weak move (%.1f%%)" % change_24h
     
     if reject_reason:
-        LOGGER.debug("Filtered out $%s: %s", symbol, reject_reason)
+        LOGGER.info("FILTER REJECT: $%s — %s", symbol, reject_reason)
         return False
     
-    LOGGER.debug("Passed filters: $%s (%.1f%%, %.1fx vol)", symbol, change_24h, volume_ratio)
+    LOGGER.info("FILTER PASS: $%s (%.1f%%, %.1fx vol, posted_hours_data has %s)", 
+                symbol, change_24h, volume_ratio,
+                "YES" if symbol in posted_hours_data else "NO")
     return True
 
 
@@ -2790,7 +2794,9 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     posted_hours_data = {}
     try:
         posted_hours_data = _load_post_history()
-        LOGGER.debug("Loaded %d coins from %s", len(posted_hours_data), _POST_HISTORY_FILE)
+        LOGGER.info("COOLDOWN HISTORY: loaded %d coins from %s (sample: %s)",
+                    len(posted_hours_data), _POST_HISTORY_FILE,
+                    str(list(posted_hours_data.items())[:5]) if posted_hours_data else "none")
     except Exception as e:
         LOGGER.debug("Could not load post history: %s", e)
     # Secondary source: SQLite (current run data)
@@ -2852,7 +2858,32 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         reverse=True
     )
     
-    top_candidates = candidates[:5]  # Build packages for top 5
+    # ─── HARD COOLDOWN FILTER (pre-Gemini) ───
+    # Enforce strict cooldown: any coin in JSONL within 24h without
+    # exceptional catalyst is REMOVED from candidates.
+    # This prevents Gemini from ever seeing coins that should be blocked.
+    pre_gemini_filtered = []
+    for coin in top_candidates:
+        coin_dict = coin.as_dict()
+        ann_type = ""
+        for a in announcements:
+            if coin.symbol in a.get("symbols", []):
+                ann_type = a.get("type", "")
+                break
+        if _check_jsonl_cooldown(coin.symbol, catalyst_type=ann_type):
+            LOGGER.info("HARD COOLDOWN BLOCK (pre-Gemini): $%s removed from Phase 1 candidates",
+                       coin.symbol)
+            continue
+        pre_gemini_filtered.append(coin)
+    
+    if len(pre_gemini_filtered) < CONFIG.min_candidates:
+        LOGGER.info("HARD COOLDOWN: only %d candidates remain after cooldown filter (need %d) — skipping Phase 1",
+                    len(pre_gemini_filtered), CONFIG.min_candidates)
+        return False
+    
+    top_candidates = pre_gemini_filtered[:5]
+    
+    # Build packages for top candidates
     
     research_packages = []  # List of (coin_dict, package_text)
     for coin in top_candidates:
@@ -3151,6 +3182,7 @@ def main_loop() -> None:
 
 def main() -> None:
     """Single run mode - for cron/scheduled usage."""
+    LOGGER.info("⚙️  Production hardened V3 — persistence, cooldown, fail-closed active")
     _maybe_update_workflow()
     config = CONFIG
     config.validate()
