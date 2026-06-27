@@ -1341,6 +1341,203 @@ class PerformanceAnalyzer:
         else:
             return 'analysis_only'
 
+class SkillsHubEngine:
+    """Binance Skills Hub Market Rank API integration.
+    
+    Fetches trending data from 4 rank types:
+    - rankType=10 (Trending) — hot coins on BSC
+    - rankType=11 (Top Search) — most searched on Binance
+    - rankType=20 (Alpha) — Binance Alpha curated picks
+    - rankType=40 (Stock) — tokenized stocks
+    
+    Returns a unified score per coin for Binance Square posting.
+    """
+    
+    BASE_URL = "https://web3.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/unified/rank/list/ai"
+    
+    _cache = None
+    _cache_time = 0
+    CACHE_TTL = 120  # seconds
+    
+    def __init__(self):
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            "Origin": "https://www.binance.com",
+            "Referer": "https://www.binance.com/",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+    
+    def fetch_all(self) -> Dict[str, Dict[str, Any]]:
+        import requests
+        """Fetch all 4 rank types and merge into unified token dict.
+        
+        Returns dict of symbol -> token_data with merged rank info.
+        """
+        now = time.time()
+        if SkillsHubEngine._cache and (now - SkillsHubEngine._cache_time) < SkillsHubEngine.CACHE_TTL:
+            return SkillsHubEngine._cache
+        
+        merged = {}
+        rank_types = {
+            10: "trending",
+            11: "top_search", 
+            20: "alpha",
+            40: "stock",
+        }
+        
+        for rank_type, source in rank_types.items():
+            try:
+                payload = {
+                    "rankType": rank_type,
+                    "chainId": "56",
+                    "period": 50,
+                    "page": 1,
+                    "size": 20,
+                }
+                resp = requests.post(self.BASE_URL, json=payload, headers=self.headers, timeout=20)
+                if resp.status_code != 200:
+                    LOGGER.warning("SkillsHub rankType=%d HTTP %d", rank_type, resp.status_code)
+                    continue
+                data = resp.json()
+                if data.get("code") != "000000":
+                    LOGGER.debug("SkillsHub rankType=%d code=%s", rank_type, data.get("code"))
+                    continue
+                tokens = data.get("data", {}).get("tokens", [])
+                for t in tokens:
+                    sym = t.get("symbol", "")
+                    if not sym:
+                        continue
+                    if sym not in merged:
+                        merged[sym] = dict(t)
+                        merged[sym]["_sources"] = []
+                    merged[sym]["_sources"].append(source)
+                    # Merge rank position
+                    merged[sym][f"_rank_{source}"] = len([x for x in merged.values() if sym in x.get("_sources", [])]) + 1
+            except Exception as e:
+                LOGGER.debug("SkillsHub rankType=%d error: %s", rank_type, e)
+        
+        SkillsHubEngine._cache = merged
+        SkillsHubEngine._cache_time = time.time()
+        LOGGER.info("SkillsHub: loaded %d unique tokens from %d rank types", len(merged), len(rank_types))
+        return merged
+    
+    def get_scored_candidates(self) -> List[Coin]:
+        """Get scored coin candidates from Skills Hub data.
+        
+        Scoring factors (0-100):
+        - search score (searchCount24h rank)
+        - source score (how many rank types include this coin)
+        - smart money score (smartMoneyHoldingPercent)
+        - price action score (24h change + volume)
+        - risk penalty (audit risk level)
+        """
+        raw = self.fetch_all()
+        if not raw:
+            return []
+        
+        candidates = []
+        for sym, data in raw.items():
+            try:
+                score = self._calculate_score(data)
+                price = float(data.get("price", 0) or 0)
+                change_24h = float(data.get("percentChange24h", 0) or 0)
+                vol_24h = float(data.get("volume24h", 0) or 0)
+                search = int(data.get("searchCount24h", 0) or 0)
+                sources = data.get("_sources", [])
+                
+                # Map to Coin dataclass
+                coin = Coin(
+                    symbol=sym,
+                    name=data.get("metaInfo", {}).get("name", sym),
+                    price=price,
+                    change_24h=change_24h,
+                    volume_24h=vol_24h,
+                    volume_ratio=min(vol_24h / max(price * 1000, 1), 20) if price > 0 else 0,
+                    market_cap=float(data.get("marketCap", 0) or 0),
+                    history=[],
+                )
+                coin._skills_score = score
+                coin._skills_search = search
+                coin._skills_sources = sources
+                coin._skills_smart_money = float(data.get("smartMoneyHoldingPercent", 0) or 0)
+                coin._skills_kol = float(data.get("kolHoldingPercent", 0) or 0)
+                coin._skills_risk = data.get("auditInfo", {}).get("riskLevel", 1)
+                candidates.append(coin)
+            except Exception as e:
+                LOGGER.debug("SkillsHub parse error for %s: %s", sym, e)
+        
+        # Sort by score descending
+        candidates.sort(key=lambda c: getattr(c, '_skills_score', 0), reverse=True)
+        return candidates
+    
+    def _calculate_score(self, data: Dict[str, Any]) -> float:
+        """Calculate unified score for a token.
+        
+        Weighted factors:
+        - searchCount24h (normalized): 30 points max
+        - source diversity: 20 points max  
+        - smart money holding: 10 points max
+        - KOL holding: 5 points max
+        - 24h change (abs): 10 points max
+        - volume spike: 10 points max
+        - trader count: 5 points max
+        - Binance alpha tag: 5 points max
+        - Binance Spot listed (via exchangeInfo): 5 points max
+        - Risk penalty: -10 to 0
+        """
+        score = 0.0
+        
+        # 1. Search count (what people are looking for on Binance) - max 30
+        search = int(data.get("searchCount24h", 0) or 0)
+        score += min(search / 35, 30.0)  # 1060 search ~= 30 points
+        
+        # 2. Source diversity (appears in multiple rank types) - max 20
+        sources = data.get("_sources", [])
+        score += min(len(sources) * 7, 20.0)
+        
+        # 3. Smart money holding - max 10
+        sm = float(data.get("smartMoneyHoldingPercent", 0) or 0)
+        score += min(sm * 1.5, 10.0)
+        
+        # 4. KOL holding - max 5
+        kol = float(data.get("kolHoldingPercent", 0) or 0)
+        score += min(kol * 1.5, 5.0)
+        
+        # 5. 24h price action (absolute change, capped) - max 10
+        change = abs(float(data.get("percentChange24h", 0) or 0))
+        score += min(change / 5, 10.0)
+        
+        # 6. Volume spike (24h volume relative to market cap) - max 10
+        vol = float(data.get("volume24h", 0) or 0)
+        mc = float(data.get("marketCap", 0) or 1)
+        vol_ratio = vol / mc if mc > 0 else 0
+        score += min(vol_ratio * 50, 10.0)
+        
+        # 7. Unique trader count (24h) - max 5
+        traders = int(data.get("count24h", 0) or 0)
+        score += min(traders / 50000, 5.0)
+        
+        # 8. Binance Alpha tag - max 5
+        token_tag = data.get("tokenTag", {})
+        if token_tag:
+            score += 5.0
+        
+        # 9. Risk penalty - subtract up to 10
+        risk = data.get("auditInfo", {}).get("riskLevel", 1)
+        if risk >= 3:
+            score -= 10.0
+        elif risk == 2:
+            score -= 5.0
+        
+        # 10. Price too low penalty (under $0.001)
+        price = float(data.get("price", 0) or 0)
+        if 0 < price < 0.001:
+            score -= 5.0
+        
+        return max(score, 0.0)
+
+
 
 class MarketScanner:
     def __init__(self, config: Config = CONFIG):
@@ -2357,6 +2554,26 @@ class ResearchEngine:
         if not reasons:
             reasons.append("Setup developing — early for those who act first")
         lines.append("- " + "\n- ".join(reasons[:3]))
+        lines.append("")
+        
+        # Skills Hub signals (Binance ecosystem trending data)
+        skills_score = coin.get("skills_score", 0)
+        skills_search = coin.get("skills_search", 0)
+        skills_sources = coin.get("skills_sources", [])
+        skills_sm = coin.get("skills_smart_money", 0)
+        skills_kol = coin.get("skills_kol", 0)
+        if skills_score > 0:
+            lines.append("── BINANCE SKILLS HUB SIGNALS ──")
+            lines.append("Trend Score: %.0f/100" % skills_score)
+            if skills_search > 0:
+                lines.append("Binance Search Volume: %d searches in 24h" % skills_search)
+            if skills_sources:
+                lines.append("Trending Categories: %s" % ", ".join(skills_sources))
+            if skills_sm > 0:
+                lines.append("Smart Money Holding: %.1f%%" % skills_sm)
+            if skills_kol > 0:
+                lines.append("KOL Holding: %.1f%%" % skills_kol)
+            lines.append("")
         
         return "\n".join(lines)
 
@@ -2874,51 +3091,93 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # 2. APPLY OBJECTIVE FILTERS (in code, deterministic)
     # ──────────────────────────────────────────────
     
-    # Get all coins from scanner
-    raw_candidates = []
-    try:
-        universe = scanner._universe()
-        raw_candidates = [c for c in universe]
-    except Exception as e:
-        LOGGER.error("Failed to get market data: %s", e)
-        return False
-    
-    # Apply objective filters
+    # ─── SKILLS HUB ENGINE (primary source) ───
+    # Use Binance Skills Hub Market Rank API for trending/top-search/alpha data
     candidates = []
-    for coin in raw_candidates:
+    skills_used = False
+    try:
+        skills = SkillsHubEngine()
+        skills_candidates = skills.get_scored_candidates()
+        if skills_candidates:
+            LOGGER.info("SkillsHub: %d candidates loaded", len(skills_candidates))
+            # Show top 5
+            for c in skills_candidates[:5]:
+                LOGGER.info("  SkillsHub: $%s score=%.0f search=%d sources=%s SM=%.1f%%",
+                           c.symbol, getattr(c, '_skills_score', 0),
+                           getattr(c, '_skills_search', 0),
+                           getattr(c, '_skills_sources', []),
+                           getattr(c, '_skills_smart_money', 0))
+            skills_used = True
+            # Apply objective filters (more lenient for SkillsHub data)
+            for coin in skills_candidates:
+                try:
+                    if _passes_objective_filters(
+                        symbol=coin.symbol,
+                        price=coin.price,
+                        change_24h=coin.change_24h,
+                        volume_ratio=getattr(coin, 'volume_ratio', 1.0),
+                        market_cap=coin.market_cap,
+                        announcements=announcements,
+                        posted_hours_data=posted_hours_data,
+                    ):
+                        candidates.append(coin)
+                except Exception as e:
+                    LOGGER.debug("SkillsHub filter error for %s: %s", coin.symbol, e)
+                    continue
+    except Exception as e:
+        LOGGER.warning("SkillsHubEngine failed: %s — falling back to MarketScanner", e)
+    
+    # ─── MARKET SCANNER (fallback) ───
+    # Use CoinGecko-based scanner if SkillsHub returned nothing
+    if not candidates:
+        raw_candidates = []
         try:
-            if _passes_objective_filters(
-                symbol=coin.symbol,
-                price=coin.price,
-                change_24h=coin.change_24h,
-                volume_ratio=coin.volume_ratio,
-                market_cap=coin.market_cap,
-                announcements=announcements,
-                posted_hours_data=posted_hours_data,
-            ):
-                candidates.append(coin)
+            universe = scanner._universe()
+            raw_candidates = [c for c in universe]
         except Exception as e:
-            LOGGER.debug("Filter error for %s: %s", coin.symbol, e)
-            continue
+            LOGGER.error("Failed to get market data: %s", e)
+            return False
+        
+        for coin in raw_candidates:
+            try:
+                if _passes_objective_filters(
+                    symbol=coin.symbol,
+                    price=coin.price,
+                    change_24h=coin.change_24h,
+                    volume_ratio=coin.volume_ratio,
+                    market_cap=coin.market_cap,
+                    announcements=announcements,
+                    posted_hours_data=posted_hours_data,
+                ):
+                    candidates.append(coin)
+            except Exception as e:
+                LOGGER.debug("Filter error for %s: %s", coin.symbol, e)
+                continue
     
     if len(candidates) < CONFIG.min_candidates:
-        LOGGER.info("[%s] Scan complete: %d/%d candidates passed — insufficient for Phase 1.",
-                     utc_now()[:16], len(candidates), len(raw_candidates))
-        for c in candidates:
-            LOGGER.info("  Passed: %s (%.1f%%, %.1fx vol)", c.symbol, c.change_24h, c.volume_ratio)
+        LOGGER.info("[%s] Scan complete: %d candidates passed — insufficient for Phase 1.",
+                     utc_now()[:16], len(candidates))
+        for c in candidates[:5]:
+            LOGGER.info("  Passed: $%s (%.1f%%, %.1fx vol)%s",
+                       c.symbol, c.change_24h, c.volume_ratio,
+                       f" score={getattr(c,'_skills_score',0):.0f}" if hasattr(c, '_skills_score') else "")
         return False
     
-    LOGGER.info("%d candidates passed objective filters", len(candidates))
+    LOGGER.info("%d candidates passed objective filters%s", len(candidates),
+                " (SkillsHub)" if skills_used else " (MarketScanner)")
     
     # ──────────────────────────────────────────────
     # 3. BUILD RESEARCH PACKAGES FOR TOP CANDIDATES
     # ──────────────────────────────────────────────
     
-    # Sort by simple market activity heuristic to get top candidates
-    candidates.sort(
-        key=lambda c: (abs(c.change_24h) * 0.6 + c.volume_ratio * 0.4),
-        reverse=True
-    )
+    # Sort by SkillsHub score (if available) or market activity heuristic
+    if skills_used:
+        candidates.sort(key=lambda c: getattr(c, '_skills_score', 0), reverse=True)
+    else:
+        candidates.sort(
+            key=lambda c: (abs(c.change_24h) * 0.6 + c.volume_ratio * 0.4),
+            reverse=True
+        )
     
     top_candidates = candidates[:5]  # Build packages for top 5
     
@@ -2954,6 +3213,14 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     research_packages = []  # List of (coin_dict, package_text)
     for coin in top_candidates:
         coin_dict = coin.as_dict()
+        
+        # Add Skills Hub data to coin_dict for richer research packages
+        coin_dict["skills_score"] = getattr(coin, '_skills_score', 0)
+        coin_dict["skills_search"] = getattr(coin, '_skills_search', 0)
+        coin_dict["skills_sources"] = getattr(coin, '_skills_sources', [])
+        coin_dict["skills_smart_money"] = getattr(coin, '_skills_smart_money', 0)
+        coin_dict["skills_kol"] = getattr(coin, '_skills_kol', 0)
+        coin_dict["skills_risk"] = getattr(coin, '_skills_risk', 1)
         
         # Add announcement context
         for a in announcements:
