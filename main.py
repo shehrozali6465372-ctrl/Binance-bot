@@ -524,10 +524,27 @@ def _verify_persistence_integrity() -> bool:
                 capture_output=True, timeout=10
             )
             if git_log.stdout.strip():
-                # Git has history for this file but it's empty now
-                LOGGER.warning("INTEGRITY FAILURE: %s had content in git, but file is empty. "
-                              "FAILING CLOSED — cannot guarantee history.", _POST_HISTORY_FILE)
-                return False
+                # File exists in git but is empty locally.
+                # Check if git always had it empty (fresh deployment) or
+                # if content was lost (corruption).
+                import subprocess as _sp
+                _size_check = _sp.run(
+                    ["git", "show", "HEAD:published_posts.jsonl"],
+                    capture_output=True, timeout=10
+                )
+                _git_size = len(_size_check.stdout.strip())
+                if _git_size > 0:
+                    # Git had content but local file is empty — corruption
+                    LOGGER.warning("INTEGRITY FAILURE: %s had %d bytes in git but is empty locally. "
+                                  "FAILING CLOSED — cannot guarantee history.",
+                                  _POST_HISTORY_FILE, _git_size)
+                    return False
+                else:
+                    # File was always empty in git — fresh deployment, safe
+                    LOGGER.info("INTEGRITY: %s is empty in git too — fresh deployment, safe to proceed",
+                               _POST_HISTORY_FILE)
+                    path.write_text("", encoding="utf-8")
+                    return True
             else:
                 # New file, never committed — first run scenario
                 LOGGER.info("INTEGRITY: %s is new (never committed) — safe to proceed",
