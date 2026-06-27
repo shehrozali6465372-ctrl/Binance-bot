@@ -403,7 +403,8 @@ def _try_git_push(max_retries: int = 3) -> bool:
                 capture_output=True, timeout=30
             )
             commit_result = _sp.run(
-                ["git", "commit", "-m", f"Auto-save: post records [{utc_now()[:10]}]"],
+                ["git", "-c", "user.name=bot", "-c", "user.email=bot@bot.com",
+                 "commit", "-m", f"Auto-save: post records [{utc_now()[:10]}]"],
                 capture_output=True, timeout=30
             )
             if commit_result.returncode != 0:
