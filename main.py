@@ -1369,7 +1369,7 @@ class SkillsHubEngine:
         }
     
     def fetch_all(self) -> Dict[str, Dict[str, Any]]:
-        import requests
+        import urllib.request, urllib.error
         """Fetch all 4 rank types and merge into unified token dict.
         
         Returns dict of symbol -> token_data with merged rank info.
@@ -1395,11 +1395,14 @@ class SkillsHubEngine:
                     "page": 1,
                     "size": 20,
                 }
-                resp = requests.post(self.BASE_URL, json=payload, headers=self.headers, timeout=20)
-                if resp.status_code != 200:
-                    LOGGER.warning("SkillsHub rankType=%d HTTP %d", rank_type, resp.status_code)
+                req = urllib.request.Request(self.BASE_URL, data=json.dumps(payload).encode('utf-8'),
+                                        headers=self.headers, method='POST')
+                resp = urllib.request.urlopen(req, timeout=20)
+                if resp.status != 200:
+                    LOGGER.warning("SkillsHub rankType=%d HTTP %d", rank_type, resp.status)
                     continue
-                data = resp.json()
+                raw_body = resp.read().decode('utf-8', errors='replace')
+                data = json.loads(raw_body)
                 if data.get("code") != "000000":
                     LOGGER.debug("SkillsHub rankType=%d code=%s", rank_type, data.get("code"))
                     continue
@@ -1414,6 +1417,10 @@ class SkillsHubEngine:
                     merged[sym]["_sources"].append(source)
                     # Merge rank position
                     merged[sym][f"_rank_{source}"] = len([x for x in merged.values() if sym in x.get("_sources", [])]) + 1
+            except urllib.error.HTTPError as e:
+                LOGGER.debug("SkillsHub rankType=%d HTTP %d: %s", rank_type, e.code, e.reason)
+            except urllib.error.URLError as e:
+                LOGGER.debug("SkillsHub rankType=%d connection error: %s", rank_type, e.reason)
             except Exception as e:
                 LOGGER.debug("SkillsHub rankType=%d error: %s", rank_type, e)
         
@@ -2840,6 +2847,12 @@ class GeminiGenerator:
             "- No fluff, no motivation, no 'not financial advice'.",
             "- Fresh language every time. Never reuse hooks.",
             "- Emojis welcome but only where natural.",
+            "",
+            "SKILLS HUB SIGNALS (if present in RESEARCH above):",
+            "- If Search Volume > 100: mention 'trending on Binance' as social proof.",
+            "- If Smart Money > 2%: mention 'smart money accumulating'.",
+            "- If Alpha tagged: mention 'Binance Alpha selection' for credibility.",
+            "- If multiple trending categories: mention momentum across categories.",
             "",
             "POST NOW:",
         ]
