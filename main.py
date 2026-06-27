@@ -371,42 +371,78 @@ def _try_git_push(max_retries: int = 3) -> bool:
         LOGGER.info("Git push skipped: no GITHUB_REPOSITORY available")
         return False
     
-    import subprocess
+    import subprocess as _sp
+    
+    # Log the current branch/HEAD state for debugging
+    try:
+        branch_check = _sp.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, timeout=5, text=True
+        )
+        current_branch = branch_check.stdout.strip()
+        sha_check = _sp.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, timeout=5, text=True
+        )
+        current_sha = sha_check.stdout.strip()
+        LOGGER.info("Git state: branch=%s sha=%s", current_branch, current_sha)
+    except Exception as e:
+        LOGGER.debug("Could not get git state: %s", e)
+        current_branch = "unknown"
+        current_sha = "unknown"
     
     for attempt in range(1, max_retries + 1):
         LOGGER.debug("Git push attempt %d/%d", attempt, max_retries)
         try:
-            subprocess.run(
+            _sp.run(
                 ["git", "add", _POST_HISTORY_FILE],
                 capture_output=True, timeout=30
             )
-            subprocess.run(
+            _sp.run(
                 ["git", "add", "posts/"],
                 capture_output=True, timeout=30
             )
-            commit_result = subprocess.run(
+            commit_result = _sp.run(
                 ["git", "commit", "-m", f"Auto-save: post records [{utc_now()[:10]}]"],
                 capture_output=True, timeout=30
             )
             if commit_result.returncode != 0:
                 stderr = commit_result.stderr.decode("utf-8", errors="replace")
-                if "nothing to commit" not in stderr:
-                    LOGGER.debug("Git commit had no effect (nothing new to commit)")
-                else:
-                    LOGGER.debug("Git commit skipped: %s", stderr.strip()[:100])
-                    return False  # Nothing to push — no error
+                stdout = commit_result.stdout.decode("utf-8", errors="replace")
+                full_output = (stderr + " " + stdout).lower()
+                if "nothing to commit" in full_output or "nothing added to commit" in full_output:
+                    LOGGER.info("Git commit: nothing new to commit -- JSONL unchanged (this is fine)")
+                    return True  # Nothing to push but no error -- success
+                LOGGER.warning("Git commit failed (attempt %d/%d): %s",
+                               attempt, max_retries, full_output[:200])
+                if attempt < max_retries:
+                    _sleep = min(5 * (2 ** (attempt - 1)), 20)
+                    time.sleep(_sleep)
+                continue
             
-            push_url = f"https://x-access-token:{token}@github.com/{repo}.git"
-            push_result = subprocess.run(
-                ["git", "push", push_url, "HEAD"],
+            # Use explicit remote URL + push to main branch
+            push_url = f"https://x-access-token:{token}@github.com/{repo}"
+            _sp.run(
+                ["git", "remote", "set-url", "origin", push_url],
+                capture_output=True, timeout=10
+            )
+            # Determine target branch: use current branch if on a named branch, fallback to main
+            target_branch = current_branch if current_branch not in ("unknown", "HEAD") else "main"
+            LOGGER.info("Pushing commit %s on branch %s to origin/%s",
+                        current_sha, current_branch, target_branch)
+            push_result = _sp.run(
+                ["git", "push", "origin", f"HEAD:{target_branch}"],
                 capture_output=True, timeout=60
             )
             if push_result.returncode == 0:
-                LOGGER.info("Git push SUCCESS (attempt %d/%d): %s committed to %s",
-                            attempt, max_retries, _POST_HISTORY_FILE, repo)
+                p_stdout = push_result.stdout.decode("utf-8", errors="replace").strip()
+                p_stderr = push_result.stderr.decode("utf-8", errors="replace").strip()
+                push_info = (p_stdout + " " + p_stderr).strip()[:200]
+                LOGGER.info("Git push SUCCESS (attempt %d/%d): commit %s pushed to %s -- %s",
+                            attempt, max_retries, current_sha, repo, push_info)
                 return True
             else:
-                err = push_result.stderr.decode("utf-8", errors="replace").strip()[:300]
+                err = push_result.stderr.decode("utf-8", errors="replace").strip()[:500]
                 if attempt < max_retries:
                     sleep_time = min(5 * (2 ** (attempt - 1)) + random.uniform(0, 2), 30)
                     LOGGER.warning("Git push FAILED attempt %d/%d (retrying in %.0fs): %s",
@@ -416,7 +452,7 @@ def _try_git_push(max_retries: int = 3) -> bool:
                     LOGGER.warning("Git push FAILED after %d attempts (record saved locally, "
                                    "will retry on next run): %s", max_retries, err)
                     return False
-        except subprocess.TimeoutExpired:
+        except _sp.TimeoutExpired:
             if attempt < max_retries:
                 sleep_time = min(5 * (2 ** (attempt - 1)), 20)
                 LOGGER.warning("Git push TIMEOUT attempt %d/%d (retrying in %.0fs)",
@@ -437,11 +473,6 @@ def _try_git_push(max_retries: int = 3) -> bool:
                 return False
     
     return False
-
-
-
-
-
 
 def _retry_pending_push() -> bool:
     """Startup retry: check if published_posts.jsonl has uncommitted changes
