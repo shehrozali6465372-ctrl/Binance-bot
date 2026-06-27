@@ -231,6 +231,422 @@ BINANCE_LISTED = {
 }
 
 
+
+
+# ─── PERSISTENT POST HISTORY (JSONL + Git Push) ───
+# Survives GHA ephemeral containers by storing records in a file
+# that gets git-committed after each publish.
+_POST_HISTORY_FILE = "published_posts.jsonl"
+
+
+def _load_post_history() -> dict:
+    """Load published posts from JSONL file.
+    
+    Returns dict of symbol -> hours_ago for recently posted coins.
+    This survives GHA runs because the file is committed to the repo.
+    
+    Safety: if the file is missing or corrupted, it is safely recreated.
+    All malformed lines are skipped and reported.
+    """
+    path = Path(_POST_HISTORY_FILE)
+    
+    # Missing file is not an error; first run has no history
+    if not path.exists():
+        LOGGER.info("Post history file %s not found — starting fresh", _POST_HISTORY_FILE)
+        return {}
+    
+    posts: dict = {}
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC for comparison with JSONL timestamps
+    
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception as e:
+        LOGGER.warning("Cannot read %s (%s) — recreating", _POST_HISTORY_FILE, e)
+        try:
+            path.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+        return {}
+    
+    if not raw:
+        return {}
+    
+    corrupt_lines = 0
+    valid_lines = 0
+    
+    for idx, line in enumerate(raw.split('\n'), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+            symbol = record.get("symbol", "").upper().strip()
+            ts_str = record.get("timestamp", "")
+            if not symbol or not ts_str:
+                corrupt_lines += 1
+                continue
+            dt = datetime.fromisoformat(ts_str)
+            # Strip timezone if present (we compare against naive UTC)
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+            hours_ago = (now - dt).total_seconds() / 3600.0
+            if symbol not in posts or hours_ago < posts[symbol]:
+                posts[symbol] = hours_ago
+            valid_lines += 1
+        except (json.JSONDecodeError, ValueError, TypeError):
+            corrupt_lines += 1
+            LOGGER.debug("Skipped corrupt JSONL line %d: %s", idx, line[:80])
+            continue
+    
+    if corrupt_lines > 0:
+        LOGGER.warning("Post history loaded: %d valid, %d corrupt lines from %s",
+                       valid_lines, corrupt_lines, _POST_HISTORY_FILE)
+    else:
+        LOGGER.info("Post history loaded: %d coins from %s (%d lines)",
+                    len(posts), _POST_HISTORY_FILE, valid_lines)
+    
+    return posts
+
+
+def _append_post_record(symbol: str, catalyst: str, link: str) -> bool:
+    """Append a post record to the JSONL history file.
+    
+    Verifies the record was written successfully.
+    Returns True if verified, False on failure.
+    The record always survives in the file even if git push fails later.
+    """
+    record = {
+        "symbol": symbol.upper().strip(),
+        "timestamp": utc_now(),
+        "catalyst": catalyst,
+        "link": link,
+    }
+    json_line = json.dumps(record) + "\n"
+    
+    try:
+        path = Path(_POST_HISTORY_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json_line)
+            f.flush()
+            os.fsync(f.fileno())
+        
+        # Verify the record was written correctly
+        with open(path, "r", encoding="utf-8") as f:
+            f.seek(0, 2)  # Seek to end
+            size = f.tell()
+            # Read last ~500 bytes to find our record
+            read_start = max(0, size - 500)
+            f.seek(read_start)
+            tail = f.read()
+        
+        if symbol.upper() in tail and record["timestamp"][:16] in tail:
+            LOGGER.info("JSONL updated: $%s | catalyst=%s | link=%s",
+                        symbol, catalyst, link or "local-only")
+            return True
+        else:
+            LOGGER.warning("JSONL write verification failed for $%s — file may be inconsistent", symbol)
+            return False
+    except Exception as e:
+        LOGGER.error("Failed to append to %s: %s", _POST_HISTORY_FILE, e)
+        return False
+
+
+def _try_git_push(max_retries: int = 3) -> bool:
+    """Try to git-commit and push the JSONL history file to the repo.
+    
+    Retries up to max_retries times with exponential backoff.
+    The JSONL record is ALREADY written to disk before this is called,
+    so even if all retries fail, the record is NOT lost — it persists
+    on disk and will be retried on the next run via _retry_pending_push().
+    
+    Returns True if push succeeded, False otherwise (never raises).
+    """
+    token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
+    if not token:
+        LOGGER.info("Git push skipped: no GH_TOKEN/GITHUB_TOKEN available")
+        return False
+    repo = os.getenv("GITHUB_REPOSITORY", "")
+    if not repo:
+        LOGGER.info("Git push skipped: no GITHUB_REPOSITORY available")
+        return False
+    
+    import subprocess
+    
+    for attempt in range(1, max_retries + 1):
+        LOGGER.debug("Git push attempt %d/%d", attempt, max_retries)
+        try:
+            subprocess.run(
+                ["git", "add", _POST_HISTORY_FILE],
+                capture_output=True, timeout=30
+            )
+            subprocess.run(
+                ["git", "add", "posts/"],
+                capture_output=True, timeout=30
+            )
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", f"Auto-save: post records [{utc_now()[:10]}]"],
+                capture_output=True, timeout=30
+            )
+            if commit_result.returncode != 0:
+                stderr = commit_result.stderr.decode("utf-8", errors="replace")
+                if "nothing to commit" not in stderr:
+                    LOGGER.debug("Git commit had no effect (nothing new to commit)")
+                else:
+                    LOGGER.debug("Git commit skipped: %s", stderr.strip()[:100])
+                return False  # Nothing to push — no error
+            
+            push_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+            push_result = subprocess.run(
+                ["git", "push", push_url, "HEAD"],
+                capture_output=True, timeout=60
+            )
+            if push_result.returncode == 0:
+                LOGGER.info("Git push SUCCESS (attempt %d/%d): %s committed to %s",
+                            attempt, max_retries, _POST_HISTORY_FILE, repo)
+                return True
+            else:
+                err = push_result.stderr.decode("utf-8", errors="replace").strip()[:300]
+                if attempt < max_retries:
+                    sleep_time = min(5 * (2 ** (attempt - 1)) + random.uniform(0, 2), 30)
+                    LOGGER.warning("Git push FAILED attempt %d/%d (retrying in %.0fs): %s",
+                                   attempt, max_retries, sleep_time, err)
+                    time.sleep(sleep_time)
+                else:
+                    LOGGER.warning("Git push FAILED after %d attempts (record saved locally, "
+                                   "will retry on next run): %s", max_retries, err)
+                    return False
+        except subprocess.TimeoutExpired:
+            if attempt < max_retries:
+                sleep_time = min(5 * (2 ** (attempt - 1)), 20)
+                LOGGER.warning("Git push TIMEOUT attempt %d/%d (retrying in %.0fs)",
+                               attempt, max_retries, sleep_time)
+                time.sleep(sleep_time)
+            else:
+                LOGGER.warning("Git push TIMEOUT after %d attempts (record saved locally)",
+                               max_retries)
+                return False
+        except Exception as e:
+            if attempt < max_retries:
+                sleep_time = min(5 * (2 ** (attempt - 1)), 20)
+                LOGGER.warning("Git push ERROR attempt %d/%d (retrying in %.0fs): %s",
+                               attempt, max_retries, sleep_time, e)
+                time.sleep(sleep_time)
+            else:
+                LOGGER.warning("Git push ERROR after %d attempts: %s", max_retries, e)
+                return False
+    
+    return False
+
+
+
+
+
+
+def _retry_pending_push() -> bool:
+    """Startup retry: check if published_posts.jsonl has uncommitted changes
+    and push them. This handles the scenario where the previous workflow run's
+    git push failed — the JSONL file has records that were never committed.
+    
+    This runs at the start of every workflow run BEFORE any decision is made,
+    so the repo is always up to date before scanning begins.
+    
+    Works even if no publish happens in this run — it just syncs pending changes.
+    """
+    token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
+    if not token:
+        return False
+    repo = os.getenv("GITHUB_REPOSITORY", "")
+    if not repo:
+        return False
+    
+    path = Path(_POST_HISTORY_FILE)
+    if not path.exists():
+        return False
+    
+    import subprocess
+    try:
+        # Check for uncommitted changes in the tracked files
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain", _POST_HISTORY_FILE, "posts/"],
+            capture_output=True, timeout=15
+        )
+        status_output = status_result.stdout.decode("utf-8", errors="replace").strip()
+        
+        if not status_output:
+            # No uncommitted changes — nothing to retry
+            return False
+        
+        # There ARE uncommitted changes — previous push must have failed
+        LOGGER.info("Startup retry: detected uncommitted changes in %s from previous run",
+                    _POST_HISTORY_FILE)
+        LOGGER.info("  git status: %s", status_output[:200])
+        
+        # Now push them
+        return _try_git_push(max_retries=3)
+    except Exception as e:
+        LOGGER.debug("Startup retry check: %s", e)
+        return False
+
+
+
+
+def _verify_persistence_integrity() -> bool:
+    """Verify that the persistence layer is intact before publishing.
+    
+    Returns True if history is reliable (safe to publish).
+    Returns False if integrity cannot be guaranteed (must fail CLOSED).
+    
+    Failure scenarios:
+    - JSONL exists in git history but is missing from checkout → cache+git both failed
+    - JSONL exists but is empty and git had content → file was truncated/corrupted
+    - Any situation where we cannot guarantee we have the full post history
+    
+    When this returns False, the system MUST NOT publish — it cannot
+    guarantee it won't repeat a recently posted coin.
+    """
+    path = Path(_POST_HISTORY_FILE)
+    
+    import subprocess
+    
+    if path.exists():
+        try:
+            size = path.stat().st_size
+            if size > 0:
+                return True  # Has content — history is usable
+            
+            # File exists but is EMPTY — possibly truncated
+            LOGGER.warning("INTEGRITY: %s exists but is empty (0 bytes)", _POST_HISTORY_FILE)
+            
+            # Check if git ever had this file with content
+            git_log = subprocess.run(
+                ["git", "log", "--oneline", "-1", "--", _POST_HISTORY_FILE],
+                capture_output=True, timeout=10
+            )
+            if git_log.stdout.strip():
+                # Git has history for this file but it's empty now
+                LOGGER.warning("INTEGRITY FAILURE: %s had content in git, but file is empty. "
+                              "FAILING CLOSED — cannot guarantee history.", _POST_HISTORY_FILE)
+                return False
+            else:
+                # New file, never committed — first run scenario
+                LOGGER.info("INTEGRITY: %s is new (never committed) — safe to proceed",
+                           _POST_HISTORY_FILE)
+                return True
+        except subprocess.TimeoutExpired:
+            LOGGER.warning("INTEGRITY: git log check timed out — allowing (safe default)")
+            return True
+        except Exception as e:
+            LOGGER.warning("INTEGRITY: check error: %s — allowing", e)
+            return True
+    
+    # File does NOT exist on disk
+    LOGGER.warning("INTEGRITY: %s does not exist on disk", _POST_HISTORY_FILE)
+    
+    try:
+        # Check if git ever had this file
+        git_log = subprocess.run(
+            ["git", "log", "--oneline", "-1", "--", _POST_HISTORY_FILE],
+            capture_output=True, timeout=10
+        )
+        if git_log.stdout.strip():
+            # File existed in git but is not in checkout + no cache
+            # This means BOTH git checkout AND cache restore failed
+            LOGGER.warning("INTEGRITY FAILURE: %s exists in git history but is missing from checkout. "
+                          "FAILING CLOSED — no publish this cycle.", _POST_HISTORY_FILE)
+            return False
+        else:
+            # Never committed — brand new repo, first run
+            LOGGER.info("INTEGRITY: %s has no git history — assuming first run ever", _POST_HISTORY_FILE)
+            # Create the file so subsequent runs have it
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("", encoding="utf-8")
+                LOGGER.info("INTEGRITY: Created empty %s for first run", _POST_HISTORY_FILE)
+            except Exception:
+                pass
+            return True
+    except subprocess.TimeoutExpired:
+        LOGGER.warning("INTEGRITY: git log check timed out — allowing")
+        return True
+    except Exception as e:
+        LOGGER.warning("INTEGRITY: git check error: %s — allowing", e)
+        return True
+
+
+def _check_jsonl_cooldown(symbol: str, catalyst_type: str = "") -> bool:
+    """Final cooldown check by reading the JSONL file directly.
+    
+    Scans the most recent records for the given symbol.
+    If found within the cooldown window AND no exceptional catalyst,
+    returns True (meaning: cooldown IS active, block publishing).
+    
+    This is a safety net that works even if the in-memory
+    posted_hours_data dict is stale or incomplete.
+    
+    Exceptional catalysts that bypass cooldown:
+    - new_listing, launchpool, megadrop, airdrop, delisting
+    """
+    path = Path(_POST_HISTORY_FILE)
+    if not path.exists():
+        return False  # No history = no cooldown
+    
+    hard_hours = CONFIG.repetition_hard_hours  # default 12
+    soft_hours = CONFIG.repetition_soft_hours  # default 24
+    
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC for comparison with JSONL timestamps
+    symbol_up = symbol.upper().strip()
+    
+    exceptional = catalyst_type in ("new_listing", "launchpool", "megadrop", "airdrop", "delisting")
+    
+    try:
+        # Read last 50 lines only (fast scan)
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not raw:
+            return False
+        
+        lines = [l.strip() for l in raw.split('\n') if l.strip()]
+        # Scan from newest (last) to oldest
+        for line in reversed(lines[-50:]):
+            try:
+                record = json.loads(line)
+                rec_sym = record.get("symbol", "").upper().strip()
+                if rec_sym != symbol_up:
+                    continue
+                
+                ts_str = record.get("timestamp", "")
+                if not ts_str:
+                    continue
+                
+                dt = datetime.fromisoformat(ts_str)
+                # Strip timezone if present (we compare against naive UTC)
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)
+                hours_ago = (now - dt).total_seconds() / 3600.0
+                
+                if hours_ago < hard_hours:
+                    if not exceptional:
+                        LOGGER.warning("COOLDOWN ACTIVE: $%s posted %.1fh ago (hard limit %dh)",
+                                       symbol, hours_ago, hard_hours)
+                        return True
+                
+                if hours_ago < soft_hours and not exceptional:
+                    LOGGER.warning("COOLDOWN ACTIVE: $%s posted %.1fh ago (soft limit %dh, catalyst=%s)",
+                                   symbol, hours_ago, soft_hours, catalyst_type or "none")
+                    return True
+                
+                # Found the most recent record for this coin, and it's outside cooldown
+                return False
+                
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+        
+        return False  # No record found for this symbol
+    except Exception as e:
+        LOGGER.debug("Cooldown check error: %s", e)
+        return False  # On error, allow (don't block publishing)
+
+
 def _passes_objective_filters(
     symbol: str,
     price: float,
@@ -261,10 +677,13 @@ def _passes_objective_filters(
     # 3. Must have a FRESH catalyst
     has_announcement = False
     ann_type = ""
+    has_exceptional_catalyst = False
     for a in announcements:
         if symbol in a.get("symbols", []):
             has_announcement = True
             ann_type = a.get("type", "")
+            if ann_type in ("new_listing", "launchpool", "megadrop", "airdrop", "delisting"):
+                has_exceptional_catalyst = True
             break
     
     has_movement = abs(change_24h) > 2.5 or volume_ratio > 1.5
@@ -277,17 +696,16 @@ def _passes_objective_filters(
         hours_ago = posted_hours_data[symbol]
         hard = CONFIG.repetition_hard_hours
         soft = CONFIG.repetition_soft_hours
-        if hours_ago < hard:
+        if hours_ago < hard and not has_exceptional_catalyst:
             reject_reason = "recently posted (%.0fh ago, hard limit %dh)" % (hours_ago, hard)
-        elif hours_ago < soft and not has_announcement:
+        elif hours_ago < soft and not has_exceptional_catalyst:
             reject_reason = "recently posted (%.0fh ago, no new catalyst, soft limit %dh)" % (hours_ago, soft)
-        elif hours_ago < 48 and not has_announcement and abs(change_24h) < 5:
+        elif hours_ago < 48 and not has_exceptional_catalyst and abs(change_24h) < 5:
             reject_reason = "recently posted (%.0fh ago, weak move %.1f%%)" % (hours_ago, change_24h)
     
     # 5. Top 5 coins — only with exceptional catalyst
     if not reject_reason and symbol in TOP_5_COINS:
-        exceptional = has_announcement and ann_type in ("new_listing", "launchpool", "megadrop")
-        if not exceptional:
+        if not has_exceptional_catalyst:
             reject_reason = "top 5 coin without exceptional catalyst"
         elif abs(change_24h) < 5:
             reject_reason = "top 5 coin with weak move (%.1f%%)" % change_24h
@@ -511,7 +929,7 @@ class Database:
 
     def get_posted_hours_dict(self, hours: int = 72) -> Dict[str, float]:
         """Get dict of symbol -> hours_ago for recently posted coins."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC for comparison with JSONL timestamps
         try:
             cur = self.conn.execute(
                 "SELECT coin_symbol, created_at FROM posts WHERE created_at IS NOT NULL ORDER BY id DESC LIMIT 200"
@@ -523,6 +941,8 @@ class Database:
                     continue
                 try:
                     posted_time = datetime.fromisoformat(row["created_at"])
+                    if posted_time.tzinfo is not None:
+                        posted_time = posted_time.replace(tzinfo=None)
                     delta = (now - posted_time).total_seconds() / 3600.0
                     if sym.upper() not in result or delta < result[sym.upper()]:
                         result[sym.upper()] = delta
@@ -2305,6 +2725,19 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         LOGGER.info("Daily post limit reached (%d/%d). Skipping.", today_count, config.max_daily_posts)
         return False
     
+    # ─── STARTUP: PERSISTENCE INTEGRITY CHECK ───
+    # Verify that the post history file is intact. If integrity cannot be
+    # guaranteed, fail CLOSED — do NOT publish this cycle.
+    if not _verify_persistence_integrity():
+        LOGGER.critical("INTEGRITY FAILURE: Persistence layer compromised. "
+                       "Skipping this cycle to prevent duplicate posts.")
+        return False
+    
+    # ─── STARTUP: RETRY PENDING GIT PUSH FROM PREVIOUS RUN ───
+    # If the previous workflow run failed to git-push the JSONL file,
+    # retry now so the repo is up to date before this run makes decisions.
+    _retry_pending_push()
+    
     # ─── FAST EXIT IF RECENTLY CHECKED ───
     # Skip full scan if we checked within last 30s (prevents redundant runs)
     check_file = Path(CONFIG.database_path).parent / ".last_scan_check"
@@ -2336,11 +2769,21 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         LOGGER.warning("Could not fetch announcements: %s", e)
     
     # Get posted hours for repetition check
+    # Primary source: JSONL file (persists via git across GHA runs)
     posted_hours_data = {}
     try:
-        posted_hours_data = publisher.db.get_posted_hours_dict(hours=72)
+        posted_hours_data = _load_post_history()
+        LOGGER.debug("Loaded %d coins from %s", len(posted_hours_data), _POST_HISTORY_FILE)
+    except Exception as e:
+        LOGGER.debug("Could not load post history: %s", e)
+    # Secondary source: SQLite (current run data)
+    try:
+        db_hours = publisher.db.get_posted_hours_dict(hours=72)
+        for sym, hrs in db_hours.items():
+            if sym not in posted_hours_data or hrs < posted_hours_data[sym]:
+                posted_hours_data[sym] = hrs
     except Exception:
-        posted_hours_data = {}
+        pass
     
     # ──────────────────────────────────────────────
     # 2. APPLY OBJECTIVE FILTERS (in code, deterministic)
@@ -2516,6 +2959,14 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # 6. GEMINI PHASE 2: WRITE THE POST
     # ──────────────────────────────────────────────
     
+    # ─── FINAL DUPLICATE CHECK (reads JSONL directly) ───
+    # This is a safety net that catches any gaps between in-memory
+    # posted_hours_data and the actual on-disk JSONL history.
+    if _check_jsonl_cooldown(best_coin["symbol"], catalyst_type=catalyst_info):
+        LOGGER.warning("ABORT publish: $%s is within cooldown (verified from %s)",
+                       best_coin["symbol"], _POST_HISTORY_FILE)
+        return False
+    
     LOGGER.info("Generating post for $%s...", best_coin["symbol"])
     content = generator.generate(best_coin, best_package)
     
@@ -2581,6 +3032,23 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # ──────────────────────────────────────────────
     
     link = publisher.publish(best_coin, content)
+    # Persist to JSONL for cross-run repetition protection
+    # Step 1: Append record to JSONL (always succeeds or we know why)
+    persist_ok = False
+    try:
+        catalyst = best_coin.get("announcement_type", best_coin.get("catalyst", "market_move"))
+        persist_ok = _append_post_record(best_coin["symbol"], catalyst, link or "")
+    except Exception as e:
+        LOGGER.error("CRITICAL: Failed to persist post record to %s: %s", _POST_HISTORY_FILE, e)
+    
+    # Step 2: Git push is best-effort (record is already on disk)
+    if persist_ok:
+        git_ok = _try_git_push()
+        if not git_ok:
+            LOGGER.info("Record saved locally in %s — will be pushed on next successful run",
+                        _POST_HISTORY_FILE)
+    else:
+        LOGGER.warning("Skipping git push because JSONL append was not verified")
     # Record performance analytics
     try:
         decision_reason = ""
