@@ -2858,10 +2858,12 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         reverse=True
     )
     
+    top_candidates = candidates[:5]  # Build packages for top 5
+    
     # ─── HARD COOLDOWN FILTER (pre-Gemini) ───
     # Enforce strict cooldown: any coin in JSONL within 24h without
-    # exceptional catalyst is REMOVED from candidates.
-    # This prevents Gemini from ever seeing coins that should be blocked.
+    # exceptional catalyst is REMOVED from candidates BEFORE they reach
+    # Gemini Phase 1. This is the HARD GATE that prevents duplicate posts.
     pre_gemini_filtered = []
     for coin in top_candidates:
         coin_dict = coin.as_dict()
@@ -2871,14 +2873,16 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                 ann_type = a.get("type", "")
                 break
         if _check_jsonl_cooldown(coin.symbol, catalyst_type=ann_type):
-            LOGGER.info("HARD COOLDOWN BLOCK (pre-Gemini): $%s removed from Phase 1 candidates",
-                       coin.symbol)
+            LOGGER.info("HARD COOLDOWN BLOCK (pre-Gemini): $%s removed from Phase 1 candidates — "
+                        "found in JSONL within cooldown window",
+                        coin.symbol)
             continue
         pre_gemini_filtered.append(coin)
     
     if len(pre_gemini_filtered) < CONFIG.min_candidates:
-        LOGGER.info("HARD COOLDOWN: only %d candidates remain after cooldown filter (need %d) — skipping Phase 1",
-                    len(pre_gemini_filtered), CONFIG.min_candidates)
+        LOGGER.info("HARD COOLDOWN: only %d/%d candidates remain after cooldown filter (need %d) — "
+                    "skipping Phase 1 this cycle",
+                    len(pre_gemini_filtered), len(top_candidates), CONFIG.min_candidates)
         return False
     
     top_candidates = pre_gemini_filtered[:5]
