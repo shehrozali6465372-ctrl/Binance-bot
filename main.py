@@ -736,26 +736,41 @@ def _passes_objective_filters(
     market_cap: float,
     announcements: List[Dict[str, Any]],
     posted_hours_data: Dict[str, float],
+    from_skills_hub: bool = False,
+    liquidity: float = 0.0,
+    risk_level: int = 0,
 ) -> bool:
-    '''Deterministic, non-negotiable checks every candidate must pass.
-    
-    Every rejection is logged with a reason. This creates an audit trail
-    for decision optimization.
-    '''
+    """Deterministic, non-negotiable checks every candidate must pass.
+
+    Skills Hub tokens use lower thresholds (price >= $0.0001, mcap >= $100k).
+    All tokens must pass liquidity ($10k min) and risk (no level 3) checks.
+    """
     reject_reason = None
-    
+
+    # Source-aware thresholds
+    price_min = 0.0001 if from_skills_hub else 0.01
+    cap_min = 100000 if from_skills_hub else CONFIG.min_cap_for_safety
+
     # 1. Must be a valid asset
     if not symbol:
         reject_reason = "empty symbol"
-    elif price <= 0 or price < 0.01:
-        reject_reason = "price too low: $%.6f" % price
-    elif market_cap > 0 and market_cap < CONFIG.min_cap_for_safety:
-        reject_reason = "market cap too low: $%.0f" % market_cap
-    
+    elif price <= 0 or price < price_min:
+        reject_reason = "price too low: $%.6f (threshold: $%.4f)" % (price, price_min)
+    elif market_cap > 0 and market_cap < cap_min:
+        reject_reason = "market cap too low: $%.0f (threshold: $%.0f)" % (market_cap, cap_min)
+
     if not reject_reason and abs(change_24h) > 150:
         reject_reason = "extreme move: %.1f%%" % change_24h
-    
-    # 3. Must have a FRESH catalyst
+
+    # 2. Liquidity check (only when data is available)
+    if not reject_reason and liquidity > 0 and liquidity < 10000:
+        reject_reason = "liquidity too low: $%.0f (min $10k)" % liquidity
+
+    # 3. Risk check (only for Skills Hub tokens with audit data)
+    if not reject_reason and risk_level >= 3:
+        reject_reason = "high risk (riskLevel=%d) \u2014 HARD REJECT" % risk_level
+
+    # 4. Must have a FRESH catalyst
     has_announcement = False
     ann_type = ""
     has_exceptional_catalyst = False
@@ -766,13 +781,13 @@ def _passes_objective_filters(
             if ann_type in ("new_listing", "launchpool", "megadrop", "airdrop", "delisting"):
                 has_exceptional_catalyst = True
             break
-    
+
     has_movement = abs(change_24h) > 2.5 or volume_ratio > 1.5
-    
+
     if not reject_reason and not has_announcement and not has_movement:
         reject_reason = "no catalyst (change=%.1f%%, vol=%.1fx)" % (change_24h, volume_ratio)
-    
-    # 4. Repetition check
+
+    # 5. Repetition check
     if not reject_reason and symbol in posted_hours_data:
         hours_ago = posted_hours_data[symbol]
         hard = CONFIG.repetition_hard_hours
@@ -783,23 +798,23 @@ def _passes_objective_filters(
             reject_reason = "recently posted (%.0fh ago, no new catalyst, soft limit %dh)" % (hours_ago, soft)
         elif hours_ago < 48 and not has_exceptional_catalyst and abs(change_24h) < 5:
             reject_reason = "recently posted (%.0fh ago, weak move %.1f%%)" % (hours_ago, change_24h)
-    
-    # 5. Top 5 coins — only with exceptional catalyst
+
+    # 6. Top 5 coins \u2014 only with exceptional catalyst
     if not reject_reason and symbol in TOP_5_COINS:
         if not has_exceptional_catalyst:
             reject_reason = "top 5 coin without exceptional catalyst"
         elif abs(change_24h) < 5:
             reject_reason = "top 5 coin with weak move (%.1f%%)" % change_24h
-    
-    if reject_reason:
-        LOGGER.info("FILTER REJECT: $%s — %s", symbol, reject_reason)
-        return False
-    
-    LOGGER.info("FILTER PASS: $%s (%.1f%%, %.1fx vol, posted_hours_data has %s)", 
-                symbol, change_24h, volume_ratio,
-                "YES" if symbol in posted_hours_data else "NO")
-    return True
 
+    if reject_reason:
+        LOGGER.info("FILTER REJECT: $%s \u2014 %s", symbol, reject_reason)
+        return False
+
+    LOGGER.info("FILTER PASS: $%s (%.1f%%, %.1fx vol, skills=%s, liq=$%.0f)",
+                symbol, change_24h, volume_ratio,
+                "YES" if from_skills_hub else "NO",
+                liquidity if liquidity > 0 else 0)
+    return True
 
 def _extract_catalyst_for_coin(symbol: str, announcements: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     '''Find the strongest catalyst for a coin from announcements.'''
@@ -829,6 +844,21 @@ def _get_today_post_count(db) -> int:
 
 
 
+def _atomic_write_json(path: str, data: dict) -> None:
+    """Atomically write JSON data to a file using temp + os.replace pattern."""
+    import json as _j, tempfile, os
+    tmp = None
+    try:
+        tmp_fd, tmp = tempfile.mkstemp(suffix='.json', dir=os.path.dirname(path) or '.')
+        with os.fdopen(tmp_fd, 'w') as f:
+            _j.dump(data, f)
+        os.replace(tmp, path)
+    except Exception:
+        if tmp and os.path.exists(tmp):
+            try: os.unlink(tmp)
+            except: pass
+        raise
+
 @dataclass
 class Coin:
     symbol: str
@@ -839,6 +869,7 @@ class Coin:
     volume_ratio: float
     market_cap: float
     history: List[float]
+    liquidity: float = 0.0
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -850,6 +881,7 @@ class Coin:
             "volume_ratio": self.volume_ratio,
             "market_cap": self.market_cap,
             "history": self.history,
+            "liquidity": self.liquidity,
         }
 
 
@@ -1353,6 +1385,19 @@ class SkillsHubEngine:
     Returns a unified score per coin for Binance Square posting.
     """
     
+    @staticmethod
+    def _safe_get(data: dict, *keys: str, default: str = "") -> str:
+        """Safely get a nested value from a dict that may have None intermediates."""
+        current = data
+        for k in keys:
+            if current is None:
+                return default
+            if isinstance(current, dict):
+                current = current.get(k)
+            else:
+                return default
+        return str(current) if current is not None else default
+
     BASE_URL = "https://web3.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/unified/rank/list/ai"
     
     _cache = None
@@ -1370,65 +1415,83 @@ class SkillsHubEngine:
     
     def fetch_all(self) -> Dict[str, Dict[str, Any]]:
         import urllib.request, urllib.error
-        """Fetch all 4 rank types and merge into unified token dict.
-        
+        """Fetch all rank types and chains, merge into unified token dict.
+
         Returns dict of symbol -> token_data with merged rank info.
         """
         now = time.time()
         if SkillsHubEngine._cache and (now - SkillsHubEngine._cache_time) < SkillsHubEngine.CACHE_TTL:
             return SkillsHubEngine._cache
-        
+        # Try loading from disk cache if memory cache expired
+        if not SkillsHubEngine._cache:
+            try:
+                import os as _os
+                cpath = "skills_cache.json"
+                if _os.path.exists(cpath) and _os.path.getsize(cpath) > 0:
+                    with open(cpath) as _f:
+                        SkillsHubEngine._cache = json.load(_f)
+                    SkillsHubEngine._cache_time = time.time()
+                    LOGGER.info("SkillsHub: loaded %d tokens from disk cache", len(SkillsHubEngine._cache))
+                    return SkillsHubEngine._cache
+            except Exception:
+                SkillsHubEngine._cache = None
+                SkillsHubEngine._cache_time = 0
+
         merged = {}
         rank_types = {
             10: "trending",
             11: "top_search", 
             20: "alpha",
+            30: "smart_money",
             40: "stock",
+            50: "futures",
         }
-        
+
         for rank_type, source in rank_types.items():
-            try:
-                payload = {
-                    "rankType": rank_type,
-                    "chainId": "56",
-                    "period": 50,
-                    "page": 1,
-                    "size": 20,
-                }
-                req = urllib.request.Request(self.BASE_URL, data=json.dumps(payload).encode('utf-8'),
-                                        headers=self.headers, method='POST')
-                resp = urllib.request.urlopen(req, timeout=20)
-                if resp.status != 200:
-                    LOGGER.warning("SkillsHub rankType=%d HTTP %d", rank_type, resp.status)
-                    continue
-                raw_body = resp.read().decode('utf-8', errors='replace')
-                data = json.loads(raw_body)
-                if data.get("code") != "000000":
-                    LOGGER.debug("SkillsHub rankType=%d code=%s", rank_type, data.get("code"))
-                    continue
-                tokens = data.get("data", {}).get("tokens", [])
-                for t in tokens:
-                    sym = t.get("symbol", "")
-                    if not sym:
+            for chain_id in ("56", "1"):
+                try:
+                    payload = {
+                        "rankType": rank_type,
+                        "chainId": chain_id,
+                        "period": 50,
+                        "page": 1,
+                        "size": 20,
+                    }
+                    req = urllib.request.Request(self.BASE_URL, data=json.dumps(payload).encode("utf-8"),
+                                            headers=self.headers, method="POST")
+                    resp = urllib.request.urlopen(req, timeout=20)
+                    if resp.status != 200:
+                        LOGGER.warning("SkillsHub rankType=%d HTTP %d", rank_type, resp.status)
                         continue
-                    if sym not in merged:
-                        merged[sym] = dict(t)
-                        merged[sym]["_sources"] = []
-                    merged[sym]["_sources"].append(source)
-                    # Merge rank position
-                    merged[sym][f"_rank_{source}"] = len([x for x in merged.values() if sym in x.get("_sources", [])]) + 1
-            except urllib.error.HTTPError as e:
-                LOGGER.debug("SkillsHub rankType=%d HTTP %d: %s", rank_type, e.code, e.reason)
-            except urllib.error.URLError as e:
-                LOGGER.debug("SkillsHub rankType=%d connection error: %s", rank_type, e.reason)
-            except Exception as e:
-                LOGGER.debug("SkillsHub rankType=%d error: %s", rank_type, e)
-        
+                    raw_body = resp.read().decode("utf-8", errors="replace")
+                    data = json.loads(raw_body)
+                    if data.get("code") != "000000":
+                        LOGGER.debug("SkillsHub rankType=%d code=%s", rank_type, data.get("code"))
+                        continue
+                    tokens = data.get("data", {}).get("tokens", [])
+                    for t in tokens:
+                        sym = t.get("symbol", "")
+                        if not sym:
+                            continue
+                        if sym not in merged:
+                            merged[sym] = dict(t)
+                            merged[sym]["_sources"] = []
+                        merged[sym]["_sources"].append(source)
+                        merged[sym][f"_rank_{source}"] = len([x for x in merged.values() if sym in x.get("_sources", [])]) + 1
+                except urllib.error.HTTPError as e:
+                    LOGGER.debug("SkillsHub rankType=%d HTTP %d: %s", rank_type, e.code, e.reason)
+                except urllib.error.URLError as e:
+                    LOGGER.debug("SkillsHub rankType=%d connection error: %s", rank_type, e.reason)
+                except Exception as e:
+                    LOGGER.debug("SkillsHub rankType=%d error: %s", rank_type, e)
+
         SkillsHubEngine._cache = merged
         SkillsHubEngine._cache_time = time.time()
+        # Atomically write to disk cache for intra-run resilience
+        _atomic_write_json("skills_cache.json", merged)
         LOGGER.info("SkillsHub: loaded %d unique tokens from %d rank types", len(merged), len(rank_types))
         return merged
-    
+
     def get_scored_candidates(self) -> List[Coin]:
         """Get scored coin candidates from Skills Hub data.
         
@@ -1451,28 +1514,31 @@ class SkillsHubEngine:
                 change_24h = float(data.get("percentChange24h", 0) or 0)
                 vol_24h = float(data.get("volume24h", 0) or 0)
                 search = int(data.get("searchCount24h", 0) or 0)
-                sources = data.get("_sources", [])
+                sources = data.get("_sources") or []
                 
                 # Map to Coin dataclass
+                mc = float(data.get("marketCap", 0) or 0)
+                liquidity = float(data.get("liquidity", 0) or 0)
                 coin = Coin(
                     symbol=sym,
-                    name=data.get("metaInfo", {}).get("name", sym),
+                    name=self._safe_get(data, "metaInfo", "name", sym),
                     price=price,
                     change_24h=change_24h,
                     volume_24h=vol_24h,
                     volume_ratio=min((vol_24h / max(mc, 1)) * 5, 5) if mc > 0 else 1.0,
                     market_cap=float(data.get("marketCap", 0) or 0),
                     history=[],
+                    liquidity=liquidity,
                 )
                 coin._skills_score = score
                 coin._skills_search = search
                 coin._skills_sources = sources
                 coin._skills_smart_money = float(data.get("smartMoneyHoldingPercent", 0) or 0)
                 coin._skills_kol = float(data.get("kolHoldingPercent", 0) or 0)
-                coin._skills_risk = data.get("auditInfo", {}).get("riskLevel", 1)
+                coin._skills_risk = (data.get("auditInfo") or {}).get("riskLevel", 1)
                 candidates.append(coin)
             except Exception as e:
-                LOGGER.debug("SkillsHub parse error for %s: %s", sym, e)
+                LOGGER.warning("SkillsHub parse error for %s: %s", sym, e)
         
         # Sort by score descending
         candidates.sort(key=lambda c: getattr(c, '_skills_score', 0), reverse=True)
@@ -1500,7 +1566,7 @@ class SkillsHubEngine:
         score += min(search / 35, 30.0)  # 1060 search ~= 30 points
         
         # 2. Source diversity (appears in multiple rank types) - max 20
-        sources = data.get("_sources", [])
+        sources = data.get("_sources") or []
         score += min(len(sources) * 7, 20.0)
         
         # 3. Smart money holding - max 10
@@ -1526,12 +1592,12 @@ class SkillsHubEngine:
         score += min(traders / 50000, 5.0)
         
         # 8. Binance Alpha tag - max 5
-        token_tag = data.get("tokenTag", {})
+        token_tag = (data.get("tokenTag") or {})
         if token_tag:
             score += 5.0
         
         # 9. Risk penalty - subtract up to 10
-        risk = data.get("auditInfo", {}).get("riskLevel", 1)
+        risk = (data.get("auditInfo") or {}).get("riskLevel", 1)
         if risk >= 3:
             score -= 10.0
         elif risk == 2:
@@ -3108,6 +3174,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # Use Binance Skills Hub Market Rank API for trending/top-search/alpha data
     candidates = []
     skills_used = False
+    skills_candidates = []
     try:
         skills = SkillsHubEngine()
         skills_candidates = skills.get_scored_candidates()
@@ -3132,6 +3199,9 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                         market_cap=coin.market_cap,
                         announcements=announcements,
                         posted_hours_data=posted_hours_data,
+                        from_skills_hub=True,
+                        liquidity=getattr(coin, 'liquidity', 0),
+                        risk_level=getattr(coin, '_skills_risk', 0),
                     ):
                         candidates.append(coin)
                 except Exception as e:
@@ -3254,6 +3324,15 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     
     if len(research_packages) < CONFIG.min_candidates:
         LOGGER.info("[%s] Scan: %d packages built — insufficient for Phase 1.", utc_now()[:16], len(research_packages))
+        import json as _json
+        _health = _json.dumps({
+            "pipeline": "early_exit",
+            "status": "skipped_insufficient",
+            "candidates_discovered": len(skills_candidates) if skills_candidates else 0,
+            "candidates_validated": len(candidates) if candidates else 0,
+            "research_packages": len(research_packages),
+        })
+        LOGGER.info("PIPELINE HEALTH: %s", _health)
         return False
     
     # Save research packages to files (for post-hoc review)
@@ -3458,6 +3537,20 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     except Exception as e:
         LOGGER.debug("Analytics recording: %s", e)
     LOGGER.info("Done — post published for $%s", best_coin["symbol"])
+    import json as _json
+    _health = _json.dumps({
+        "pipeline": "complete",
+        "status": "published",
+        "coin": best_coin.get("symbol", ""),
+        "catalyst": catalyst_info,
+        "gemini_rank": rankings[0].get("rank", 1) if rankings else 0,
+        "candidates_discovered": len(skills_candidates) if skills_candidates else 0,
+        "candidates_validated": len(candidates) if candidates else 0,
+        "announcements_found": len(announcements) if announcements else 0,
+        "daily_post_count": today_count + 1,
+        "daily_post_limit": config.max_daily_posts,
+    })
+    LOGGER.info("PIPELINE HEALTH: %s", _health)
     return True
 
 def main_loop() -> None:
