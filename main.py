@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from pathlib import Path
+
+# Image Intelligence
+from image_engine import ImageComposer, ImageUploader
 
 # --- Embedded Workflow YAML for self-update in GHA ---
 _NEW_WORKFLOW_B64 = """bmFtZTogQmluYW5jZSBTcXVhcmUgQXV0byBQb3N0ZXIKCm9uOgogIHNjaGVkdWxlOgogICAgLSBjcm9uOiAnKi81ICogKiAqIConCiAgd29ya2Zsb3dfZGlzcGF0Y2g6CgojIFByZXZlbnQgb3ZlcmxhcHBpbmcgcnVucyDigJQgaWYgYSBydW4gdGFrZXMgPjVtaW4sIG5leHQgb25lIHdhaXRzCmNvbmN1cnJlbmN5OgogIGdyb3VwOiBiaW5hbmNlLXNxdWFyZS1wb3N0ZXIKICBjYW5jZWwtaW4tcHJvZ3Jlc3M6IGZhbHNlCgpqb2JzOgogIHJ1bi1hZ2VudDoKICAgIHJ1bnMtb246IHVidW50dS1sYXRlc3QKCiAgICBwZXJtaXNzaW9uczoKICAgICAgY29udGVudHM6IHdyaXRlCiAgICAgIGFjdGlvbnM6IHdyaXRlCgogICAgc3RlcHM6CiAgICAgIC0gbmFtZTogQ2hlY2tvdXQgY29kZQogICAgICAgIHVzZXM6IGFjdGlvbnMvY2hlY2tvdXRAdjQKICAgICAgICB3aXRoOgogICAgICAgICAgZmV0Y2gtZGVwdGg6IDAKICAgICAgICAgIHRva2VuOiAke3sgc2VjcmV0cy5HSVRIVUJfVE9LRU4gfX0KCiAgICAgIC0gbmFtZTogU2V0IHVwIFB5dGhvbgogICAgICAgIHVzZXM6IGFjdGlvbnMvc2V0dXAtcHl0aG9uQHY1CiAgICAgICAgd2l0aDoKICAgICAgICAgIHB5dGhvbi12ZXJzaW9uOiAiMy4xMSIKCiAgICAgICMgUmVzdG9yZSBwZXJzaXN0ZW50IHN0YXRlIChhZ2VudC5kYikgZnJvbSBwcmV2aW91cyBydW4KICAgICAgLSBuYW1lOiBSZXN0b3JlIGFnZW50LmRiIGZyb20gY2FjaGUKICAgICAgICBpZDogY2FjaGUtcmVzdG9yZQogICAgICAgIHVzZXM6IGFjdGlvbnMvY2FjaGUvcmVzdG9yZUB2NAogICAgICAgIHdpdGg6CiAgICAgICAgICBwYXRoOiBhZ2VudC5kYgogICAgICAgICAga2V5OiBhZ2VudC1kYi0ke3sgZ2l0aHViLnJlZl9uYW1lIH19CgogICAgICAjIFJ1biB0aGUgYWdlbnQg4oCUIHNpbmdsZSBzY2FuLCBleGl0cyBpbW1lZGlhdGVseSBpZiBubyBvcHBvcnR1bml0eQogICAgICAtIG5hbWU6IFJ1biBDcnlwdG8gQWdlbnQKICAgICAgICBlbnY6CiAgICAgICAgICBHRU1JTklfQVBJX0tFWTogJHt7IHNlY3JldHMuR0VNSU5JX0FQSV9LRVkgfX0KICAgICAgICAgIFNRVUFSRV9BUElfS0VZOiAke3sgc2VjcmV0cy5TUVVBUkVfQVBJX0tFWSB9fQogICAgICAgICAgR0hfVE9LRU46ICR7eyBzZWNyZXRzLkdJVEhVQl9UT0tFTiB9fQogICAgICAgICAgRFJZX1JVTjogIjAiCiAgICAgICAgICBMSVZFX01BUktFVF9EQVRBOiAiMSIKICAgICAgICAgIFBPU1RfSU5URVJWQUw6ICIwIgogICAgICAgICAgTUFYX0lURVJBVElPTlM6ICIxIgogICAgICAgICAgTUFYX0RBSUxZX1BPU1RTOiAiOCIKICAgICAgICAgIEdFTUlOSV9NT0RFTDogImdlbWluaS0yLjUtZmxhc2giCiAgICAgICAgcnVuOiBweXRob24gbWFpbi5weQoKICAgICAgIyBQZXJzaXN0IHN0YXRlIGZvciBuZXh0IDUtbWludXRlIHJ1bgogICAgICAtIG5hbWU6IFNhdmUgYWdlbnQuZGIgdG8gY2FjaGUKICAgICAgICBpZjogYWx3YXlzKCkKICAgICAgICB1c2VzOiBhY3Rpb25zL2NhY2hlL3NhdmVAdjQKICAgICAgICB3aXRoOgogICAgICAgICAgcGF0aDogYWdlbnQuZGIKICAgICAgICAgIGtleTogYWdlbnQtZGItJHt7IGdpdGh1Yi5yZWZfbmFtZSB9fQoKICAgICAgIyBVcGxvYWQgb3V0cHV0cyBmb3IgcmV2aWV3IChvbmx5IHdoZW4gcG9zdCB3YXMgZ2VuZXJhdGVkKQogICAgICAtIG5hbWU6IFVwbG9hZCBhcnRpZmFjdHMKICAgICAgICBpZjogYWx3YXlzKCkKICAgICAgICB1c2VzOiBhY3Rpb25zL3VwbG9hZC1hcnRpZmFjdEB2NAogICAgICAgIHdpdGg6CiAgICAgICAgICBuYW1lOiBhZ2VudC1vdXRwdXQtJHt7IGdpdGh1Yi5ydW5faWQgfX0KICAgICAgICAgIHBhdGg6IHwKICAgICAgICAgICAgcG9zdHMvCiAgICAgICAgICAgIHJlc2VhcmNoLwogICAgICAgICAgICBwcm9tcHRzLwogICAgICAgICAgICBkcmFmdHMvCiAgICAgICAgICAgIGFnZW50LmRiCiAgICAgICAgICAgIHB1Ymxpc2hlZF9wb3N0cy5qc29ubAo="""
@@ -2969,7 +2973,7 @@ class PostPublisher:
         self.config = config
         self.db = Database(config.database_path)
 
-    def publish(self, coin: Dict[str, Any], content: str) -> str:
+    def publish(self, coin: Dict[str, Any], content: str, image_url: str = "") -> str:
         # Check if this is a draft template (Gemini failed) - don't publish low quality
         if content.startswith("[DRAFT_TEMPLATE]"):
             actual_content = content.replace("[DRAFT_TEMPLATE]", "", 1)
@@ -2989,7 +2993,7 @@ class PostPublisher:
                 LOGGER.warning("Could not save post to DB: %s", e)
             return "[DRY-RUN]"
 
-        share_link = self._try_square_api(coin, content)
+        share_link = self._try_square_api(coin, content, image_url)
         if share_link:
             LOGGER.info("\U0001f4e1 Published successfully with link: %s", share_link)
             self._save_locally(coin, content, share_link=share_link)
@@ -3003,7 +3007,7 @@ class PostPublisher:
             LOGGER.warning("Could not save post to database: %s", e)
         return share_link or ""
 
-    def _try_square_api(self, coin: Dict[str, Any], content: str) -> str:
+    def _try_square_api(self, coin: Dict[str, Any], content: str, image_url: str = "") -> str:
         """Publish to Binance Square via official Creator Center API."""
         square_key = self.config.square_api_key
         if not square_key:
@@ -3014,6 +3018,10 @@ class PostPublisher:
             "contentType": 1,
             "bodyTextOnly": self._limit_hashtags(content),
         }
+        if image_url:
+            payload["imageUrl"] = image_url
+            payload["contentType"] = 2  # text+image content type
+            LOGGER.info("Including image in Square post: %s", image_url)
         
         # Image not supported in Square API text posts yet
         headers = {
@@ -3501,10 +3509,31 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                 best_coin["symbol"], word_count, len(hashtags))
     
     # ──────────────────────────────────────────────
+    # 7a. IMAGE INTELLIGENCE (after quality gate, before publish)
+    # ──────────────────────────────────────────────
+    image_url = ""
+    try:
+        composer = ImageComposer()
+        img_path = composer.generate_post_image(coin=best_coin)
+        if img_path:
+            uploader = ImageUploader()
+            uploaded_url = uploader.binance_square_upload(img_path)
+            if uploaded_url:
+                image_url = uploaded_url
+                LOGGER.info("Image ready for $%s: %s", best_coin["symbol"], image_url)
+            else:
+                LOGGER.warning("Image upload failed for $%s, proceeding text-only", best_coin["symbol"])
+        else:
+            LOGGER.info("No image generated for $%s, proceeding text-only", best_coin["symbol"])
+    except Exception as e:
+        LOGGER.warning("Image generation failed for $%s: %s — proceeding text-only",
+                      best_coin["symbol"], e)
+    
+    # ──────────────────────────────────────────────
     # 7. PUBLISH
     # ──────────────────────────────────────────────
     
-    link = publisher.publish(best_coin, content)
+    link = publisher.publish(best_coin, content, image_url=image_url)
     # Persist to JSONL for cross-run repetition protection
     # Step 1: Append record to JSONL (always succeeds or we know why)
     persist_ok = False
@@ -3549,6 +3578,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         "announcements_found": len(announcements) if announcements else 0,
         "daily_post_count": today_count + 1,
         "daily_post_limit": config.max_daily_posts,
+        "image_generated": bool(image_url),
     })
     LOGGER.info("PIPELINE HEALTH: %s", _health)
     return True

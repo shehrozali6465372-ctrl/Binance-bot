@@ -287,7 +287,7 @@ class ImageIntelligenceEngine:
         coin_history: Optional[List[float]] = None,
     ) -> Image.Image:
         """Render the full trading image."""
-        WIDTH, HEIGHT = 1080, 1080
+        WIDTH, HEIGHT = 1080, 1350
         img = Image.new("RGB", (WIDTH, HEIGHT), COLORS["bg_dark"])
         draw = ImageDraw.Draw(img)
         
@@ -322,7 +322,7 @@ class ImageIntelligenceEngine:
         draw.text((30, chart_top + 5), "CHART ANALYSIS", fill=text_dim, font=self.font_tiny)
         
         # ---- MIDDLE SECTION: Coin Info ----
-        mid_y = chart_bottom + 15
+        mid_y = chart_bottom + 25
         
         # Headline ribbon
         headline_color = primary_color
@@ -423,7 +423,7 @@ class ImageIntelligenceEngine:
             s_y += 45
         
         # ---- RISK LEVEL (bottom) ----
-        risk_y = HEIGHT - 60
+        risk_y = HEIGHT - 70
         draw.rounded_rectangle([20, risk_y, WIDTH - 20, HEIGHT - 10], radius=6, fill=bg_card, outline=border)
         
         risk_level = "HIGH" if (v5_score and v5_score.get("risk_penalty", 0) > 5) else ("MEDIUM" if (v5_score and v5_score.get("risk_penalty", 0) > 2) else "LOW")
@@ -518,6 +518,77 @@ class ImageIntelligenceEngine:
         }
 
 
+class ImageComposer:
+    """ImageComposer module with reusable templates for Binance Square posts."""
+    
+    TEMPLATES = {
+        "breakout": {"label": "BREAKOUT ALERT"},
+        "narrative": {"label": "TRENDING NARRATIVE"},
+        "listing": {"label": "BINANCE LISTING"},
+        "whale": {"label": "WHALE MOVEMENT"},
+        "smart_money": {"label": "SMART MONEY WATCH"},
+        "ai_narrative": {"label": "AI NARRATIVE WATCH"},
+        "defi": {"label": "DEFI ALERT"},
+        "meme": {"label": "MEME WATCH"},
+        "default": {"label": "MARKET UPDATE"},
+    }
+    
+    def __init__(self, config=None):
+        self.engine = ImageIntelligenceEngine(config)
+    
+    def select_template(self, coin: Dict[str, Any]) -> str:
+        """Select best template based on coin catalyst and narrative."""
+        catalyst = coin.get("announcement_type", "") or coin.get("catalyst", "")
+        narrative = coin.get("narrative", "") or coin.get("skills_narrative", "")
+        symbol = coin.get("symbol", "").lower()
+        
+        if catalyst == "new_listing":
+            return "listing"
+        if catalyst in ("airdrop", "launchpool"):
+            return "listing"
+        if catalyst == "delisting":
+            return "breakout"
+        if "ai" in narrative.lower() or symbol in ("fetch", "agix", "tao", "rndr", "near"):
+            return "ai_narrative"
+        if "meme" in narrative.lower() or symbol in ("doge", "shib", "pepe", "wif"):
+            return "meme"
+        if "defi" in narrative.lower() or symbol in ("aave", "uni", "link", "mkr"):
+            return "defi"
+        if "rwa" in narrative.lower():
+            return "narrative"
+        vol = float(coin.get("volume_ratio", 0) or 0)
+        if vol > 3:
+            return "breakout"
+        return "default"
+    
+    def generate_post_image(
+        self,
+        coin: Dict[str, Any],
+        v5_score: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Path]:
+        """Generate a post image using best template and live data."""
+        template = self.select_template(coin)
+        LOGGER.info("ImageComposer: using '%s' template for $%s", template, coin.get("symbol", ""))
+        
+        analysis = {
+            "category": coin.get("narrative", coin.get("skills_narrative", "")),
+            "direction": "bullish" if float(coin.get("change_24h", 0) or 0) >= 0 else "bearish",
+        }
+        setup = {
+            "entry": coin.get("entry", "?"),
+            "target1": coin.get("target1", "?"),
+            "target2": coin.get("target2", "?"),
+            "stop": coin.get("stop", "?"),
+        }
+        try:
+            return self.engine.generate(
+                coin=coin, analysis=analysis, setup=setup, v5_score_result=v5_score,
+            )
+        except Exception as e:
+            LOGGER.warning("ImageComposer failed for $%s: %s", coin.get("symbol", ""), e)
+            return None
+
+
 class ImageUploader:
     """Upload generated images and return public URLs - guaranteed.
     
@@ -533,6 +604,65 @@ class ImageUploader:
         self.config = config
         self.images_dir = Path("images")
         self.images_dir.mkdir(parents=True, exist_ok=True)
+    
+    def binance_square_upload(self, image_path: Path) -> Optional[str]:
+        """Upload image to Binance Square media service.
+        
+        Flow: request presigned URL, upload image, return public URL.
+        Falls back to GitHub API upload on failure.
+        """
+        square_key = os.getenv("SQUARE_API_KEY") or ""
+        if not square_key or not image_path or not image_path.exists():
+            LOGGER.info("No SQUARE_API_KEY, skipping Binance upload")
+            return None
+        
+        try:
+            import mimetypes
+            mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+            file_size = image_path.stat().st_size
+            
+            # Step 1: Request presigned upload URL
+            url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/media/upload/getUrl"
+            payload = json.dumps({
+                "contentType": 1, "mediaType": mime,
+                "fileSize": file_size, "fileName": image_path.name,
+            }).encode("utf-8")
+            
+            headers = {
+                "X-Square-OpenAPI-Key": square_key,
+                "Content-Type": "application/json",
+                "clienttype": "binanceSkill",
+            }
+            
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            
+            if resp_data.get("code") == "000000":
+                d = resp_data.get("data", {})
+                presigned = d.get("uploadUrl") or d.get("url", "")
+                image_url = d.get("imageUrl") or d.get("url", "")
+                
+                if presigned and image_url:
+                    # Step 2: Upload image to presigned URL
+                    with open(image_path, "rb") as f:
+                        img_data = f.read()
+                    
+                    up_req = urllib.request.Request(presigned, data=img_data, method="PUT")
+                    up_req.add_header("Content-Type", mime)
+                    
+                    with urllib.request.urlopen(up_req, timeout=60) as up_resp:
+                        if up_resp.status in (200, 201):
+                            LOGGER.info("Binance image upload success: %s", image_url)
+                            return image_url
+            
+            LOGGER.debug("Binance upload response: %s", resp_data.get("message", "unknown"))
+        except Exception as e:
+            LOGGER.debug("Binance upload failed: %s", e)
+        
+        # Fallback to GitHub API
+        LOGGER.info("Binance upload failed, falling back to GitHub API")
+        return self._github_api_upload(image_path)
     
     def upload(self, image_path: Path) -> tuple:
         """Upload image and return (url, verified).
