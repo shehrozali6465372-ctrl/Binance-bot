@@ -923,6 +923,12 @@ class ImageUploader:
     def binance_media_upload(self, image_path: Path, square_api_key: str) -> Optional[str]:
         """Upload image via Binance Square native media API.
         
+        NOTE: The endpoint /bapi/composite/v1/pgc/openApi/media/upload/getUrl
+        exists but is blocked by CloudFront (HTTP 403) for non-Binance origins.
+        OpenAPI keys do NOT grant access. Falls back to GitHub API upload.
+        """
+        """Upload image via Binance Square native media API.
+        
         Flow:
         1. Call media/upload/getUrl → get presigned upload URL + resourceId
         2. Upload image binary to presigned URL
