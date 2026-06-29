@@ -2928,7 +2928,7 @@ class GeminiGenerator:
             "   - HASHTAGS: Exactly one line with 4 hashtags only.",
             "",
             "6. HASHTAGS — EXACTLY 4. NO MORE. NO LESS.",
-            "   Must include: #$symbol #Write2Earn" % symbol,
+            "   Must include: #%s #Write2Earn" % symbol,
             "   Choose the other 2 based on token category and market context:",
             "     - Trending altcoin → #Altcoins #CryptoTrading",
             "     - AI token → #AI #Crypto",
