@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import json
 import urllib.request
 import urllib.error
+from urllib.parse import quote
 from PIL import Image, ImageDraw, ImageFont
 
 LOGGER = logging.getLogger("agent.image_engine")
@@ -591,13 +592,14 @@ class ImageComposer:
 
 class ImageUploader:
     """Upload generated images and return public URLs - guaranteed.
+    Binance Square OpenAPI has NO dedicated media upload endpoint.
+    Images are attached via imageUrl field in content/add.
     
-    Provider 1: GitHub API (create/update file via REST API - most reliable in GHA)
+    Provider 1: GitHub REST API (create file via API - most reliable in GHA)
     Provider 2: Git push with token auth
     Provider 3: GHA environment URL construction
-    Provider 4: Base64 data URI (last resort - always works)
     
-    Every post will have an image - guaranteed.
+    Every post will have an image when possible - text-only fallback always preserved.
     """
     
     def __init__(self, config=None):
@@ -605,64 +607,94 @@ class ImageUploader:
         self.images_dir = Path("images")
         self.images_dir.mkdir(parents=True, exist_ok=True)
     
+    
+    def _verify_url(self, url: str) -> bool:
+        """Verify that an image URL is publicly accessible via HEAD request."""
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.status
+                ct = resp.headers.get("Content-Type", "")
+                cl = resp.headers.get("Content-Length", "0")
+                if status == 200 and "image" in ct:
+                    LOGGER.info("URL verified OK: %s (%s, %s bytes)", url, ct, cl)
+                    return True
+                LOGGER.debug("URL check: HTTP %d, Content-Type: %s", status, ct)
+                return status == 200
+        except Exception as e:
+            LOGGER.debug("URL verification failed for %s: %s", url, e)
+            return False
+    
+    def _url_encode_filename(self, filename: str) -> str:
+        """URL-encode special characters in filename for safe URLs."""
+        return quote(filename, safe='')
+    
+    def _build_github_raw_url(self, image_path: Path) -> Optional[str]:
+        """Build GitHub raw content URL for image in the repo."""
+        gh_repo = os.getenv("GITHUB_REPOSITORY", "")
+        if not gh_repo:
+            return None
+        branch = os.getenv("GITHUB_HEAD_REF") or os.getenv("GITHUB_REF_NAME", "main")
+        safe_name = self._url_encode_filename(image_path.name)
+        url = f"https://raw.githubusercontent.com/{gh_repo}/{branch}/images/{safe_name}"
+        LOGGER.info("Built GitHub raw URL: %s", url)
+        return url
+
     def binance_square_upload(self, image_path: Path) -> Optional[str]:
-        """Upload image to Binance Square media service.
+        """Upload image for Binance Square post.
         
-        Flow: request presigned URL, upload image, return public URL.
-        Falls back to GitHub API upload on failure.
+        Flow:
+        1. Upload image to GitHub repo via REST API (requires GH_TOKEN)
+        2. Return public raw.githubusercontent.com URL
+        3. This URL is then passed as imageUrl to content/add
+        
+        In GitHub Actions, GITHUB_TOKEN is automatically available.
+        Falls back gracefully if upload fails — text-only publish proceeds.
         """
-        square_key = os.getenv("SQUARE_API_KEY") or ""
-        if not square_key or not image_path or not image_path.exists():
-            LOGGER.info("No SQUARE_API_KEY, skipping Binance upload")
+        if not image_path or not image_path.exists():
+            LOGGER.warning("binance_square_upload: image path missing: %s", image_path)
             return None
         
-        try:
-            import mimetypes
-            mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
-            file_size = image_path.stat().st_size
-            
-            # Step 1: Request presigned upload URL
-            url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/media/upload/getUrl"
-            payload = json.dumps({
-                "contentType": 1, "mediaType": mime,
-                "fileSize": file_size, "fileName": image_path.name,
-            }).encode("utf-8")
-            
-            headers = {
-                "X-Square-OpenAPI-Key": square_key,
-                "Content-Type": "application/json",
-                "clienttype": "binanceSkill",
-            }
-            
-            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                resp_data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            
-            if resp_data.get("code") == "000000":
-                d = resp_data.get("data", {})
-                presigned = d.get("uploadUrl") or d.get("url", "")
-                image_url = d.get("imageUrl") or d.get("url", "")
-                
-                if presigned and image_url:
-                    # Step 2: Upload image to presigned URL
-                    with open(image_path, "rb") as f:
-                        img_data = f.read()
-                    
-                    up_req = urllib.request.Request(presigned, data=img_data, method="PUT")
-                    up_req.add_header("Content-Type", mime)
-                    
-                    with urllib.request.urlopen(up_req, timeout=60) as up_resp:
-                        if up_resp.status in (200, 201):
-                            LOGGER.info("Binance image upload success: %s", image_url)
-                            return image_url
-            
-            LOGGER.debug("Binance upload response: %s", resp_data.get("message", "unknown"))
-        except Exception as e:
-            LOGGER.debug("Binance upload failed: %s", e)
+        # Log image info before upload
+        import mimetypes
+        mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+        file_size = image_path.stat().st_size
+        LOGGER.info("Upload step 1: image ready — %s (%s, %d bytes, %s)",
+                    image_path.name, mime, file_size, image_path)
         
-        # Fallback to GitHub API
-        LOGGER.info("Binance upload failed, falling back to GitHub API")
-        return self._github_api_upload(image_path)
+        # Attempt 1: GitHub REST API (most reliable in GHA)
+        gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
+        gh_repo = os.getenv("GITHUB_REPOSITORY", "")
+        
+        LOGGER.info("Upload step 2: checking GitHub credentials — token=%s repo=%s",
+                    "SET (%d chars)" % len(gh_token) if gh_token else "NOT SET",
+                    gh_repo if gh_repo else "NOT SET")
+        
+        if gh_token and gh_repo:
+            url = self._github_api_upload(image_path)
+            if url:
+                LOGGER.info("Upload step 3: GitHub API upload SUCCESS — %s", url)
+                return url
+            LOGGER.warning("Upload step 3: GitHub API upload returned None")
+        else:
+            LOGGER.warning("Upload step 3: GitHub API upload skipped (missing token or repo)")
+        
+        # Attempt 2: Git push upload
+        LOGGER.info("Upload step 4: trying git push upload")
+        url = self._git_push_image(image_path)
+        if url:
+            LOGGER.info("Upload step 4: git push upload SUCCESS — %s", url)
+            return url
+        
+        # Attempt 3: GHA env URL (last resort, unverified)
+        LOGGER.info("Upload step 5: trying GHA env URL")
+        url = self._gha_env_url(image_path)
+        if url:
+            LOGGER.warning("Upload step 5: GHA env URL (unverified) — %s", url)
+            return url
+        
+        LOGGER.warning("Upload step 6: ALL upload methods FAILED — proceeding text-only")
+        return None
     
     def upload(self, image_path: Path) -> tuple:
         """Upload image and return (url, verified).
@@ -707,9 +739,13 @@ class ImageUploader:
         try:
             gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
             if not gh_token:
+                LOGGER.warning("GitHub API upload: no GH_TOKEN available")
                 return None
             
             gh_repo = os.getenv("GITHUB_REPOSITORY", "")
+            LOGGER.info("GitHub API upload: token=%s repo=%s",
+                        "SET" if gh_token else "NOT_SET",
+                        gh_repo if gh_repo else "NOT_SET")
             if not gh_repo:
                 # Try git remote
                 import subprocess
@@ -748,8 +784,9 @@ class ImageUploader:
             if Path(image_path).resolve() != dest.resolve():
                 shutil.copy2(str(image_path), str(dest))
             
-            # API endpoint
-            api_url = f"https://api.github.com/repos/{gh_repo}/contents/images/{image_path.name}"
+            # API endpoint (URL-encode filename for special chars)
+            safe_filename = self._url_encode_filename(image_path.name)
+            api_url = f"https://api.github.com/repos/{gh_repo}/contents/images/{safe_filename}"
             
             # First check if file exists (get SHA if it does)
             sha = None
@@ -763,8 +800,11 @@ class ImageUploader:
                     existing = json.loads(resp.read().decode())
                     sha = existing.get("sha")
             except urllib.error.HTTPError as e:
-                if e.code != 404:
-                    LOGGER.debug("GitHub API check failed: %s", e)
+                if e.code == 404:
+                    LOGGER.info("File does not exist on GitHub, will create new")
+                else:
+                    err_detail = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
+                    LOGGER.warning("GitHub API check failed (HTTP %d): %s", e.code, err_detail)
             
             # Create or update file
             payload = {
@@ -786,16 +826,21 @@ class ImageUploader:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 response_data = json.loads(resp.read().decode())
             
-            # Success! Get the raw URL
-            raw_url = f"https://raw.githubusercontent.com/{gh_repo}/{branch}/images/{image_path.name}"
-            LOGGER.info("GitHub API upload success: %s", raw_url)
+            # Success! Get the raw URL (URL-encoded for safety)
+            safe_name = self._url_encode_filename(image_path.name)
+            raw_url = f"https://raw.githubusercontent.com/{gh_repo}/{branch}/images/{safe_name}"
+            LOGGER.info("GitHub API upload SUCCESS: %s", raw_url)
+            if self._verify_url(raw_url):
+                LOGGER.info("GitHub raw URL verified accessible: %s", raw_url)
+            else:
+                LOGGER.warning("GitHub raw URL not verifiable (may still work): %s", raw_url)
             return raw_url
             
         except urllib.error.HTTPError as e:
             err_body = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
-            LOGGER.debug("GitHub API upload failed (HTTP %d): %s", e.code, err_body)
+            LOGGER.warning("GitHub API upload FAILED (HTTP %d): %s", e.code, err_body)
         except Exception as e:
-            LOGGER.debug("GitHub API upload failed: %s", e)
+            LOGGER.warning("GitHub API upload FAILED: %s", e)
         
         return None
     
@@ -855,9 +900,9 @@ class ImageUploader:
                 LOGGER.info("Git push success: %s", url)
                 return url
             
-            LOGGER.debug("Git push failed: %s", result.stderr[:200])
+            LOGGER.warning("Git push failed: %s", result.stderr[:200])
         except Exception as e:
-            LOGGER.debug("Git push error: %s", e)
+            LOGGER.warning("Git push error: %s", e)
         
         return None
     
@@ -866,5 +911,6 @@ class ImageUploader:
         gh_repo = os.getenv("GITHUB_REPOSITORY", "")
         if gh_repo:
             branch = os.getenv("GITHUB_HEAD_REF") or os.getenv("GITHUB_REF_NAME", "main")
-            return f"https://raw.githubusercontent.com/{gh_repo}/{branch}/images/{image_path.name}"
+            safe_name = self._url_encode_filename(image_path.name)
+            return f"https://raw.githubusercontent.com/{gh_repo}/{branch}/images/{safe_name}"
         return None

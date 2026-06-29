@@ -312,7 +312,7 @@ def _load_post_history() -> dict:
     return posts
 
 
-def _append_post_record(symbol: str, catalyst: str, link: str) -> bool:
+def _append_post_record(symbol: str, catalyst: str, link: str, image_url: str = "") -> bool:
     """Append a post record to the JSONL history file.
     
     Verifies the record was written successfully.
@@ -324,6 +324,7 @@ def _append_post_record(symbol: str, catalyst: str, link: str) -> bool:
         "timestamp": utc_now(),
         "catalyst": catalyst,
         "link": link,
+        "image_url": image_url if image_url else "",
     }
     json_line = json.dumps(record) + "\n"
     
@@ -3539,7 +3540,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     persist_ok = False
     try:
         catalyst = best_coin.get("announcement_type", best_coin.get("catalyst", "market_move"))
-        persist_ok = _append_post_record(best_coin["symbol"], catalyst, link or "")
+        persist_ok = _append_post_record(best_coin["symbol"], catalyst, link or "", image_url)
     except Exception as e:
         LOGGER.error("CRITICAL: Failed to persist post record to %s: %s", _POST_HISTORY_FILE, e)
     
