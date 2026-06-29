@@ -917,25 +917,23 @@ class ImageUploader:
 
     # ──────────────────────────────────────────────
     # BINANCE SQUARE NATIVE MEDIA UPLOAD
-    # Uses: POST /bapi/composite/v1/pgc/openApi/media/upload/getUrl
+        # ──────────────────────────────────────────────
+    # Binance Square Official Image Upload Flow
+    # Uses: POST /image/presignedUrl + /image/imageStatus
+    # Source: github.com/binance/binance-skills-hub (square-post skill)
+    # ──────────────────────────────────────────────
     # ──────────────────────────────────────────────
     
     def binance_media_upload(self, image_path: Path, square_api_key: str) -> Optional[str]:
-        """Upload image via Binance Square native media API.
-        
-        NOTE: The endpoint /bapi/composite/v1/pgc/openApi/media/upload/getUrl
-        exists but is blocked by CloudFront (HTTP 403) for non-Binance origins.
-        OpenAPI keys do NOT grant access. Falls back to GitHub API upload.
-        """
-        """Upload image via Binance Square native media API.
+        """Upload image via Binance Square official media API.
         
         Flow:
-        1. Call media/upload/getUrl → get presigned upload URL + resourceId
+        1. Call /image/presignedUrl → get presigned upload URL + fileTicket
         2. Upload image binary to presigned URL
-        3. Confirm upload → obtain media resourceId
-        4. Return resourceId for use in content/add
+        3. Poll /image/imageStatus until processed → obtain imageUrl
+        4. Return imageUrl for use in content/add as imageList
         
-        Returns media resourceId string on success, None on failure.
+        Returns imageUrl string (https://bin.bnbstatic.com/...) on success, None on failure.
         """
         if not image_path or not image_path.exists():
             LOGGER.warning("binance_media_upload: image missing: %s", image_path)
@@ -947,45 +945,42 @@ class ImageUploader:
         file_size = image_path.stat().st_size
         LOGGER.info("Media step 1: image ready — %s (%d bytes)", image_path.name, file_size)
         
-        # Step 1: Request upload URL
-        upload_info = self._request_upload_url(image_path, square_api_key)
+        # Step 1: Request presigned upload URL
+        upload_info = self._request_presigned_url(image_path, square_api_key)
         if not upload_info:
             LOGGER.warning("Media step 1 FAILED: could not get upload URL")
             return None
         
-        upload_url = upload_info.get("uploadUrl") or upload_info.get("url", "")
-        resource_id = upload_info.get("resourceId") or upload_info.get("resourceId", "")
+        presigned_url = upload_info.get("presignedUrl", "")
+        file_ticket = upload_info.get("fileTicket", "")
         
-        LOGGER.info("Media step 2: got upload URL (len=%d), resourceId=%s",
-                    len(upload_url), resource_id[:20] if resource_id else "N/A")
+        if not presigned_url or not file_ticket:
+            LOGGER.warning("Media step 1: missing presignedUrl or fileTicket in response: %s", upload_info)
+            return None
+        
+        LOGGER.info("Media step 2: got presignedUrl (len=%d), fileTicket=%s",
+                    len(presigned_url), file_ticket[:20] if len(file_ticket) > 20 else file_ticket)
         
         # Step 2: Upload image to presigned URL
-        if not self._upload_to_presigned_url(image_path, upload_url):
+        if not self._upload_to_presigned_url(image_path, presigned_url):
             LOGGER.warning("Media step 2 FAILED: image upload to storage failed")
             return None
         
         LOGGER.info("Media step 3: image uploaded to storage successfully")
         
-        # Step 3: If upload URL response already contains resourceId, use it
-        # Otherwise, we might need to call a confirm endpoint
-        if resource_id:
-            LOGGER.info("Media step 4: obtained media resourceId: %s", resource_id[:30])
-            return resource_id
+        # Step 3: Poll image status until processed
+        image_url = self._poll_image_status(square_api_key, file_ticket)
+        if image_url:
+            LOGGER.info("Media step 4: obtained imageUrl: %s", image_url)
+            return image_url
         
-        # Try to get resourceId from the upload response (might be in redirect headers)
-        LOGGER.warning("Media step 4: no resourceId from getUrl, trying alternative")
+        LOGGER.warning("Media step 4 FAILED: image status polling did not return a valid URL")
         return None
     
-    def _request_upload_url(self, image_path: Path, api_key: str) -> Optional[dict]:
-        """Request a presigned upload URL from Binance Square media API."""
-        import mimetypes
-        mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
-        ext = image_path.suffix.lstrip(".") or "png"
-        
+    def _request_presigned_url(self, image_path: Path, api_key: str) -> Optional[dict]:
+        """Request a presigned upload URL from Binance Square /image/presignedUrl endpoint."""
         payload = {
-            "contentType": mime,
-            "ext": ext,
-            "size": image_path.stat().st_size,
+            "imageName": image_path.name,
         }
         
         headers = {
@@ -994,36 +989,96 @@ class ImageUploader:
             "clienttype": "binanceSkill",
         }
         
-        url = "https://www.binance.com/bapi/composite/v1/pgc/openApi/media/upload/getUrl"
+        url = "https://www.binance.com/bapi/composite/v2/public/pgc/openApi/image/presignedUrl"
         
         try:
             data_bytes = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
-            LOGGER.info("Media API request: POST /pgc/openApi/media/upload/getUrl payload=%s",
-                        json.dumps(payload)[:200])
+            LOGGER.info("Image presignedUrl request: POST /image/presignedUrl imageName=%s", image_path.name)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 resp_body = resp.read().decode("utf-8", errors="replace")
             
-            LOGGER.info("Media API response: HTTP %d %s", resp.status, resp_body[:300])
+            LOGGER.info("Image presignedUrl response: HTTP %d %s", resp.status, resp_body[:300])
             data = json.loads(resp_body)
             
             if data.get("code") == "000000" and data.get("data"):
-                upload_data = data["data"]
-                LOGGER.info("Media getUrl SUCCESS: uploadUrl=%s..., resourceId=%s",
-                           str(upload_data.get("uploadUrl", ""))[:50],
-                           str(upload_data.get("resourceId", ""))[:20])
-                return upload_data
+                result = data["data"]
+                LOGGER.info("Image presignedUrl SUCCESS: presignedUrl=%s..., fileTicket=%s",
+                           str(result.get("presignedUrl", ""))[:60],
+                           str(result.get("fileTicket", ""))[:20])
+                return result
             else:
-                LOGGER.warning("Media getUrl FAILED [%s]: %s",
+                LOGGER.warning("Image presignedUrl FAILED [%s]: %s",
                               data.get("code"), data.get("message", ""))
                 return None
         except urllib.error.HTTPError as e:
             body = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
-            LOGGER.warning("Media getUrl HTTP ERROR %d: %s", e.code, body)
+            LOGGER.warning("Image presignedUrl HTTP ERROR %d: %s", e.code, body)
             return None
         except Exception as e:
-            LOGGER.warning("Media getUrl FAILED: %s", e)
+            LOGGER.warning("Image presignedUrl FAILED: %s", e)
             return None
+    
+    def _poll_image_status(self, api_key: str, file_ticket: str, max_retries: int = 10, poll_interval: int = 3) -> Optional[str]:
+        """Poll /image/imageStatus until image is processed.
+        
+        Returns imageUrl string on success, None on failure.
+        """
+        import time as time_module
+        
+        headers = {
+            "X-Square-OpenAPI-Key": api_key,
+            "Content-Type": "application/json",
+            "clienttype": "binanceSkill",
+        }
+        
+        url = "https://www.binance.com/bapi/composite/v2/public/pgc/openApi/image/imageStatus"
+        payload = {"fileTicket": file_ticket}
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                data_bytes = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    resp_body = resp.read().decode("utf-8", errors="replace")
+                
+                data = json.loads(resp_body)
+                
+                if data.get("code") == "000000" and data.get("data"):
+                    status_data = data["data"]
+                    status = status_data.get("status")
+                    
+                    if status == 1:
+                        image_url = status_data.get("imageUrl", "")
+                        LOGGER.info("Image status SUCCESS (attempt %d/%d): imageUrl=%s",
+                                   attempt, max_retries, image_url)
+                        return image_url
+                    elif status == 2:
+                        failed_reason = status_data.get("failedReason", "unknown")
+                        LOGGER.warning("Image status FAILED (attempt %d/%d): status=2 reason=%s",
+                                      attempt, max_retries, failed_reason)
+                        return None
+                    else:
+                        LOGGER.info("Image status processing... (attempt %d/%d, status=%s)",
+                                   attempt, max_retries, status)
+                else:
+                    LOGGER.warning("Image status API error [%s]: %s (attempt %d/%d)",
+                                  data.get("code"), data.get("message", ""), attempt, max_retries)
+                
+            except urllib.error.HTTPError as e:
+                body = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
+                LOGGER.warning("Image status HTTP ERROR %d: %s (attempt %d/%d)",
+                              e.code, body, attempt, max_retries)
+            except Exception as e:
+                LOGGER.warning("Image status poll error: %s (attempt %d/%d)",
+                              e, attempt, max_retries)
+            
+            if attempt < max_retries:
+                LOGGER.info("Waiting %ds before next poll...", poll_interval)
+                time_module.sleep(poll_interval)
+        
+        LOGGER.warning("Image status polling exhausted after %d retries", max_retries)
+        return None
     
     def _upload_to_presigned_url(self, image_path: Path, upload_url: str) -> bool:
         """Upload image binary to the presigned storage URL."""

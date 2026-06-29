@@ -313,6 +313,8 @@ def _load_post_history() -> dict:
 
 
 def _append_post_record(symbol: str, catalyst: str, link: str, image_url: str = "", media_id: str = "") -> bool:
+    # Note: image_url can be a single URL string (legacy) or first entry of image_list
+    # media_id kept for backward compatibility with JSONL records
     """Append a post record to the JSONL history file.
     
     Verifies the record was written successfully.
@@ -2973,7 +2975,9 @@ class PostPublisher:
         self.config = config
         self.db = Database(config.database_path)
 
-    def publish(self, coin: Dict[str, Any], content: str, image_url: str = "", media_id: str = "") -> str:
+    def publish(self, coin: Dict[str, Any], content: str, image_list: Optional[List[str]] = None) -> str:
+        if image_list is None:
+            image_list = []
         # Check if this is a draft template (Gemini failed) - don't publish low quality
         if content.startswith("[DRAFT_TEMPLATE]"):
             actual_content = content.replace("[DRAFT_TEMPLATE]", "", 1)
@@ -2993,7 +2997,7 @@ class PostPublisher:
                 LOGGER.warning("Could not save post to DB: %s", e)
             return "[DRY-RUN]"
 
-        share_link = self._try_square_api(coin, content, image_url, media_id)
+        share_link = self._try_square_api(coin, content, image_list)
         if share_link:
             LOGGER.info("\U0001f4e1 Published successfully with link: %s", share_link)
             self._save_locally(coin, content, share_link=share_link)
@@ -3007,14 +3011,19 @@ class PostPublisher:
             LOGGER.warning("Could not save post to database: %s", e)
         return share_link or ""
 
-    def _try_square_api(self, coin: Dict[str, Any], content: str, image_url: str = "", media_id: str = "") -> str:
+    def _try_square_api(self, coin: Dict[str, Any], content: str, image_list: Optional[List[str]] = None) -> str:
         """Publish to Binance Square via official Creator Center API.
         
-        Image strategy (priority order):
-        1. If media_id is set → use native media (resourceId in payload)
-        2. If image_url is set → use external image URL (contentType=2)
-        3. No image → text-only
+        Image strategy (from binance-skills-hub square-post skill):
+        1. If image_list has URLs → contentType=1 with imageList (native feed image post)
+        2. No images → text-only (contentType=1 without imageList)
+        
+        Native image posts use contentType=1 + imageList, NOT contentType=2.
+        contentType=2 creates an Article type (/cart/ link) which is not desired.
         """
+        if image_list is None:
+            image_list = []
+        
         square_key = self.config.square_api_key
         if not square_key:
             LOGGER.warning("No SQUARE_API_KEY set, saving locally")
@@ -3027,37 +3036,22 @@ class PostPublisher:
         }
         url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
         
-        # Strategy 1: Native media upload (resourceId from Binance media API)
-        if media_id:
+        # Strategy 1: Native feed image post (contentType=1 + imageList)
+        if image_list:
             payload = {
-                "contentType": 2,
-                "title": "$%s" % coin.get("symbol", "Market"),
+                "contentType": 1,
                 "bodyTextOnly": self._limit_hashtags(content),
-                "resourceId": media_id,
+                "imageList": image_list,
             }
-            LOGGER.info("Publishing with native media (resourceId=%s...)", media_id[:20])
+            LOGGER.info("Publishing native image post (contentType=1) with %d image(s): %s",
+                       len(image_list), image_list[0][:60] if image_list else "N/A")
             result = self._try_publish(url, headers, payload)
             if result:
-                LOGGER.info("Native media publish SUCCESS")
+                LOGGER.info("Native image publish SUCCESS")
                 return result
-            LOGGER.warning("Native media publish FAILED, trying imageUrl fallback")
+            LOGGER.warning("Native image publish FAILED, falling back to text-only")
         
-        # Strategy 2: External image URL via GitHub
-        if image_url:
-            payload = {
-                "contentType": 2,
-                "title": "$%s" % coin.get("symbol", "Market"),
-                "bodyTextOnly": self._limit_hashtags(content),
-                "imageUrl": image_url,
-            }
-            LOGGER.info("Publishing with imageUrl (contentType=2): %s", image_url)
-            result = self._try_publish(url, headers, payload)
-            if result:
-                LOGGER.info("ImageUrl publish SUCCESS")
-                return result
-            LOGGER.warning("ImageUrl publish FAILED, falling back to text-only")
-        
-        # Strategy 3: Text-only
+        # Strategy 2: Text-only (contentType=1, no imageList)
         payload_text = {
             "contentType": 1,
             "bodyTextOnly": self._limit_hashtags(content),
@@ -3549,36 +3543,30 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     
     # ──────────────────────────────────────────────
     # 7a. IMAGE INTELLIGENCE (after quality gate, before publish)
+    # Uses official Binance Square /image/presignedUrl + /image/imageStatus flow
+    # Source: github.com/binance/binance-skills-hub (square-post skill)
     # ──────────────────────────────────────────────
-    image_url = ""
-    media_id = ""
+    image_list: List[str] = []
     try:
         composer = ImageComposer()
         img_path = composer.generate_post_image(coin=best_coin)
         if img_path:
             uploader = ImageUploader()
             
-            # Strategy 1: Binance native media upload (preferred)
+            # Official Binance Square image upload flow
             square_key = CONFIG.square_api_key
             if square_key:
-                LOGGER.info("Image upload: trying Binance native media API first")
-                resource_id = uploader.binance_media_upload(img_path, square_key)
-                if resource_id:
-                    media_id = resource_id
-                    LOGGER.info("Image ready via Binance native API for $%s: mediaId=%s",
-                               best_coin["symbol"], media_id[:20])
+                LOGGER.info("Image upload: using Binance Square /image/presignedUrl flow")
+                image_url = uploader.binance_media_upload(img_path, square_key)
+                if image_url:
+                    image_list = [image_url]
+                    LOGGER.info("Image ready via Binance API for $%s: %s",
+                               best_coin["symbol"], image_url)
                 else:
-                    LOGGER.warning("Binance native media upload failed, trying GitHub fallback")
-            
-            # Strategy 2: GitHub API upload (fallback)
-            if not media_id:
-                uploaded_url = uploader.binance_square_upload(img_path)
-                if uploaded_url:
-                    image_url = uploaded_url
-                    LOGGER.info("Image ready via GitHub for $%s: %s", best_coin["symbol"], image_url)
-                else:
-                    LOGGER.warning("All image upload methods failed for $%s, proceeding text-only",
+                    LOGGER.warning("Binance image upload failed for $%s, proceeding text-only",
                                   best_coin["symbol"])
+            else:
+                LOGGER.warning("No SQUARE_API_KEY, proceeding without image")
         else:
             LOGGER.info("No image generated for $%s, proceeding text-only", best_coin["symbol"])
     except Exception as e:
@@ -3589,13 +3577,13 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # 7. PUBLISH
     # ──────────────────────────────────────────────
     
-    link = publisher.publish(best_coin, content, image_url=image_url, media_id=media_id)
+    link = publisher.publish(best_coin, content, image_list=image_list)
     # Persist to JSONL for cross-run repetition protection
     # Step 1: Append record to JSONL (always succeeds or we know why)
     persist_ok = False
     try:
         catalyst = best_coin.get("announcement_type", best_coin.get("catalyst", "market_move"))
-        persist_ok = _append_post_record(best_coin["symbol"], catalyst, link or "", image_url, media_id)
+        persist_ok = _append_post_record(best_coin["symbol"], catalyst, link or "", image_list[0] if image_list else "", "")
     except Exception as e:
         LOGGER.error("CRITICAL: Failed to persist post record to %s: %s", _POST_HISTORY_FILE, e)
     
@@ -3634,7 +3622,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         "announcements_found": len(announcements) if announcements else 0,
         "daily_post_count": today_count + 1,
         "daily_post_limit": config.max_daily_posts,
-        "image_generated": bool(image_url),
+        "image_generated": len(image_list) > 0,
     })
     LOGGER.info("PIPELINE HEALTH: %s", _health)
     return True
