@@ -914,3 +914,137 @@ class ImageUploader:
             safe_name = self._url_encode_filename(image_path.name)
             return f"https://raw.githubusercontent.com/{gh_repo}/{branch}/images/{safe_name}"
         return None
+
+    # ──────────────────────────────────────────────
+    # BINANCE SQUARE NATIVE MEDIA UPLOAD
+    # Uses: POST /bapi/composite/v1/pgc/openApi/media/upload/getUrl
+    # ──────────────────────────────────────────────
+    
+    def binance_media_upload(self, image_path: Path, square_api_key: str) -> Optional[str]:
+        """Upload image via Binance Square native media API.
+        
+        Flow:
+        1. Call media/upload/getUrl → get presigned upload URL + resourceId
+        2. Upload image binary to presigned URL
+        3. Confirm upload → obtain media resourceId
+        4. Return resourceId for use in content/add
+        
+        Returns media resourceId string on success, None on failure.
+        """
+        if not image_path or not image_path.exists():
+            LOGGER.warning("binance_media_upload: image missing: %s", image_path)
+            return None
+        if not square_api_key:
+            LOGGER.warning("binance_media_upload: no API key provided")
+            return None
+        
+        file_size = image_path.stat().st_size
+        LOGGER.info("Media step 1: image ready — %s (%d bytes)", image_path.name, file_size)
+        
+        # Step 1: Request upload URL
+        upload_info = self._request_upload_url(image_path, square_api_key)
+        if not upload_info:
+            LOGGER.warning("Media step 1 FAILED: could not get upload URL")
+            return None
+        
+        upload_url = upload_info.get("uploadUrl") or upload_info.get("url", "")
+        resource_id = upload_info.get("resourceId") or upload_info.get("resourceId", "")
+        
+        LOGGER.info("Media step 2: got upload URL (len=%d), resourceId=%s",
+                    len(upload_url), resource_id[:20] if resource_id else "N/A")
+        
+        # Step 2: Upload image to presigned URL
+        if not self._upload_to_presigned_url(image_path, upload_url):
+            LOGGER.warning("Media step 2 FAILED: image upload to storage failed")
+            return None
+        
+        LOGGER.info("Media step 3: image uploaded to storage successfully")
+        
+        # Step 3: If upload URL response already contains resourceId, use it
+        # Otherwise, we might need to call a confirm endpoint
+        if resource_id:
+            LOGGER.info("Media step 4: obtained media resourceId: %s", resource_id[:30])
+            return resource_id
+        
+        # Try to get resourceId from the upload response (might be in redirect headers)
+        LOGGER.warning("Media step 4: no resourceId from getUrl, trying alternative")
+        return None
+    
+    def _request_upload_url(self, image_path: Path, api_key: str) -> Optional[dict]:
+        """Request a presigned upload URL from Binance Square media API."""
+        import mimetypes
+        mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+        ext = image_path.suffix.lstrip(".") or "png"
+        
+        payload = {
+            "contentType": mime,
+            "ext": ext,
+            "size": image_path.stat().st_size,
+        }
+        
+        headers = {
+            "X-Square-OpenAPI-Key": api_key,
+            "Content-Type": "application/json",
+            "clienttype": "binanceSkill",
+        }
+        
+        url = "https://www.binance.com/bapi/composite/v1/pgc/openApi/media/upload/getUrl"
+        
+        try:
+            data_bytes = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
+            LOGGER.info("Media API request: POST /pgc/openApi/media/upload/getUrl payload=%s",
+                        json.dumps(payload)[:200])
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp_body = resp.read().decode("utf-8", errors="replace")
+            
+            LOGGER.info("Media API response: HTTP %d %s", resp.status, resp_body[:300])
+            data = json.loads(resp_body)
+            
+            if data.get("code") == "000000" and data.get("data"):
+                upload_data = data["data"]
+                LOGGER.info("Media getUrl SUCCESS: uploadUrl=%s..., resourceId=%s",
+                           str(upload_data.get("uploadUrl", ""))[:50],
+                           str(upload_data.get("resourceId", ""))[:20])
+                return upload_data
+            else:
+                LOGGER.warning("Media getUrl FAILED [%s]: %s",
+                              data.get("code"), data.get("message", ""))
+                return None
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
+            LOGGER.warning("Media getUrl HTTP ERROR %d: %s", e.code, body)
+            return None
+        except Exception as e:
+            LOGGER.warning("Media getUrl FAILED: %s", e)
+            return None
+    
+    def _upload_to_presigned_url(self, image_path: Path, upload_url: str) -> bool:
+        """Upload image binary to the presigned storage URL."""
+        try:
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            
+            LOGGER.info("Storage upload: sending %d bytes to %s",
+                       len(image_data), upload_url[:60])
+            
+            # Upload as binary PUT request to the presigned URL
+            req = urllib.request.Request(upload_url, data=image_data, method="PUT")
+            req.add_header("Content-Type", "image/png")
+            
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                status = resp.status
+                resp_body = resp.read().decode("utf-8", errors="replace")[:200]
+                LOGGER.info("Storage upload response: HTTP %d %s", status, resp_body)
+            
+            # HTTP 200 or 201 = success
+            LOGGER.info("Storage upload SUCCESS (HTTP %d)", status)
+            return True
+            
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
+            LOGGER.warning("Storage upload FAILED (HTTP %d): %s", e.code, body)
+            return False
+        except Exception as e:
+            LOGGER.warning("Storage upload FAILED: %s", e)
+            return False

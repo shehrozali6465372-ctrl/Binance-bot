@@ -312,7 +312,7 @@ def _load_post_history() -> dict:
     return posts
 
 
-def _append_post_record(symbol: str, catalyst: str, link: str, image_url: str = "") -> bool:
+def _append_post_record(symbol: str, catalyst: str, link: str, image_url: str = "", media_id: str = "") -> bool:
     """Append a post record to the JSONL history file.
     
     Verifies the record was written successfully.
@@ -325,6 +325,7 @@ def _append_post_record(symbol: str, catalyst: str, link: str, image_url: str = 
         "catalyst": catalyst,
         "link": link,
         "image_url": image_url if image_url else "",
+        "media_id": media_id if media_id else "",
     }
     json_line = json.dumps(record) + "\n"
     
@@ -2972,7 +2973,7 @@ class PostPublisher:
         self.config = config
         self.db = Database(config.database_path)
 
-    def publish(self, coin: Dict[str, Any], content: str, image_url: str = "") -> str:
+    def publish(self, coin: Dict[str, Any], content: str, image_url: str = "", media_id: str = "") -> str:
         # Check if this is a draft template (Gemini failed) - don't publish low quality
         if content.startswith("[DRAFT_TEMPLATE]"):
             actual_content = content.replace("[DRAFT_TEMPLATE]", "", 1)
@@ -2992,7 +2993,7 @@ class PostPublisher:
                 LOGGER.warning("Could not save post to DB: %s", e)
             return "[DRY-RUN]"
 
-        share_link = self._try_square_api(coin, content, image_url)
+        share_link = self._try_square_api(coin, content, image_url, media_id)
         if share_link:
             LOGGER.info("\U0001f4e1 Published successfully with link: %s", share_link)
             self._save_locally(coin, content, share_link=share_link)
@@ -3006,12 +3007,13 @@ class PostPublisher:
             LOGGER.warning("Could not save post to database: %s", e)
         return share_link or ""
 
-    def _try_square_api(self, coin: Dict[str, Any], content: str, image_url: str = "") -> str:
+    def _try_square_api(self, coin: Dict[str, Any], content: str, image_url: str = "", media_id: str = "") -> str:
         """Publish to Binance Square via official Creator Center API.
         
-        Strategy for image posts:
-        1. First try contentType=1 (native feed post) with imageUrl
-        2. If that fails (image unsupported), fall back to contentType=2 (article with image)
+        Image strategy (priority order):
+        1. If media_id is set → use native media (resourceId in payload)
+        2. If image_url is set → use external image URL (contentType=2)
+        3. No image → text-only
         """
         square_key = self.config.square_api_key
         if not square_key:
@@ -3025,34 +3027,43 @@ class PostPublisher:
         }
         url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
         
-        # Build payload - start with text-only
-        payload = {
-            "contentType": 1,
-            "bodyTextOnly": self._limit_hashtags(content),
-        }
+        # Strategy 1: Native media upload (resourceId from Binance media API)
+        if media_id:
+            payload = {
+                "contentType": 2,
+                "title": "$%s" % coin.get("symbol", "Market"),
+                "bodyTextOnly": self._limit_hashtags(content),
+                "resourceId": media_id,
+            }
+            LOGGER.info("Publishing with native media (resourceId=%s...)", media_id[:20])
+            result = self._try_publish(url, headers, payload)
+            if result:
+                LOGGER.info("Native media publish SUCCESS")
+                return result
+            LOGGER.warning("Native media publish FAILED, trying imageUrl fallback")
+        
+        # Strategy 2: External image URL via GitHub
         if image_url:
-            payload["imageUrl"] = image_url
-
-        if image_url:
-            # Use contentType=2 with minimal title for image visibility in feed
-            # Research: contentType=1 ignores imageUrl (no image shown)
-            #          contentType=2 processes imageUrl and shows image in feed
-            # We use a shorter title to keep the post looking native
-            payload2 = {
+            payload = {
                 "contentType": 2,
                 "title": "$%s" % coin.get("symbol", "Market"),
                 "bodyTextOnly": self._limit_hashtags(content),
                 "imageUrl": image_url,
             }
-            LOGGER.info("Publishing with image (contentType=2): %s", image_url)
-            result = self._try_publish(url, headers, payload2)
+            LOGGER.info("Publishing with imageUrl (contentType=2): %s", image_url)
+            result = self._try_publish(url, headers, payload)
             if result:
-                LOGGER.info("Published with image successfully")
+                LOGGER.info("ImageUrl publish SUCCESS")
                 return result
-            LOGGER.warning("Image post failed, falling back to text-only")
-            return self._try_publish(url, headers, payload) or ""
-        else:
-            return self._try_publish(url, headers, payload) or ""
+            LOGGER.warning("ImageUrl publish FAILED, falling back to text-only")
+        
+        # Strategy 3: Text-only
+        payload_text = {
+            "contentType": 1,
+            "bodyTextOnly": self._limit_hashtags(content),
+        }
+        LOGGER.info("Publishing text-only (no image)")
+        return self._try_publish(url, headers, payload_text) or ""
     
     def _try_publish(self, url: str, headers: dict, payload: dict) -> str:
         """Attempt to publish a post with the given payload.
@@ -3540,17 +3551,34 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # 7a. IMAGE INTELLIGENCE (after quality gate, before publish)
     # ──────────────────────────────────────────────
     image_url = ""
+    media_id = ""
     try:
         composer = ImageComposer()
         img_path = composer.generate_post_image(coin=best_coin)
         if img_path:
             uploader = ImageUploader()
-            uploaded_url = uploader.binance_square_upload(img_path)
-            if uploaded_url:
-                image_url = uploaded_url
-                LOGGER.info("Image ready for $%s: %s", best_coin["symbol"], image_url)
-            else:
-                LOGGER.warning("Image upload failed for $%s, proceeding text-only", best_coin["symbol"])
+            
+            # Strategy 1: Binance native media upload (preferred)
+            square_key = CONFIG.square_api_key
+            if square_key:
+                LOGGER.info("Image upload: trying Binance native media API first")
+                resource_id = uploader.binance_media_upload(img_path, square_key)
+                if resource_id:
+                    media_id = resource_id
+                    LOGGER.info("Image ready via Binance native API for $%s: mediaId=%s",
+                               best_coin["symbol"], media_id[:20])
+                else:
+                    LOGGER.warning("Binance native media upload failed, trying GitHub fallback")
+            
+            # Strategy 2: GitHub API upload (fallback)
+            if not media_id:
+                uploaded_url = uploader.binance_square_upload(img_path)
+                if uploaded_url:
+                    image_url = uploaded_url
+                    LOGGER.info("Image ready via GitHub for $%s: %s", best_coin["symbol"], image_url)
+                else:
+                    LOGGER.warning("All image upload methods failed for $%s, proceeding text-only",
+                                  best_coin["symbol"])
         else:
             LOGGER.info("No image generated for $%s, proceeding text-only", best_coin["symbol"])
     except Exception as e:
@@ -3561,13 +3589,13 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # 7. PUBLISH
     # ──────────────────────────────────────────────
     
-    link = publisher.publish(best_coin, content, image_url=image_url)
+    link = publisher.publish(best_coin, content, image_url=image_url, media_id=media_id)
     # Persist to JSONL for cross-run repetition protection
     # Step 1: Append record to JSONL (always succeeds or we know why)
     persist_ok = False
     try:
         catalyst = best_coin.get("announcement_type", best_coin.get("catalyst", "market_move"))
-        persist_ok = _append_post_record(best_coin["symbol"], catalyst, link or "", image_url)
+        persist_ok = _append_post_record(best_coin["symbol"], catalyst, link or "", image_url, media_id)
     except Exception as e:
         LOGGER.error("CRITICAL: Failed to persist post record to %s: %s", _POST_HISTORY_FILE, e)
     
