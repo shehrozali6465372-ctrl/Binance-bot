@@ -3465,7 +3465,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     quality_issues = []
     import re
     # Check for $cashtag
-    cashtags = re.findall(r'\$[A-Za-z0-9]+', content)
+    cashtags = re.findall(r'\$[A-Za-z0-9_\u4e00-\u9fff]+', content)
     if not cashtags:
         quality_issues.append("no $cashtag found")
     elif best_coin.get("symbol", "").upper() not in [t.upper().lstrip('$') for t in cashtags]:
