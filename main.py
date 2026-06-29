@@ -3053,10 +3053,11 @@ class PostPublisher:
         }
         if image_url:
             payload["imageUrl"] = image_url
-            payload["contentType"] = 2  # text+image content type
+            # contentType=2 requires a title field (article post)
+            payload["title"] = "$%s - Setup & Key Levels" % coin.get("symbol", "Trade")
+            payload["contentType"] = 2
             LOGGER.info("Including image in Square post: %s", image_url)
         
-        # Image not supported in Square API text posts yet
         headers = {
             "X-Square-OpenAPI-Key": square_key,
             "Content-Type": "application/json",
