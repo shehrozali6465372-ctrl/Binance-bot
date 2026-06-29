@@ -3033,31 +3033,25 @@ class PostPublisher:
         if image_url:
             payload["imageUrl"] = image_url
 
-        # Strategy 1: contentType=1 with imageUrl (native feed post)
         if image_url:
-            LOGGER.info("Strategy 1: Trying contentType=1 with imageUrl (native feed image post)")
-            result = self._try_publish(url, headers, payload)
-            if result:
-                LOGGER.info("Strategy 1 succeeded: native feed post with image published")
-                return result
-            LOGGER.warning("Strategy 1 failed, trying Strategy 2 (article with image)")
-            
-            # Strategy 2: contentType=2 with title (fallback article with image)
+            # Use contentType=2 with minimal title for image visibility in feed
+            # Research: contentType=1 ignores imageUrl (no image shown)
+            #          contentType=2 processes imageUrl and shows image in feed
+            # We use a shorter title to keep the post looking native
             payload2 = {
                 "contentType": 2,
-                "title": "$%s - Trade Setup & Analysis" % coin.get("symbol", "Market"),
+                "title": "$%s" % coin.get("symbol", "Market"),
                 "bodyTextOnly": self._limit_hashtags(content),
                 "imageUrl": image_url,
             }
-            LOGGER.info("Strategy 2: Trying contentType=2 with title (article with image)")
-            result2 = self._try_publish(url, headers, payload2)
-            if result2:
-                LOGGER.info("Strategy 2 succeeded: article with image published")
-                return result2
-            LOGGER.warning("Both strategies failed, returning empty")
-            return ""
+            LOGGER.info("Publishing with image (contentType=2): %s", image_url)
+            result = self._try_publish(url, headers, payload2)
+            if result:
+                LOGGER.info("Published with image successfully")
+                return result
+            LOGGER.warning("Image post failed, falling back to text-only")
+            return self._try_publish(url, headers, payload) or ""
         else:
-            # No image - simple text-only post
             return self._try_publish(url, headers, payload) or ""
     
     def _try_publish(self, url: str, headers: dict, payload: dict) -> str:
