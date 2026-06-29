@@ -3041,31 +3041,64 @@ class PostPublisher:
         return share_link or ""
 
     def _try_square_api(self, coin: Dict[str, Any], content: str, image_url: str = "") -> str:
-        """Publish to Binance Square via official Creator Center API."""
+        """Publish to Binance Square via official Creator Center API.
+        
+        Strategy for image posts:
+        1. First try contentType=1 (native feed post) with imageUrl
+        2. If that fails (image unsupported), fall back to contentType=2 (article with image)
+        """
         square_key = self.config.square_api_key
         if not square_key:
             LOGGER.warning("No SQUARE_API_KEY set, saving locally")
             return ""
 
+        headers = {
+            "X-Square-OpenAPI-Key": square_key,
+            "Content-Type": "application/json",
+            "clienttype": "binanceSkill",
+        }
+        url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
+        
+        # Build payload - start with text-only
         payload = {
             "contentType": 1,
             "bodyTextOnly": self._limit_hashtags(content),
         }
         if image_url:
             payload["imageUrl"] = image_url
-            # contentType=2 requires a title field (article post)
-            payload["title"] = "$%s - Setup & Key Levels" % coin.get("symbol", "Trade")
-            payload["contentType"] = 2
-            LOGGER.info("Including image in Square post: %s", image_url)
+
+        # Strategy 1: contentType=1 with imageUrl (native feed post)
+        if image_url:
+            LOGGER.info("Strategy 1: Trying contentType=1 with imageUrl (native feed image post)")
+            result = self._try_publish(url, headers, payload)
+            if result:
+                LOGGER.info("Strategy 1 succeeded: native feed post with image published")
+                return result
+            LOGGER.warning("Strategy 1 failed, trying Strategy 2 (article with image)")
+            
+            # Strategy 2: contentType=2 with title (fallback article with image)
+            payload2 = {
+                "contentType": 2,
+                "title": "$%s - Trade Setup & Analysis" % coin.get("symbol", "Market"),
+                "bodyTextOnly": self._limit_hashtags(content),
+                "imageUrl": image_url,
+            }
+            LOGGER.info("Strategy 2: Trying contentType=2 with title (article with image)")
+            result2 = self._try_publish(url, headers, payload2)
+            if result2:
+                LOGGER.info("Strategy 2 succeeded: article with image published")
+                return result2
+            LOGGER.warning("Both strategies failed, returning empty")
+            return ""
+        else:
+            # No image - simple text-only post
+            return self._try_publish(url, headers, payload) or ""
+    
+    def _try_publish(self, url: str, headers: dict, payload: dict) -> str:
+        """Attempt to publish a post with the given payload.
         
-        headers = {
-            "X-Square-OpenAPI-Key": square_key,
-            "Content-Type": "application/json",
-            "clienttype": "binanceSkill",
-        }
-
-        url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
-
+        Returns share link string on success, empty string on failure.
+        """
         try:
             data_bytes = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
@@ -3078,7 +3111,8 @@ class PostPublisher:
             if data.get("code") == "000000":
                 post_id = data.get("data", {}).get("id", "unknown")
                 share_link = data.get("data", {}).get("shareLink", "")
-                LOGGER.info("Published to Square! ID: %s Link: %s", post_id, share_link)
+                ct = payload.get("contentType", 1)
+                LOGGER.info("Published to Square! ID: %s Link: %s (contentType=%d)", post_id, share_link, ct)
                 return share_link
             else:
                 LOGGER.warning("Square API error [%s]: %s", data.get("code"), data.get("message"))
