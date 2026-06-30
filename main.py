@@ -316,9 +316,9 @@ SCORE_WEIGHTS = {
 }
 
 # Publishing thresholds
-SCORE_PUBLISH_DIRECT = 80      # Score >= 80 → publish directly
-SCORE_GEMINI_REVIEW = 70       # Score 70-79 → Gemini Phase 1 review
-SCORE_MINIMUM = 70             # Score < 70 → reject
+SCORE_PUBLISH_DIRECT = 75      # Score >= 75 → publish directly
+SCORE_GEMINI_REVIEW = 60       # Score 60-74 → Gemini Phase 1 review
+SCORE_MINIMUM = 60             # Score < 60 → reject
 
 # ─── PERSISTENT POST HISTORY (JSONL + Git Push) ───
 # Survives GHA ephemeral containers by storing records in a file
@@ -1645,72 +1645,100 @@ class SkillsHubEngine:
         return candidates
     
     def _calculate_score(self, data: Dict[str, Any]) -> Dict[str, float]:
-        """Calculate weighted score (0-100) for a token using configurable weights.
+        """Calculate normalized weighted score (0-100) using available metrics only.
         
-        Scoring factors (from SCORE_WEIGHTS):
-        - trending_rank (20%): appears in Trending rank (rankType=10)
-        - smart_money (20%): smart money holding percent
-        - top_search (15%): appears in Top Search rank (rankType=11)
-        - volume_24h (15%): 24h volume / market cap ratio
-        - market_cap (10%): market cap score
-        - liquidity (10%): liquidity score
-        - momentum (5%): absolute 24h price change
-        - ai_quality (5%): source diversity / alpha tag
+        Each metric is scored 0-100 and weighted by SCORE_WEIGHTS.
+        If a metric's data is unavailable, its weight is redistributed
+        to available metrics. Never penalizes for missing data.
         
-        Returns dict with 'final' score and all component scores.
-        Score range: 0-100. Risk penalty applied separately by caller.
+        Skills Hub category bonuses boost base score:
+        - Trending: +5 if token appears in Trending rank
+        - Top Search: +5 if token appears in Top Search rank  
+        - Smart Money: +5 if token appears in Smart Money rank
+        - Multi-category: +5 if in 3+ categories
+        
+        Returns dict with 'final' score (0-100), 'normalized' score,
+        'base' score, 'skills_bonus', and all component scores.
         """
-        w = SCORE_WEIGHTS
+        import copy
+        w = copy.copy(SCORE_WEIGHTS)
         components = {}
+        availability = {}
         
         sources = data.get("_sources") or []
         source_set = set(sources)
         
-        # 1. Trending rank (20%) - appears in rankType=10
+        # --- Calculate each component (0-100) ---
+        
+        # 1. Trending rank - appears in rankType=10
         has_trending = 1.0 if "trending" in source_set else 0.0
-        components["trending_rank"] = has_trending * 100.0  # 0 or 100
+        components["trending_rank"] = has_trending * 100.0
+        availability["trending_rank"] = True  # always known from sources
         
-        # 2. Smart money (20%) - smartMoneyHoldingPercent (0-100%)
-        sm = float(data.get("smartMoneyHoldingPercent", 0) or 0)
-        components["smart_money"] = min(sm * 10.0, 100.0)  # 10% holding = 100
+        # 2. Smart money - smartMoneyHoldingPercent
+        sm_raw = data.get("smartMoneyHoldingPercent")
+        sm = float(sm_raw) if sm_raw is not None else 0
+        has_sm_data = "smart_money" in source_set or sm > 0
+        if has_sm_data:
+            components["smart_money"] = min(sm * 10.0, 100.0)
+        else:
+            components["smart_money"] = 0.0
+        availability["smart_money"] = has_sm_data
         
-        # 3. Top Search (15%) - appears in rankType=11
+        # 3. Top Search - appears in rankType=11
         has_top_search = 1.0 if "top_search" in source_set else 0.0
-        components["top_search"] = has_top_search * 100.0  # 0 or 100
+        components["top_search"] = has_top_search * 100.0
+        availability["top_search"] = True  # always known from sources
         
-        # 4. 24h Volume (15%) - volume/mcap ratio
-        vol = float(data.get("volume24h", 0) or 0)
-        mc = float(data.get("marketCap", 0) or 1)
-        vol_ratio = vol / mc if mc > 0 else 0
-        components["volume_24h"] = min(vol_ratio * 500, 100.0)  # 0.2 ratio = 100
+        # 4. 24h Volume - volume / mcap ratio
+        vol_raw = data.get("volume24h")
+        vol = float(vol_raw) if vol_raw is not None else 0
+        mc_raw = data.get("marketCap")
+        mc = float(mc_raw) if mc_raw is not None else 0
+        has_vol_data = vol > 0 and mc > 0
+        if has_vol_data:
+            vol_ratio = vol / mc
+            components["volume_24h"] = min(vol_ratio * 500, 100.0)
+        else:
+            components["volume_24h"] = 0.0
+        availability["volume_24h"] = has_vol_data
         
-        # 5. Market Cap (10%) - log scale up to $1B
+        # 5. Market Cap - log scale up to $1B
         mc_val = float(data.get("marketCap", 0) or 0)
-        if mc_val >= 1_000_000_000:
-            components["market_cap"] = 100.0
-        elif mc_val >= 100_000_000:
-            components["market_cap"] = 80.0
-        elif mc_val >= 10_000_000:
-            components["market_cap"] = 60.0
-        elif mc_val >= 1_000_000:
-            components["market_cap"] = 40.0
+        has_mcap_data = mc_val > 0
+        if has_mcap_data:
+            if mc_val >= 1_000_000_000:
+                components["market_cap"] = 100.0
+            elif mc_val >= 100_000_000:
+                components["market_cap"] = 80.0
+            elif mc_val >= 10_000_000:
+                components["market_cap"] = 60.0
+            elif mc_val >= 1_000_000:
+                components["market_cap"] = 40.0
+            else:
+                components["market_cap"] = 20.0
         else:
-            components["market_cap"] = 20.0
+            components["market_cap"] = 0.0
+        availability["market_cap"] = has_mcap_data
         
-        # 6. Liquidity (10%) - liquidity score
-        liq = float(data.get("liquidity", 0) or 0)
-        if liq >= 1_000_000:
-            components["liquidity"] = 100.0
-        elif liq >= 100_000:
-            components["liquidity"] = 80.0
-        elif liq >= 10_000:
-            components["liquidity"] = 60.0
-        elif liq > 0:
-            components["liquidity"] = 40.0
+        # 6. Liquidity
+        liq_raw = data.get("liquidity")
+        liq = float(liq_raw) if liq_raw is not None else 0
+        has_liq_data = liq > 0
+        if has_liq_data:
+            if liq >= 1_000_000:
+                components["liquidity"] = 100.0
+            elif liq >= 100_000:
+                components["liquidity"] = 80.0
+            elif liq >= 10_000:
+                components["liquidity"] = 60.0
+            else:
+                components["liquidity"] = 40.0
         else:
-            components["liquidity"] = 50.0  # neutral when unknown
+            components["liquidity"] = 0.0
+        availability["liquidity"] = has_liq_data
         
-        # 7. Momentum (5%) - absolute 24h change
+        # 7. Momentum - absolute 24h change
         change = abs(float(data.get("percentChange24h", 0) or 0))
         if change >= 20:
             components["momentum"] = 100.0
@@ -1722,35 +1750,81 @@ class SkillsHubEngine:
             components["momentum"] = 40.0
         else:
             components["momentum"] = 20.0
+        availability["momentum"] = True  # percentChange24h is always available
         
-        # 8. AI Quality (5%) - source diversity + alpha tag
-        diversity_score = min(len(source_set) * 25.0, 100.0)  # 4 sources = 100
+        # 8. AI Quality - source diversity + alpha tag
+        diversity_score = min(len(source_set) * 25.0, 100.0)
         alpha_bonus = 20.0 if data.get("tokenTag") else 0.0
         components["ai_quality"] = min(diversity_score + alpha_bonus, 100.0)
+        availability["ai_quality"] = True  # always known from sources
         
-        # Calculate final weighted score
-        final_score = 0.0
-        for key, weight in w.items():
-            if key in components:
-                final_score += components[key] * weight
+        # --- Normalize weights based on available metrics ---
+        available_weight = 0.0
+        for key in w:
+            if availability.get(key, False):
+                available_weight += w[key]
         
-        # Risk penalty
+        # Compute base score: sum(component * weight) for available metrics only
+        base_score = 0.0
+        for key in w:
+            if availability.get(key, False):
+                base_score += components[key] * w[key]
+        
+        # Normalize to available weight (avoid division by zero)
+        if available_weight > 0:
+            normalized_score = base_score / available_weight
+        else:
+            normalized_score = 0.0
+        
+        # --- Skills Hub category bonuses (added on top) ---
+        skills_bonus = 0.0
+        if "trending" in source_set:
+            skills_bonus += 5.0
+        if "top_search" in source_set:
+            skills_bonus += 5.0
+        if "smart_money" in source_set:
+            skills_bonus += 5.0
+        if len(source_set) >= 3:
+            skills_bonus += 5.0  # multi-category bonus
+        
+        # If token is alpha, extra bonus
+        alpha_bonus_cat = 5.0 if "alpha" in source_set else 0.0
+        skills_bonus += alpha_bonus_cat
+        
+        # Final score before risk
+        final_score = normalized_score + skills_bonus
+        
+        # --- Risk penalties (applied to final score) ---
         risk = (data.get("auditInfo") or {}).get("riskLevel", 1)
         if risk >= 3:
-            final_score *= 0.5  # 50% penalty for high risk
+            final_score *= 0.5
         elif risk == 2:
-            final_score *= 0.8  # 20% penalty for medium risk
+            final_score *= 0.8
         
-        # Price too low penalty
+        # Price too low penalty (already caught by _passes_objective_filters, but double check)
         price = float(data.get("price", 0) or 0)
         if 0 < price < 0.0001:
             final_score *= 0.3
         elif 0 < price < 0.001:
             final_score *= 0.6
         
-        components["final"] = round(max(final_score, 0.0), 1)
-        components["risk_level"] = risk
-        return components
+        final_score = round(min(max(final_score, 0.0), 100.0), 1)
+        
+        # Build result dict
+        result = {
+            "final": final_score,
+            "normalized": round(normalized_score, 1),
+            "base": round(base_score, 1),
+            "skills_bonus": round(skills_bonus, 1),
+            "available_weight": round(available_weight, 2),
+            "risk_level": risk,
+        }
+        for key in components:
+            result[key] = round(components[key], 1)
+        for key in availability:
+            result[f"{key}_avail"] = availability[key]
+        
+        return result
 
 
 
@@ -3428,8 +3502,8 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # 3. SCORING GATE (Skills Hub candidates only)
     # ──────────────────────────────────────────────
     # Apply the weighted scoring system (0-100) with publishing rules:
-    #   Score >= 80 → DIRECT PUBLISH (skip Gemini Phase 1)
-    #   Score 70-79 → GEMINI REVIEW (send to Phase 1)
+    #   Score >= 75 → DIRECT PUBLISH (skip Gemini Phase 1)
+    #   Score 60-74 → GEMINI REVIEW (send to Phase 1)
     #   Score < 70  → REJECT (remove from candidates)
     # MarketScanner fallback candidates bypass this gate.
     
@@ -3438,9 +3512,13 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         if skills_used and hasattr(coin, '_skills_score'):
             score = coin._skills_score
             components = getattr(coin, '_skills_components', {})
-            LOGGER.info("  SCORE: $%s = %.1f/100 (trending=%.0f smart_money=%.0f "
-                       "search=%.0f volume=%.0f mcap=%.0f liq=%.0f mom=%.0f quality=%.0f risk=%d)",
-                       coin.symbol, score,
+            base = components.get("base", 0)
+            norm = components.get("normalized", 0)
+            bonus = components.get("skills_bonus", 0)
+            avail_w = components.get("available_weight", 1.0)
+            LOGGER.info("  SCORE: $%s final=%.1f norm=%.1f base=%.1f bonus=%.1f avail=%.0f%% "
+                       "(tr=%.0f sm=%.0f srch=%.0f vol=%.0f mcap=%.0f liq=%.0f mom=%.0f qual=%.0f risk=%d)",
+                       coin.symbol, score, norm, base, bonus, avail_w * 100,
                        components.get("trending_rank", 0),
                        components.get("smart_money", 0),
                        components.get("top_search", 0),
@@ -3484,7 +3562,13 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # Show top candidates after scoring
     for c in candidates[:5]:
         decision = getattr(c, '_skills_publish_decision', 'review')
-        LOGGER.info("  Ranked: $%s (%.1f) → %s", c.symbol, getattr(c, '_skills_score', 0), decision)
+        components = getattr(c, '_skills_components', {})
+        score = getattr(c, '_skills_score', 0)
+        norm = components.get("normalized", score)
+        bonus = components.get("skills_bonus", 0)
+        sources = getattr(c, '_skills_sources', [])
+        LOGGER.info("  Ranked #: $%s final=%.1f norm=%.1f bonus=%.1f sources=%s → %s",
+                   c.symbol, score, norm, bonus, sources, decision)
     
     # ──────────────────────────────────────────────
     # 4. BUILD RESEARCH PACKAGES FOR TOP CANDIDATES
