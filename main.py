@@ -300,6 +300,26 @@ def _get_binance_listed() -> set:
 
 
 
+
+
+# ─── SCORING WEIGHTS (configurable) ───
+# Used by SkillsHubEngine to calculate final score (0-100)
+SCORE_WEIGHTS = {
+    "trending_rank": 0.20,     # 20% - appears in Trending rank
+    "smart_money": 0.20,       # 20% - smart money holding %
+    "top_search": 0.15,        # 15% - appears in Top Search rank
+    "volume_24h": 0.15,        # 15% - 24h volume / market cap ratio
+    "market_cap": 0.10,        # 10% - market cap score
+    "liquidity": 0.10,         # 10% - liquidity score
+    "momentum": 0.05,          # 5%  - price momentum (24h change)
+    "ai_quality": 0.05,        # 5%  - AI quality / source diversity
+}
+
+# Publishing thresholds
+SCORE_PUBLISH_DIRECT = 80      # Score >= 80 → publish directly
+SCORE_GEMINI_REVIEW = 70       # Score 70-79 → Gemini Phase 1 review
+SCORE_MINIMUM = 70             # Score < 70 → reject
+
 # ─── PERSISTENT POST HISTORY (JSONL + Git Push) ───
 # Survives GHA ephemeral containers by storing records in a file
 # that gets git-committed after each publish.
@@ -1572,12 +1592,13 @@ class SkillsHubEngine:
     def get_scored_candidates(self) -> List[Coin]:
         """Get scored coin candidates from Skills Hub data.
         
-        Scoring factors (0-100):
-        - search score (searchCount24h rank)
-        - source score (how many rank types include this coin)
-        - smart money score (smartMoneyHoldingPercent)
-        - price action score (24h change + volume)
-        - risk penalty (audit risk level)
+        Uses weighted scoring system (see _calculate_score):
+        - trending_rank (20%), smart_money (20%), top_search (15%)
+        - volume_24h (15%), market_cap (10%), liquidity (10%)
+        - momentum (5%), ai_quality (5%)
+        
+        Returns candidates sorted by final score (0-100) descending.
+        Each coin has _skills_score, _skills_components, _skills_sources attrs.
         """
         raw = self.fetch_all()
         if not raw:
@@ -1586,7 +1607,8 @@ class SkillsHubEngine:
         candidates = []
         for sym, data in raw.items():
             try:
-                score = self._calculate_score(data)
+                score_data = self._calculate_score(data)
+                final_score = score_data.get("final", 0)
                 price = float(data.get("price", 0) or 0)
                 change_24h = float(data.get("percentChange24h", 0) or 0)
                 vol_24h = float(data.get("volume24h", 0) or 0)
@@ -1607,12 +1629,13 @@ class SkillsHubEngine:
                     history=[],
                     liquidity=liquidity,
                 )
-                coin._skills_score = score
+                coin._skills_score = final_score
+                coin._skills_components = score_data
                 coin._skills_search = search
                 coin._skills_sources = sources
                 coin._skills_smart_money = float(data.get("smartMoneyHoldingPercent", 0) or 0)
                 coin._skills_kol = float(data.get("kolHoldingPercent", 0) or 0)
-                coin._skills_risk = (data.get("auditInfo") or {}).get("riskLevel", 1)
+                coin._skills_risk = score_data.get("risk_level", 1)
                 candidates.append(coin)
             except Exception as e:
                 LOGGER.warning("SkillsHub parse error for %s: %s", sym, e)
@@ -1621,71 +1644,113 @@ class SkillsHubEngine:
         candidates.sort(key=lambda c: getattr(c, '_skills_score', 0), reverse=True)
         return candidates
     
-    def _calculate_score(self, data: Dict[str, Any]) -> float:
-        """Calculate unified score for a token.
+    def _calculate_score(self, data: Dict[str, Any]) -> Dict[str, float]:
+        """Calculate weighted score (0-100) for a token using configurable weights.
         
-        Weighted factors:
-        - searchCount24h (normalized): 30 points max
-        - source diversity: 20 points max  
-        - smart money holding: 10 points max
-        - KOL holding: 5 points max
-        - 24h change (abs): 10 points max
-        - volume spike: 10 points max
-        - trader count: 5 points max
-        - Binance alpha tag: 5 points max
-        - Binance Spot listed (via exchangeInfo): 5 points max
-        - Risk penalty: -10 to 0
+        Scoring factors (from SCORE_WEIGHTS):
+        - trending_rank (20%): appears in Trending rank (rankType=10)
+        - smart_money (20%): smart money holding percent
+        - top_search (15%): appears in Top Search rank (rankType=11)
+        - volume_24h (15%): 24h volume / market cap ratio
+        - market_cap (10%): market cap score
+        - liquidity (10%): liquidity score
+        - momentum (5%): absolute 24h price change
+        - ai_quality (5%): source diversity / alpha tag
+        
+        Returns dict with 'final' score and all component scores.
+        Score range: 0-100. Risk penalty applied separately by caller.
         """
-        score = 0.0
+        w = SCORE_WEIGHTS
+        components = {}
         
-        # 1. Search count (what people are looking for on Binance) - max 30
-        search = int(data.get("searchCount24h", 0) or 0)
-        score += min(search / 35, 30.0)  # 1060 search ~= 30 points
-        
-        # 2. Source diversity (appears in multiple rank types) - max 20
         sources = data.get("_sources") or []
-        score += min(len(sources) * 7, 20.0)
+        source_set = set(sources)
         
-        # 3. Smart money holding - max 10
+        # 1. Trending rank (20%) - appears in rankType=10
+        has_trending = 1.0 if "trending" in source_set else 0.0
+        components["trending_rank"] = has_trending * 100.0  # 0 or 100
+        
+        # 2. Smart money (20%) - smartMoneyHoldingPercent (0-100%)
         sm = float(data.get("smartMoneyHoldingPercent", 0) or 0)
-        score += min(sm * 1.5, 10.0)
+        components["smart_money"] = min(sm * 10.0, 100.0)  # 10% holding = 100
         
-        # 4. KOL holding - max 5
-        kol = float(data.get("kolHoldingPercent", 0) or 0)
-        score += min(kol * 1.5, 5.0)
+        # 3. Top Search (15%) - appears in rankType=11
+        has_top_search = 1.0 if "top_search" in source_set else 0.0
+        components["top_search"] = has_top_search * 100.0  # 0 or 100
         
-        # 5. 24h price action (absolute change, capped) - max 10
-        change = abs(float(data.get("percentChange24h", 0) or 0))
-        score += min(change / 5, 10.0)
-        
-        # 6. Volume spike (24h volume relative to market cap) - max 10
+        # 4. 24h Volume (15%) - volume/mcap ratio
         vol = float(data.get("volume24h", 0) or 0)
         mc = float(data.get("marketCap", 0) or 1)
         vol_ratio = vol / mc if mc > 0 else 0
-        score += min(vol_ratio * 50, 10.0)
+        components["volume_24h"] = min(vol_ratio * 500, 100.0)  # 0.2 ratio = 100
         
-        # 7. Unique trader count (24h) - max 5
-        traders = int(data.get("count24h", 0) or 0)
-        score += min(traders / 50000, 5.0)
+        # 5. Market Cap (10%) - log scale up to $1B
+        mc_val = float(data.get("marketCap", 0) or 0)
+        if mc_val >= 1_000_000_000:
+            components["market_cap"] = 100.0
+        elif mc_val >= 100_000_000:
+            components["market_cap"] = 80.0
+        elif mc_val >= 10_000_000:
+            components["market_cap"] = 60.0
+        elif mc_val >= 1_000_000:
+            components["market_cap"] = 40.0
+        else:
+            components["market_cap"] = 20.0
         
-        # 8. Binance Alpha tag - max 5
-        token_tag = (data.get("tokenTag") or {})
-        if token_tag:
-            score += 5.0
+        # 6. Liquidity (10%) - liquidity score
+        liq = float(data.get("liquidity", 0) or 0)
+        if liq >= 1_000_000:
+            components["liquidity"] = 100.0
+        elif liq >= 100_000:
+            components["liquidity"] = 80.0
+        elif liq >= 10_000:
+            components["liquidity"] = 60.0
+        elif liq > 0:
+            components["liquidity"] = 40.0
+        else:
+            components["liquidity"] = 50.0  # neutral when unknown
         
-        # 9. Risk penalty - subtract up to 10
+        # 7. Momentum (5%) - absolute 24h change
+        change = abs(float(data.get("percentChange24h", 0) or 0))
+        if change >= 20:
+            components["momentum"] = 100.0
+        elif change >= 10:
+            components["momentum"] = 80.0
+        elif change >= 5:
+            components["momentum"] = 60.0
+        elif change >= 2:
+            components["momentum"] = 40.0
+        else:
+            components["momentum"] = 20.0
+        
+        # 8. AI Quality (5%) - source diversity + alpha tag
+        diversity_score = min(len(source_set) * 25.0, 100.0)  # 4 sources = 100
+        alpha_bonus = 20.0 if data.get("tokenTag") else 0.0
+        components["ai_quality"] = min(diversity_score + alpha_bonus, 100.0)
+        
+        # Calculate final weighted score
+        final_score = 0.0
+        for key, weight in w.items():
+            if key in components:
+                final_score += components[key] * weight
+        
+        # Risk penalty
         risk = (data.get("auditInfo") or {}).get("riskLevel", 1)
         if risk >= 3:
-            score -= 10.0
+            final_score *= 0.5  # 50% penalty for high risk
         elif risk == 2:
-            score -= 5.0
+            final_score *= 0.8  # 20% penalty for medium risk
         
-        # 10. Price too low penalty (under $0.001)
+        # Price too low penalty
         price = float(data.get("price", 0) or 0)
-        if 0 < price < 0.001:
-            score -= 5.0
+        if 0 < price < 0.0001:
+            final_score *= 0.3
+        elif 0 < price < 0.001:
+            final_score *= 0.6
         
-        return max(score, 0.0)
+        components["final"] = round(max(final_score, 0.0), 1)
+        components["risk_level"] = risk
+        return components
 
 
 
@@ -3360,17 +3425,70 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                 " (SkillsHub)" if skills_used else " (MarketScanner)")
     
     # ──────────────────────────────────────────────
-    # 3. BUILD RESEARCH PACKAGES FOR TOP CANDIDATES
+    # 3. SCORING GATE (Skills Hub candidates only)
     # ──────────────────────────────────────────────
+    # Apply the weighted scoring system (0-100) with publishing rules:
+    #   Score >= 80 → DIRECT PUBLISH (skip Gemini Phase 1)
+    #   Score 70-79 → GEMINI REVIEW (send to Phase 1)
+    #   Score < 70  → REJECT (remove from candidates)
+    # MarketScanner fallback candidates bypass this gate.
     
-    # Sort by SkillsHub score (if available) or market activity heuristic
-    if skills_used:
-        candidates.sort(key=lambda c: getattr(c, '_skills_score', 0), reverse=True)
-    else:
-        candidates.sort(
-            key=lambda c: (abs(c.change_24h) * 0.6 + c.volume_ratio * 0.4),
-            reverse=True
-        )
+    scored_candidates = []
+    for coin in candidates:
+        if skills_used and hasattr(coin, '_skills_score'):
+            score = coin._skills_score
+            components = getattr(coin, '_skills_components', {})
+            LOGGER.info("  SCORE: $%s = %.1f/100 (trending=%.0f smart_money=%.0f "
+                       "search=%.0f volume=%.0f mcap=%.0f liq=%.0f mom=%.0f quality=%.0f risk=%d)",
+                       coin.symbol, score,
+                       components.get("trending_rank", 0),
+                       components.get("smart_money", 0),
+                       components.get("top_search", 0),
+                       components.get("volume_24h", 0),
+                       components.get("market_cap", 0),
+                       components.get("liquidity", 0),
+                       components.get("momentum", 0),
+                       components.get("ai_quality", 0),
+                       components.get("risk_level", 1))
+            
+            if score >= SCORE_PUBLISH_DIRECT:
+                LOGGER.info("  GATE: $%s score=%.1f >= %d → DIRECT PUBLISH", 
+                           coin.symbol, score, SCORE_PUBLISH_DIRECT)
+                coin._skills_publish_decision = "direct"
+                scored_candidates.append(coin)
+            elif score >= SCORE_GEMINI_REVIEW:
+                LOGGER.info("  GATE: $%s score=%.1f >= %d → GEMINI REVIEW",
+                           coin.symbol, score, SCORE_GEMINI_REVIEW)
+                coin._skills_publish_decision = "review"
+                scored_candidates.append(coin)
+            else:
+                LOGGER.info("  GATE: $%s score=%.1f < %d → REJECTED", 
+                           coin.symbol, score, SCORE_MINIMUM)
+        else:
+            # MarketScanner fallback: use heuristic, send to Gemini review
+            heuristic = min(abs(coin.change_24h) * 3 + coin.volume_ratio * 10, 100)
+            LOGGER.info("  SCORE: $%s heuristic=%.1f/100 (fallback scanner)", coin.symbol, heuristic)
+            coin._skills_publish_decision = "review"
+            coin._skills_score = heuristic
+            scored_candidates.append(coin)
+    
+    if not scored_candidates:
+        LOGGER.info("SCORING GATE: all candidates rejected — no post this cycle")
+        return False
+    
+    candidates = scored_candidates
+    
+    # Sort by score descending
+    candidates.sort(key=lambda c: getattr(c, '_skills_score', 0), reverse=True)
+    
+    # Show top candidates after scoring
+    for c in candidates[:5]:
+        decision = getattr(c, '_skills_publish_decision', 'review')
+        LOGGER.info("  Ranked: $%s (%.1f) → %s", c.symbol, getattr(c, '_skills_score', 0), decision)
+    
+    # ──────────────────────────────────────────────
+    # 4. BUILD RESEARCH PACKAGES FOR TOP CANDIDATES
+    # ──────────────────────────────────────────────
     
     top_candidates = candidates[:5]  # Build packages for top 5
     
@@ -3461,16 +3579,41 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
             LOGGER.debug("Could not save research packages: %s", e)
     
     # ──────────────────────────────────────────────
-    # 4. GEMINI PHASE 1: DECISION
+    # 5. GEMINI PHASE 1: DECISION (only for REVIEW candidates)
     # ──────────────────────────────────────────────
     
-    top_3_packages = [pkg for _, pkg in research_packages[:3]]
-    top_3_coins = [coin for coin, _ in research_packages[:3]]
+    # Check if top candidate qualifies for DIRECT publish (score >= 80)
+    top_coin_dict, top_pkg = research_packages[0]
+    top_score = top_coin_dict.get("skills_score", 0)
+    top_decision = top_coin_dict.get("_skills_publish_decision", "review")
     
-    LOGGER.info("Sending top 3 to Gemini Phase 1: %s",
-                ", ".join("$%s" % c["symbol"] for c in top_3_coins))
-    
-    rankings = generator.decide(top_3_packages)
+    if top_decision == "direct":
+        LOGGER.info("DIRECT PUBLISH: $%s score=%.1f >= %d — skipping Gemini Phase 1",
+                   top_coin_dict["symbol"], top_score, SCORE_PUBLISH_DIRECT)
+        rankings = [{
+            "rank": 1,
+            "symbol": top_coin_dict["symbol"],
+            "reason": "Automatically selected by scoring engine (score=%.1f >= %d)" 
+                      % (top_score, SCORE_PUBLISH_DIRECT),
+            "decision": "publish",
+        }]
+        # Add rankings for remaining candidates
+        for i, (coin, pkg) in enumerate(research_packages[1:], 2):
+            rankings.append({
+                "rank": i,
+                "symbol": coin["symbol"],
+                "reason": "Lower score (%.1f)" % coin.get("skills_score", 0),
+                "decision": "skip",
+            })
+    else:
+        # Existing Gemini Phase 1 flow for REVIEW candidates
+        top_3_packages = [pkg for _, pkg in research_packages[:3]]
+        top_3_coins = [coin for coin, _ in research_packages[:3]]
+        
+        LOGGER.info("Sending top 3 to Gemini Phase 1: %s",
+                    ", ".join("$%s" % c["symbol"] for c in top_3_coins))
+        
+        rankings = generator.decide(top_3_packages)
     
     if not rankings:
         LOGGER.warning("Gemini Phase 1 returned no valid ranking — no post this cycle")
@@ -3481,7 +3624,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         LOGGER.info("Gemini rank %d: $%s — %s", r.get('rank', '?'), r.get('symbol', '?'), r.get('reason', '')[:120])
     
     # ──────────────────────────────────────────────
-    # 5. SELECT #1 PICK
+    # 6. SELECT #1 PICK
     # ──────────────────────────────────────────────
     
     best_symbol = rankings[0].get("symbol", "")
@@ -3611,7 +3754,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                 best_coin["symbol"], word_count, len(hashtags))
     
     # ──────────────────────────────────────────────
-    # 7a. IMAGE INTELLIGENCE (after quality gate, before publish)
+    # 8a. IMAGE INTELLIGENCE (after quality gate, before publish)
     # Uses official Binance Square /image/presignedUrl + /image/imageStatus flow
     # Source: github.com/binance/binance-skills-hub (square-post skill)
     # ──────────────────────────────────────────────
@@ -3643,7 +3786,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                       best_coin["symbol"], e)
     
     # ──────────────────────────────────────────────
-    # 7. PUBLISH
+    # 9. PUBLISH
     # ──────────────────────────────────────────────
     
     link = publisher.publish(best_coin, content, image_list=image_list)
