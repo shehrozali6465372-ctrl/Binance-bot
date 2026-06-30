@@ -224,15 +224,78 @@ def _http_json_with_retry(
 
 
 TOP_5_COINS = {"BTC", "ETH", "BNB", "SOL", "XRP"}
-BINANCE_LISTED = {
-    "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK",
-    "MATIC", "POL", "SHIB", "TRX", "ATOM", "UNI", "APT", "ARB", "OP", "NEAR",
-    "FIL", "ALGO", "AAVE", "MKR", "COMP", "SAND", "MANA", "AXS", "THETA", "FTM",
-    "ICP", "EOS", "XLM", "VET", "EGLD", "GRT", "RNDR", "FET", "AGIX", "PEPE",
-    "TIA", "SEI", "SUI", "INJ", "BLUR", "STRK", "BONK", "WIF", "JUP", "JTO",
-    "RE", "LAYER", "AVNT", "SHELL", "NOT", "DOGS", "HMSTR", "ETHFI", "EIGEN",
-    "VIRTUAL", "AI16Z", "ARC", "AKT", "OCEAN", "TAO", "PENDLE", "ENA", "ALT",
-}
+
+# Dynamic Binance listed symbols cache
+_binance_listed_cache = None
+_binance_listed_cache_time = 0
+
+def _get_binance_listed() -> set:
+    """Fetch all Binance Spot trading symbols via exchangeInfo API.
+    
+    Results are cached for 1 hour to avoid rate limits.
+    Falls back to a known set if the API is unavailable.
+    """
+    global _binance_listed_cache, _binance_listed_cache_time
+    now = time.time()
+    if _binance_listed_cache is not None and (now - _binance_listed_cache_time) < 3600:
+        return _binance_listed_cache
+    
+    try:
+        url = "https://api.binance.com/api/v3/exchangeInfo"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        symbols = [s for s in data.get("symbols", []) 
+                   if s.get("status") == "TRADING" and s.get("isSpotTradingAllowed")]
+        result = set()
+        for s in symbols:
+            base = s.get("baseAsset", "")
+            if base:
+                result.add(base)
+        _binance_listed_cache = result
+        _binance_listed_cache_time = now
+        LOGGER.info("Binance listed: loaded %d trading assets from exchangeInfo API", len(result))
+        return result
+    except Exception as e:
+        LOGGER.warning("Binance exchangeInfo API failed: %s — using fallback list", e)
+        # Fallback to known major symbols
+        fallback = {
+            "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK",
+            "MATIC", "POL", "SHIB", "TRX", "ATOM", "UNI", "APT", "ARB", "OP", "NEAR",
+            "FIL", "ALGO", "AAVE", "MKR", "COMP", "SAND", "MANA", "AXS", "THETA", "FTM",
+            "ICP", "EOS", "XLM", "VET", "EGLD", "GRT", "RNDR", "FET", "AGIX", "PEPE",
+            "TIA", "SEI", "SUI", "INJ", "BLUR", "STRK", "BONK", "WIF", "JUP", "JTO",
+            "RE", "LAYER", "AVNT", "SHELL", "NOT", "DOGS", "HMSTR", "ETHFI", "EIGEN",
+            "VIRTUAL", "AI16Z", "ARC", "AKT", "OCEAN", "TAO", "PENDLE", "ENA", "ALT",
+            "1INCH", "AAVE", "ACH", "AGLD", "ALGO", "ALPHA", "ANKR", "APE", "API3",
+            "AR", "ARB", "ASTR", "ATA", "ATOM", "AUDIO", "AVAX", "AXS", "BAL", "BAND",
+            "BAT", "BCH", "BICO", "BLZ", "BNB", "BNT", "BSW", "BTC", "C98", "CAKE",
+            "CELO", "CELR", "CFX", "CHR", "CHZ", "COMP", "COTI", "CRV", "CTC", "CTK",
+            "CTSI", "CVX", "DAR", "DASH", "DGB", "DOCK", "DODO", "DOGE", "DOT", "DYDX",
+            "EDU", "EGLD", "ENJ", "ENS", "EOS", "ETC", "ETH", "FET", "FIL", "FITFI",
+            "FLM", "FLOW", "FLR", "FORTH", "FRONT", "FTM", "FTT", "FXS", "GALA", "GAS",
+            "GLM", "GLMR", "GMT", "GMX", "GNO", "GRT", "GTC", "HBAR", "HFT", "HIVE",
+            "HNT", "HOT", "ICP", "ICX", "ID", "ILV", "IMX", "INJ", "IOST", "IOTA",
+            "IOTX", "JASMY", "JOE", "JST", "KAS", "KAVA", "KDA", "KLAY", "KNC", "KSM",
+            "LDO", "LEVER", "LINA", "LINK", "LIT", "LOKA", "LOOM", "LPT", "LQTY", "LRC",
+            "LTC", "LUNA", "LUNC", "MAGIC", "MANA", "MASK", "MATIC", "MAV", "MDT", "MINA",
+            "MKR", "MLN", "MOVR", "MTL", "MVL", "NEAR", "NEO", "NKN", "NMR", "NULS",
+            "OCEAN", "OG", "OMG", "ONE", "ONG", "ONT", "OP", "ORBS", "ORDI", "OXT",
+            "PAXG", "PENDLE", "PEOPLE", "PEPE", "PERP", "PHB", "PIVX", "POL", "POLYX",
+            "POWR", "PROS", "PUNDIX", "PYR", "QI", "QNT", "QTUM", "RAD", "RARE", "REN",
+            "REP", "REQ", "RIF", "RLC", "RNDR", "ROSE", "RPL", "RSR", "RUNE", "RVN",
+            "SAND", "SANTOS", "SC", "SCRT", "SFP", "SHIB", "SKL", "SLP", "SNX", "SOL",
+            "SPELL", "SRM", "SSV", "STEEM", "STG", "STMX", "STORJ", "STPT", "STRAX",
+            "STX", "SUI", "SUN", "SUPER", "SUSHI", "SWEAT", "SXP", "SYN", "SYS", "T",
+            "TFUEL", "THETA", "TIA", "TLM", "TOMO", "TORN", "TRB", "TROY", "TRU", "TRX",
+            "TWT", "UMA", "UNFI", "UNI", "USDT", "USTC", "VANRY", "VET", "VGX", "VIB",
+            "VIDT", "VITE", "VOXEL", "VRA", "WAVES", "WAXP", "WBTC", "WIF", "WLD", "WNXM",
+            "WOO", "XCN", "XEC", "XEM", "XLM", "XMR", "XRP", "XTZ", "XVG", "XVS",
+            "YFI", "YGG", "ZEC", "ZEN", "ZIL", "ZRX",
+        }
+        _binance_listed_cache = fallback
+        _binance_listed_cache_time = now
+        return fallback
 
 
 
@@ -807,7 +870,13 @@ def _passes_objective_filters(
         elif hours_ago < 48 and not has_exceptional_catalyst and abs(change_24h) < 5:
             reject_reason = "recently posted (%.0fh ago, weak move %.1f%%)" % (hours_ago, change_24h)
 
-    # 6. Top 5 coins \u2014 only with exceptional catalyst
+    # 6. Must be listed on Binance Spot
+    if not reject_reason:
+        binance_listed = _get_binance_listed()
+        if symbol not in binance_listed:
+            reject_reason = "not listed on Binance Spot"
+    
+    # 7. Top 5 coins \u2014 only with exceptional catalyst
     if not reject_reason and symbol in TOP_5_COINS:
         if not has_exceptional_catalyst:
             reject_reason = "top 5 coin without exceptional catalyst"
