@@ -3340,7 +3340,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     1. Collect data from all sources
     2. Apply deterministic objective filters (in code)
     3. Build Research Packages for top candidates
-    4. Send top 3 to Gemini Phase 1 → decision/ranking
+    4. Routing: DIRECT publish (score >= 75) or REVIEW (Gemini Phase 1)
     5. Select #1 pick
     6. Gemini Phase 2 → write the post
     7. Publish
@@ -3571,126 +3571,155 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                    c.symbol, score, norm, bonus, sources, decision)
     
     # ──────────────────────────────────────────────
-    # 4. BUILD RESEARCH PACKAGES FOR TOP CANDIDATES
     # ──────────────────────────────────────────────
+    # 4. DIRECT vs REVIEW ROUTING
+    # ──────────────────────────────────────────────
+    # If ANY candidate qualifies for DIRECT PUBLISH (score >= 75),
+    # skip Gemini Phase 1 entirely and publish the highest-scoring
+    # direct candidate immediately.
+    # Only invoke Gemini Phase 1 when NO direct candidates exist.
     
-    top_candidates = candidates[:5]  # Build packages for top 5
+    direct_candidates = [c for c in candidates 
+                         if getattr(c, '_skills_publish_decision', '') == 'direct']
+    review_candidates = [c for c in candidates 
+                         if getattr(c, '_skills_publish_decision', '') == 'review']
     
-    # ─── HARD COOLDOWN FILTER (pre-Gemini) ───
-    # Enforce strict cooldown: any coin in JSONL within 24h without
-    # exceptional catalyst is REMOVED from candidates BEFORE they reach
-    # Gemini Phase 1. This is the HARD GATE that prevents duplicate posts.
-    pre_gemini_filtered = []
-    for coin in top_candidates:
-        coin_dict = coin.as_dict()
-        ann_type = ""
-        for a in announcements:
-            if coin.symbol in a.get("symbols", []):
-                ann_type = a.get("type", "")
-                break
-        if _check_jsonl_cooldown(coin.symbol, catalyst_type=ann_type):
-            LOGGER.info("HARD COOLDOWN BLOCK (pre-Gemini): $%s removed from Phase 1 candidates — "
-                        "found in JSONL within cooldown window",
-                        coin.symbol)
-            continue
-        pre_gemini_filtered.append(coin)
-    
-    if len(pre_gemini_filtered) < CONFIG.min_candidates:
-        LOGGER.info("HARD COOLDOWN: only %d/%d candidates remain after cooldown filter (need %d) — "
-                    "skipping Phase 1 this cycle",
-                    len(pre_gemini_filtered), len(top_candidates), CONFIG.min_candidates)
-        return False
-    
-    top_candidates = pre_gemini_filtered[:5]
-    
-    # Build packages for top candidates
-    
-    research_packages = []  # List of (coin_dict, package_text)
-    for coin in top_candidates:
-        coin_dict = coin.as_dict()
+    if direct_candidates:
+        # ─── DIRECT PUBLISH PATH ───
+        best_direct = direct_candidates[0]  # Highest scoring (already sorted by score descending)
+        LOGGER.info("=" * 60)
+        LOGGER.info("DIRECT candidate detected \u2014 Gemini skipped")
+        LOGGER.info("Publishing highest-scoring direct candidate: $%s (score=%.1f)",
+                   best_direct.symbol, best_direct._skills_score)
+        LOGGER.info("=" * 60)
         
-        # Add Skills Hub data to coin_dict for richer research packages
-        coin_dict["skills_score"] = getattr(coin, '_skills_score', 0)
-        coin_dict["skills_search"] = getattr(coin, '_skills_search', 0)
-        coin_dict["skills_sources"] = getattr(coin, '_skills_sources', [])
-        coin_dict["skills_smart_money"] = getattr(coin, '_skills_smart_money', 0)
-        coin_dict["skills_kol"] = getattr(coin, '_skills_kol', 0)
-        coin_dict["skills_risk"] = getattr(coin, '_skills_risk', 1)
+        # Build research package for the direct candidate only
+        best_dict = best_direct.as_dict()
+        best_dict["skills_score"] = getattr(best_direct, '_skills_score', 0)
+        best_dict["skills_search"] = getattr(best_direct, '_skills_search', 0)
+        best_dict["skills_sources"] = getattr(best_direct, '_skills_sources', [])
+        best_dict["skills_smart_money"] = getattr(best_direct, '_skills_smart_money', 0)
+        best_dict["skills_kol"] = getattr(best_direct, '_skills_kol', 0)
+        best_dict["skills_risk"] = getattr(best_direct, '_skills_risk', 1)
         
-        # Add announcement context
         for a in announcements:
-            if coin.symbol in a.get("symbols", []):
-                coin_dict["announcement_boost"] = True
-                coin_dict["announcement_type"] = a.get("type", "news")
-                coin_dict["announcement_title"] = a.get("title", "")
+            if best_direct.symbol in a.get("symbols", []):
+                best_dict["announcement_boost"] = True
+                best_dict["announcement_type"] = a.get("type", "news")
+                best_dict["announcement_title"] = a.get("title", "")
                 break
         
-        hours_ago = posted_hours_data.get(coin.symbol.upper())
+        hours_ago = posted_hours_data.get(best_direct.symbol.upper())
+        try:
+            best_pkg = research.build_research_package(best_dict, announcements, hours_ago)
+        except Exception as e:
+            LOGGER.debug("Research package failed for $%s: %s", best_direct.symbol, e)
+            best_pkg = ""
         
-        try:
-            pkg = research.build_research_package(coin_dict, announcements, hours_ago)
-            research_packages.append((coin_dict, pkg))
-        except Exception as e:
-            LOGGER.debug("Research package failed for %s: %s", coin.symbol, e)
-            continue
-    
-    if len(research_packages) < CONFIG.min_candidates:
-        LOGGER.info("[%s] Scan: %d packages built — insufficient for Phase 1.", utc_now()[:16], len(research_packages))
-        import json as _json
-        _health = _json.dumps({
-            "pipeline": "early_exit",
-            "status": "skipped_insufficient",
-            "candidates_discovered": len(skills_candidates) if skills_candidates else 0,
-            "candidates_validated": len(candidates) if candidates else 0,
-            "research_packages": len(research_packages),
-        })
-        LOGGER.info("PIPELINE HEALTH: %s", _health)
-        return False
-    
-    # Save research packages to files (for post-hoc review)
-    if CONFIG.save_research_packages:
-        try:
-            research_dir = Path("research")
-            research_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-            for coin_dict, pkg in research_packages:
-                sym = coin_dict.get("symbol", "UNKNOWN")
-                pkg_path = research_dir / "pkg_%s_%s.md" % (sym, ts)
-                header = "---\nSymbol: %s\nTime: %s UTC\n---\n\n" % (sym, ts)
-                pkg_path.write_text(header + pkg)
-            LOGGER.info("Saved %d research packages to research/", len(research_packages))
-        except Exception as e:
-            LOGGER.debug("Could not save research packages: %s", e)
-    
-    # ──────────────────────────────────────────────
-    # 5. GEMINI PHASE 1: DECISION (only for REVIEW candidates)
-    # ──────────────────────────────────────────────
-    
-    # Check if top candidate qualifies for DIRECT publish (score >= 80)
-    top_coin_dict, top_pkg = research_packages[0]
-    top_score = top_coin_dict.get("skills_score", 0)
-    top_decision = top_coin_dict.get("_skills_publish_decision", "review")
-    
-    if top_decision == "direct":
-        LOGGER.info("DIRECT PUBLISH: $%s score=%.1f >= %d — skipping Gemini Phase 1",
-                   top_coin_dict["symbol"], top_score, SCORE_PUBLISH_DIRECT)
+        # Create synthetic rankings (bypass Gemini Phase 1 entirely)
         rankings = [{
             "rank": 1,
-            "symbol": top_coin_dict["symbol"],
-            "reason": "Automatically selected by scoring engine (score=%.1f >= %d)" 
-                      % (top_score, SCORE_PUBLISH_DIRECT),
+            "symbol": best_direct.symbol,
+            "reason": "Direct publish: score=%.1f >= %d (auto-selected by scoring engine)" 
+                      % (best_direct._skills_score, SCORE_PUBLISH_DIRECT),
             "decision": "publish",
         }]
-        # Add rankings for remaining candidates
-        for i, (coin, pkg) in enumerate(research_packages[1:], 2):
-            rankings.append({
-                "rank": i,
-                "symbol": coin["symbol"],
-                "reason": "Lower score (%.1f)" % coin.get("skills_score", 0),
-                "decision": "skip",
-            })
+        for coin in candidates:
+            if coin.symbol != best_direct.symbol:
+                rankings.append({
+                    "rank": len(rankings) + 1,
+                    "symbol": coin.symbol,
+                    "reason": "Lower score (%.1f) or review mode" % getattr(coin, '_skills_score', 0),
+                    "decision": "skip",
+                })
+        
+        # Set best_coin/best_package for Phase 2
+        best_coin = best_dict
+        best_package = best_pkg
+        catalyst_info = best_coin.get("announcement_type", "market_move")
+        if best_coin.get("announcement_boost"):
+            catalyst_info = best_coin.get("announcement_type", "announcement")
+        
+        decision_reason = rankings[0].get("reason", "")
+        
+        LOGGER.info("DECISION: Direct publish $%s (score=%.1f, catalyst=%s)",
+                   best_coin["symbol"], best_direct._skills_score, catalyst_info)
+        
     else:
-        # Existing Gemini Phase 1 flow for REVIEW candidates
+        # ─── REVIEW PATH (Gemini Phase 1) ───
+        # Only invoke when NO direct candidates exist
+        LOGGER.info("No direct candidates \u2014 invoking Gemini Phase 1 for %d review candidates",
+                   len(review_candidates))
+        
+        # Build research packages for top 5 review candidates
+        top_review = review_candidates[:5]
+        
+        # ─── HARD COOLDOWN FILTER (pre-Gemini) ───
+        pre_gemini_filtered = []
+        for coin in top_review:
+            ann_type = ""
+            for a in announcements:
+                if coin.symbol in a.get("symbols", []):
+                    ann_type = a.get("type", "")
+                    break
+            if _check_jsonl_cooldown(coin.symbol, catalyst_type=ann_type):
+                LOGGER.info("HARD COOLDOWN BLOCK (pre-Gemini): $%s removed \u2014 found in JSONL", coin.symbol)
+                continue
+            pre_gemini_filtered.append(coin)
+        
+        if len(pre_gemini_filtered) < CONFIG.min_candidates:
+            LOGGER.info("HARD COOLDOWN: only %d/%d review candidates remain \u2014 skipping Phase 1",
+                        len(pre_gemini_filtered), len(top_review))
+            return False
+        
+        top_review = pre_gemini_filtered[:5]
+        
+        # Build research packages
+        research_packages = []
+        for coin in top_review:
+            coin_dict = coin.as_dict()
+            coin_dict["skills_score"] = getattr(coin, '_skills_score', 0)
+            coin_dict["skills_search"] = getattr(coin, '_skills_search', 0)
+            coin_dict["skills_sources"] = getattr(coin, '_skills_sources', [])
+            coin_dict["skills_smart_money"] = getattr(coin, '_skills_smart_money', 0)
+            coin_dict["skills_kol"] = getattr(coin, '_skills_kol', 0)
+            coin_dict["skills_risk"] = getattr(coin, '_skills_risk', 1)
+            
+            for a in announcements:
+                if coin.symbol in a.get("symbols", []):
+                    coin_dict["announcement_boost"] = True
+                    coin_dict["announcement_type"] = a.get("type", "news")
+                    coin_dict["announcement_title"] = a.get("title", "")
+                    break
+            
+            hours_ago = posted_hours_data.get(coin.symbol.upper())
+            
+            try:
+                pkg = research.build_research_package(coin_dict, announcements, hours_ago)
+                research_packages.append((coin_dict, pkg))
+            except Exception as e:
+                LOGGER.debug("Research package failed for %s: %s", coin.symbol, e)
+                continue
+        
+        if len(research_packages) < CONFIG.min_candidates:
+            LOGGER.info("[%s] Review: %d packages built \u2014 insufficient for Phase 1", utc_now()[:16], len(research_packages))
+            return False
+        
+        # Save research packages
+        if CONFIG.save_research_packages:
+            try:
+                research_dir = Path("research")
+                research_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+                for coin_dict, pkg in research_packages:
+                    sym = coin_dict.get("symbol", "UNKNOWN")
+                    Path(research_dir / "pkg_%s_%s.md" % (sym, ts)).write_text(
+                        "---\nSymbol: %s\nTime: %s UTC\n---\n\n" % (sym, ts) + pkg)
+                LOGGER.info("Saved %d research packages to research/", len(research_packages))
+            except Exception:
+                pass
+        
+        # Gemini Phase 1
         top_3_packages = [pkg for _, pkg in research_packages[:3]]
         top_3_coins = [coin for coin, _ in research_packages[:3]]
         
@@ -3698,6 +3727,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                     ", ".join("$%s" % c["symbol"] for c in top_3_coins))
         
         rankings = generator.decide(top_3_packages)
+    
     
     if not rankings:
         LOGGER.warning("Gemini Phase 1 returned no valid ranking — no post this cycle")
@@ -3708,32 +3738,35 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         LOGGER.info("Gemini rank %d: $%s — %s", r.get('rank', '?'), r.get('symbol', '?'), r.get('reason', '')[:120])
     
     # ──────────────────────────────────────────────
-    # 6. SELECT #1 PICK
+    # 5. SELECT #1 PICK (REVIEW path only)
     # ──────────────────────────────────────────────
     
-    best_symbol = rankings[0].get("symbol", "")
-    if not best_symbol:
-        LOGGER.warning("Gemini #1 pick has no symbol — skipping")
-        return False
-    
-    best_coin = None
-    best_package = ""
-    for coin, pkg in research_packages:
-        if coin["symbol"].upper() == best_symbol.upper():
-            best_coin = coin
-            best_package = pkg
-            break
-    
-    if not best_coin:
-        LOGGER.warning("Gemini recommended $%s but not found in research packages", best_symbol)
-        # Fallback: use first candidate
-        best_coin, best_package = research_packages[0]
-        LOGGER.info("Falling back to $%s", best_coin["symbol"])
-    
-    decision_reason = rankings[0].get("reason", "") if rankings else ""
-    catalyst_info = best_coin.get("announcement_type", "market_move")
-    if best_coin.get("announcement_boost"):
-        catalyst_info = best_coin.get("announcement_type", "announcement")
+    # In DIRECT PUBLISH path, best_coin is already set above.
+    # For REVIEW path, look up #1 pick from Gemini rankings.
+    if 'best_coin' not in dir() or best_coin is None:
+        best_symbol = rankings[0].get("symbol", "")
+        if not best_symbol:
+            LOGGER.warning("Gemini #1 pick has no symbol — skipping")
+            return False
+        
+        best_coin = None
+        best_package = ""
+        for coin, pkg in research_packages:
+            if coin["symbol"].upper() == best_symbol.upper():
+                best_coin = coin
+                best_package = pkg
+                break
+        
+        if not best_coin:
+            LOGGER.warning("Gemini recommended $%s but not found in research packages", best_symbol)
+            # Fallback: use first candidate
+            best_coin, best_package = research_packages[0]
+            LOGGER.info("Falling back to $%s", best_coin["symbol"])
+        
+        decision_reason = rankings[0].get("reason", "") if rankings else ""
+        catalyst_info = best_coin.get("announcement_type", "market_move")
+        if best_coin.get("announcement_boost"):
+            catalyst_info = best_coin.get("announcement_type", "announcement")
     
     LOGGER.info("=" * 60)
     LOGGER.info("DECISION: Publish $%s", best_coin["symbol"])
@@ -3838,7 +3871,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                 best_coin["symbol"], word_count, len(hashtags))
     
     # ──────────────────────────────────────────────
-    # 8a. IMAGE INTELLIGENCE (after quality gate, before publish)
+    # 7a. IMAGE INTELLIGENCE (after quality gate, before publish)
     # Uses official Binance Square /image/presignedUrl + /image/imageStatus flow
     # Source: github.com/binance/binance-skills-hub (square-post skill)
     # ──────────────────────────────────────────────
@@ -3870,7 +3903,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                       best_coin["symbol"], e)
     
     # ──────────────────────────────────────────────
-    # 9. PUBLISH
+    # 8. PUBLISH
     # ──────────────────────────────────────────────
     
     link = publisher.publish(best_coin, content, image_list=image_list)
