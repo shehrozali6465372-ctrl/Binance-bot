@@ -4168,9 +4168,17 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         })),
     )
     safe_runtime_config = {
-        key: value for key, value in config.__dict__.items()
-        if key not in {"gemini_api_key", "square_api_key"}
+        key: getattr(config, key) for key in (
+            "post_interval", "database_path", "publish_log_path", "max_iterations",
+            "dry_run", "log_level", "live_market_data", "gemini_model",
+            "http_timeout_seconds", "gemini_temperature", "gemini_top_p",
+            "gemini_max_output_tokens", "min_word_count", "min_hashtags",
+            "min_candidates", "repetition_hard_hours", "repetition_soft_hours",
+            "save_research_packages", "max_daily_posts", "min_cap_for_safety",
+        )
     }
+    # Only secret-presence booleans enter the immutable config fingerprint.
+    # Secret values, tokens and credentials are never serialized or logged.
     safe_runtime_config["gemini_api_key_configured"] = bool(config.gemini_api_key)
     safe_runtime_config["square_api_key_configured"] = bool(config.square_api_key)
     safe_runtime_config["github_token_configured"] = bool(os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN"))
