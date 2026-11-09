@@ -182,6 +182,7 @@ _binance_listed_cache = None
 _binance_listed_cache_time = 0
 _binance_spot_pairs_cache = {}
 _binance_spot_snapshot_observed_at = None
+_LAYER1_LAST_SUMMARY = {}
 
 def _get_binance_listed(force_refresh: bool = False) -> set:
     """Return active Binance Spot base assets and retain the provider's exact snapshot time."""
@@ -4125,6 +4126,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
 
 def _persist_layer1_market_intelligence(candidates, database_path: str, trend_records=None) -> dict:
     """Persist real market evidence and auditable candidate decisions; never fabricate scores."""
+    global _LAYER1_LAST_SUMMARY
     from layer1.foundation import (
         AssetIdentity, BinanceListingEligibilityEngine, CandidateDiscoveryFilteringEngine,
         Layer1Store, MarketObservation, RelevanceScore, RelevanceScoringEngine, TrendSignal,
@@ -4133,8 +4135,9 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
     store = Layer1Store(database_path)
     summary = {
         "observations": 0, "trends": 0, "candidates": 0,
-        "ready": 0, "rejected": 0, "scores_deferred": 0,
-        "ready_asset_ids": [],
+        "ready": 0, "rejected": 0, "rejected_inputs": 0,
+        "scores_deferred": 0, "ready_asset_ids": [],
+        "provider_health": {},
     }
     trend_signals = []
     for record in (trend_records or []):
@@ -4152,8 +4155,9 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         try:
             signal.validate()
             trend_signals.append(signal)
-        except ValueError:
+        except (TypeError, ValueError):
             LOGGER.warning("Layer 1 ignored invalid trend evidence from %s", source)
+            summary["rejected_inputs"] += 1
     try:
         allowed_quotes = {
             value.strip().upper()
@@ -4172,10 +4176,25 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         for coin in candidates:
             asset_id = getattr(coin, "asset_id", "")
             observed_at = getattr(coin, "observed_at", "")
-            if not asset_id.startswith("coingecko:") or not observed_at:
-                LOGGER.warning("Layer 1 rejected %s: canonical asset ID or source timestamp missing", coin.symbol)
+            source = getattr(coin, "market_data_source", "unknown")
+            symbol = getattr(coin, "symbol", "UNKNOWN")
+            if not isinstance(asset_id, str) or not asset_id.startswith("coingecko:"):
+                store.save_rejection(
+                    symbol, "canonical_asset_id_missing_or_unsupported", source,
+                    observed_at if isinstance(observed_at, str) else None,
+                    {"asset_id_present": bool(asset_id)},
+                )
+                summary["rejected_inputs"] += 1
+                LOGGER.warning("Layer 1 rejected %s: canonical CoinGecko asset identity missing", symbol)
                 continue
-            base = coin.symbol.upper()
+            if not isinstance(observed_at, str) or not observed_at:
+                store.save_rejection(
+                    symbol, "market_observation_timestamp_missing", source, None,
+                    {"asset_id": asset_id},
+                )
+                summary["rejected_inputs"] += 1
+                continue
+            base = symbol.upper()
             pairs = sorted(
                 [
                     pair for pair in _binance_spot_pairs_cache.get(base, [])
@@ -4190,20 +4209,32 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             eligibility = eligibility_engine.evaluate(
                 identity, {"symbols": pairs}, verified_at=snapshot_observed_at
             )
-            market = MarketObservation(
-                asset_id=asset_id,
-                provider=getattr(coin, "market_data_source", "unknown"),
-                endpoint="https://api.coingecko.com/api/v3/coins/markets",
-                observed_at=observed_at,
-                price=float(coin.price),
-                currency="USD",
-                change_24h=float(coin.change_24h),
-                volume_24h=float(coin.volume_24h),
-                market_cap=float(coin.market_cap),
-                history=tuple(float(value) for value in (coin.history or [])),
-                published_at=getattr(coin, "provider_published_at", None),
-                data_hash=getattr(coin, "market_data_hash", ""),
-            )
+            try:
+                market = MarketObservation(
+                    asset_id=asset_id,
+                    provider=source,
+                    endpoint="https://api.coingecko.com/api/v3/coins/markets",
+                    observed_at=observed_at,
+                    price=float(coin.price),
+                    currency="USD",
+                    change_24h=float(coin.change_24h),
+                    volume_24h=float(coin.volume_24h),
+                    market_cap=float(coin.market_cap),
+                    history=tuple(float(value) for value in (coin.history or [])),
+                    published_at=getattr(coin, "provider_published_at", None),
+                    data_hash=getattr(coin, "market_data_hash", ""),
+                )
+                market.validate()
+            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                store.save_rejection(
+                    symbol, "market_observation_invalid", source, observed_at,
+                    {"error_type": type(exc).__name__},
+                )
+                summary["rejected_inputs"] += 1
+                LOGGER.warning("Layer 1 rejected invalid market observation for %s: %s", symbol, type(exc).__name__)
+                continue
+            # Database errors are deliberately not swallowed: required evidence
+            # persistence failure stops the complete cycle.
             store.save_market(market)
             summary["observations"] += 1
             asset_trends = [signal for signal in trend_signals if asset_id in signal.asset_ids]
@@ -4225,6 +4256,25 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             store.save_score(score)
             if score.score == 0 and "deferred" in score.reason:
                 summary["scores_deferred"] += 1
+        sources = {getattr(coin, "market_data_source", "unknown") for coin in candidates}
+        summary["provider_health"] = {
+            "binance_spot_metadata": (
+                "AVAILABLE" if snapshot_observed_at and _binance_spot_pairs_cache else "UNAVAILABLE"
+            ),
+            "coingecko_market_data": (
+                "AVAILABLE" if summary["observations"] else "UNAVAILABLE"
+            ),
+            "coingecko_trending": (
+                "AVAILABLE" if any(signal.source == "coingecko_trending" for signal in trend_signals)
+                else "UNAVAILABLE"
+            ),
+            "market_derived_trends": (
+                "AVAILABLE" if any(signal.source.startswith("market_") for signal in trend_signals)
+                else "UNAVAILABLE"
+            ),
+            "binance_announcements": "UNAVAILABLE_NO_VERIFIED_DOCUMENTED_ADAPTER",
+        }
+        _LAYER1_LAST_SUMMARY = dict(summary)
         LOGGER.info("Layer 1 evidence persisted: %s", json.dumps(summary, sort_keys=True))
         return summary
     finally:
@@ -4267,6 +4317,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     context = ConfigurationOrchestrator(layer_config).create_context(safe_runtime_config)
     lease = RunLease(config.database_path)
     status = "FAILED"
+    _LAYER1_LAST_SUMMARY = {}
     summary = {"run_id": context.run_id, "layer1_version": "1.1.0"}
     try:
         lease.acquire(context)
@@ -4278,6 +4329,8 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         )
         status = "SUCCEEDED" if outcome else "NO_CANDIDATE_OR_BLOCKED"
         summary["cycle_result"] = status
+        if _LAYER1_LAST_SUMMARY:
+            summary["layer1"] = dict(_LAYER1_LAST_SUMMARY)
         return outcome
     except Exception as exc:
         summary["error_type"] = type(exc).__name__
