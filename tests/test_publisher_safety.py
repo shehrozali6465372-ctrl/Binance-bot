@@ -111,7 +111,7 @@ class PublisherSafetyTests(unittest.TestCase):
         row = self.publisher.db.conn.execute(
             "SELECT status FROM publication_attempts WHERE coin_symbol = 'XRP'"
         ).fetchone()
-        self.assertEqual(row["status"], "SUBMITTING")
+        self.assertEqual(row["status"], "PUBLICATION_UNKNOWN")
 
     def test_success_response_without_remote_id_is_unknown_and_not_retried(self):
         response = FakeResponse({"code": "000000", "data": {"shareLink": "https://example.invalid/no-id"}})
