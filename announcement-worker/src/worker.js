@@ -68,10 +68,21 @@ export async function startAnnouncementWorker({
       });
     });
 
-    stream.on("error", async (error) => {
+    // The SDK's stream handler only supports "message". Transport-level
+    // lifecycle events belong to WebsocketStreamsConnection.on().
+    connection.on("error", (error) => {
       const message = String(error?.message || error).slice(0, 500);
-      logger.error("Binance CMS stream error", { error: message });
-      await store.setState("DEGRADED", { lastError: message }).catch(() => {});
+      logger.error("Binance CMS connection error", { error: message });
+      if (!closed) {
+        void store.setState("DEGRADED", { lastError: message }).catch(() => {});
+      }
+    });
+    connection.on("close", (code, reason) => {
+      const message = `WebSocket closed (code=${code ?? "unknown"}, reason=${String(reason ?? "").slice(0, 200)})`;
+      logger.warn("Binance CMS connection closed", { code, reason: String(reason ?? "").slice(0, 200) });
+      if (!closed) {
+        void store.setState("DEGRADED", { lastError: message }).catch(() => {});
+      }
     });
 
     const shutdown = async (signal = "shutdown") => {
