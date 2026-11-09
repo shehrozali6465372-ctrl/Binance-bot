@@ -1,12 +1,12 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from layer1.announcement_importer import import_recent_binance_announcements
 
 
-NOW = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
-PUBLISHED = datetime(2026, 11, 10, 11, 30, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
+PUBLISHED = NOW - timedelta(minutes=30)
 
 
 class FakeCursor:
@@ -160,8 +160,8 @@ class AnnouncementImporterTests(unittest.TestCase):
             connect_factory=connect, now=NOW, lookback_days=3, max_rows=50,
         )
         lower, upper, limit = connection.fake_cursor.params
-        self.assertEqual(lower, datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc))
-        self.assertEqual(upper, datetime(2026, 11, 10, 12, 5, tzinfo=timezone.utc))
+        self.assertEqual(lower, NOW - timedelta(days=3))
+        self.assertEqual(upper, NOW + timedelta(minutes=5))
         self.assertEqual(limit, 50)
 
 
