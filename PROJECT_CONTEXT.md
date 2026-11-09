@@ -8,7 +8,7 @@ This is the canonical working context for continuing the Binance Square Write-to
 
 - Repository: https://github.com/shehrozali6465372-ctrl/Binance-bot
 - Current feature branch: `feature/binance-cms-announcement-worker`
-- Feature branch HEAD after adding this context file: `3026ff1d6ee44a2cd62c40f031eade0a2c48a2cf`
+- Feature branch HEAD before this verification-context update: `748505bb5462d0a351685f9f922b5056049aebf3`
 - Draft PR #2: https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/2
 - PR title: Add isolated Binance CMS announcement listener
 - PR base: `layer-1/completion-hardening`
@@ -139,11 +139,42 @@ Do not oversimplify Render pricing:
 | Paid resource approval | Not granted |
 | Package lockfile | Missing |
 | Actual SDK runtime smoke test | Not verified |
-| GitHub Actions latest run | Not verified |
+| GitHub Actions latest run | PASS: run `42715929886`, head SHA `748505bb5462d0a351685f9f922b5056049aebf3`, PR event, mocked test job success |
 | Local mirrored unit tests | 12 passed, 0 failed |
 | Live Binance stream test | Not performed |
 | Python agent importer | Not implemented |
 | Real Binance Square post during tests | None; must remain none |
+
+## Cloudflare compatibility verification (2026-11-10)
+
+The user asked whether Cloudflare Workers can replace the proposed Render Background Worker. A source-level compatibility review was performed against Cloudflare's current official docs and Binance's official SDK source.
+
+Verified facts:
+- Cloudflare Durable Objects support outbound WebSocket clients, but outbound WebSockets do not use the Durable Object WebSocket Hibernation API.
+- Cloudflare's Durable Object lifecycle documentation says an open outbound connection prevents eviction for up to 15 minutes per operation; later I/O may extend in-memory lifetime, but this is not a contractual guarantee of uninterrupted, always-on 24/7 ingestion.
+- Cloudflare Workers Free limits include 100,000 requests/day and 10 ms CPU per request. Durable Objects are available on Free with SQLite storage, subject to free account limits.
+- Binance's official `@binance/cms@1.0.3` package declares Node-targeted dependencies and the official common WebSocket implementation imports runtime `events` and `ws`; it also imports `http` types. The runtime `ws` dependency is designed for Node's WebSocket stack, not Cloudflare's native Worker WebSocket API.
+- Therefore the existing official Binance SDK has NOT been shown compatible with Cloudflare Workers/Durable Objects. Do not deploy the current `announcement-worker/src/worker.js` to Cloudflare as-is.
+- The existing worker is also Node/PostgreSQL-specific: it imports `pg`, uses `process.env`, and registers Node process signal handlers. It is not a Cloudflare Worker implementation.
+- Cloudflare Durable Object SQLite could potentially replace a dedicated Postgres store for a Cloudflare-native implementation, but this does not solve the SDK/runtime incompatibility or guarantee always-on outbound stream connectivity.
+- Do not hand-roll Binance authentication/signing to bypass the official SDK limitation. Any alternative transport/auth design must be based on an officially documented Binance interface and reviewed before implementation.
+- A Cloudflare Worker may still be useful as a read-only authenticated API/adapter or scheduled processing component, but that is a different role from maintaining the Binance CMS WebSocket connection.
+
+Sources reviewed:
+- Cloudflare Durable Object WebSocket guidance: https://developers.cloudflare.com/durable-objects/best-practices/websockets/
+- Cloudflare Durable Object lifecycle: https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/
+- Cloudflare Workers limits: https://developers.cloudflare.com/workers/platform/limits/
+- Cloudflare Durable Object limits: https://developers.cloudflare.com/durable-objects/platform/limits/
+- Binance CMS package manifest: https://github.com/binance/binance-connector-js/blob/master/clients/cms/package.json
+- Binance CMS export entry point: https://github.com/binance/binance-connector-js/blob/master/clients/cms/src/index.ts
+- Binance official WebSocket implementation: https://github.com/binance/binance-connector-js/blob/master/common/src/websocket.ts
+- Binance CMS WebSocket stream class: https://github.com/binance/binance-connector-js/blob/master/clients/cms/src/websocket-streams/websocket-streams.ts
+
+Current Cloudflare decision:
+- Cloudflare Workers/Durable Objects is NOT approved as a drop-in replacement for the current listener.
+- No Cloudflare Worker, Durable Object, D1 database, or Cloudflare deployment has been created.
+- No existing Cloudflare resources, secrets, or zones have been modified.
+- Next work should prototype compatibility in an isolated branch only if a supported official SDK/runtime path is established. Otherwise retain the official Node SDK and evaluate a persistent Node runtime, with no paid provisioning until explicit cost approval.
 
 ## Required next steps (in order)
 
