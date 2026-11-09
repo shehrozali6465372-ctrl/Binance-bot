@@ -18,7 +18,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
 
-LAYER1_VERSION = "1.0.0"
+LAYER1_VERSION = "1.1.0"
 SCORE_VERSION = "layer1-relevance-v1"
 OFFICIAL_BINANCE_HOSTS = {"binance.com", "www.binance.com", "developers.binance.com"}
 ALLOWED_ANNOUNCEMENT_TYPES = {
@@ -342,6 +342,8 @@ class MarketDataIntelligenceEngine:
             raise ValueError("exact uppercase Binance symbol and canonical asset_id are required")
         if not isinstance(quote_asset, str) or not quote_asset.isalnum() or not quote_asset.isupper():
             raise ValueError("quote_asset must be an uppercase alphanumeric code")
+        if not symbol.endswith(quote_asset):
+            raise ValueError("Binance symbol does not end with the requested quote asset")
         url = f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={symbol}"
         payload = self.fetch_json(url, self.timeout)
         if not isinstance(payload, dict) or payload.get("symbol") != symbol:
@@ -602,6 +604,11 @@ class Layer1Store:
             event_type TEXT NOT NULL, published_at TEXT NOT NULL, observed_at TEXT NOT NULL,
             payload_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS layer1_announcement_revisions (
+            source_id TEXT NOT NULL, revision_key TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL, payload_json TEXT NOT NULL,
+            PRIMARY KEY(source_id, revision_key)
+        );
         CREATE TABLE IF NOT EXISTS layer1_trend_signals (
             signal_key TEXT PRIMARY KEY, topic TEXT NOT NULL, source TEXT NOT NULL,
             observed_at TEXT NOT NULL, payload_json TEXT NOT NULL
@@ -633,18 +640,27 @@ class Layer1Store:
 
     def save_announcement(self, evidence: AnnouncementEvidence) -> None:
         evidence.validate()
+        payload = json.dumps(evidence.__dict__, sort_keys=True, allow_nan=False)
+        revision_key = evidence.content_hash or hashlib.sha256(payload.encode()).hexdigest()
         self.conn.execute(
-            "INSERT OR REPLACE INTO layer1_announcement_evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO layer1_announcement_revisions VALUES (?, ?, ?, ?)",
+            (evidence.source_id, revision_key, utc_now(), payload),
+        )
+        self.conn.execute(
+            "INSERT INTO layer1_announcement_evidence VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(source_id) DO UPDATE SET source_url=excluded.source_url, "
+            "publisher=excluded.publisher, event_type=excluded.event_type, "
+            "published_at=excluded.published_at, observed_at=excluded.observed_at, "
+            "payload_json=excluded.payload_json",
             (evidence.source_id, evidence.source_url, evidence.publisher, evidence.event_type,
-             evidence.published_at, evidence.observed_at,
-             json.dumps(evidence.__dict__, sort_keys=True)),
+             evidence.published_at, evidence.observed_at, payload),
         )
         self.conn.commit()
 
     def save_trend(self, signal: TrendSignal) -> None:
         signal.validate()
         key = hashlib.sha256(
-            f"{signal.source}|{signal.source_item_id}|{signal.topic}|{signal.observed_at}".encode()
+            f"{signal.source}|{signal.source_item_id}|{signal.topic}|{signal.content_hash}|{signal.observed_at}".encode()
         ).hexdigest()
         self.conn.execute(
             "INSERT OR REPLACE INTO layer1_trend_signals VALUES (?, ?, ?, ?, ?)",
