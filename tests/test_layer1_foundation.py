@@ -574,7 +574,8 @@ class Layer1FoundationTests(unittest.TestCase):
 
 
     def test_runtime_ast_keeps_layer1_gate_and_publisher_in_one_execution_path(self):
-        source = open(main.__file__, encoding="utf-8").read()
+        with open(main.__file__, encoding="utf-8") as source_file:
+            source = source_file.read()
         module = ast.parse(source)
         functions = {
             node.name: node for node in module.body if isinstance(node, ast.FunctionDef)
