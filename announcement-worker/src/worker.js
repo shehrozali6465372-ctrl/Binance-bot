@@ -70,6 +70,15 @@ export async function startAnnouncementWorker({
 
     // The SDK's stream handler only supports "message". Transport-level
     // lifecycle events belong to WebsocketStreamsConnection.on().
+    connection.on("open", () => {
+      if (!closed) {
+        void store.setState("LISTENING").catch((error) => {
+          logger.error("Could not restore LISTENING worker state", {
+            error: String(error?.message || error).slice(0, 500),
+          });
+        });
+      }
+    });
     connection.on("error", (error) => {
       const message = String(error?.message || error).slice(0, 500);
       logger.error("Binance CMS connection error", { error: message });
