@@ -749,6 +749,7 @@ def _passes_objective_filters(
     from_skills_hub: bool = False,
     liquidity: float = 0.0,
     risk_level: int = 0,
+    asset_id: str = "",
 ) -> bool:
     """Deterministic, non-negotiable checks every candidate must pass.
 
@@ -764,6 +765,8 @@ def _passes_objective_filters(
     # 1. Must be a valid asset
     if not symbol:
         reject_reason = "empty symbol"
+    elif not asset_id or not asset_id.startswith("coingecko:"):
+        reject_reason = "canonical asset identity missing or unverified"
     elif price <= 0 or price < price_min:
         reject_reason = "price too low: $%.6f (threshold: $%.4f)" % (price, price_min)
     elif market_cap > 0 and market_cap < cap_min:
@@ -1909,17 +1912,11 @@ class BinanceAnnouncementEngine:
         self.base_url = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
     
     def fetch_announcements(self, catalog_id: int, limit: int = 10) -> List[Dict[str, Any]]:
-        """Fetch announcements from a specific catalog."""
-        url = f"{self.base_url}?type=1&pageNo=1&pageSize={limit}&catalogId={catalog_id}"
-        try:
-            data = http_get_json(url, timeout=self.config.http_timeout_seconds)
-            if data.get("code") == "000000":
-                for cat in data.get("data", {}).get("catalogs", []):
-                    if cat.get("catalogId") == catalog_id:
-                        return cat.get("articles", [])
-            return []
-        except Exception:
-            return []
+        """No production fetch until a documented/authorized official adapter is verified."""
+        LOGGER.warning(
+            "Announcement feed unavailable: legacy undocumented Binance BAPI is disabled"
+        )
+        return []
     
     def extract_symbols(self, title: str) -> List[str]:
         """Extract coin symbols from announcement title."""
@@ -3452,6 +3449,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     skills_used = False
     skills_candidates = []
     try:
+        raise RuntimeError("Undocumented Binance Skills Hub BAPI is disabled until an official documented interface is verified")
         skills = SkillsHubEngine()
         skills_candidates = skills.get_scored_candidates()
         if skills_candidates:
@@ -3478,6 +3476,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                         from_skills_hub=True,
                         liquidity=getattr(coin, 'liquidity', 0),
                         risk_level=getattr(coin, '_skills_risk', 0),
+                        asset_id=getattr(coin, 'asset_id', ''),
                     ):
                         candidates.append(coin)
                 except Exception as e:
@@ -3507,6 +3506,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                     market_cap=coin.market_cap,
                     announcements=announcements,
                     posted_hours_data=posted_hours_data,
+                    asset_id=getattr(coin, 'asset_id', ''),
                 ):
                     candidates.append(coin)
             except Exception as e:
