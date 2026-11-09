@@ -183,6 +183,57 @@ class PublisherSafetyTests(unittest.TestCase):
         finally:
             migrated.close()
 
+    def test_second_database_connection_observes_unresolved_reservation(self):
+        second = main.PostPublisher(self.config)
+        try:
+            key = self.publisher._idempotency_key("LINK", "reserved content", [])
+            content_hash = main.hashlib.sha256(b"reserved content").hexdigest()
+            self.assertIsNone(self.publisher._begin_attempt(key, "LINK", content_hash))
+            with patch("main.urllib.request.urlopen") as urlopen:
+                result = second.publish({"symbol": "LINK"}, "different regenerated content")
+            self.assertEqual(result.status, "PUBLICATION_UNKNOWN")
+            urlopen.assert_not_called()
+        finally:
+            second.db.close()
+
+    def test_sqlite_backup_restore_preserves_publication_ledger(self):
+        key = self.publisher._idempotency_key("AVAX", "backup content", [])
+        content_hash = main.hashlib.sha256(b"backup content").hexdigest()
+        self.assertIsNone(self.publisher._begin_attempt(key, "AVAX", content_hash))
+        self.publisher._finish_attempt(
+            key, "PUBLICATION_UNKNOWN", post_id="remote-backup-1",
+            share_link="https://example.invalid/remote-backup-1", http_status=504,
+            error="ambiguous gateway timeout",
+        )
+        backup_path = str(Path(self.tmp.name) / "backup.db")
+        restored_path = str(Path(self.tmp.name) / "restored.db")
+        backup = sqlite3.connect(backup_path)
+        try:
+            self.publisher.db.conn.backup(backup)
+        finally:
+            backup.close()
+        restored = sqlite3.connect(backup_path)
+        try:
+            target = sqlite3.connect(restored_path)
+            try:
+                restored.backup(target)
+            finally:
+                target.close()
+        finally:
+            restored.close()
+        check = main.Database(restored_path)
+        try:
+            row = check.conn.execute(
+                "SELECT status, remote_post_id, share_link, http_status FROM publication_attempts WHERE idempotency_key = ?",
+                (key,),
+            ).fetchone()
+            self.assertEqual(row["status"], "PUBLICATION_UNKNOWN")
+            self.assertEqual(row["remote_post_id"], "remote-backup-1")
+            self.assertEqual(row["share_link"], "https://example.invalid/remote-backup-1")
+            self.assertEqual(row["http_status"], 504)
+        finally:
+            check.close()
+
     def test_legacy_node_script_cannot_issue_direct_publication(self):
         script = (Path(__file__).resolve().parents[1] / "scripts" / "post-text.mjs").read_text(encoding="utf-8")
         self.assertIn("Direct publishing is disabled", script)
