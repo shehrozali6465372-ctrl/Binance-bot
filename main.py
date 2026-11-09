@@ -3249,7 +3249,8 @@ class PostPublisher:
             self.db.conn.execute(
                 """
                 UPDATE publication_attempts
-                SET status = ?, remote_post_id = ?, share_link = ?, http_status = ?,
+                SET status = ?, remote_post_id = COALESCE(?, remote_post_id),
+                    share_link = COALESCE(?, share_link), http_status = COALESCE(?, http_status),
                     error = ?, updated_at = ?
                 WHERE idempotency_key = ?
                 """,
