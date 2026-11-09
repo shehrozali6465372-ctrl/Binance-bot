@@ -150,6 +150,43 @@ class PublisherSafetyTests(unittest.TestCase):
         ).fetchone()
         self.assertIsNotNone(table)
 
+    def test_existing_analytics_rows_survive_additive_migration(self):
+        legacy_path = str(Path(self.tmp.name) / "legacy.db")
+        legacy = sqlite3.connect(legacy_path)
+        legacy.execute(
+            "CREATE TABLE post_analytics (id INTEGER PRIMARY KEY, coin_symbol TEXT, created_at TEXT, views INTEGER)"
+        )
+        legacy.execute(
+            "INSERT INTO post_analytics (id, coin_symbol, created_at, views) VALUES (1, 'BTC', '2026-01-01T00:00:00+00:00', 7)"
+        )
+        legacy.commit()
+        legacy.close()
+
+        migrated = main.Database(legacy_path)
+        try:
+            row = migrated.conn.execute(
+                "SELECT id, coin_symbol, views FROM post_analytics WHERE id = 1"
+            ).fetchone()
+            columns = {
+                item["name"] for item in migrated.conn.execute(
+                    "PRAGMA table_info(post_analytics)"
+                ).fetchall()
+            }
+            self.assertEqual((row["id"], row["coin_symbol"], row["views"]), (1, "BTC", 7))
+            self.assertIn("remote_post_id", columns)
+            ledger = migrated.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='publication_attempts'"
+            ).fetchone()
+            self.assertIsNotNone(ledger)
+        finally:
+            migrated.close()
+
+    def test_legacy_node_script_cannot_issue_direct_publication(self):
+        script = Path("scripts/post-text.mjs").read_text(encoding="utf-8")
+        self.assertIn("Direct publishing is disabled", script)
+        self.assertNotIn("content/add", script)
+        self.assertNotIn("fetch(", script)
+
     def test_jsonl_keeps_remote_post_identity(self):
         original = main._POST_HISTORY_FILE
         try:
