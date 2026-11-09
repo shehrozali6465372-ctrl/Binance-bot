@@ -195,3 +195,37 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - Clearly label facts as verified, unverified, or planned.
 - Never store API keys, secrets, database URLs, tokens, or other credentials here.
 - Do not create duplicate context files or copy this file to ChatGPT Library.
+
+## Progress update — 2026-11-10
+
+### Verified SDK contract and worker correction
+- Re-read the official Binance connector-js source for @binance/cms.
+- Verified ConfigurationWebsocketStreams accepts apiKey, apiSecret, wsURL, and reconnectDelay; the worker's CMS constructor configuration uses the correct property names.
+- Verified WebsocketStreams.connect() resolves to WebsocketStreamsConnection.
+- Verified the connection exposes .on(error), .on(close), and .disconnect().
+- Verified comAnnouncementEn() returns a stream handler whose supported event is only message and whose .unsubscribe() method is valid.
+- Found and fixed a real defect: the worker previously registered error on the stream handler, which does not support that event. It now registers transport error and close listeners on the connection and marks the worker DEGRADED on unexpected transport failure/closure.
+- No live Binance connection was opened during this source review or code change.
+
+### Current branch / PR / CI
+- Branch: feature/binance-cms-announcement-worker
+- Latest verified feature commit before this context update: 54a39277c43177c6ef1400dc7cd548649c8bb180
+- PR #2: open, draft, unmerged; base layer-1/completion-hardening.
+- GitHub Actions run 42718605216 for commit 54a39277c43177c6ef1400dc7cd548649c8bb180: job mocked-announcement-tests completed SUCCESS.
+- That workflow currently runs the offline Node test suite only; it does not install/import the production SDK or exercise a live WebSocket. Do not interpret this as runtime integration proof.
+- announcement-worker/package-lock.json is still missing. Reproducible npm ci verification remains outstanding.
+- The transport-event correction is committed, but dedicated worker lifecycle tests with mocked SDK/connection are still outstanding.
+
+### Safety / deployment
+- Existing Square publisher and live publishing workflow remain untouched.
+- No real Square post was published.
+- No Binance CMS production connection was initiated.
+- No Render/Neon/Cloudflare resources were created or modified; no paid resources were provisioned.
+- PR #2 remains unmerged and no deployment was performed.
+
+### Next work
+1. Add deterministic worker lifecycle tests using injected/mock CMS connection and database pool; tests must not open a network connection or publish a Square post.
+2. Generate and commit the npm lockfile using Node >=22.12, then change CI to npm ci and run the complete test suite.
+3. Implement the separate Python importer only after reviewing existing Layer 1 data contracts and tests; importer must be read-only against the announcement ledger and must not change publisher behavior.
+4. Add integration tests proving announcement evidence reaches Layer 1 candidate evaluation without invoking the Square publisher.
+5. Keep PR unmerged and request explicit approval before any merge, deployment, or paid infrastructure.
