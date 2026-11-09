@@ -3265,7 +3265,7 @@ class PostPublisher:
         if existing:
             old_status = str(existing.get("status") or "PUBLICATION_UNKNOWN")
             LOGGER.error("Duplicate submission blocked for %s; existing status=%s", symbol, old_status)
-            blocked_status = "DUPLICATE_BLOCKED" if old_status == "PUBLISHED_CONFIRMED" else "PUBLICATION_UNKNOWN"
+            blocked_status = "DUPLICATE_BLOCKED" if old_status in ("PUBLISHED_CONFIRMED", "FAILED_CONFIRMED") else "PUBLICATION_UNKNOWN"
             return PublishResult(
                 status=blocked_status,
                 post_id=str(existing.get("remote_post_id") or ""),
