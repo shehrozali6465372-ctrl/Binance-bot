@@ -84,7 +84,7 @@ class Layer1FoundationTests(unittest.TestCase):
         def fetch(url, timeout):
             calls.append((url, timeout))
             return {"symbol": "BTCUSDT", "lastPrice": "65000", "priceChangePercent": "1.5",
-                    "quoteVolume": "1200000"}
+                    "quoteVolume": "1200000", "closeTime": int(time.time() * 1000)}
         engine = MarketDataIntelligenceEngine(fetch)
         result = engine.fetch_binance_24h("BTCUSDT", self.identity.asset_id)
         self.assertEqual(result.price, 65000)
@@ -121,7 +121,7 @@ class Layer1FoundationTests(unittest.TestCase):
             {"symbol": "BTCUSDT_240628", "baseAsset": "BTC", "quoteAsset": "USDT",
              "status": "TRADING", "isSpotTradingAllowed": False},
         ]}
-        eligible = engine.evaluate(self.identity, payload)
+        eligible = engine.evaluate(self.identity, payload, verified_at=iso())
         self.assertEqual(eligible.status, "ELIGIBLE")
         self.assertEqual(eligible.eligible_pairs, ("BTCUSDT",))
         unavailable = engine.evaluate(self.identity, {})
@@ -129,7 +129,7 @@ class Layer1FoundationTests(unittest.TestCase):
         inactive = engine.evaluate(self.identity, {"symbols": [
             {"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
              "status": "BREAK", "isSpotTradingAllowed": True}
-        ]})
+        ]}, verified_at=iso())
         self.assertEqual(inactive.status, "INELIGIBLE")
 
     def test_module4_rejects_unofficial_announcement_sources(self):
@@ -235,6 +235,8 @@ class Layer1FoundationTests(unittest.TestCase):
         coin.observed_at = iso()
         coin.market_data_source = "coingecko_markets"
         old_pairs = main._binance_spot_pairs_cache
+        old_snapshot = main._binance_spot_snapshot_observed_at
+        main._binance_spot_snapshot_observed_at = iso()
         main._binance_spot_pairs_cache = {"BTC": [{
             "symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
             "status": "TRADING", "isSpotTradingAllowed": True
@@ -263,10 +265,13 @@ class Layer1FoundationTests(unittest.TestCase):
                 conn.close()
         finally:
             main._binance_spot_pairs_cache = old_pairs
+            main._binance_spot_snapshot_observed_at = old_snapshot
+
     def test_layer1_store_persists_source_provenance_candidate_reasons_and_score_version(self):
         eligibility = BinanceListingEligibilityEngine().evaluate(
             self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
-             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]}
+             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]},
+            verified_at=iso()
         )
         market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
         candidate = CandidateDiscoveryFilteringEngine().build(self.identity, eligibility, [market], [], [])
@@ -292,7 +297,8 @@ class Layer1FoundationTests(unittest.TestCase):
     def test_module7_score_is_deterministic_explainable_and_never_overrides_hard_gate(self):
         eligibility = BinanceListingEligibilityEngine().evaluate(
             self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
-             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]}
+             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]},
+            verified_at=iso()
         )
         market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
         candidate = CandidateDiscoveryFilteringEngine().build(self.identity, eligibility, [market], [], [])
@@ -312,6 +318,141 @@ class Layer1FoundationTests(unittest.TestCase):
             [market], [], []
         )
         self.assertEqual(engine.score(ineligible, components).score, 0.0)
+
+
+
+    def test_config_hash_includes_safe_runtime_metadata_without_secrets(self):
+        cfg = AgentConfig(database_path=self.db)
+        orchestrator = ConfigurationOrchestrator(cfg)
+        base = orchestrator.create_context({"model": "model-a", "api_key_configured": True})
+        changed = orchestrator.create_context({"model": "model-b", "api_key_configured": True})
+        self.assertNotEqual(base.config_hash, changed.config_hash)
+        with self.assertRaises(ValueError):
+            orchestrator.create_context({"unsafe": float("nan")})
+
+    def test_run_lease_does_not_release_when_finish_status_is_invalid(self):
+        cfg = AgentConfig(database_path=self.db)
+        lease = RunLease(self.db)
+        try:
+            context = ConfigurationOrchestrator(cfg).create_context()
+            lease.acquire(context)
+            with self.assertRaises(ValueError):
+                lease.finish("PUBLISHED")
+            self.assertEqual(
+                lease.conn.execute("SELECT COUNT(*) FROM layer1_run_lease").fetchone()[0], 1
+            )
+            lease.finish("FAILED")
+        finally:
+            lease.close()
+
+    def test_module2_rejects_non_finite_history_and_negative_volume(self):
+        with self.assertRaises(ValueError):
+            MarketObservation(self.identity.asset_id, "provider", "/market", iso(),
+                              price=10, history=(10, float("nan"))).validate()
+        with self.assertRaisesRegex(ValueError, "volume_24h"):
+            MarketObservation(self.identity.asset_id, "provider", "/market", iso(),
+                              price=10, volume_24h=-1).validate()
+
+    def test_module2_binance_adapter_requires_real_provider_timestamp(self):
+        engine = MarketDataIntelligenceEngine(
+            lambda *_: {"symbol": "BTCUSDT", "lastPrice": "65000",
+                        "priceChangePercent": "1.5", "quoteVolume": "1200000"}
+        )
+        with self.assertRaisesRegex(ValueError, "closeTime"):
+            engine.fetch_binance_24h("BTCUSDT", self.identity.asset_id)
+
+    def test_module3_requires_fresh_snapshot_and_exact_quote_pair(self):
+        engine = BinanceListingEligibilityEngine(("USDT",), max_snapshot_age_seconds=30)
+        symbols = [{"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
+                    "status": "TRADING", "isSpotTradingAllowed": True}]
+        stale = engine.evaluate(self.identity, {"symbols": symbols}, verified_at=iso(-120))
+        self.assertEqual(stale.status, "UNVERIFIED")
+        missing_time = engine.evaluate(self.identity, {"symbols": symbols})
+        self.assertEqual(missing_time.status, "UNVERIFIED")
+        wrong_quote = engine.evaluate(
+            self.identity,
+            {"symbols": [{"symbol": "BTCUSDC", "baseAsset": "BTC", "quoteAsset": "USDC",
+                          "status": "TRADING", "isSpotTradingAllowed": True}]},
+            verified_at=iso(),
+        )
+        self.assertEqual(wrong_quote.status, "INELIGIBLE")
+
+    def test_module4_requires_https_and_deduplicates_latest_source_revision(self):
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            AnnouncementEvidence(
+                "article", "http://www.binance.com/announcement", "Binance",
+                "listing", "BTC listing", iso(), iso(), (self.identity.asset_id,)
+            ).validate()
+        older = AnnouncementEvidence(
+            "article-1", "https://www.binance.com/en/support/announcement/example",
+            "Binance", "listing", "BTC listing", iso(-120), iso(-120),
+            (self.identity.asset_id,), "hash-old", updated_at=iso(-120)
+        )
+        newer = AnnouncementEvidence(
+            "article-1", "https://www.binance.com/en/support/announcement/example",
+            "Binance", "listing", "BTC listing updated", iso(-120), iso(),
+            (self.identity.asset_id,), "hash-new", updated_at=iso()
+        )
+        results, status = AnnouncementIntelligenceEngine(lambda: [older, newer]).fetch()
+        self.assertEqual(status, "AVAILABLE")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].content_hash, "hash-new")
+
+    def test_module5_syndicated_trend_is_not_counted_as_independent_source(self):
+        signals = [
+            TrendSignal("AI", "source-a", iso(), 1, (self.identity.asset_id,), "item-a", "same-story"),
+            TrendSignal("AI", "source-b", iso(), 2, (self.identity.asset_id,), "item-b", "same-story"),
+            TrendSignal("AI", "source-c", iso(), 3, (self.identity.asset_id,), "item-c", "independent-story"),
+        ]
+        engine = TrendingNarrativeIntelligenceEngine()
+        normalized = engine.normalize(signals)
+        self.assertEqual(len(normalized), 3)
+        self.assertEqual(engine.independent_source_count(normalized), 2)
+
+    def test_module6_candidate_identity_changes_for_material_trend_item_and_rejects_mismatch(self):
+        eligibility = BinanceListingEligibilityEngine().evaluate(
+            self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
+             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]},
+            verified_at=iso()
+        )
+        market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
+        builder = CandidateDiscoveryFilteringEngine()
+        one = TrendSignal("AI", "source", iso(), 1, (self.identity.asset_id,), "item-1", "hash-1")
+        two = TrendSignal("AI", "source", iso(), 1, (self.identity.asset_id,), "item-2", "hash-2")
+        first = builder.build(self.identity, eligibility, [market], [], [one])
+        second = builder.build(self.identity, eligibility, [market], [], [two])
+        self.assertNotEqual(first.candidate_id, second.candidate_id)
+        mismatched = builder.build(
+            self.identity,
+            type(eligibility)("ELIGIBLE", "different-canonical-id", "BTC", ("BTCUSDT",)),
+            [market], [], []
+        )
+        self.assertEqual(mismatched.state, "REJECTED")
+        self.assertIn("canonical_asset_identity_mismatch", mismatched.rejection_reasons)
+
+    def test_module7_rejects_boolean_scores_and_ranks_deterministically(self):
+        eligibility = BinanceListingEligibilityEngine().evaluate(
+            self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
+             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]},
+            verified_at=iso()
+        )
+        market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
+        candidate = CandidateDiscoveryFilteringEngine().build(self.identity, eligibility, [market], [], [])
+        engine = RelevanceScoringEngine()
+        with self.assertRaises(ValueError):
+            engine.score(candidate, {
+                "event_materiality": True, "source_credibility": 90, "freshness": 100,
+                "audience_relevance": 70, "novelty": 60,
+            })
+        first = engine.score(candidate, {
+            "event_materiality": 80, "source_credibility": 90, "freshness": 100,
+            "audience_relevance": 70, "novelty": 60,
+        })
+        deferred = engine.score(candidate, {
+            "event_materiality": None, "source_credibility": 90, "freshness": 100,
+            "audience_relevance": 70, "novelty": 60,
+        })
+        self.assertEqual(engine.rank([deferred, first]), [first, deferred])
 
 
 if __name__ == "__main__":
