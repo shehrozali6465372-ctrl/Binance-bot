@@ -35,7 +35,10 @@ def _parse_time(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("timestamps must include timezone")
-    return parsed.astimezone(timezone.utc)
+    normalized = parsed.astimezone(timezone.utc)
+    if normalized.timestamp() > time.time() + 300:
+        raise ValueError("timestamp is more than 5 minutes in the future")
+    return normalized
 
 
 @dataclass(frozen=True)
