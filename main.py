@@ -3611,6 +3611,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
         layer1_summary = _persist_layer1_market_intelligence(
             candidates, config.database_path, trend_records
         )
+        discovered_candidate_count = len(candidates)
         ready_asset_ids = set(layer1_summary.get("ready_asset_ids", []))
         candidates = [
             coin for coin in candidates
@@ -3618,7 +3619,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
         ]
         LOGGER.info(
             "Layer 1 discovery gate: %d/%d candidates remain research-eligible",
-            len(candidates), len(ready_asset_ids),
+            len(candidates), discovered_candidate_count,
         )
     except Exception as exc:
         LOGGER.error("Layer 1 evidence persistence failed; stopping cycle: %s", exc)
