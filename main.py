@@ -4053,6 +4053,17 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
         LOGGER.warning("Image generation failed for $%s: %s — proceeding text-only",
                       best_coin["symbol"], e)
     
+    # Revalidate again after any potentially slow media-generation/upload work.
+    # Only the freshest official exchangeInfo snapshot may authorize the POST.
+    if not _revalidate_binance_spot_asset(
+        best_coin.get("symbol", ""), best_coin.get("asset_id", "")
+    ):
+        LOGGER.warning(
+            "FINAL PUBLICATION AUTHORIZATION BLOCK: $%s lost fresh exact Spot eligibility",
+            best_coin.get("symbol", ""),
+        )
+        return False
+
     # ──────────────────────────────────────────────
     # 8. PUBLISH
     # ──────────────────────────────────────────────
@@ -4256,7 +4267,6 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             store.save_score(score)
             if score.score == 0 and "deferred" in score.reason:
                 summary["scores_deferred"] += 1
-        sources = {getattr(coin, "market_data_source", "unknown") for coin in candidates}
         summary["provider_health"] = {
             "binance_spot_metadata": (
                 "AVAILABLE" if snapshot_observed_at and _binance_spot_pairs_cache else "UNAVAILABLE"
