@@ -160,7 +160,8 @@ class Layer1FoundationTests(unittest.TestCase):
     def test_module6_candidate_requires_eligibility_and_source_backed_signal(self):
         eligible = BinanceListingEligibilityEngine().evaluate(
             self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
-             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]}
+             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]},
+            verified_at=iso()
         )
         market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
         builder = CandidateDiscoveryFilteringEngine()
