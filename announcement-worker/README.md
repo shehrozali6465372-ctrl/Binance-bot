@@ -19,6 +19,8 @@ Never put credentials in source control or chat. Do not enable trading or withdr
 
 ## Local verification
 
+The test suite covers payload validation, deterministic deduplication, SQL parameterization and worker-state persistence using mocks. It does not open a live Binance connection.
+
 ```sh
 npm test
 ```
