@@ -594,5 +594,57 @@ class Layer1FoundationTests(unittest.TestCase):
         self.assertIn("_revalidate_binance_spot_asset", call_names)
         self.assertIn("publish", call_names)
 
+
+    def test_layer1_store_persists_rejected_input_reason_codes_idempotently(self):
+        store = Layer1Store(self.db)
+        try:
+            store.save_rejection(
+                "BTC", "market_observation_invalid", "coingecko_markets",
+                iso(), {"error_type": "ValueError"}
+            )
+            store.save_rejection(
+                "BTC", "market_observation_invalid", "coingecko_markets",
+                iso(), {"error_type": "ValueError"}
+            )
+            rows = store.conn.execute(
+                "SELECT symbol, reason_code, source, details_json "
+                "FROM layer1_candidate_rejections"
+            ).fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][0:3], ("BTC", "market_observation_invalid", "coingecko_markets"))
+            self.assertIn("ValueError", rows[0][3])
+        finally:
+            store.close()
+
+    def test_runtime_layer1_persists_missing_identity_and_invalid_market_rejections(self):
+        old_pairs = main._binance_spot_pairs_cache
+        old_snapshot = main._binance_spot_snapshot_observed_at
+        main._binance_spot_pairs_cache = {}
+        main._binance_spot_snapshot_observed_at = iso()
+        missing = main.Coin("NOID", "No ID", 1, 0, 0, 1, 1000000, [])
+        invalid = main.Coin("BTC", "Bitcoin", -1, 0, 0, 1, 1000000, [])
+        invalid.asset_id = "coingecko:bitcoin"
+        invalid.observed_at = iso()
+        invalid.market_data_source = "coingecko_markets"
+        invalid.provider_published_at = iso()
+        invalid.market_data_hash = "fixture"
+        try:
+            result = main._persist_layer1_market_intelligence([missing, invalid], self.db, [])
+            self.assertEqual(result["rejected_inputs"], 2)
+            conn = sqlite3.connect(self.db)
+            try:
+                rows = conn.execute(
+                    "SELECT reason_code FROM layer1_candidate_rejections ORDER BY reason_code"
+                ).fetchall()
+                self.assertEqual([row[0] for row in rows], [
+                    "canonical_asset_id_missing_or_unsupported", "market_observation_invalid"
+                ])
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_market_observations").fetchone()[0], 0)
+            finally:
+                conn.close()
+        finally:
+            main._binance_spot_pairs_cache = old_pairs
+            main._binance_spot_snapshot_observed_at = old_snapshot
+
 if __name__ == "__main__":
     unittest.main()
