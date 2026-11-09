@@ -1030,10 +1030,27 @@ class Database:
                     share_link TEXT,
                     http_status INTEGER,
                     error TEXT,
+                    reconciliation_note TEXT,
+                    reconciliation_evidence TEXT,
+                    reconciled_by TEXT,
+                    reconciled_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
+            )
+            # Additive ledger migration for operator-audited reconciliation.
+            ledger_columns = {
+                row["name"] for row in self.conn.execute(
+                    "PRAGMA table_info(publication_attempts)"
+                ).fetchall()
+            }
+            for column in ("reconciliation_note", "reconciliation_evidence", "reconciled_by", "reconciled_at"):
+                if column not in ledger_columns:
+                    self.conn.execute(f"ALTER TABLE publication_attempts ADD COLUMN {column} TEXT")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_publication_attempts_symbol_status "
+                "ON publication_attempts(coin_symbol, status)"
             )
             # Additive migration: never drop or rewrite legacy rows.
             analytics_columns = {
