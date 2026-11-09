@@ -80,6 +80,10 @@ def reconcile(conn, args):
 
         supplied_id = args.remote_post_id.strip() if target == "PUBLISHED_CONFIRMED" else ""
         existing_id = str(row["remote_post_id"] or "")
+        if target == "FAILED_CONFIRMED" and existing_id:
+            raise ValueError(
+                "Cannot confirm failure while a remote post ID is already recorded"
+            )
         if existing_id and supplied_id and existing_id != supplied_id:
             raise ValueError("Supplied remote ID conflicts with the ID already stored in ledger")
         final_id = supplied_id or existing_id
