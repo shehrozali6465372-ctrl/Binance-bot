@@ -23,21 +23,20 @@ export async function startAnnouncementWorker({
 } = {}) {
   const pool = poolFactory({ connectionString: databaseUrl, max: 3, application_name: "binance-cms-announcement-worker" });
   const store = new AnnouncementStore(pool);
-  await store.initialize();
-  await store.setState("STARTING", { startedAt: new Date().toISOString() });
-
-  const client = cmsFactory({
-    apiKey,
-    apiSecret,
-    wsURL: process.env.BINANCE_CMS_WS_URL || CMS_WS_STREAMS_PROD_URL,
-    reconnectDelay: 5000,
-  });
-
   let connection;
   let closed = false;
   let writeQueue = Promise.resolve();
 
   try {
+    await store.initialize();
+    await store.setState("STARTING", { startedAt: new Date().toISOString() });
+
+    const client = cmsFactory({
+      apiKey,
+      apiSecret,
+      wsURL: process.env.BINANCE_CMS_WS_URL || CMS_WS_STREAMS_PROD_URL,
+      reconnectDelay: 5000,
+    });
     connection = await client.websocketStreams.connect();
     const stream = connection.comAnnouncementEn();
     await store.setState("LISTENING");
@@ -108,7 +107,7 @@ export async function startAnnouncementWorker({
     return { shutdown, stream, connection, store, pool };
   } catch (error) {
     await store.setState("FAILED", { lastError: String(error?.message || error).slice(0, 500) }).catch(() => {});
-    await pool.end();
+    await pool.end().catch(() => {});
     throw error;
   }
 }
