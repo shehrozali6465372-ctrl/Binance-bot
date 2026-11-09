@@ -2192,8 +2192,12 @@ class HotSearchEngine:
         seen_topics = set()
         merged = []
         for topic in all_topics:
-            key = topic.get("topic", "").lower().strip()
-            if key and key not in seen_topics:
+            key = (
+                topic.get("topic", "").casefold().strip(),
+                topic.get("source", "").casefold().strip(),
+                topic.get("source_item_id", ""),
+            )
+            if key[0] and key not in seen_topics:
                 seen_topics.add(key)
                 merged.append(topic)
         
@@ -2275,6 +2279,9 @@ class HotSearchEngine:
                     "name": name,
                     "asset_id": "coingecko:" + coin_id,
                     "source_item_id": coin_id,
+                    "content_hash": hashlib.sha256(
+                        json.dumps(item, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest(),
                     "observed_at": datetime.now(timezone.utc).isoformat(),
                     "rank": i + 1,
                     "trend_strength": trend_strength,
@@ -2308,6 +2315,7 @@ class HotSearchEngine:
                         "source": "market_gainer",
                         "asset_id": getattr(coin, "asset_id", ""),
                         "source_item_id": getattr(coin, "asset_id", ""),
+                        "content_hash": getattr(coin, "market_data_hash", ""),
                         "observed_at": getattr(coin, "observed_at", ""),
                         "affected_coins": [coin.symbol],
                         "narrative": self._detect_narrative(coin.symbol),
@@ -2324,6 +2332,7 @@ class HotSearchEngine:
                     "source": "market_volume",
                     "asset_id": getattr(coin, "asset_id", ""),
                     "source_item_id": getattr(coin, "asset_id", ""),
+                    "content_hash": getattr(coin, "market_data_hash", ""),
                     "observed_at": getattr(coin, "observed_at", ""),
                     "affected_coins": [coin.symbol],
                     "narrative": self._detect_narrative(coin.symbol),
@@ -3619,7 +3628,10 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         topic = record.get("topic")
         if not all(isinstance(value, str) and value for value in (asset_id, source, observed_at, topic)):
             continue
-        signal = TrendSignal(topic, source, observed_at, record.get("rank"), (asset_id,), source_item_id or "")
+        signal = TrendSignal(
+            topic, source, observed_at, record.get("rank"), (asset_id,),
+            source_item_id or "", record.get("content_hash") or "",
+        )
         try:
             signal.validate()
             trend_signals.append(signal)
