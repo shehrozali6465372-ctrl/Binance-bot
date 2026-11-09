@@ -303,3 +303,16 @@ This section supersedes earlier status/gap statements above where they conflict.
 - GitHub reports PR #2 as open, draft, unmerged, and mergeable=false (mergeable_state=dirty). The base branch has advanced one commit beyond the PR's recorded base; that base commit adds .github/workflows/announcement-worker-tests.yml, a path also independently added/extended on this feature branch. The feature branch therefore needs an explicit base-sync/conflict-resolution decision. No merge, rebase, PR retarget, or deployment was performed because merge approval has not been granted.
 - Latest compare at this check: feature branch 36 commits ahead and 1 commit behind layer-1/completion-hardening.
 - This branch's workflow changes, worker, importer, and tests remain unmerged. The production scheduled workflow .github/workflows/run_bot.yml remains untouched.
+
+
+## Approved branch synchronization completed (2026-11-10 UTC)
+
+- User explicitly approved syncing the feature branch with the base and resolving the workflow conflict.
+- Created a non-rewrite two-parent merge commit: 0aa7aed7cf2e47c64fbdb6d6c65a0cc3d1e9dc19.
+  - First parent (feature history): 346085c95d847bc69b1f8ed7c0496346d8bbfd44.
+  - Second parent (base branch): ec1ee7b6902e5f24d37c54e8e5fd2c71334d1b42.
+- Conflict was limited to .github/workflows/announcement-worker-tests.yml. Preserved the feature branch's expanded workflow because it retains the base workflow while also performing locked npm ci, the offline SDK contract tests, and the Python Layer 1 test job.
+- The feature branch is now 40 commits ahead and 0 behind layer-1/completion-hardening. No force push or history rewrite was used.
+- GitHub PR #2 is now open, draft, unmerged, and mergeable=true. It has NOT been merged.
+- GitHub Actions push run 42722549557 and PR run 42722558943 both completed SUCCESS on merge commit 0aa7aed7cf2e47c64fbdb6d6c65a0cc3d1e9dc19. In each run, both mocked-announcement-tests and python-layer1-tests passed.
+- The publisher workflow .github/workflows/run_bot.yml was not changed. No deployment, live Binance stream connection, Square post, secrets change, database creation, or paid infrastructure provisioning occurred.
