@@ -109,9 +109,11 @@ class PublisherSafetyTests(unittest.TestCase):
         self.assertEqual(second.status, "PUBLICATION_UNKNOWN")
         self.assertEqual(urlopen.call_count, 1)
         row = self.publisher.db.conn.execute(
-            "SELECT status FROM publication_attempts WHERE coin_symbol = 'XRP'"
+            "SELECT status, remote_post_id, share_link FROM publication_attempts WHERE coin_symbol = 'XRP'"
         ).fetchone()
         self.assertEqual(row["status"], "PUBLICATION_UNKNOWN")
+        self.assertEqual(row["remote_post_id"], "remote-after-db-error")
+        self.assertEqual(row["share_link"], "https://example.invalid/post/remote-after-db-error")
 
     def test_success_response_without_remote_id_is_unknown_and_not_retried(self):
         response = FakeResponse({"code": "000000", "data": {"shareLink": "https://example.invalid/no-id"}})
