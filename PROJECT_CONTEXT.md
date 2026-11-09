@@ -292,3 +292,14 @@ This section supersedes earlier status/gap statements above where they conflict.
 5. Validate TLS certificate/hostname verification, secret rotation, and Render environment configuration.
 6. Run a controlled live Binance CMS connectivity test only after credentials and infrastructure are explicitly approved; keep Square publishing disabled throughout.
 7. Review PR merge conflicts/base branch and obtain explicit merge/deployment approval.
+
+
+## Latest post-fix verification (2026-11-10 UTC)
+
+- Optional announcement importer failure handling and its regression test were committed in code commit 05d6bcd793400a936ea73da20804dcd3a16db393.
+- GitHub Actions run 42720344133 tested that exact code commit and completed SUCCESS. Both Node worker tests and Python Layer 1 tests passed.
+- The regression confirms a failed optional CMS database import is reported as DEGRADED_IMPORT_FAILED while market observations/candidate evaluation continue. Exception text is not logged.
+- The branch head after the context-only update will be recorded by GitHub; the verified code commit remains 05d6bcd793400a936ea73da20804dcd3a16db393.
+- GitHub reports PR #2 as open, draft, unmerged, and mergeable=false (mergeable_state=dirty). The base branch has advanced one commit beyond the PR's recorded base; that base commit adds .github/workflows/announcement-worker-tests.yml, a path also independently added/extended on this feature branch. The feature branch therefore needs an explicit base-sync/conflict-resolution decision. No merge, rebase, PR retarget, or deployment was performed because merge approval has not been granted.
+- Latest compare at this check: feature branch 36 commits ahead and 1 commit behind layer-1/completion-hardening.
+- This branch's workflow changes, worker, importer, and tests remain unmerged. The production scheduled workflow .github/workflows/run_bot.yml remains untouched.
