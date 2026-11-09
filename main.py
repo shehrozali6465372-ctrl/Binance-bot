@@ -182,76 +182,42 @@ _binance_listed_cache = None
 _binance_listed_cache_time = 0
 
 def _get_binance_listed() -> set:
-    """Fetch all Binance Spot trading symbols via exchangeInfo API.
-    
-    Results are cached for 1 hour to avoid rate limits.
-    Falls back to a known set if the API is unavailable.
-    """
+    """Return currently active Binance Spot base assets; fail closed on any provider/schema error."""
     global _binance_listed_cache, _binance_listed_cache_time
     now = time.time()
-    if _binance_listed_cache is not None and (now - _binance_listed_cache_time) < 3600:
+    if _binance_listed_cache is not None and (now - _binance_listed_cache_time) < 300:
         return _binance_listed_cache
-    
     try:
-        url = "https://api.binance.com/api/v3/exchangeInfo"
-        req = urllib.request.Request(url)
+        url = "https://data-api.binance.vision/api/v3/exchangeInfo"
+        req = urllib.request.Request(url, headers={"User-Agent": "binance-square-agent/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        symbols = [s for s in data.get("symbols", []) 
-                   if s.get("status") == "TRADING" and s.get("isSpotTradingAllowed")]
-        result = set()
-        for s in symbols:
-            base = s.get("baseAsset", "")
-            if base:
-                result.add(base)
-        _binance_listed_cache = result
+            data = json.loads(resp.read().decode("utf-8"))
+        symbols = data.get("symbols") if isinstance(data, dict) else None
+        if not isinstance(symbols, list) or not symbols:
+            raise ValueError("exchangeInfo response has no valid symbols array")
+        eligible = set()
+        for item in symbols:
+            if not isinstance(item, dict):
+                continue
+            base = item.get("baseAsset")
+            quote = item.get("quoteAsset")
+            pair = item.get("symbol")
+            if (isinstance(base, str) and base and isinstance(quote, str) and quote
+                    and isinstance(pair, str) and pair
+                    and item.get("status") == "TRADING"
+                    and item.get("isSpotTradingAllowed") is True):
+                eligible.add(base)
+        if not eligible:
+            raise ValueError("exchangeInfo produced no verified active Spot assets")
+        _binance_listed_cache = eligible
         _binance_listed_cache_time = now
-        LOGGER.info("Binance listed: loaded %d trading assets from exchangeInfo API", len(result))
-        return result
-    except Exception as e:
-        LOGGER.warning("Binance exchangeInfo API failed: %s — using fallback list", e)
-        # Fallback to known major symbols
-        fallback = {
-            "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK",
-            "MATIC", "POL", "SHIB", "TRX", "ATOM", "UNI", "APT", "ARB", "OP", "NEAR",
-            "FIL", "ALGO", "AAVE", "MKR", "COMP", "SAND", "MANA", "AXS", "THETA", "FTM",
-            "ICP", "EOS", "XLM", "VET", "EGLD", "GRT", "RNDR", "FET", "AGIX", "PEPE",
-            "TIA", "SEI", "SUI", "INJ", "BLUR", "STRK", "BONK", "WIF", "JUP", "JTO",
-            "RE", "LAYER", "AVNT", "SHELL", "NOT", "DOGS", "HMSTR", "ETHFI", "EIGEN",
-            "VIRTUAL", "AI16Z", "ARC", "AKT", "OCEAN", "TAO", "PENDLE", "ENA", "ALT",
-            "1INCH", "AAVE", "ACH", "AGLD", "ALGO", "ALPHA", "ANKR", "APE", "API3",
-            "AR", "ARB", "ASTR", "ATA", "ATOM", "AUDIO", "AVAX", "AXS", "BAL", "BAND",
-            "BAT", "BCH", "BICO", "BLZ", "BNB", "BNT", "BSW", "BTC", "C98", "CAKE",
-            "CELO", "CELR", "CFX", "CHR", "CHZ", "COMP", "COTI", "CRV", "CTC", "CTK",
-            "CTSI", "CVX", "DAR", "DASH", "DGB", "DOCK", "DODO", "DOGE", "DOT", "DYDX",
-            "EDU", "EGLD", "ENJ", "ENS", "EOS", "ETC", "ETH", "FET", "FIL", "FITFI",
-            "FLM", "FLOW", "FLR", "FORTH", "FRONT", "FTM", "FTT", "FXS", "GALA", "GAS",
-            "GLM", "GLMR", "GMT", "GMX", "GNO", "GRT", "GTC", "HBAR", "HFT", "HIVE",
-            "HNT", "HOT", "ICP", "ICX", "ID", "ILV", "IMX", "INJ", "IOST", "IOTA",
-            "IOTX", "JASMY", "JOE", "JST", "KAS", "KAVA", "KDA", "KLAY", "KNC", "KSM",
-            "LDO", "LEVER", "LINA", "LINK", "LIT", "LOKA", "LOOM", "LPT", "LQTY", "LRC",
-            "LTC", "LUNA", "LUNC", "MAGIC", "MANA", "MASK", "MATIC", "MAV", "MDT", "MINA",
-            "MKR", "MLN", "MOVR", "MTL", "MVL", "NEAR", "NEO", "NKN", "NMR", "NULS",
-            "OCEAN", "OG", "OMG", "ONE", "ONG", "ONT", "OP", "ORBS", "ORDI", "OXT",
-            "PAXG", "PENDLE", "PEOPLE", "PEPE", "PERP", "PHB", "PIVX", "POL", "POLYX",
-            "POWR", "PROS", "PUNDIX", "PYR", "QI", "QNT", "QTUM", "RAD", "RARE", "REN",
-            "REP", "REQ", "RIF", "RLC", "RNDR", "ROSE", "RPL", "RSR", "RUNE", "RVN",
-            "SAND", "SANTOS", "SC", "SCRT", "SFP", "SHIB", "SKL", "SLP", "SNX", "SOL",
-            "SPELL", "SRM", "SSV", "STEEM", "STG", "STMX", "STORJ", "STPT", "STRAX",
-            "STX", "SUI", "SUN", "SUPER", "SUSHI", "SWEAT", "SXP", "SYN", "SYS", "T",
-            "TFUEL", "THETA", "TIA", "TLM", "TOMO", "TORN", "TRB", "TROY", "TRU", "TRX",
-            "TWT", "UMA", "UNFI", "UNI", "USDT", "USTC", "VANRY", "VET", "VGX", "VIB",
-            "VIDT", "VITE", "VOXEL", "VRA", "WAVES", "WAXP", "WBTC", "WIF", "WLD", "WNXM",
-            "WOO", "XCN", "XEC", "XEM", "XLM", "XMR", "XRP", "XTZ", "XVG", "XVS",
-            "YFI", "YGG", "ZEC", "ZEN", "ZIL", "ZRX",
-        }
-        _binance_listed_cache = fallback
-        _binance_listed_cache_time = now
-        return fallback
-
-
-
-
+        LOGGER.info("Binance Spot eligibility snapshot loaded: %d base assets", len(eligible))
+        return eligible
+    except Exception as exc:
+        LOGGER.error("Binance Spot eligibility unavailable; failing closed: %s", exc)
+        _binance_listed_cache = None
+        _binance_listed_cache_time = 0
+        return set()
 
 
 # ─── SCORING WEIGHTS (configurable) ───
@@ -1830,18 +1796,8 @@ class MarketScanner:
         self.universe = self._build_universe()
 
     def _build_universe(self) -> List[Coin]:
-        sample = [
-            Coin("SOL", "Solana", 168.42, 11.2, 3.4e9, 2.7, 7.4e10, [154, 158, 161, 165, 168]),
-            Coin("LINK", "Chainlink", 21.11, 8.7, 1.1e9, 2.1, 1.3e10, [19.1, 19.8, 20.2, 20.6, 21.1]),
-            Coin("AAVE", "Aave", 112.55, 7.9, 5.2e8, 1.9, 1.7e9, [105, 107, 109, 111, 112]),
-            Coin("DOGE", "Dogecoin", 0.184, 5.4, 2.8e9, 1.8, 2.7e10, [0.173, 0.176, 0.179, 0.181, 0.184]),
-            Coin("ETH", "Ethereum", 3472.15, 3.1, 1.5e10, 1.3, 4.2e11, [3390, 3410, 3432, 3451, 3472]),
-            Coin("BTC", "Bitcoin", 68241.0, 1.4, 2.4e10, 1.1, 1.3e12, [67120, 67500, 67980, 68110, 68241]),
-            Coin("MKR", "Sky", 3892.2, -2.4, 2.1e8, 0.8, 3.4e9, [3990, 3960, 3925, 3902, 3892]),
-            Coin("OP", "Optimism", 2.62, -4.8, 7.8e8, 1.4, 2.3e9, [2.79, 2.74, 2.69, 2.65, 2.62]),
-            Coin("ARB", "Arbitrum", 0.79, -6.2, 9.2e8, 1.6, 3.1e9, [0.86, 0.84, 0.82, 0.80, 0.79]),
-        ]
-        return sample
+        """No production sample universe: unavailable provider data means no candidates."""
+        return []
 
     def _live_universe(self) -> List[Coin]:
         """Get live market data from CoinGecko (Binance API is geo-blocked from GHA)."""
@@ -1849,33 +1805,40 @@ class MarketScanner:
 
     def _synthetic_history(self, price: float, change_24h: float) -> List[float]:
         steps = 10
-        if abs(change_24h) < 0.01:
-            return [round(price, 8)] * steps
-        start = price / (1 + change_24h / 100.0)
-        return [round(start + (price - start) * (i / (steps - 1)), 8) for i in range(steps)]
+        # Historical observations must come from a provider, never be synthesized.
+        return []
 
 
     def _coingecko_universe(self) -> List[Coin]:
         """Get Binance-listed trending coins from CoinGecko."""
-        # Coins listed on Binance (major pairs)
-        BINANCE_LISTED = {
-            "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK",
-            "MATIC", "POL", "SHIB", "TRX", "ATOM", "UNI", "APT", "ARB", "OP", "NEAR",
-            "FIL", "ALGO", "AAVE", "MKR", "COMP", "SAND", "MANA", "AXS", "THETA", "FTM",
-            "ICP", "EOS", "XLM", "VET", "EGLD", "GRT", "RNDR", "FET", "AGIX", "PEPE",
-            "TIA", "SEI", "SUI", "INJ", "BLUR", "STRK", "BONK", "WIF", "JUP", "JTO",
-        }
+        # Eligibility is derived from the live official Binance Spot exchangeInfo snapshot.
+        binance_listed = _get_binance_listed()
+        if not binance_listed:
+            return []
         url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=50&sparkline=true&price_change_percentage=24h"
         try:
             payload = http_get_json(url, timeout=self.config.http_timeout_seconds)
-        except Exception:
-            return self._build_universe()
+        except Exception as exc:
+            LOGGER.warning("CoinGecko market data unavailable; no synthetic fallback: %s", exc)
+            return []
+
+        if not isinstance(payload, list):
+            LOGGER.warning("CoinGecko market response schema invalid")
+            return []
+        symbol_counts = {}
+        for entry in payload:
+            symbol = str(entry.get("symbol", "")).upper() if isinstance(entry, dict) else ""
+            if symbol:
+                symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
 
         coins: List[Coin] = []
         for item in payload:
             try:
                 symbol = (item.get("symbol") or "").upper()
-                if symbol not in BINANCE_LISTED:
+                if symbol not in binance_listed or symbol_counts.get(symbol) != 1:
+                    continue
+                coin_id = item.get("id")
+                if not isinstance(coin_id, str) or not coin_id:
                     continue
                 name = item.get("name") or symbol
                 price = float(item.get("current_price") or 0)
@@ -1888,12 +1851,14 @@ class MarketScanner:
                     continue
                 volume_ratio = min(max(0.3, volume_24h / max(market_cap, 1) * 100), 10.0)
                 sparkline = item.get("sparkline_in_7d", {}).get("price", [])
-                history = [float(p) for p in sparkline[-10:]] if sparkline else self._synthetic_history(price, change_24h)
+                history = [float(p) for p in sparkline[-10:] if float(p) > 0] if sparkline else []
             except (TypeError, ValueError, KeyError):
                 continue
-            coins.append(Coin(symbol, name, price, change_24h, volume_24h, volume_ratio, market_cap, history))
+            coin = Coin(symbol, name, price, change_24h, volume_24h, volume_ratio, market_cap, history)
+            coin.asset_id = "coingecko:" + coin_id
+            coins.append(coin)
 
-        return coins or self._build_universe()
+        return coins
 
     _universe_cache = None
     _cache_timestamp = 0
@@ -1909,9 +1874,10 @@ class MarketScanner:
                 MarketScanner._universe_cache = coins
                 MarketScanner._cache_timestamp = now
                 return coins
-        MarketScanner._universe_cache = self.universe
+        LOGGER.warning("LIVE_MARKET_DATA is disabled; refusing to use synthetic sample market data")
+        MarketScanner._universe_cache = []
         MarketScanner._cache_timestamp = now
-        return MarketScanner._universe_cache
+        return []
 
     def top_gainers(self, limit: int = 3) -> List[Dict[str, Any]]:
         universe = self._universe()
@@ -2151,13 +2117,7 @@ class HotSearchEngine:
         except Exception:
             self._provider_status["market"] = False
         
-        # Provider 4: Synthetic / narrative-based (always available as fallback)
-        try:
-            synth_topics = self._synthetic_topics()
-            all_topics.extend(synth_topics)
-            self._provider_status["synthetic"] = len(synth_topics) > 0
-        except Exception:
-            self._provider_status["synthetic"] = False
+            # Synthetic narrative feeds are prohibited from production opportunity evidence.
         
         # Merge and deduplicate by topic name
         seen_topics = set()
