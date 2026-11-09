@@ -33,7 +33,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22.12.0"
-      - name: Run offline mocked tests
+      - name: Install locked worker dependencies
+        working-directory: announcement-worker
+        run: npm ci
+      - name: Run offline mocked tests and SDK contract test
         working-directory: announcement-worker
         run: npm test
 
