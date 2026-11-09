@@ -3,13 +3,17 @@ import test from "node:test";
 import { startAnnouncementWorker } from "../src/worker.js";
 
 class FakePool {
-  constructor() {
+  constructor({ failInitialize = false } = {}) {
     this.queries = [];
     this.ended = false;
+    this.failInitialize = failInitialize;
   }
 
   async query(sql, values = []) {
     this.queries.push({ sql, values });
+    if (this.failInitialize && sql.includes("CREATE TABLE IF NOT EXISTS")) {
+      throw new Error("offline simulated schema initialization failure");
+    }
     if (sql.includes("INSERT INTO binance_announcement_events")) {
       return { rowCount: 1, rows: [{ id: 7 }] };
     }
