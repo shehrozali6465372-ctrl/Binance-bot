@@ -280,6 +280,23 @@ class PublisherSafetyTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["status"], "FAILED_CONFIRMED")
 
+    def test_cannot_reconcile_failed_when_remote_post_id_is_known(self):
+        key = self.publisher._idempotency_key("NEAR", "accepted content", [])
+        digest = main.hashlib.sha256(b"accepted content").hexdigest()
+        self.assertIsNone(self.publisher._begin_attempt(key, "NEAR", digest))
+        self.publisher._finish_attempt(
+            key, "PUBLICATION_UNKNOWN", post_id="known-remote-near"
+        )
+        import scripts.reconcile_publications as reconcile
+        args = type("Args", (), {
+            "action": "confirm-failed", "attempt_id": 1,
+            "operator": "test-operator", "note": "attempted contradiction",
+            "evidence": "manual-check", "share_link": "",
+            "confirm_no_post_created": True,
+        })()
+        with self.assertRaisesRegex(ValueError, "remote post ID is already recorded"):
+            reconcile.reconcile(self.publisher.db.conn, args)
+
     def test_terminal_publication_state_cannot_be_reconciled_again(self):
         key = self.publisher._idempotency_key("XLM", "already done", [])
         digest = main.hashlib.sha256(b"already done").hexdigest()
