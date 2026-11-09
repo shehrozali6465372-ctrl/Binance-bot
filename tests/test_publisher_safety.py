@@ -234,6 +234,67 @@ class PublisherSafetyTests(unittest.TestCase):
         finally:
             check.close()
 
+    def test_operator_reconciliation_confirms_known_remote_id_without_network(self):
+        key = self.publisher._idempotency_key("ATOM", "pending content", [])
+        digest = main.hashlib.sha256(b"pending content").hexdigest()
+        self.assertIsNone(self.publisher._begin_attempt(key, "ATOM", digest))
+        import scripts.reconcile_publications as reconcile
+        args = type("Args", (), {
+            "action": "confirm-published", "attempt_id": 1,
+            "operator": "test-operator", "note": "Verified in Creator Center",
+            "evidence": "manual-check:creator-center/post/remote-atom",
+            "remote_post_id": "remote-atom",
+            "share_link": "https://www.binance.com/square/post/remote-atom",
+        })()
+        with patch("main.urllib.request.urlopen") as urlopen:
+            reconcile.reconcile(self.publisher.db.conn, args)
+        urlopen.assert_not_called()
+        row = self.publisher.db.conn.execute(
+            "SELECT status, remote_post_id, reconciled_by, reconciliation_note "
+            "FROM publication_attempts WHERE id = 1"
+        ).fetchone()
+        self.assertEqual(row["status"], "PUBLISHED_CONFIRMED")
+        self.assertEqual(row["remote_post_id"], "remote-atom")
+        self.assertEqual(row["reconciled_by"], "test-operator")
+        self.assertEqual(row["reconciliation_note"], "Verified in Creator Center")
+
+    def test_failed_reconciliation_requires_explicit_no_post_acknowledgement(self):
+        key = self.publisher._idempotency_key("ETC", "ambiguous content", [])
+        digest = main.hashlib.sha256(b"ambiguous content").hexdigest()
+        self.assertIsNone(self.publisher._begin_attempt(key, "ETC", digest))
+        import scripts.reconcile_publications as reconcile
+        base = {
+            "action": "confirm-failed", "attempt_id": 1,
+            "operator": "test-operator", "note": "No post found after manual review",
+            "evidence": "manual-check:creator-center/search-2026-11-09",
+            "share_link": "", "confirm_no_post_created": False,
+        }
+        with self.assertRaises(SystemExit):
+            reconcile.reconcile(self.publisher.db.conn, type("Args", (), base)())
+        base["confirm_no_post_created"] = True
+        with patch("main.urllib.request.urlopen") as urlopen:
+            reconcile.reconcile(self.publisher.db.conn, type("Args", (), base)())
+        urlopen.assert_not_called()
+        row = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE id = 1"
+        ).fetchone()
+        self.assertEqual(row["status"], "FAILED_CONFIRMED")
+
+    def test_terminal_publication_state_cannot_be_reconciled_again(self):
+        key = self.publisher._idempotency_key("XLM", "already done", [])
+        digest = main.hashlib.sha256(b"already done").hexdigest()
+        self.assertIsNone(self.publisher._begin_attempt(key, "XLM", digest))
+        self.publisher._finish_attempt(key, "FAILED_CONFIRMED", error="definitive rejection")
+        import scripts.reconcile_publications as reconcile
+        args = type("Args", (), {
+            "action": "confirm-published", "attempt_id": 1,
+            "operator": "test-operator", "note": "incorrect attempt",
+            "evidence": "manual-check", "remote_post_id": "remote-conflict",
+            "share_link": "",
+        })()
+        with self.assertRaisesRegex(ValueError, "terminal"):
+            reconcile.reconcile(self.publisher.db.conn, args)
+
     def test_legacy_node_script_cannot_issue_direct_publication(self):
         script = (Path(__file__).resolve().parents[1] / "scripts" / "post-text.mjs").read_text(encoding="utf-8")
         self.assertIn("Direct publishing is disabled", script)
