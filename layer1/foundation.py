@@ -408,6 +408,102 @@ class RelevanceScore:
     reason: str
 
 
+class Layer1Store:
+    """Auditable persistence for Modules 2, 4, 5, 6 and 7."""
+    def __init__(self, database_path: str):
+        from pathlib import Path
+        Path(database_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(database_path, timeout=30)
+        self.conn.execute("PRAGMA busy_timeout=30000")
+        self.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS layer1_market_observations (
+            observation_key TEXT PRIMARY KEY, asset_id TEXT NOT NULL,
+            provider TEXT NOT NULL, endpoint TEXT NOT NULL,
+            observed_at TEXT NOT NULL, payload_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS layer1_announcement_evidence (
+            source_id TEXT PRIMARY KEY, source_url TEXT NOT NULL, publisher TEXT NOT NULL,
+            event_type TEXT NOT NULL, published_at TEXT NOT NULL, observed_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS layer1_trend_signals (
+            signal_key TEXT PRIMARY KEY, topic TEXT NOT NULL, source TEXT NOT NULL,
+            observed_at TEXT NOT NULL, payload_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS layer1_candidates (
+            candidate_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL,
+            rejection_reasons_json TEXT NOT NULL, evidence_refs_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS layer1_candidate_scores (
+            candidate_id TEXT NOT NULL, score_version TEXT NOT NULL, score REAL NOT NULL,
+            components_json TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+            PRIMARY KEY(candidate_id, score_version)
+        );
+        """)
+
+    def save_market(self, observation: MarketObservation) -> None:
+        observation.validate()
+        payload = json.dumps(observation.__dict__, sort_keys=True)
+        key = hashlib.sha256(
+            f"{observation.asset_id}|{observation.provider}|{observation.endpoint}|{observation.observed_at}".encode()
+        ).hexdigest()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO layer1_market_observations VALUES (?, ?, ?, ?, ?, ?)",
+            (key, observation.asset_id, observation.provider, observation.endpoint,
+             observation.observed_at, payload),
+        )
+        self.conn.commit()
+
+    def save_announcement(self, evidence: AnnouncementEvidence) -> None:
+        evidence.validate()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO layer1_announcement_evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (evidence.source_id, evidence.source_url, evidence.publisher, evidence.event_type,
+             evidence.published_at, evidence.observed_at,
+             json.dumps(evidence.__dict__, sort_keys=True)),
+        )
+        self.conn.commit()
+
+    def save_trend(self, signal: TrendSignal) -> None:
+        signal.validate()
+        key = hashlib.sha256(
+            f"{signal.source}|{signal.source_item_id}|{signal.topic}|{signal.observed_at}".encode()
+        ).hexdigest()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO layer1_trend_signals VALUES (?, ?, ?, ?, ?)",
+            (key, signal.topic, signal.source, signal.observed_at,
+             json.dumps(signal.__dict__, sort_keys=True)),
+        )
+        self.conn.commit()
+
+    def save_candidate(self, candidate: Candidate) -> None:
+        evidence = {
+            "events": list(candidate.event_ids),
+            "markets": list(candidate.market_observation_ids),
+            "trends": list(candidate.trend_signal_ids),
+            "eligibility": candidate.eligibility.__dict__,
+        }
+        self.conn.execute(
+            "INSERT OR REPLACE INTO layer1_candidates VALUES (?, ?, ?, ?, ?, ?)",
+            (candidate.candidate_id, candidate.asset_id, candidate.state,
+             json.dumps(list(candidate.rejection_reasons)),
+             json.dumps(evidence, sort_keys=True), utc_now()),
+        )
+        self.conn.commit()
+
+    def save_score(self, score: RelevanceScore) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO layer1_candidate_scores VALUES (?, ?, ?, ?, ?, ?)",
+            (score.candidate_id, score.score_version, score.score,
+             json.dumps(dict(score.components), sort_keys=True), score.reason, utc_now()),
+        )
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
+
+
 class RelevanceScoringEngine:
     """Explainable ranking only. It cannot authorize publication."""
     WEIGHTS = {"event_materiality": 0.30, "source_credibility": 0.25,
