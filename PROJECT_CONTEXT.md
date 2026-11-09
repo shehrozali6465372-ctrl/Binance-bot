@@ -279,7 +279,7 @@ This section supersedes earlier status/gap statements above where they conflict.
 - Worker CI does not perform a live Binance connection or real PostgreSQL integration. Python importer tests inject a fake connector; they do not prove real PostgreSQL compatibility.
 - Root scheduled .github/workflows/run_bot.yml currently installs Pillow only and does not configure ANNOUNCEMENT_DATABASE_URL or install psycopg. Therefore the importer is not activated by the existing scheduled workflow. Do not modify that workflow or add its secret/dependency without separate explicit approval.
 - A configured importer failure previously propagated before the Layer1Store cleanup block, potentially interrupting the established cycle and leaking the SQLite connection. The current continuation fix wraps this optional enrichment read, records DEGRADED_IMPORT_FAILED without logging exception text/DSNs, and allows the established market-data path to continue. A regression test covers that behavior.
-- announcement-worker runtime no longer creates or alters PostgreSQL tables. A versioned SQL migration is applied separately by an admin/migration role; README documents minimum grants for separate worker and read-only importer roles. Actual database roles/grants have not yet been provisioned or verified.
+- announcement-worker currently creates its PostgreSQL tables at startup. Before production, split schema migration privileges from the runtime worker role; do not give the listener a broad owner/admin credential.
 - sslmode=require encrypts the importer connection but does not provide the strongest hostname verification. Before production, decide and test a certificate-verifying TLS mode supported by the selected database provider.
 - No Binance API key, database secret, production connection, paid resource, Render service, Cloudflare resource, or live Square post was created or used in this continuation.
 - No production deployment, PR merge, or publisher workflow change was performed.
@@ -303,14 +303,3 @@ This section supersedes earlier status/gap statements above where they conflict.
 - GitHub reports PR #2 as open, draft, unmerged, and mergeable=false (mergeable_state=dirty). The base branch has advanced one commit beyond the PR's recorded base; that base commit adds .github/workflows/announcement-worker-tests.yml, a path also independently added/extended on this feature branch. The feature branch therefore needs an explicit base-sync/conflict-resolution decision. No merge, rebase, PR retarget, or deployment was performed because merge approval has not been granted.
 - Latest compare at this check: feature branch 36 commits ahead and 1 commit behind layer-1/completion-hardening.
 - This branch's workflow changes, worker, importer, and tests remain unmerged. The production scheduled workflow .github/workflows/run_bot.yml remains untouched.
-
-
-## Database privilege hardening update (2026-11-10 UTC)
-
-- Added announcement-worker/migrations/001_create_announcement_tables.sql for one-time schema creation by a dedicated migration/admin role.
-- Runtime AnnouncementStore.initialize() now performs a read-only to_regclass schema check and fails clearly if the migration has not been applied. Runtime credentials no longer require CREATE/ALTER/DROP privileges.
-- README now documents minimum worker grants (SELECT/INSERT on event rows, sequence usage, SELECT/INSERT/UPDATE on worker state) and a separate SELECT-only importer role.
-- Added tests for read-only schema checking, missing-migration failure, and migration schema constraints. Worker lifecycle mocks were updated to simulate pre-created tables.
-- GitHub Actions run 42720669506 completed SUCCESS on code commit 2c7480a4b7c7a9566f1c9d33ac2e6f7d90cd3ba8. Both Node worker tests and Python Layer 1 tests passed.
-- These tests remain mocked/offline; no PostgreSQL server, database role, grant, or real migration was exercised.
-- No live Binance connection, Square post, deployment, or paid resource was used.

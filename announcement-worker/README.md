@@ -35,27 +35,7 @@ The tests are fully mocked and do not connect to Binance, PostgreSQL, or Binance
 - Runtime: Node 22.12.0+
 - Set the three required environment variables in Render's secret environment configuration.
 
-The worker does not create or alter database objects at runtime. Apply the versioned SQL migration in migrations/001_create_announcement_tables.sql once using a database administrator/migration credential. Then configure DATABASE_URL with a restricted runtime role.
-
-Minimum grants for the worker role (replace role names as appropriate):
-
-```sql
-GRANT CONNECT ON DATABASE your_database TO binance_cms_worker;
-GRANT USAGE ON SCHEMA public TO binance_cms_worker;
-GRANT SELECT, INSERT ON TABLE public.binance_announcement_events TO binance_cms_worker;
-GRANT USAGE, SELECT ON SEQUENCE public.binance_announcement_events_id_seq TO binance_cms_worker;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.binance_announcement_worker_state TO binance_cms_worker;
-```
-
-Use a separate read-only role for the Python importer:
-
-```sql
-GRANT CONNECT ON DATABASE your_database TO binance_cms_importer;
-GRANT USAGE ON SCHEMA public TO binance_cms_importer;
-GRANT SELECT ON TABLE public.binance_announcement_events TO binance_cms_importer;
-```
-
-The worker role must not own the schema/tables and must not receive CREATE, ALTER, DROP, or role-management privileges. The importer role should have no write privileges. The database must be durable and shared with the agent's ingestion adapter; a worker-local SQLite file or Render filesystem is not a valid substitute.
+The worker creates its two PostgreSQL tables idempotently at startup. The database must be durable and shared with the agent's ingestion adapter; a worker-local SQLite file or Render filesystem is not a valid substitute.
 
 ## Event identity and replay limitations
 

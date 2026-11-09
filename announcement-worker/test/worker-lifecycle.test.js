@@ -11,11 +11,8 @@ class FakePool {
 
   async query(sql, values = []) {
     this.queries.push({ sql, values });
-    if (this.failInitialize && sql.includes("to_regclass")) {
+    if (this.failInitialize && sql.includes("CREATE TABLE IF NOT EXISTS")) {
       throw new Error("offline simulated schema initialization failure");
-    }
-    if (sql.includes("to_regclass")) {
-      return { rowCount: 1, rows: [{ events_table: "binance_announcement_events", state_table: "binance_announcement_worker_state" }] };
     }
     if (sql.includes("INSERT INTO binance_announcement_events")) {
       return { rowCount: 1, rows: [{ id: 7 }] };
