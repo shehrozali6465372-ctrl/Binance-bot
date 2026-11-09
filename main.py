@@ -1869,6 +1869,8 @@ class MarketScanner:
                 continue
             coin = Coin(symbol, name, price, change_24h, volume_24h, volume_ratio, market_cap, history)
             coin.asset_id = "coingecko:" + coin_id
+            coin.observed_at = datetime.now(timezone.utc).isoformat()
+            coin.market_data_source = "coingecko_markets"
             coins.append(coin)
 
         return coins
@@ -3523,6 +3525,82 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                 LOGGER.debug("Filter error for %s: %s", coin.symbol, e)
                 continue
     
+def _persist_layer1_market_intelligence(candidates, database_path: str) -> dict:
+    """Persist real market evidence and auditable candidate decisions; never fabricate scores."""
+    from layer1.foundation import (
+        AssetIdentity, BinanceListingEligibilityEngine, CandidateDiscoveryFilteringEngine,
+        Layer1Store, MarketObservation, RelevanceScore, RelevanceScoringEngine,
+    )
+
+    store = Layer1Store(database_path)
+    summary = {"observations": 0, "candidates": 0, "ready": 0, "rejected": 0, "scores_deferred": 0}
+    try:
+        allowed_quotes = {
+            value.strip().upper()
+            for value in os.getenv("BINANCE_ALLOWED_QUOTE_ASSETS", "USDT").split(",")
+            if value.strip()
+        }
+        eligibility_engine = BinanceListingEligibilityEngine(tuple(sorted(allowed_quotes)))
+        candidate_engine = CandidateDiscoveryFilteringEngine()
+        scoring_engine = RelevanceScoringEngine()
+        for coin in candidates:
+            asset_id = getattr(coin, "asset_id", "")
+            observed_at = getattr(coin, "observed_at", "")
+            if not asset_id.startswith("coingecko:") or not observed_at:
+                LOGGER.warning("Layer 1 rejected %s: canonical asset ID or source timestamp missing", coin.symbol)
+                continue
+            base = coin.symbol.upper()
+            pairs = [
+                {"symbol": base + quote, "baseAsset": base, "quoteAsset": quote,
+                 "status": "TRADING", "isSpotTradingAllowed": True}
+                for quote in allowed_quotes
+            ]
+            identity = AssetIdentity(asset_id, coin.name, base, next(iter(sorted(allowed_quotes))))
+            eligibility = eligibility_engine.evaluate(
+                identity, {"symbols": pairs}, verified_at=observed_at
+            )
+            market = MarketObservation(
+                asset_id=asset_id,
+                provider=getattr(coin, "market_data_source", "unknown"),
+                endpoint="https://api.coingecko.com/api/v3/coins/markets",
+                observed_at=observed_at,
+                price=float(coin.price),
+                currency="USD",
+                change_24h=float(coin.change_24h),
+                volume_24h=float(coin.volume_24h),
+                market_cap=float(coin.market_cap),
+                history=tuple(float(value) for value in (coin.history or [])),
+            )
+            store.save_market(market)
+            summary["observations"] += 1
+            candidate = candidate_engine.build(identity, eligibility, [market], [], [])
+            store.save_candidate(candidate)
+            summary["candidates"] += 1
+            summary["ready" if candidate.state == "READY_FOR_RESEARCH" else "rejected"] += 1
+            # The five editorial relevance inputs are not all available in market data.
+            # Persist an explicit deferred score rather than inventing evidence.
+            score = scoring_engine.score(candidate, {
+                "event_materiality": None,
+                "source_credibility": None,
+                "freshness": None,
+                "audience_relevance": None,
+                "novelty": None,
+            })
+            store.save_score(score)
+            if score.score == 0 and "deferred" in score.reason:
+                summary["scores_deferred"] += 1
+        LOGGER.info("Layer 1 evidence persisted: %s", json.dumps(summary, sort_keys=True))
+        return summary
+    finally:
+        store.close()
+
+
+    try:
+        _persist_layer1_market_intelligence(candidates, config.database_path)
+    except Exception as exc:
+        LOGGER.error("Layer 1 evidence persistence failed; stopping cycle: %s", exc)
+        return False
+
     if len(candidates) < CONFIG.min_candidates:
         LOGGER.info("[%s] Scan complete: %d candidates passed — insufficient for Phase 1.",
                      utc_now()[:16], len(candidates))
