@@ -598,13 +598,15 @@ class Layer1FoundationTests(unittest.TestCase):
     def test_layer1_store_persists_rejected_input_reason_codes_idempotently(self):
         store = Layer1Store(self.db)
         try:
+            observed_at = iso()
+            details = {"error_type": "ValueError"}
             store.save_rejection(
                 "BTC", "market_observation_invalid", "coingecko_markets",
-                iso(), {"error_type": "ValueError"}
+                observed_at, details
             )
             store.save_rejection(
                 "BTC", "market_observation_invalid", "coingecko_markets",
-                iso(), {"error_type": "ValueError"}
+                observed_at, details
             )
             rows = store.conn.execute(
                 "SELECT symbol, reason_code, source, details_json "
