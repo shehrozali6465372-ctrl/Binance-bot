@@ -47,7 +47,7 @@ function normalizeCatalogId(value) {
 function classifyEvent(catalogName, title) {
   const value = (catalogName + " " + title).toLowerCase();
   if (/delist|remove.*trading/.test(value)) return "delisting";
-  if (/new listing|list.*token|launchpool|launchpad/.test(value)) return "listing";
+  if (/listing|listed|will list|list.*token|launchpool|launchpad/.test(value)) return "listing";
   if (/suspend|resume.*trading/.test(value)) return "suspension";
   if (/maintenance|wallet.*upgrade/.test(value)) return "maintenance";
   if (/network upgrade|hard fork|upgrade/.test(value)) return "upgrade";
