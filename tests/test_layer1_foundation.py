@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from layer1.foundation import (
     AgentConfig, AnnouncementEvidence, AnnouncementIntelligenceEngine,
     AssetIdentity, BinanceListingEligibilityEngine, CandidateDiscoveryFilteringEngine,
-    ConfigurationOrchestrator, MarketDataIntelligenceEngine, MarketObservation,
+    ConfigurationOrchestrator, Layer1Store, MarketDataIntelligenceEngine, MarketObservation,
     RelevanceScoringEngine, RunLease, TrendSignal,
     TrendingNarrativeIntelligenceEngine,
 )
@@ -221,6 +221,32 @@ class Layer1FoundationTests(unittest.TestCase):
         with patch.object(engine, "_from_announcements", return_value=[]), patch.object(engine, "_from_coingecko_trending", return_value=[]), patch.object(engine, "_from_market_data", return_value=[]), patch.object(engine, "_synthetic_topics", side_effect=AssertionError("synthetic called")):
             self.assertEqual(engine.get_trending(force_refresh=True), [])
 
+    def test_layer1_store_persists_source_provenance_candidate_reasons_and_score_version(self):
+        eligibility = BinanceListingEligibilityEngine().evaluate(
+            self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
+             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]}
+        )
+        market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
+        candidate = CandidateDiscoveryFilteringEngine().build(self.identity, eligibility, [market], [], [])
+        score = RelevanceScoringEngine().score(candidate, {
+            "event_materiality": 80, "source_credibility": 90, "freshness": 100,
+            "audience_relevance": 70, "novelty": 60,
+        })
+        store = Layer1Store(self.db)
+        try:
+            store.save_market(market)
+            store.save_candidate(candidate)
+            store.save_score(score)
+            self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM layer1_market_observations").fetchone()[0], 1)
+            row = store.conn.execute("SELECT state, evidence_refs_json FROM layer1_candidates WHERE candidate_id=?",
+                                     (candidate.candidate_id,)).fetchone()
+            self.assertEqual(row[0], "READY_FOR_RESEARCH")
+            saved = store.conn.execute("SELECT score, score_version FROM layer1_candidate_scores WHERE candidate_id=?",
+                                       (candidate.candidate_id,)).fetchone()
+            self.assertEqual(saved[1], score.score_version)
+            self.assertEqual(saved[0], score.score)
+        finally:
+            store.close()
     def test_module7_score_is_deterministic_explainable_and_never_overrides_hard_gate(self):
         eligibility = BinanceListingEligibilityEngine().evaluate(
             self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
