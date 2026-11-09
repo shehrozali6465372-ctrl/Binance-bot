@@ -3357,7 +3357,7 @@ class PostPublisher:
         return text + "\n" + " ".join(tags[:max_tags])
 
 
-def run_once(config, scanner, announcement_engine, research, generator, publisher, posted_symbols, hot_search_engine=None) -> bool:
+def _run_once_impl(config, scanner, announcement_engine, research, generator, publisher, posted_symbols, hot_search_engine=None) -> bool:
     """Run one iteration using Opportunity Intelligence Architecture.
     
     Flow:
@@ -3997,6 +3997,49 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     })
     LOGGER.info("PIPELINE HEALTH: %s", _health)
     return True
+
+
+def run_once(config, scanner, announcement_engine, research, generator, publisher,
+             posted_symbols, hot_search_engine=None) -> bool:
+    """Execute one Layer 1+ downstream cycle under a durable run lease."""
+    from layer1.foundation import AgentConfig, ConfigurationOrchestrator, RunLease
+
+    layer_config = AgentConfig(
+        database_path=config.database_path,
+        http_timeout_seconds=config.http_timeout_seconds,
+        max_daily_posts=config.max_daily_posts,
+        dry_run=config.dry_run,
+        allowed_quote_assets=tuple(
+            item.strip().upper()
+            for item in os.getenv("BINANCE_ALLOWED_QUOTE_ASSETS", "USDT").split(",")
+            if item.strip()
+        ),
+    )
+    context = ConfigurationOrchestrator(layer_config).create_context()
+    lease = RunLease(config.database_path)
+    status = "FAILED"
+    summary = {"run_id": context.run_id, "layer1_version": "1.0.0"}
+    try:
+        lease.acquire(context)
+        LOGGER.info("Layer 1 run started: run_id=%s config_hash=%s",
+                    context.run_id, context.config_hash)
+        outcome = _run_once_impl(
+            config, scanner, announcement_engine, research, generator,
+            publisher, posted_symbols, hot_search_engine
+        )
+        status = "SUCCEEDED" if outcome else "NO_CANDIDATE_OR_BLOCKED"
+        summary["cycle_result"] = status
+        return outcome
+    except Exception as exc:
+        summary["error_type"] = type(exc).__name__
+        summary["error"] = str(exc)[:500]
+        raise
+    finally:
+        try:
+            if lease.run_id:
+                lease.finish(status, summary)
+        finally:
+            lease.close()
 
 def main_loop() -> None:
     """Main loop that runs continuously with configured interval."""
