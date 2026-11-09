@@ -163,3 +163,26 @@ test("failed initial connection records FAILED and closes the database pool", as
   assert.ok(pool.queries.some(({ values }) => values[0] === "FAILED"));
   assert.equal(pool.ended, true);
 });
+
+
+test("database initialization failure still closes the pool", async () => {
+  const pool = new FakePool({ failInitialize: true });
+  let cmsFactoryCalled = false;
+  await assert.rejects(
+    startAnnouncementWorker({
+      apiKey: "offline-test-key",
+      apiSecret: "offline-test-secret",
+      databaseUrl: "postgresql://offline.invalid/db",
+      cmsFactory: () => {
+        cmsFactoryCalled = true;
+        throw new Error("CMS must not initialize after database failure");
+      },
+      poolFactory: () => pool,
+      logger,
+    }),
+    /offline simulated schema initialization failure/,
+  );
+  assert.equal(cmsFactoryCalled, false);
+  assert.ok(pool.queries.some(({ values }) => values[0] === "FAILED"));
+  assert.equal(pool.ended, true);
+});
