@@ -180,10 +180,11 @@ TOP_5_COINS = {"BTC", "ETH", "BNB", "SOL", "XRP"}
 # Dynamic Binance listed symbols cache
 _binance_listed_cache = None
 _binance_listed_cache_time = 0
+_binance_spot_pairs_cache = {}
 
 def _get_binance_listed() -> set:
-    """Return currently active Binance Spot base assets; fail closed on any provider/schema error."""
-    global _binance_listed_cache, _binance_listed_cache_time
+    """Return active Binance Spot base assets and retain exact verified pair metadata."""
+    global _binance_listed_cache, _binance_listed_cache_time, _binance_spot_pairs_cache
     now = time.time()
     if _binance_listed_cache is not None and (now - _binance_listed_cache_time) < 300:
         return _binance_listed_cache
@@ -206,6 +207,7 @@ def _get_binance_listed() -> set:
         if not allowed_quotes:
             raise ValueError("BINANCE_ALLOWED_QUOTE_ASSETS is empty")
         eligible = set()
+        verified_pairs = {}
         for item in symbols:
             if not isinstance(item, dict):
                 continue
@@ -217,9 +219,14 @@ def _get_binance_listed() -> set:
                     and item.get("status") == "TRADING"
                     and item.get("isSpotTradingAllowed") is True):
                 eligible.add(base)
+                verified_pairs.setdefault(base, []).append({
+                    "symbol": pair, "baseAsset": base, "quoteAsset": quote,
+                    "status": "TRADING", "isSpotTradingAllowed": True,
+                })
         if not eligible:
             raise ValueError("exchangeInfo produced no verified active Spot assets")
         _binance_listed_cache = eligible
+        _binance_spot_pairs_cache = verified_pairs
         _binance_listed_cache_time = now
         LOGGER.info("Binance Spot eligibility snapshot loaded: %d base assets", len(eligible))
         return eligible
@@ -227,6 +234,7 @@ def _get_binance_listed() -> set:
         LOGGER.error("Binance Spot eligibility unavailable; failing closed: %s", exc)
         _binance_listed_cache = None
         _binance_listed_cache_time = 0
+        _binance_spot_pairs_cache = {}
         return set()
 
 
@@ -3551,11 +3559,13 @@ def _persist_layer1_market_intelligence(candidates, database_path: str) -> dict:
                 continue
             base = coin.symbol.upper()
             pairs = [
-                {"symbol": base + quote, "baseAsset": base, "quoteAsset": quote,
-                 "status": "TRADING", "isSpotTradingAllowed": True}
-                for quote in allowed_quotes
+                pair for pair in _binance_spot_pairs_cache.get(base, [])
+                if pair.get("quoteAsset") in allowed_quotes
             ]
-            identity = AssetIdentity(asset_id, coin.name, base, next(iter(sorted(allowed_quotes))))
+            identity = AssetIdentity(
+                asset_id, coin.name, base,
+                pairs[0]["quoteAsset"] if pairs else next(iter(sorted(allowed_quotes)))
+            )
             eligibility = eligibility_engine.evaluate(
                 identity, {"symbols": pairs}, verified_at=observed_at
             )
