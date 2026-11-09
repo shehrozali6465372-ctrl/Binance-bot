@@ -95,6 +95,49 @@ class PublisherSafetyTests(unittest.TestCase):
         self.assertEqual(second.status, "DUPLICATE_BLOCKED")
         self.assertEqual(urlopen.call_count, 1)
 
+    def test_remote_acceptance_followed_by_local_persistence_failure_is_not_retried(self):
+        response = FakeResponse({
+            "code": "000000",
+            "data": {"id": "remote-after-db-error", "shareLink": "https://example.invalid/post/remote-after-db-error"},
+        })
+        with patch("main.urllib.request.urlopen", return_value=response) as urlopen:
+            with patch.object(self.publisher.db, "save_post", side_effect=sqlite3.OperationalError("disk full")):
+                first = self.publisher.publish({"symbol": "XRP"}, "first content")
+            second = self.publisher.publish({"symbol": "XRP"}, "regenerated content")
+
+        self.assertEqual(first.status, "PUBLICATION_UNKNOWN")
+        self.assertEqual(second.status, "PUBLICATION_UNKNOWN")
+        self.assertEqual(urlopen.call_count, 1)
+        row = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE coin_symbol = 'XRP'"
+        ).fetchone()
+        self.assertEqual(row["status"], "SUBMITTING")
+
+    def test_success_response_without_remote_id_is_unknown_and_not_retried(self):
+        response = FakeResponse({"code": "000000", "data": {"shareLink": "https://example.invalid/no-id"}})
+        with patch("main.urllib.request.urlopen", return_value=response) as urlopen:
+            first = self.publisher.publish({"symbol": "ADA"}, "content without remote identity")
+            second = self.publisher.publish({"symbol": "ADA"}, "regenerated content")
+
+        self.assertEqual(first.status, "PUBLICATION_UNKNOWN")
+        self.assertEqual(second.status, "PUBLICATION_UNKNOWN")
+        self.assertEqual(urlopen.call_count, 1)
+
+    def test_metrics_require_exact_remote_post_identity(self):
+        analyzer = main.PerformanceAnalyzer(self.publisher.db)
+        analyzer.record_publish(
+            {"symbol": "DOGE"}, "educational post #DOGE",
+            square_link="https://example.invalid/post/remote-doge",
+            remote_post_id="remote-doge",
+        )
+        self.assertFalse(analyzer.update_metrics("DOGE", views=100, remote_post_id="wrong-id"))
+        self.assertTrue(analyzer.update_metrics("DOGE", views=100, remote_post_id="remote-doge"))
+        row = self.publisher.db.conn.execute(
+            "SELECT views, remote_post_id FROM post_analytics WHERE coin_symbol = 'DOGE'"
+        ).fetchone()
+        self.assertEqual(row["views"], 100)
+        self.assertEqual(row["remote_post_id"], "remote-doge")
+
     def test_schema_has_additive_ledger_and_remote_identity(self):
         columns = {
             row["name"] for row in self.publisher.db.conn.execute(
