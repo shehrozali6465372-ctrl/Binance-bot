@@ -193,8 +193,18 @@ def _get_binance_listed() -> set:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         symbols = data.get("symbols") if isinstance(data, dict) else None
-        if not isinstance(symbols, list) or not symbols:
-            raise ValueError("exchangeInfo response has no valid symbols array")
+        server_time = data.get("serverTime") if isinstance(data, dict) else None
+        if not isinstance(symbols, list) or not symbols or not isinstance(server_time, (int, float)):
+            raise ValueError("exchangeInfo response missing symbols or serverTime")
+        if abs((now * 1000) - float(server_time)) > 900000:
+            raise ValueError("exchangeInfo serverTime is stale or clock-skewed")
+        allowed_quotes = {
+            value.strip().upper()
+            for value in os.getenv("BINANCE_ALLOWED_QUOTE_ASSETS", "USDT").split(",")
+            if value.strip()
+        }
+        if not allowed_quotes:
+            raise ValueError("BINANCE_ALLOWED_QUOTE_ASSETS is empty")
         eligible = set()
         for item in symbols:
             if not isinstance(item, dict):
@@ -202,7 +212,7 @@ def _get_binance_listed() -> set:
             base = item.get("baseAsset")
             quote = item.get("quoteAsset")
             pair = item.get("symbol")
-            if (isinstance(base, str) and base and isinstance(quote, str) and quote
+            if (isinstance(base, str) and base and quote in allowed_quotes
                     and isinstance(pair, str) and pair
                     and item.get("status") == "TRADING"
                     and item.get("isSpotTradingAllowed") is True):
