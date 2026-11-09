@@ -3,6 +3,9 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
+
+import main
 from datetime import datetime, timedelta, timezone
 
 from layer1.foundation import (
@@ -16,6 +19,11 @@ from layer1.foundation import (
 
 def iso(delta_seconds=0):
     return (datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)).isoformat()
+
+
+class AgentConfigShim:
+    live_market_data = True
+    http_timeout_seconds = 1
 
 
 class Layer1FoundationTests(unittest.TestCase):
@@ -141,6 +149,39 @@ class Layer1FoundationTests(unittest.TestCase):
         rejected = builder.build(self.identity, eligible, [], [], [])
         self.assertEqual(rejected.state, "REJECTED")
         self.assertIn("no_source_backed_discovery_signal", rejected.rejection_reasons)
+
+    def test_legacy_market_scanner_has_no_synthetic_or_sample_fallback(self):
+        scanner = main.MarketScanner(AgentConfigShim())
+        self.assertEqual(scanner._build_universe(), [])
+        self.assertEqual(scanner._synthetic_history(100, 10), [])
+        with patch("main.http_get_json", side_effect=RuntimeError("provider unavailable")):
+            self.assertEqual(scanner._coingecko_universe(), [])
+
+    def test_legacy_listing_check_fails_closed_without_static_allowlist(self):
+        main._binance_listed_cache = None
+        main._binance_listed_cache_time = 0
+        with patch("main.urllib.request.urlopen", side_effect=OSError("offline")):
+            self.assertEqual(main._get_binance_listed(), set())
+
+    def test_legacy_candidate_filter_requires_canonical_asset_identity(self):
+        with patch("main._get_binance_listed", return_value={"BTC"}):
+            accepted = main._passes_objective_filters(
+                symbol="BTC", price=65000, change_24h=8, volume_ratio=2,
+                market_cap=1_000_000_000, announcements=[], posted_hours_data={},
+                asset_id="",
+            )
+            self.assertFalse(accepted)
+
+    def test_legacy_announcement_bapi_is_disabled_without_network(self):
+        engine = main.BinanceAnnouncementEngine()
+        with patch("main.http_get_json") as fetch:
+            self.assertEqual(engine.fetch_announcements(48), [])
+        fetch.assert_not_called()
+
+    def test_hot_search_does_not_invoke_synthetic_provider(self):
+        engine = main.HotSearchEngine()
+        with patch.object(engine, "_from_announcements", return_value=[]), patch.object(engine, "_from_coingecko_trending", return_value=[]), patch.object(engine, "_from_market_data", return_value=[]), patch.object(engine, "_synthetic_topics", side_effect=AssertionError("synthetic called")):
+            self.assertEqual(engine.get_trending(force_refresh=True), [])
 
     def test_module7_score_is_deterministic_explainable_and_never_overrides_hard_gate(self):
         eligibility = BinanceListingEligibilityEngine().evaluate(
