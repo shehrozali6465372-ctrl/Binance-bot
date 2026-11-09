@@ -4293,6 +4293,7 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
 def run_once(config, scanner, announcement_engine, research, generator, publisher,
              posted_symbols, hot_search_engine=None) -> bool:
     """Execute one Layer 1+ downstream cycle under a durable run lease."""
+    global _LAYER1_LAST_SUMMARY
     from layer1.foundation import AgentConfig, ConfigurationOrchestrator, RunLease
 
     # The application Config remains the single authority. Layer 1 receives a
