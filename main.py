@@ -2215,9 +2215,15 @@ class HotSearchEngine:
                 trend_strength = max(1.0, 10.0 - score * 0.7)
                 affected = self._topic_to_coins(symbol) or [symbol]
                 
+                coin_id = item.get("id")
+                if not isinstance(coin_id, str) or not coin_id or not symbol:
+                    continue
                 topics.append({
                     "topic": symbol,
                     "name": name,
+                    "asset_id": "coingecko:" + coin_id,
+                    "source_item_id": coin_id,
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
                     "rank": i + 1,
                     "trend_strength": trend_strength,
                     "source": "coingecko_trending",
@@ -2248,6 +2254,9 @@ class HotSearchEngine:
                         "rank": i + 1,
                         "trend_strength": min(10.0, 5.0 + abs(coin.change_24h) * 0.3),
                         "source": "market_gainer",
+                        "asset_id": getattr(coin, "asset_id", ""),
+                        "source_item_id": getattr(coin, "asset_id", ""),
+                        "observed_at": getattr(coin, "observed_at", ""),
                         "affected_coins": [coin.symbol],
                         "narrative": self._detect_narrative(coin.symbol),
                         "hot_search_score": min(10.0, 4.0 + abs(coin.change_24h) * 0.3),
@@ -2261,6 +2270,9 @@ class HotSearchEngine:
                     "rank": 10 + i + 1,
                     "trend_strength": min(10.0, 3.0 + coin.volume_ratio * 2),
                     "source": "market_volume",
+                    "asset_id": getattr(coin, "asset_id", ""),
+                    "source_item_id": getattr(coin, "asset_id", ""),
+                    "observed_at": getattr(coin, "observed_at", ""),
                     "affected_coins": [coin.symbol],
                     "narrative": self._detect_narrative(coin.symbol),
                     "hot_search_score": min(10.0, 3.0 + coin.volume_ratio * 1.5),
@@ -3533,15 +3545,30 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                 LOGGER.debug("Filter error for %s: %s", coin.symbol, e)
                 continue
     
-def _persist_layer1_market_intelligence(candidates, database_path: str) -> dict:
+def _persist_layer1_market_intelligence(candidates, database_path: str, trend_records=None) -> dict:
     """Persist real market evidence and auditable candidate decisions; never fabricate scores."""
     from layer1.foundation import (
         AssetIdentity, BinanceListingEligibilityEngine, CandidateDiscoveryFilteringEngine,
-        Layer1Store, MarketObservation, RelevanceScore, RelevanceScoringEngine,
+        Layer1Store, MarketObservation, RelevanceScore, RelevanceScoringEngine, TrendSignal,
     )
 
     store = Layer1Store(database_path)
-    summary = {"observations": 0, "candidates": 0, "ready": 0, "rejected": 0, "scores_deferred": 0}
+    summary = {"observations": 0, "trends": 0, "candidates": 0, "ready": 0, "rejected": 0, "scores_deferred": 0}
+    trend_signals = []
+    for record in (trend_records or []):
+        asset_id = record.get("asset_id")
+        source = record.get("source")
+        source_item_id = record.get("source_item_id")
+        observed_at = record.get("observed_at")
+        topic = record.get("topic")
+        if not all(isinstance(value, str) and value for value in (asset_id, source, observed_at, topic)):
+            continue
+        signal = TrendSignal(topic, source, observed_at, record.get("rank"), (asset_id,), source_item_id or "")
+        try:
+            signal.validate()
+            trend_signals.append(signal)
+        except ValueError:
+            LOGGER.warning("Layer 1 ignored invalid trend evidence from %s", source)
     try:
         allowed_quotes = {
             value.strip().upper()
@@ -3551,6 +3578,9 @@ def _persist_layer1_market_intelligence(candidates, database_path: str) -> dict:
         eligibility_engine = BinanceListingEligibilityEngine(tuple(sorted(allowed_quotes)))
         candidate_engine = CandidateDiscoveryFilteringEngine()
         scoring_engine = RelevanceScoringEngine()
+        for signal in trend_signals:
+            store.save_trend(signal)
+            summary["trends"] += 1
         for coin in candidates:
             asset_id = getattr(coin, "asset_id", "")
             observed_at = getattr(coin, "observed_at", "")
@@ -3583,7 +3613,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str) -> dict:
             )
             store.save_market(market)
             summary["observations"] += 1
-            candidate = candidate_engine.build(identity, eligibility, [market], [], [])
+            asset_trends = [signal for signal in trend_signals if asset_id in signal.asset_ids]
+            candidate = candidate_engine.build(identity, eligibility, [market], [], asset_trends)
             store.save_candidate(candidate)
             summary["candidates"] += 1
             summary["ready" if candidate.state == "READY_FOR_RESEARCH" else "rejected"] += 1
@@ -3606,7 +3637,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str) -> dict:
 
 
     try:
-        _persist_layer1_market_intelligence(candidates, config.database_path)
+        trend_records = hot_search_engine.get_trending(force_refresh=True) if hot_search_engine else []
+        _persist_layer1_market_intelligence(candidates, config.database_path, trend_records)
     except Exception as exc:
         LOGGER.error("Layer 1 evidence persistence failed; stopping cycle: %s", exc)
         return False
