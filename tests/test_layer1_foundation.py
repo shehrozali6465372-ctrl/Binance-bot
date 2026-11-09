@@ -232,14 +232,22 @@ class Layer1FoundationTests(unittest.TestCase):
             "status": "TRADING", "isSpotTradingAllowed": True
         }]}
         try:
-            result = main._persist_layer1_market_intelligence([coin], self.db)
+            trend = {
+                "topic": "BTC", "source": "coingecko_trending",
+                "source_item_id": "bitcoin", "asset_id": "coingecko:bitcoin",
+                "observed_at": iso(), "rank": 1,
+            }
+            result = main._persist_layer1_market_intelligence([coin], self.db, [trend])
             self.assertEqual(result["observations"], 1)
+            self.assertEqual(result["trends"], 1)
             self.assertEqual(result["candidates"], 1)
             conn = sqlite3.connect(self.db)
             try:
                 row = conn.execute("SELECT state, evidence_refs_json FROM layer1_candidates").fetchone()
                 self.assertEqual(row[0], "READY_FOR_RESEARCH")
                 self.assertIn("BTCUSDT", row[1])
+                self.assertIn("coingecko:bitcoin", row[1])
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_trend_signals").fetchone()[0], 1)
                 score = conn.execute("SELECT score, reason FROM layer1_candidate_scores").fetchone()
                 self.assertEqual(score[0], 0.0)
                 self.assertIn("deferred", score[1])
