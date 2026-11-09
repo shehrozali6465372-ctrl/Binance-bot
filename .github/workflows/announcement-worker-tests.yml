@@ -1,0 +1,32 @@
+name: Binance CMS Announcement Worker Tests
+
+on:
+  push:
+    branches:
+      - feature/binance-cms-announcement-worker
+    paths:
+      - "announcement-worker/**"
+      - ".github/workflows/announcement-worker-tests.yml"
+  pull_request:
+    paths:
+      - "announcement-worker/**"
+      - ".github/workflows/announcement-worker-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mocked-announcement-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+      - name: Run offline mocked tests
+        working-directory: announcement-worker
+        run: npm test
