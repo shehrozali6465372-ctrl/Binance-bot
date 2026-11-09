@@ -95,6 +95,14 @@ class Layer1FoundationTests(unittest.TestCase):
                 "BTCUSDT", self.identity.asset_id
             )
 
+    def test_market_and_trend_evidence_rejects_future_timestamps(self):
+        future = iso(3600)
+        market = MarketObservation(self.identity.asset_id, "provider", "/market", future, price=10)
+        with self.assertRaisesRegex(ValueError, "future"):
+            market.validate()
+        with self.assertRaisesRegex(ValueError, "future"):
+            TrendSignal("BTC", "source", future).validate()
+
     def test_module2_rejects_synthetic_or_invalid_history_values(self):
         item = MarketObservation(self.identity.asset_id, "provider", "/market", iso(),
                                  price=10, history=(10, -1))
