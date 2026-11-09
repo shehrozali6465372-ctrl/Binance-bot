@@ -102,8 +102,10 @@ class AnnouncementImporterTests(unittest.TestCase):
             "-c default_transaction_read_only=on",
         )
         self.assertIn("SELECT", connection.fake_cursor.query.upper())
-        self.assertNotIn("INSERT", connection.fake_cursor.query.upper())
-        self.assertNotIn("UPDATE", connection.fake_cursor.query.upper())
+        self.assertNotRegex(
+            connection.fake_cursor.query,
+            r"(?im)^\\s*(INSERT|UPDATE|DELETE|ALTER|DROP|CREATE)\\b",
+        )
 
     def test_free_standing_ticker_word_does_not_match(self):
         connect, _ = self.connector([
