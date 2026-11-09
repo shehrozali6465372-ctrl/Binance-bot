@@ -151,6 +151,14 @@ def import_recent_binance_announcements(
                     raise ValueError("announcement identity or provenance is missing")
                 if not isinstance(body, str):
                     raise ValueError("announcement body must be text")
+                # PostgreSQL CHAR columns can be blank-padded; normalize them
+                # before hashing/validation and persistence.
+                source_id = source_id.strip()
+                content_hash = content_hash.strip()
+                event_type = event_type.strip()
+                title = title.strip()
+                publisher = publisher.strip()
+                source_url = source_url.strip()
                 asset_ids = _matched_asset_ids(title, body, symbol_index, ambiguous_symbols)
                 if not asset_ids:
                     result["unmatched_rows"] += 1
