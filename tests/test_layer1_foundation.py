@@ -1,3 +1,4 @@
+import ast
 import json
 import time
 import os
@@ -570,6 +571,27 @@ class Layer1FoundationTests(unittest.TestCase):
             main._binance_spot_pairs_cache = old_pairs
             main._binance_spot_snapshot_observed_at = old_snapshot
 
+
+
+    def test_runtime_ast_keeps_layer1_gate_and_publisher_in_one_execution_path(self):
+        source = open(main.__file__, encoding="utf-8").read()
+        module = ast.parse(source)
+        functions = {
+            node.name: node for node in module.body if isinstance(node, ast.FunctionDef)
+        }
+        self.assertIn("_run_once_impl", functions)
+        self.assertIn("_persist_layer1_market_intelligence", functions)
+        runtime = functions["_run_once_impl"]
+        call_names = set()
+        for node in ast.walk(runtime):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    call_names.add(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    call_names.add(node.func.attr)
+        self.assertIn("_persist_layer1_market_intelligence", call_names)
+        self.assertIn("_revalidate_binance_spot_asset", call_names)
+        self.assertIn("publish", call_names)
 
 if __name__ == "__main__":
     unittest.main()
