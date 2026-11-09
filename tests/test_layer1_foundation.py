@@ -154,7 +154,7 @@ class Layer1FoundationTests(unittest.TestCase):
         scanner = main.MarketScanner(AgentConfigShim())
         self.assertEqual(scanner._build_universe(), [])
         self.assertEqual(scanner._synthetic_history(100, 10), [])
-        with patch("main.http_get_json", side_effect=RuntimeError("provider unavailable")):
+        with patch("main._get_binance_listed", return_value={"BTC"}), patch("main.http_get_json", side_effect=RuntimeError("provider unavailable")):
             self.assertEqual(scanner._coingecko_universe(), [])
 
     def test_legacy_listing_check_fails_closed_without_static_allowlist(self):
