@@ -229,3 +229,40 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 3. Implement the separate Python importer only after reviewing existing Layer 1 data contracts and tests; importer must be read-only against the announcement ledger and must not change publisher behavior.
 4. Add integration tests proving announcement evidence reaches Layer 1 candidate evaluation without invoking the Square publisher.
 5. Keep PR unmerged and request explicit approval before any merge, deployment, or paid infrastructure.
+## Progress update — Layer 1 CMS importer and reproducible CI
+
+### Implemented on the feature branch
+- Added layer1/announcement_importer.py. It reads only recent documented CMS rows from binance_announcement_events using parameterized SELECT SQL; it sets PostgreSQL sslmode=require and default_transaction_read_only=on, uses a 5-second connect timeout, and closes cursor/connection.
+- Importer uses a 7-day lookback by default and caps reads at 250 rows (hard cap 1,000). It selects the latest stored revision per source_id.
+- Asset attribution is deliberately conservative: it accepts only uppercase ticker symbols in parentheses and only when the symbol maps to exactly one current candidate with a canonical coingecko asset ID. Ambiguous or free-standing symbol matches are rejected.
+- Validated AnnouncementEvidence is persisted into Layer1Store and passed into CandidateDiscoveryFilteringEngine.build() for the matching asset. The candidate evidence ledger now records announcement source IDs.
+- The importer is optional until ANNOUNCEMENT_DATABASE_URL is configured. Without that environment variable provider health is UNAVAILABLE_NO_DATABASE_URL and existing Layer 1 market flow remains unchanged. If configured but the read/import fails, the Layer 1 cycle fails closed.
+- No Square publisher code, publisher credentials, direct publishing routes, or publishing logic were changed. A dedicated integration test patches the publisher to raise if called and verifies announcement evidence reaches the Layer 1 candidate ledger.
+- Added tests for exact ticker matching, ambiguous symbol rejection, free-standing ticker rejection, invalid event rejection, read-only SQL, TLS/read-only connection options, query time window, and Layer 1 evidence integration.
+
+### Worker SDK and dependency verification
+- Added announcement-worker/package-lock.json (lockfile v3, 48 installed packages) using Node v22.23.1 / npm 10.9.8.
+- announcement-worker/package.json now declares type=module.
+- CI now runs npm ci and an offline official @binance/cms SDK export/constructor contract test; it does not open a live Binance connection.
+- Verified locally on the authorized device in /tmp/binance-bot-check: npm ci completed and Node tests passed 13/13.
+
+### Verified CI result
+- Latest verified feature commit: d47466f3aa10c7695929a4be18b3dad3367ef900.
+- GitHub Actions run 42719504744 completed SUCCESS for that exact commit.
+- Node job: 13 passed, 0 failed; npm ci completed.
+- Python Layer 1 job: 62 tests passed; Python compileall passed.
+- The Python importer tests use an injected fake connector. No real PostgreSQL server, Binance WebSocket, or Square publishing endpoint was contacted.
+- The earlier failing CI runs were corrected; the latest run is green. Do not treat earlier failed runs as the final state.
+
+### Activation blockers / boundaries
+- The current scheduled run_bot.yml workflow still installs Pillow only and does not provide ANNOUNCEMENT_DATABASE_URL or psycopg. The importer is therefore implemented and tested but not active in the scheduled production workflow.
+- Wiring the new database secret and psycopg dependency into the existing scheduled publisher workflow requires a separate explicit approval because it changes that workflow's environment. No credentials or secrets were added or read.
+- No live worker service, PostgreSQL database, Render service, Cloudflare resource, or paid resource has been created. No live Binance CMS connection was opened and no real Square post was published.
+- PR #2 remains open, draft, and unmerged.
+
+### Next steps
+1. Add mocked worker lifecycle tests for transport error/close events, queued message handling, shutdown and pool cleanup; no network access.
+2. Review importer SQL against a disposable PostgreSQL test instance or equivalent controlled fixture before production activation.
+3. Obtain explicit approval before modifying run_bot.yml to install psycopg and pass ANNOUNCEMENT_DATABASE_URL from a GitHub secret. The secret itself must be created by the repository owner; never place its value in code or context.
+4. Confirm worker runtime/database hosting and exact costs before provisioning; no paid resources without approval.
+5. Keep PR #2 unmerged and deployment disabled until integration, security review, and explicit approval are complete.
