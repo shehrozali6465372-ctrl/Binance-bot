@@ -1,4 +1,5 @@
 import json
+import time
 import os
 import sqlite3
 import tempfile
@@ -19,6 +20,17 @@ from layer1.foundation import (
 
 def iso(delta_seconds=0):
     return (datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)).isoformat()
+
+
+class FakeHTTPResponse:
+    def __init__(self, payload):
+        self.payload = json.dumps(payload).encode("utf-8")
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return False
+    def read(self):
+        return self.payload
 
 
 class AgentConfigShim:
@@ -163,6 +175,31 @@ class Layer1FoundationTests(unittest.TestCase):
         with patch("main.urllib.request.urlopen", side_effect=OSError("offline")):
             self.assertEqual(main._get_binance_listed(), set())
 
+    def test_legacy_listing_snapshot_requires_fresh_server_time_and_quote_asset(self):
+        payload = {"serverTime": int(time.time() * 1000), "symbols": [
+            {"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
+             "status": "TRADING", "isSpotTradingAllowed": True},
+            {"symbol": "BTCUSDC", "baseAsset": "BTC", "quoteAsset": "USDC",
+             "status": "TRADING", "isSpotTradingAllowed": True},
+        ]}
+        main._binance_listed_cache = None
+        with patch("main.urllib.request.urlopen", return_value=FakeHTTPResponse(payload)):
+            self.assertEqual(main._get_binance_listed(), {"BTC"})
+        stale = {**payload, "serverTime": int((time.time() - 3600) * 1000)}
+        main._binance_listed_cache = None
+        with patch("main.urllib.request.urlopen", return_value=FakeHTTPResponse(stale)):
+            self.assertEqual(main._get_binance_listed(), set())
+
+    def test_run_once_integrates_layer1_run_lease(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
+        with patch("main._run_once_impl", return_value=True):
+            self.assertTrue(main.run_once(cfg, None, None, None, None, None, set()))
+        conn = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_run_lease").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_runs WHERE status='SUCCEEDED'").fetchone()[0], 1)
+        finally:
+            conn.close()
     def test_legacy_candidate_filter_requires_canonical_asset_identity(self):
         with patch("main._get_binance_listed", return_value={"BTC"}):
             accepted = main._passes_objective_filters(
