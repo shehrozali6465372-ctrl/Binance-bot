@@ -183,11 +183,16 @@ _binance_listed_cache_time = 0
 _binance_spot_pairs_cache = {}
 _binance_spot_snapshot_observed_at = None
 
-def _get_binance_listed() -> set:
+def _get_binance_listed(force_refresh: bool = False) -> set:
     """Return active Binance Spot base assets and retain the provider's exact snapshot time."""
     global _binance_listed_cache, _binance_listed_cache_time
     global _binance_spot_pairs_cache, _binance_spot_snapshot_observed_at
     now = time.time()
+    if force_refresh:
+        _binance_listed_cache = None
+        _binance_listed_cache_time = 0
+        _binance_spot_pairs_cache = {}
+        _binance_spot_snapshot_observed_at = None
     if _binance_listed_cache is not None and (now - _binance_listed_cache_time) < 300:
         return _binance_listed_cache
     try:
@@ -242,6 +247,41 @@ def _get_binance_listed() -> set:
         _binance_spot_pairs_cache = {}
         _binance_spot_snapshot_observed_at = None
         return set()
+
+
+def _revalidate_binance_spot_asset(symbol: str, asset_id: str) -> bool:
+    """Refresh official metadata and re-check the exact canonical asset/pair before authorization."""
+    from layer1.foundation import AssetIdentity, BinanceListingEligibilityEngine
+
+    normalized_symbol = symbol.strip().upper() if isinstance(symbol, str) else ""
+    if not normalized_symbol or not isinstance(asset_id, str) or not asset_id.startswith("coingecko:"):
+        return False
+    current_listed = _get_binance_listed(force_refresh=True)
+    allowed_quotes = {
+        value.strip().upper()
+        for value in os.getenv("BINANCE_ALLOWED_QUOTE_ASSETS", "USDT").split(",")
+        if value.strip()
+    }
+    if normalized_symbol not in current_listed or not allowed_quotes:
+        return False
+    matching_pairs = sorted(
+        [
+            item for item in _binance_spot_pairs_cache.get(normalized_symbol, [])
+            if item.get("quoteAsset") in allowed_quotes
+            and item.get("baseAsset") == normalized_symbol
+            and item.get("status") == "TRADING"
+            and item.get("isSpotTradingAllowed") is True
+        ],
+        key=lambda item: (item.get("quoteAsset", ""), item.get("symbol", "")),
+    )
+    if not matching_pairs:
+        return False
+    quote_asset = matching_pairs[0]["quoteAsset"]
+    identity = AssetIdentity(asset_id, asset_id, normalized_symbol, quote_asset)
+    decision = BinanceListingEligibilityEngine(tuple(sorted(allowed_quotes))).evaluate(
+        identity, {"symbols": matching_pairs}, verified_at=_binance_spot_snapshot_observed_at
+    )
+    return decision.status == "ELIGIBLE" and bool(decision.eligible_pairs)
 
 
 # ─── SCORING WEIGHTS (configurable) ───
@@ -925,6 +965,7 @@ class Coin:
             "market_cap": self.market_cap,
             "history": self.history,
             "liquidity": self.liquidity,
+            "asset_id": getattr(self, "asset_id", ""),
         }
 
 
@@ -3564,7 +3605,11 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
     )
 
     store = Layer1Store(database_path)
-    summary = {"observations": 0, "trends": 0, "candidates": 0, "ready": 0, "rejected": 0, "scores_deferred": 0}
+    summary = {
+        "observations": 0, "trends": 0, "candidates": 0,
+        "ready": 0, "rejected": 0, "scores_deferred": 0,
+        "ready_asset_ids": [],
+    }
     trend_signals = []
     for record in (trend_records or []):
         asset_id = record.get("asset_id")
@@ -3637,6 +3682,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             store.save_candidate(candidate)
             summary["candidates"] += 1
             summary["ready" if candidate.state == "READY_FOR_RESEARCH" else "rejected"] += 1
+            if candidate.state == "READY_FOR_RESEARCH":
+                summary["ready_asset_ids"].append(asset_id)
             # The five editorial relevance inputs are not all available in market data.
             # Persist an explicit deferred score rather than inventing evidence.
             score = scoring_engine.score(candidate, {
@@ -3657,7 +3704,18 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
 
     try:
         trend_records = hot_search_engine.get_trending(force_refresh=True) if hot_search_engine else []
-        _persist_layer1_market_intelligence(candidates, config.database_path, trend_records)
+        layer1_summary = _persist_layer1_market_intelligence(
+            candidates, config.database_path, trend_records
+        )
+        ready_asset_ids = set(layer1_summary.get("ready_asset_ids", []))
+        candidates = [
+            coin for coin in candidates
+            if getattr(coin, "asset_id", "") in ready_asset_ids
+        ]
+        LOGGER.info(
+            "Layer 1 discovery gate: %d/%d candidates remain research-eligible",
+            len(candidates), len(ready_asset_ids),
+        )
     except Exception as exc:
         LOGGER.error("Layer 1 evidence persistence failed; stopping cycle: %s", exc)
         return False
@@ -4045,7 +4103,18 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
     
     LOGGER.info("Quality gate PASSED for $%s (%d words, %d hashtags)",
                 best_coin["symbol"], word_count, len(hashtags))
-    
+
+    # Re-check exact Binance Spot eligibility against a freshly fetched official
+    # exchangeInfo snapshot immediately before expensive media work / authorization.
+    if not _revalidate_binance_spot_asset(
+        best_coin.get("symbol", ""), best_coin.get("asset_id", "")
+    ):
+        LOGGER.warning(
+            "FINAL ELIGIBILITY BLOCK: $%s is not freshly verified on the exact Binance Spot pair",
+            best_coin.get("symbol", ""),
+        )
+        return False
+
     # ──────────────────────────────────────────────
     # 7a. IMAGE INTELLIGENCE (after quality gate, before publish)
     # Uses official Binance Square /image/presignedUrl + /image/imageStatus flow
