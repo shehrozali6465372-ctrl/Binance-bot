@@ -266,3 +266,29 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 3. Obtain explicit approval before modifying run_bot.yml to install psycopg and pass ANNOUNCEMENT_DATABASE_URL from a GitHub secret. The secret itself must be created by the repository owner; never place its value in code or context.
 4. Confirm worker runtime/database hosting and exact costs before provisioning; no paid resources without approval.
 5. Keep PR #2 unmerged and deployment disabled until integration, security review, and explicit approval are complete.
+
+## Continuation update — current branch verification (2026-11-10 UTC)
+
+This section supersedes earlier status/gap statements above where they conflict.
+
+- Current feature branch HEAD before the optional-import failure fix: 8f43849d3464e6ce5432b3f9ccc3b50456640d67 (branch: feature/binance-cms-announcement-worker).
+- PR #2 remains open, draft, and unmerged: https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/2.
+- Latest verified GitHub Actions run before this fix: run 42719943415, head 8f43849d3464e6ce5432b3f9ccc3b50456640d67, conclusion SUCCESS. Both mocked-announcement-tests and python-layer1-tests passed.
+- The worker now has a committed npm lockfile, npm ci in CI, an offline official SDK export/constructor contract test, and mocked lifecycle tests for message persistence, transport error/reconnect state, failed connection cleanup, database initialization failure cleanup, and graceful shutdown.
+- The Python importer and Layer 1 integration are implemented on this feature branch. Tests verify that imported announcement evidence reaches candidate evaluation and that the Square publisher is not instantiated.
+- Worker CI does not perform a live Binance connection or real PostgreSQL integration. Python importer tests inject a fake connector; they do not prove real PostgreSQL compatibility.
+- Root scheduled .github/workflows/run_bot.yml currently installs Pillow only and does not configure ANNOUNCEMENT_DATABASE_URL or install psycopg. Therefore the importer is not activated by the existing scheduled workflow. Do not modify that workflow or add its secret/dependency without separate explicit approval.
+- A configured importer failure previously propagated before the Layer1Store cleanup block, potentially interrupting the established cycle and leaking the SQLite connection. The current continuation fix wraps this optional enrichment read, records DEGRADED_IMPORT_FAILED without logging exception text/DSNs, and allows the established market-data path to continue. A regression test covers that behavior.
+- announcement-worker currently creates its PostgreSQL tables at startup. Before production, split schema migration privileges from the runtime worker role; do not give the listener a broad owner/admin credential.
+- sslmode=require encrypts the importer connection but does not provide the strongest hostname verification. Before production, decide and test a certificate-verifying TLS mode supported by the selected database provider.
+- No Binance API key, database secret, production connection, paid resource, Render service, Cloudflare resource, or live Square post was created or used in this continuation.
+- No production deployment, PR merge, or publisher workflow change was performed.
+
+### Remaining production gates
+1. Confirm a dedicated durable PostgreSQL instance and exact monthly cost; obtain explicit approval before provisioning.
+2. Create separate migration and least-privilege worker/importer database roles.
+3. Confirm the Python runtime dependency installation strategy for psycopg; this requires approval before changing the scheduled workflow.
+4. Test worker persistence and importer query against a disposable real PostgreSQL instance with no production credentials.
+5. Validate TLS certificate/hostname verification, secret rotation, and Render environment configuration.
+6. Run a controlled live Binance CMS connectivity test only after credentials and infrastructure are explicitly approved; keep Square publishing disabled throughout.
+7. Review PR merge conflicts/base branch and obtain explicit merge/deployment approval.

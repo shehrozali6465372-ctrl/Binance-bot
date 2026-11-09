@@ -92,6 +92,49 @@ class AnnouncementLayer1IntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_failed_optional_cms_import_degrades_without_blocking_market_pipeline(self):
+        now = datetime.now(timezone.utc).isoformat()
+        coin = SimpleNamespace(
+            asset_id="coingecko:bitcoin",
+            observed_at=now,
+            market_data_source="coingecko_markets",
+            symbol="BTC",
+            name="Bitcoin",
+            price=65000.0,
+            change_24h=1.5,
+            volume_24h=1000000.0,
+            market_cap=1000000000.0,
+            history=(),
+            provider_published_at=now,
+            market_data_hash="c" * 64,
+        )
+        pairs = [{
+            "symbol": "BTCUSDT",
+            "baseAsset": "BTC",
+            "quoteAsset": "USDT",
+            "status": "TRADING",
+            "isSpotTradingAllowed": True,
+        }]
+
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(directory, "layer1-failed-import.sqlite")
+            with (
+                patch.dict(os.environ, {"ANNOUNCEMENT_DATABASE_URL": "postgresql://redacted.example/db"}),
+                patch.object(main, "_binance_spot_pairs_cache", {"BTC": pairs}),
+                patch.object(main, "_binance_spot_snapshot_observed_at", now),
+                patch(
+                    "layer1.announcement_importer.import_recent_binance_announcements",
+                    side_effect=RuntimeError("connection failed: postgresql://secret@host/db"),
+                ),
+                patch.object(main, "PostPublisher", side_effect=AssertionError("publisher must not be called")),
+            ):
+                summary = main._persist_layer1_market_intelligence([coin], database_path, [])
+
+            self.assertEqual(summary["provider_health"]["binance_announcements"], "DEGRADED_IMPORT_FAILED")
+            self.assertEqual(summary["announcement_import_error_type"], "RuntimeError")
+            self.assertEqual(summary["observations"], 1)
+            self.assertEqual(summary["candidates"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
