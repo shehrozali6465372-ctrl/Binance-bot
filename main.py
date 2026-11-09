@@ -3194,6 +3194,9 @@ class PostPublisher:
     def _begin_attempt(self, key: str, symbol: str, content_hash: str) -> Optional[Dict[str, Any]]:
         """Atomically reserve an attempt; an existing key is never submitted again."""
         with self.db.conn:
+            # Acquire the SQLite write reservation before the read/check/insert
+            # sequence so concurrent publishers cannot both pass the pending check.
+            self.db.conn.execute("BEGIN IMMEDIATE")
             pending = self.db.conn.execute(
                 """
                 SELECT * FROM publication_attempts
