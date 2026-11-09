@@ -203,13 +203,31 @@ class Layer1FoundationTests(unittest.TestCase):
 
     def test_run_once_integrates_layer1_run_lease(self):
         cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
-        with patch("main._run_once_impl", return_value=True):
+        previous_summary = main._LAYER1_LAST_SUMMARY
+
+        def fake_runtime(*args):
+            main._LAYER1_LAST_SUMMARY = {
+                "provider_health": {"coingecko_market_data": "AVAILABLE"},
+                "rejected_inputs": 1,
+            }
+            return True
+
+        with patch("main._run_once_impl", side_effect=fake_runtime):
             self.assertTrue(main.run_once(cfg, None, None, None, None, None, set()))
         conn = sqlite3.connect(self.db)
         try:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_run_lease").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_runs WHERE status='SUCCEEDED'").fetchone()[0], 1)
+            summary_json = conn.execute(
+                "SELECT summary_json FROM layer1_runs WHERE status='SUCCEEDED'"
+            ).fetchone()[0]
+            summary = json.loads(summary_json)
+            self.assertEqual(
+                summary["layer1"]["provider_health"]["coingecko_market_data"], "AVAILABLE"
+            )
+            self.assertEqual(summary["layer1"]["rejected_inputs"], 1)
         finally:
+            main._LAYER1_LAST_SUMMARY = previous_summary
             conn.close()
     def test_legacy_candidate_filter_requires_canonical_asset_identity(self):
         with patch("main._get_binance_listed", return_value={"BTC"}):
@@ -256,6 +274,13 @@ class Layer1FoundationTests(unittest.TestCase):
             self.assertEqual(result["trends"], 1)
             self.assertEqual(result["candidates"], 1)
             self.assertEqual(result["ready_asset_ids"], ["coingecko:bitcoin"])
+            self.assertEqual(result["provider_health"]["binance_spot_metadata"], "AVAILABLE")
+            self.assertEqual(result["provider_health"]["coingecko_market_data"], "AVAILABLE")
+            self.assertEqual(result["provider_health"]["coingecko_trending"], "AVAILABLE")
+            self.assertEqual(
+                result["provider_health"]["binance_announcements"],
+                "UNAVAILABLE_NO_VERIFIED_DOCUMENTED_ADAPTER",
+            )
             conn = sqlite3.connect(self.db)
             try:
                 row = conn.execute("SELECT state, evidence_refs_json FROM layer1_candidates").fetchone()
@@ -591,7 +616,15 @@ class Layer1FoundationTests(unittest.TestCase):
                 elif isinstance(node.func, ast.Attribute):
                     call_names.add(node.func.attr)
         self.assertIn("_persist_layer1_market_intelligence", call_names)
-        self.assertIn("_revalidate_binance_spot_asset", call_names)
+        self.assertGreaterEqual(
+            sum(
+                1 for node in ast.walk(runtime)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_revalidate_binance_spot_asset"
+            ),
+            2,
+        )
         self.assertIn("publish", call_names)
 
 
