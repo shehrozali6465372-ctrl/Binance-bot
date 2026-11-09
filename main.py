@@ -347,7 +347,7 @@ def _load_post_history() -> dict:
     return posts
 
 
-def _append_post_record(symbol: str, catalyst: str, link: str, image_url: str = "", media_id: str = "") -> bool:
+def _append_post_record(symbol: str, catalyst: str, link: str, image_url: str = "", media_id: str = "", remote_post_id: str = "") -> bool:
     # Note: image_url can be a single URL string (legacy) or first entry of image_list
     # media_id kept for backward compatibility with JSONL records
     """Append a post record to the JSONL history file.
@@ -363,6 +363,7 @@ def _append_post_record(symbol: str, catalyst: str, link: str, image_url: str = 
         "link": link,
         "image_url": image_url if image_url else "",
         "media_id": media_id if media_id else "",
+        "remote_post_id": remote_post_id if remote_post_id else "",
     }
     json_line = json.dumps(record) + "\n"
     
@@ -3193,6 +3194,16 @@ class PostPublisher:
     def _begin_attempt(self, key: str, symbol: str, content_hash: str) -> Optional[Dict[str, Any]]:
         """Atomically reserve an attempt; an existing key is never submitted again."""
         with self.db.conn:
+            pending = self.db.conn.execute(
+                """
+                SELECT * FROM publication_attempts
+                WHERE coin_symbol = ? AND status IN ('SUBMITTING', 'PUBLICATION_UNKNOWN')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (symbol.upper(),),
+            ).fetchone()
+            if pending is not None:
+                return dict(pending)
             cur = self.db.conn.execute(
                 """
                 INSERT OR IGNORE INTO publication_attempts
@@ -3254,8 +3265,9 @@ class PostPublisher:
         if existing:
             old_status = str(existing.get("status") or "PUBLICATION_UNKNOWN")
             LOGGER.error("Duplicate submission blocked for %s; existing status=%s", symbol, old_status)
+            blocked_status = "DUPLICATE_BLOCKED" if old_status == "PUBLISHED_CONFIRMED" else "PUBLICATION_UNKNOWN"
             return PublishResult(
-                status=old_status,
+                status=blocked_status,
                 post_id=str(existing.get("remote_post_id") or ""),
                 share_link=str(existing.get("share_link") or ""),
                 http_status=existing.get("http_status"),
@@ -3957,7 +3969,8 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     persist_ok = False
     try:
         persist_ok = _append_post_record(
-            best_coin["symbol"], catalyst, link, image_list[0] if image_list else "", post_id
+            best_coin["symbol"], catalyst, link, image_list[0] if image_list else "",
+            remote_post_id=post_id,
         )
     except Exception as e:
         LOGGER.error("CRITICAL: Failed to persist confirmed publication: %s", e)
