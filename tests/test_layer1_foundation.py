@@ -221,6 +221,32 @@ class Layer1FoundationTests(unittest.TestCase):
         with patch.object(engine, "_from_announcements", return_value=[]), patch.object(engine, "_from_coingecko_trending", return_value=[]), patch.object(engine, "_from_market_data", return_value=[]), patch.object(engine, "_synthetic_topics", side_effect=AssertionError("synthetic called")):
             self.assertEqual(engine.get_trending(force_refresh=True), [])
 
+    def test_runtime_layer1_pipeline_persists_exact_exchange_pair_and_market_provenance(self):
+        coin = main.Coin("BTC", "Bitcoin", 65000, 1.2, 1_000_000, 1.5, 1_200_000_000_000, [64000, 65000])
+        coin.asset_id = "coingecko:bitcoin"
+        coin.observed_at = iso()
+        coin.market_data_source = "coingecko_markets"
+        old_pairs = main._binance_spot_pairs_cache
+        main._binance_spot_pairs_cache = {"BTC": [{
+            "symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
+            "status": "TRADING", "isSpotTradingAllowed": True
+        }]}
+        try:
+            result = main._persist_layer1_market_intelligence([coin], self.db)
+            self.assertEqual(result["observations"], 1)
+            self.assertEqual(result["candidates"], 1)
+            conn = sqlite3.connect(self.db)
+            try:
+                row = conn.execute("SELECT state, evidence_refs_json FROM layer1_candidates").fetchone()
+                self.assertEqual(row[0], "READY_FOR_RESEARCH")
+                self.assertIn("BTCUSDT", row[1])
+                score = conn.execute("SELECT score, reason FROM layer1_candidate_scores").fetchone()
+                self.assertEqual(score[0], 0.0)
+                self.assertIn("deferred", score[1])
+            finally:
+                conn.close()
+        finally:
+            main._binance_spot_pairs_cache = old_pairs
     def test_layer1_store_persists_source_provenance_candidate_reasons_and_score_version(self):
         eligibility = BinanceListingEligibilityEngine().evaluate(
             self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
