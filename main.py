@@ -1,5 +1,6 @@
 import json
 import os
+import hashlib
 import random
 import logging
 import re
@@ -18,56 +19,7 @@ from pathlib import Path
 # Image Intelligence
 from image_engine import ImageComposer, ImageUploader
 
-# --- Embedded Workflow YAML for self-update in GHA ---
-_NEW_WORKFLOW_B64 = """bmFtZTogQmluYW5jZSBTcXVhcmUgQXV0byBQb3N0ZXIKCm9uOgogIHNjaGVkdWxlOgogICAgLSBjcm9uOiAnKi81ICogKiAqIConCiAgd29ya2Zsb3dfZGlzcGF0Y2g6CgojIFByZXZlbnQgb3ZlcmxhcHBpbmcgcnVucyDigJQgaWYgYSBydW4gdGFrZXMgPjVtaW4sIG5leHQgb25lIHdhaXRzCmNvbmN1cnJlbmN5OgogIGdyb3VwOiBiaW5hbmNlLXNxdWFyZS1wb3N0ZXIKICBjYW5jZWwtaW4tcHJvZ3Jlc3M6IGZhbHNlCgpqb2JzOgogIHJ1bi1hZ2VudDoKICAgIHJ1bnMtb246IHVidW50dS1sYXRlc3QKCiAgICBwZXJtaXNzaW9uczoKICAgICAgY29udGVudHM6IHdyaXRlCiAgICAgIGFjdGlvbnM6IHdyaXRlCgogICAgc3RlcHM6CiAgICAgIC0gbmFtZTogQ2hlY2tvdXQgY29kZQogICAgICAgIHVzZXM6IGFjdGlvbnMvY2hlY2tvdXRAdjQKICAgICAgICB3aXRoOgogICAgICAgICAgZmV0Y2gtZGVwdGg6IDAKICAgICAgICAgIHRva2VuOiAke3sgc2VjcmV0cy5HSVRIVUJfVE9LRU4gfX0KCiAgICAgIC0gbmFtZTogU2V0IHVwIFB5dGhvbgogICAgICAgIHVzZXM6IGFjdGlvbnMvc2V0dXAtcHl0aG9uQHY1CiAgICAgICAgd2l0aDoKICAgICAgICAgIHB5dGhvbi12ZXJzaW9uOiAiMy4xMSIKCiAgICAgICMgUmVzdG9yZSBwZXJzaXN0ZW50IHN0YXRlIChhZ2VudC5kYikgZnJvbSBwcmV2aW91cyBydW4KICAgICAgLSBuYW1lOiBSZXN0b3JlIGFnZW50LmRiIGZyb20gY2FjaGUKICAgICAgICBpZDogY2FjaGUtcmVzdG9yZQogICAgICAgIHVzZXM6IGFjdGlvbnMvY2FjaGUvcmVzdG9yZUB2NAogICAgICAgIHdpdGg6CiAgICAgICAgICBwYXRoOiBhZ2VudC5kYgogICAgICAgICAga2V5OiBhZ2VudC1kYi0ke3sgZ2l0aHViLnJlZl9uYW1lIH19CgogICAgICAjIFJ1biB0aGUgYWdlbnQg4oCUIHNpbmdsZSBzY2FuLCBleGl0cyBpbW1lZGlhdGVseSBpZiBubyBvcHBvcnR1bml0eQogICAgICAtIG5hbWU6IFJ1biBDcnlwdG8gQWdlbnQKICAgICAgICBlbnY6CiAgICAgICAgICBHRU1JTklfQVBJX0tFWTogJHt7IHNlY3JldHMuR0VNSU5JX0FQSV9LRVkgfX0KICAgICAgICAgIFNRVUFSRV9BUElfS0VZOiAke3sgc2VjcmV0cy5TUVVBUkVfQVBJX0tFWSB9fQogICAgICAgICAgR0hfVE9LRU46ICR7eyBzZWNyZXRzLkdJVEhVQl9UT0tFTiB9fQogICAgICAgICAgRFJZX1JVTjogIjAiCiAgICAgICAgICBMSVZFX01BUktFVF9EQVRBOiAiMSIKICAgICAgICAgIFBPU1RfSU5URVJWQUw6ICIwIgogICAgICAgICAgTUFYX0lURVJBVElPTlM6ICIxIgogICAgICAgICAgTUFYX0RBSUxZX1BPU1RTOiAiOCIKICAgICAgICAgIEdFTUlOSV9NT0RFTDogImdlbWluaS0yLjUtZmxhc2giCiAgICAgICAgcnVuOiBweXRob24gbWFpbi5weQoKICAgICAgIyBQZXJzaXN0IHN0YXRlIGZvciBuZXh0IDUtbWludXRlIHJ1bgogICAgICAtIG5hbWU6IFNhdmUgYWdlbnQuZGIgdG8gY2FjaGUKICAgICAgICBpZjogYWx3YXlzKCkKICAgICAgICB1c2VzOiBhY3Rpb25zL2NhY2hlL3NhdmVAdjQKICAgICAgICB3aXRoOgogICAgICAgICAgcGF0aDogYWdlbnQuZGIKICAgICAgICAgIGtleTogYWdlbnQtZGItJHt7IGdpdGh1Yi5yZWZfbmFtZSB9fQoKICAgICAgIyBVcGxvYWQgb3V0cHV0cyBmb3IgcmV2aWV3IChvbmx5IHdoZW4gcG9zdCB3YXMgZ2VuZXJhdGVkKQogICAgICAtIG5hbWU6IFVwbG9hZCBhcnRpZmFjdHMKICAgICAgICBpZjogYWx3YXlzKCkKICAgICAgICB1c2VzOiBhY3Rpb25zL3VwbG9hZC1hcnRpZmFjdEB2NAogICAgICAgIHdpdGg6CiAgICAgICAgICBuYW1lOiBhZ2VudC1vdXRwdXQtJHt7IGdpdGh1Yi5ydW5faWQgfX0KICAgICAgICAgIHBhdGg6IHwKICAgICAgICAgICAgcG9zdHMvCiAgICAgICAgICAgIHJlc2VhcmNoLwogICAgICAgICAgICBwcm9tcHRzLwogICAgICAgICAgICBkcmFmdHMvCiAgICAgICAgICAgIGFnZW50LmRiCiAgICAgICAgICAgIHB1Ymxpc2hlZF9wb3N0cy5qc29ubAo="""
-
-def _maybe_update_workflow():
-    """Update workflow file when running in GHA (GITHUB_TOKEN has workflow scope)."""
-    import base64, json, urllib.request
-    
-    gha_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or os.getenv("INPUT_GITHUB_TOKEN")
-    repo_name = os.getenv("GITHUB_REPOSITORY", "")
-    workflow_path = ".github/workflows/run_bot.yml"
-    
-    if not gha_token or not repo_name:
-        LOGGER.debug("Not in GHA or no token -- skipping workflow update")
-        return
-    
-    try:
-        url = "https://api.github.com/repos/" + repo_name + "/contents/" + workflow_path
-        req = urllib.request.Request(url)
-        req.add_header("Authorization", "Bearer " + gha_token)
-        req.add_header("Accept", "application/vnd.github.v3+json")
-        
-        resp = urllib.request.urlopen(req)
-        current = json.loads(resp.read())
-        current_b64 = current.get("content", "").replace("\n", "")
-        sha = current.get("sha", "")
-        
-        expected_b64 = _NEW_WORKFLOW_B64.strip()
-        if current_b64.strip() == expected_b64:
-            LOGGER.info("Workflow already up to date")
-            return
-        
-        LOGGER.info("Updating workflow to 5-min schedule for repo=%s path=%s...", repo_name, workflow_path)
-        payload = json.dumps({
-            "message": "Auto-update: 5-minute opportunity scan model",
-            "content": expected_b64,
-            "sha": sha,
-        }).encode()
-        
-        req2 = urllib.request.Request(url, data=payload, method="PUT")
-        req2.add_header("Authorization", "Bearer " + gha_token)
-        req2.add_header("Accept", "application/vnd.github.v3+json")
-        req2.add_header("Content-Type", "application/json")
-        
-        resp2 = urllib.request.urlopen(req2)
-        result = json.loads(resp2.read())
-        LOGGER.info("Workflow updated! Commit: " + result.get("commit", {}).get("sha", "?"))
-    except Exception as e:
-        LOGGER.warning("Workflow update attempt failed: " + str(e)[:200])
-
-
+# Workflow files are deployment configuration and are never self-modified by the agent.
 
 @dataclass(frozen=True)
 class Config:
@@ -1065,6 +1017,29 @@ class Database:
                 )
                 """
             )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS publication_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    coin_symbol TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    remote_post_id TEXT UNIQUE,
+                    share_link TEXT,
+                    http_status INTEGER,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            # Additive migration: never drop or rewrite legacy rows.
+            analytics_columns = {
+                row["name"] for row in self.conn.execute("PRAGMA table_info(post_analytics)").fetchall()
+            }
+            if "remote_post_id" not in analytics_columns:
+                self.conn.execute("ALTER TABLE post_analytics ADD COLUMN remote_post_id TEXT")
 
     def save_post(self, post: Any) -> int:
         if isinstance(post, dict):
@@ -1219,8 +1194,9 @@ class PerformanceAnalyzer:
         post_content: str,
         decision_reason: str = "",
         square_link: str = "",
+        remote_post_id: str = "",
     ) -> None:
-        """Store full metadata for a published post."""
+        """Store metadata only for a confirmed remote publication."""
         symbol = coin.get("symbol", "")
         catalyst_type = coin.get("announcement_type", "market_move")
         narrative = coin.get("narrative", "")
@@ -1248,8 +1224,8 @@ class PerformanceAnalyzer:
                     INSERT INTO post_analytics (
                         coin_symbol, created_at, catalyst_type, narrative,
                         hook_style, trade_setup_style, decision_reason,
-                        word_count, hashtags, square_post_link
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        word_count, hashtags, square_post_link, remote_post_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         symbol,
@@ -1262,6 +1238,7 @@ class PerformanceAnalyzer:
                         word_count,
                         hashtags_str,
                         square_link,
+                        remote_post_id or None,
                     )
                 )
             LOGGER.info("Analytics: stored $%s (%s, %s, %d words)",
@@ -1278,17 +1255,18 @@ class PerformanceAnalyzer:
         shares: int = None,
         traders: int = None,
         reward: float = None,
+        remote_post_id: str = None,
     ) -> bool:
-        """Update performance metrics for the latest post of a coin."""
+        """Update metrics only for the explicitly identified remote post."""
         try:
             with self.db.conn:
                 cursor = self.db.conn.execute(
                     """
                     SELECT id FROM post_analytics
-                    WHERE coin_symbol = ? AND views IS NULL
+                    WHERE coin_symbol = ? AND remote_post_id = ? AND views IS NULL
                     ORDER BY created_at DESC LIMIT 1
                     """,
-                    (coin_symbol.upper(),)
+                    (coin_symbol.upper(), remote_post_id)
                 )
                 row = cursor.fetchone()
                 if not row:
@@ -3178,159 +3156,210 @@ class GeminiGenerator:
         rankings.sort(key=lambda r: r.get('rank', 999))
         
         return rankings
+
+@dataclass(frozen=True)
+class PublishResult:
+    status: str
+    share_link: str = ""
+    post_id: str = ""
+    local_post_id: Optional[int] = None
+    http_status: Optional[int] = None
+    error: str = ""
+
+    @property
+    def confirmed(self) -> bool:
+        return self.status == "PUBLISHED_CONFIRMED"
+
+
 class PostPublisher:
+    """Single controlled publisher with durable no-blind-retry semantics."""
+
+    API_URL = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
+
     def __init__(self, config: Config = CONFIG):
         self.config = config
         self.db = Database(config.database_path)
 
-    def publish(self, coin: Dict[str, Any], content: str, image_list: Optional[List[str]] = None) -> str:
-        if image_list is None:
-            image_list = []
-        # Check if this is a draft template (Gemini failed) - don't publish low quality
+    @staticmethod
+    def _idempotency_key(symbol: str, content: str, image_list: List[str]) -> str:
+        material = json.dumps(
+            {"symbol": symbol.upper().strip(), "content": content, "images": image_list},
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def _begin_attempt(self, key: str, symbol: str, content_hash: str) -> Optional[Dict[str, Any]]:
+        """Atomically reserve an attempt; an existing key is never submitted again."""
+        with self.db.conn:
+            cur = self.db.conn.execute(
+                """
+                INSERT OR IGNORE INTO publication_attempts
+                    (idempotency_key, coin_symbol, content_hash, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'SUBMITTING', ?, ?)
+                """,
+                (key, symbol.upper(), content_hash, utc_now(), utc_now()),
+            )
+            row = self.db.conn.execute(
+                "SELECT * FROM publication_attempts WHERE idempotency_key = ?", (key,)
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Could not reserve publication attempt")
+        if cur.rowcount == 0:
+            return dict(row)
+        return None
+
+    def _finish_attempt(
+        self, key: str, status: str, *, post_id: str = "", share_link: str = "",
+        http_status: Optional[int] = None, error: str = ""
+    ) -> None:
+        with self.db.conn:
+            self.db.conn.execute(
+                """
+                UPDATE publication_attempts
+                SET status = ?, remote_post_id = ?, share_link = ?, http_status = ?,
+                    error = ?, updated_at = ?
+                WHERE idempotency_key = ?
+                """,
+                (status, post_id or None, share_link or None, http_status, error[:1000], utc_now(), key),
+            )
+
+    def publish(self, coin: Dict[str, Any], content: str,
+                image_list: Optional[List[str]] = None) -> PublishResult:
+        images = list(image_list or [])
+        symbol = str(coin.get("symbol", "UNKNOWN")).upper().strip()
+
         if content.startswith("[DRAFT_TEMPLATE]"):
-            actual_content = content.replace("[DRAFT_TEMPLATE]", "", 1)
-            LOGGER.warning("Template fallback content - saving as draft only, not publishing to Square")
-            self._save_locally(coin, actual_content, share_link="[DRAFT-Skipped-Gemini-unavailable]")
-            try:
-                self.db.save_post({"content": actual_content, "coin_symbol": coin.get("symbol", "")})
-            except Exception:
-                pass
-            return ""
+            actual = content.replace("[DRAFT_TEMPLATE]", "", 1)
+            self._save_locally(coin, actual, share_link="[DRAFT-ONLY]")
+            return PublishResult(status="DRAFT_ONLY")
+
         if self.config.dry_run:
-            LOGGER.info("[DRY-RUN] Would publish post for %s", coin.get("symbol"))
+            LOGGER.info("[DRY-RUN] Would publish post for %s; no network POST attempted", symbol)
             self._save_locally(coin, content, share_link="[DRY-RUN]")
-            try:
-                self.db.save_post({"content": content, "coin_symbol": coin.get("symbol", "")})
-            except Exception as e:
-                LOGGER.warning("Could not save post to DB: %s", e)
-            return "[DRY-RUN]"
+            return PublishResult(status="DRY_RUN")
 
-        share_link = self._try_square_api(coin, content, image_list)
-        if share_link:
-            LOGGER.info("\U0001f4e1 Published successfully with link: %s", share_link)
-            self._save_locally(coin, content, share_link=share_link)
-        else:
-            LOGGER.warning("Square API failed, saving locally")
-            self._save_locally(coin, content, share_link=None)
-        # Save to database for tracking
+        if not self.config.square_api_key:
+            return PublishResult(status="FAILED_CONFIRMED", error="SQUARE_API_KEY is not configured")
+
+        key = self._idempotency_key(symbol, content, images)
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         try:
-            self.db.save_post({"content": content, "coin_symbol": coin.get("symbol", "")})
-        except Exception as e:
-            LOGGER.warning("Could not save post to database: %s", e)
-        return share_link or ""
+            existing = self._begin_attempt(key, symbol, content_hash)
+        except Exception as exc:
+            # Fail closed: do not submit unless the durable attempt reservation exists.
+            return PublishResult(status="FAILED_CONFIRMED", error=f"ledger reservation failed: {exc}")
 
-    def _try_square_api(self, coin: Dict[str, Any], content: str, image_list: Optional[List[str]] = None) -> str:
-        """Publish to Binance Square via official Creator Center API.
-        
-        Image strategy (from binance-skills-hub square-post skill):
-        1. If image_list has URLs → contentType=1 with imageList (native feed image post)
-        2. No images → text-only (contentType=1 without imageList)
-        
-        Native image posts use contentType=1 + imageList, NOT contentType=2.
-        contentType=2 creates an Article type (/cart/ link) which is not desired.
-        """
-        if image_list is None:
-            image_list = []
-        
-        square_key = self.config.square_api_key
-        if not square_key:
-            LOGGER.warning("No SQUARE_API_KEY set, saving locally")
-            return ""
+        if existing:
+            old_status = str(existing.get("status") or "PUBLICATION_UNKNOWN")
+            LOGGER.error("Duplicate submission blocked for %s; existing status=%s", symbol, old_status)
+            return PublishResult(
+                status=old_status,
+                post_id=str(existing.get("remote_post_id") or ""),
+                share_link=str(existing.get("share_link") or ""),
+                http_status=existing.get("http_status"),
+                error="Existing idempotency key; automatic resubmission blocked",
+            )
 
+        payload = {"contentType": 1, "bodyTextOnly": self._limit_hashtags(content)}
+        if images:
+            payload["imageList"] = images
         headers = {
-            "X-Square-OpenAPI-Key": square_key,
+            "X-Square-OpenAPI-Key": self.config.square_api_key,
             "Content-Type": "application/json",
             "clienttype": "binanceSkill",
         }
-        url = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
-        
-        # Strategy 1: Native feed image post (contentType=1 + imageList)
-        if image_list:
-            payload = {
-                "contentType": 1,
-                "bodyTextOnly": self._limit_hashtags(content),
-                "imageList": image_list,
-            }
-            LOGGER.info("Publishing native image post (contentType=1) with %d image(s): %s",
-                       len(image_list), image_list[0][:60] if image_list else "N/A")
-            result = self._try_publish(url, headers, payload)
-            if result:
-                LOGGER.info("Native image publish SUCCESS")
-                return result
-            LOGGER.warning("Native image publish FAILED, falling back to text-only")
-        
-        # Strategy 2: Text-only (contentType=1, no imageList)
-        payload_text = {
-            "contentType": 1,
-            "bodyTextOnly": self._limit_hashtags(content),
-        }
-        LOGGER.info("Publishing text-only (no image)")
-        return self._try_publish(url, headers, payload_text) or ""
-    
-    def _try_publish(self, url: str, headers: dict, payload: dict) -> str:
-        """Attempt to publish a post with the given payload.
-        
-        Returns share link string on success, empty string on failure.
-        """
+
         try:
-            data_bytes = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=self.config.http_timeout_seconds) as resp:
-                resp_body = resp.read().decode("utf-8", errors="replace")
+            request = urllib.request.Request(
+                self.API_URL,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=self.config.http_timeout_seconds) as response:
+                http_status = response.status
+                body = response.read().decode("utf-8", errors="replace")
+            parsed = json.loads(body)
+            if parsed.get("code") != "000000":
+                message = str(parsed.get("message") or parsed.get("messageDetail") or "Binance rejected request")
+                self._finish_attempt(key, "FAILED_CONFIRMED", http_status=http_status, error=message)
+                return PublishResult(status="FAILED_CONFIRMED", http_status=http_status, error=message)
 
-            LOGGER.info("Square API response: HTTP %d %s", resp.status, resp_body[:300])
-            data = json.loads(resp_body)
+            data = parsed.get("data") or {}
+            post_id = str(data.get("id") or "")
+            share_link = str(data.get("shareLink") or "")
+            if not post_id:
+                self._finish_attempt(
+                    key, "PUBLICATION_UNKNOWN", http_status=http_status,
+                    error="Success response did not contain a remote post ID",
+                )
+                return PublishResult(
+                    status="PUBLICATION_UNKNOWN", http_status=http_status,
+                    error="Success response lacked remote post ID; no retry permitted",
+                )
 
-            if data.get("code") == "000000":
-                post_id = data.get("data", {}).get("id", "unknown")
-                share_link = data.get("data", {}).get("shareLink", "")
-                ct = payload.get("contentType", 1)
-                LOGGER.info("Published to Square! ID: %s Link: %s (contentType=%d)", post_id, share_link, ct)
-                return share_link
-            else:
-                LOGGER.warning("Square API error [%s]: %s", data.get("code"), data.get("message"))
-                return ""
+            # Remote acceptance is confirmed. Keep the ledger SUBMITTING until local
+            # post/analytics persistence succeeds; on local failure it remains non-retryable.
+            local_post_id = self.db.save_post({
+                "content": content,
+                "coin_symbol": symbol,
+                "remote_post_id": post_id,
+                "share_link": share_link,
+                "publication_status": "PUBLISHED_CONFIRMED",
+            })
+            self._finish_attempt(
+                key, "PUBLISHED_CONFIRMED", post_id=post_id, share_link=share_link,
+                http_status=http_status,
+            )
+            self._save_locally(coin, content, share_link=share_link or f"[POST-ID:{post_id}]")
+            return PublishResult(
+                status="PUBLISHED_CONFIRMED", share_link=share_link, post_id=post_id,
+                local_post_id=local_post_id, http_status=http_status,
+            )
+
+        except urllib.error.HTTPError as exc:
+            # 408/429/5xx can be ambiguous at the application boundary; never retry.
+            status = "PUBLICATION_UNKNOWN" if exc.code in (408, 429) or exc.code >= 500 else "FAILED_CONFIRMED"
+            try:
+                self._finish_attempt(key, status, http_status=exc.code, error=str(exc))
+            except Exception:
+                pass
+            return PublishResult(status=status, http_status=exc.code, error=str(exc))
         except Exception as exc:
-            LOGGER.warning("Square API request failed: %s", exc)
-            return ""
+            # A timeout, disconnect, or invalid response may occur after remote acceptance.
+            try:
+                self._finish_attempt(key, "PUBLICATION_UNKNOWN", error=str(exc))
+            except Exception:
+                pass
+            return PublishResult(
+                status="PUBLICATION_UNKNOWN",
+                error=f"Submission outcome cannot be confirmed: {exc}",
+            )
 
     def _save_locally(self, coin: Dict[str, Any], content: str, share_link: str = None) -> None:
-        """Save post to local file with share link if available."""
         symbol = coin.get("symbol", "UNKNOWN")
         posts_dir = Path("posts")
         posts_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-        filename = f"post_{symbol}_{ts}.md"
-        path = posts_dir / filename
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path = posts_dir / f"post_{symbol}_{ts}.md"
         try:
             header = f"---\nSymbol: {symbol}\nTime: {ts} UTC\n"
             if share_link:
                 header += f"Square Link: {share_link}\n"
-            header += "---\n\n"
-            path.write_text(header + content)
-            LOGGER.info("Saved post locally: %s (link: %s)", path, share_link or "N/A")
-        except Exception as e:
-            LOGGER.error("Could not save locally: %s", e)
+            path.write_text(header + "---\n\n" + content)
+        except Exception as exc:
+            LOGGER.error("Could not save local post: %s", exc)
 
     @staticmethod
     def _limit_hashtags(content: str, max_tags: int = 5) -> str:
-        """Limit hashtags in content to max_tags. Binance Square allows ~5 max."""
-        import re
-        # Extract all hashtags
-        tags = re.findall(r'#[A-Za-z0-9_]+', content)
+        tags = re.findall(r"#[A-Za-z0-9_]+", content)
         if len(tags) <= max_tags:
             return content
-        
-        # Remove all hashtags from content
-        text = re.sub(r'#[A-Za-z0-9_]+', '', content)
-        # Clean up extra spaces
-        text = re.sub(r' +', ' ', text).strip()
-        # Keep only first max_tags hashtags
-        keep_tags = tags[:max_tags]
-        # Add back at the end
-        return text + '\n' + ' '.join(keep_tags)
-
-
+        text = re.sub(r"#[A-Za-z0-9_]+", "", content)
+        text = re.sub(r" +", " ", text).strip()
+        return text + "\n" + " ".join(tags[:max_tags])
 
 
 def run_once(config, scanner, announcement_engine, research, generator, publisher, posted_symbols, hot_search_engine=None) -> bool:
@@ -3906,39 +3935,53 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     # 8. PUBLISH
     # ──────────────────────────────────────────────
     
-    link = publisher.publish(best_coin, content, image_list=image_list)
-    # Persist to JSONL for cross-run repetition protection
-    # Step 1: Append record to JSONL (always succeeds or we know why)
+    publish_result = publisher.publish(best_coin, content, image_list=image_list)
+    if not publish_result.confirmed:
+        LOGGER.warning(
+            "Publication not confirmed for $%s: status=%s error=%s",
+            best_coin["symbol"], publish_result.status, publish_result.error,
+        )
+        LOGGER.info("PIPELINE HEALTH: %s", json.dumps({
+            "pipeline": "publication",
+            "status": publish_result.status,
+            "coin": best_coin.get("symbol", ""),
+            "real_post_confirmed": False,
+        }))
+        return False
+
+    link = publish_result.share_link
+    post_id = publish_result.post_id
+    catalyst = best_coin.get("announcement_type", best_coin.get("catalyst", "market_move"))
+
+    # Only confirmed remote publications enter cooldown history.
     persist_ok = False
     try:
-        catalyst = best_coin.get("announcement_type", best_coin.get("catalyst", "market_move"))
-        persist_ok = _append_post_record(best_coin["symbol"], catalyst, link or "", image_list[0] if image_list else "", "")
+        persist_ok = _append_post_record(
+            best_coin["symbol"], catalyst, link, image_list[0] if image_list else "", post_id
+        )
     except Exception as e:
-        LOGGER.error("CRITICAL: Failed to persist post record to %s: %s", _POST_HISTORY_FILE, e)
-    
-    # Step 2: Git push is best-effort (record is already on disk)
+        LOGGER.error("CRITICAL: Failed to persist confirmed publication: %s", e)
+
     if persist_ok:
-        git_ok = _try_git_push()
-        if not git_ok:
-            LOGGER.info("Record saved locally in %s — will be pushed on next successful run",
-                        _POST_HISTORY_FILE)
+        if not _try_git_push():
+            LOGGER.warning("Confirmed publication history remains local; next run must reconcile/push")
     else:
-        LOGGER.warning("Skipping git push because JSONL append was not verified")
-    # Record performance analytics
+        LOGGER.critical("Remote publication confirmed but JSONL persistence failed; DB ledger is authoritative")
+
     try:
-        decision_reason = ""
-        if rankings:
-            decision_reason = rankings[0].get("reason", "")
+        decision_reason = rankings[0].get("reason", "") if rankings else ""
         performance = PerformanceAnalyzer(publisher.db)
         performance.record_publish(
             coin=best_coin,
             post_content=content,
             decision_reason=decision_reason,
-            square_link=link or "",
+            square_link=link,
+            remote_post_id=post_id,
         )
     except Exception as e:
-        LOGGER.debug("Analytics recording: %s", e)
-    LOGGER.info("Done — post published for $%s", best_coin["symbol"])
+        LOGGER.error("Confirmed publication analytics persistence failed: %s", e)
+
+    LOGGER.info("Done — Binance confirmed post %s for $%s", post_id, best_coin["symbol"])
     import json as _json
     _health = _json.dumps({
         "pipeline": "complete",
@@ -3958,7 +4001,6 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
 
 def main_loop() -> None:
     """Main loop that runs continuously with configured interval."""
-    _maybe_update_workflow()
     config = CONFIG
     config.validate()
     
@@ -4025,7 +4067,6 @@ def main_loop() -> None:
 def main() -> None:
     """Single run mode - for cron/scheduled usage."""
     LOGGER.info("⚙️  Production hardened V3 — persistence, cooldown, fail-closed active")
-    _maybe_update_workflow()
     config = CONFIG
     config.validate()
     
