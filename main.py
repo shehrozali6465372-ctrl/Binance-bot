@@ -3606,114 +3606,6 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                 LOGGER.debug("Filter error for %s: %s", coin.symbol, e)
                 continue
     
-def _persist_layer1_market_intelligence(candidates, database_path: str, trend_records=None) -> dict:
-    """Persist real market evidence and auditable candidate decisions; never fabricate scores."""
-    from layer1.foundation import (
-        AssetIdentity, BinanceListingEligibilityEngine, CandidateDiscoveryFilteringEngine,
-        Layer1Store, MarketObservation, RelevanceScore, RelevanceScoringEngine, TrendSignal,
-    )
-
-    store = Layer1Store(database_path)
-    summary = {
-        "observations": 0, "trends": 0, "candidates": 0,
-        "ready": 0, "rejected": 0, "scores_deferred": 0,
-        "ready_asset_ids": [],
-    }
-    trend_signals = []
-    for record in (trend_records or []):
-        asset_id = record.get("asset_id")
-        source = record.get("source")
-        source_item_id = record.get("source_item_id")
-        observed_at = record.get("observed_at")
-        topic = record.get("topic")
-        if not all(isinstance(value, str) and value for value in (asset_id, source, observed_at, topic)):
-            continue
-        signal = TrendSignal(
-            topic, source, observed_at, record.get("rank"), (asset_id,),
-            source_item_id or "", record.get("content_hash") or "",
-        )
-        try:
-            signal.validate()
-            trend_signals.append(signal)
-        except ValueError:
-            LOGGER.warning("Layer 1 ignored invalid trend evidence from %s", source)
-    try:
-        allowed_quotes = {
-            value.strip().upper()
-            for value in os.getenv("BINANCE_ALLOWED_QUOTE_ASSETS", "USDT").split(",")
-            if value.strip()
-        }
-        if not allowed_quotes:
-            raise RuntimeError("BINANCE_ALLOWED_QUOTE_ASSETS is empty; Layer 1 cannot verify Spot eligibility")
-        snapshot_observed_at = _binance_spot_snapshot_observed_at
-        eligibility_engine = BinanceListingEligibilityEngine(tuple(sorted(allowed_quotes)))
-        candidate_engine = CandidateDiscoveryFilteringEngine()
-        scoring_engine = RelevanceScoringEngine()
-        for signal in trend_signals:
-            store.save_trend(signal)
-            summary["trends"] += 1
-        for coin in candidates:
-            asset_id = getattr(coin, "asset_id", "")
-            observed_at = getattr(coin, "observed_at", "")
-            if not asset_id.startswith("coingecko:") or not observed_at:
-                LOGGER.warning("Layer 1 rejected %s: canonical asset ID or source timestamp missing", coin.symbol)
-                continue
-            base = coin.symbol.upper()
-            pairs = sorted(
-                [
-                    pair for pair in _binance_spot_pairs_cache.get(base, [])
-                    if pair.get("quoteAsset") in allowed_quotes
-                ],
-                key=lambda pair: (pair.get("quoteAsset", ""), pair.get("symbol", "")),
-            )
-            identity = AssetIdentity(
-                asset_id, coin.name, base,
-                pairs[0]["quoteAsset"] if pairs else sorted(allowed_quotes)[0]
-            )
-            eligibility = eligibility_engine.evaluate(
-                identity, {"symbols": pairs}, verified_at=snapshot_observed_at
-            )
-            market = MarketObservation(
-                asset_id=asset_id,
-                provider=getattr(coin, "market_data_source", "unknown"),
-                endpoint="https://api.coingecko.com/api/v3/coins/markets",
-                observed_at=observed_at,
-                price=float(coin.price),
-                currency="USD",
-                change_24h=float(coin.change_24h),
-                volume_24h=float(coin.volume_24h),
-                market_cap=float(coin.market_cap),
-                history=tuple(float(value) for value in (coin.history or [])),
-                published_at=getattr(coin, "provider_published_at", None),
-                data_hash=getattr(coin, "market_data_hash", ""),
-            )
-            store.save_market(market)
-            summary["observations"] += 1
-            asset_trends = [signal for signal in trend_signals if asset_id in signal.asset_ids]
-            candidate = candidate_engine.build(identity, eligibility, [market], [], asset_trends)
-            store.save_candidate(candidate)
-            summary["candidates"] += 1
-            summary["ready" if candidate.state == "READY_FOR_RESEARCH" else "rejected"] += 1
-            if candidate.state == "READY_FOR_RESEARCH":
-                summary["ready_asset_ids"].append(asset_id)
-            # The five editorial relevance inputs are not all available in market data.
-            # Persist an explicit deferred score rather than inventing evidence.
-            score = scoring_engine.score(candidate, {
-                "event_materiality": None,
-                "source_credibility": None,
-                "freshness": None,
-                "audience_relevance": None,
-                "novelty": None,
-            })
-            store.save_score(score)
-            if score.score == 0 and "deferred" in score.reason:
-                summary["scores_deferred"] += 1
-        LOGGER.info("Layer 1 evidence persisted: %s", json.dumps(summary, sort_keys=True))
-        return summary
-    finally:
-        store.close()
-
-
     try:
         trend_records = hot_search_engine.get_trending(force_refresh=True) if hot_search_engine else []
         layer1_summary = _persist_layer1_market_intelligence(
@@ -4228,6 +4120,114 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
     LOGGER.info("PIPELINE HEALTH: %s", _health)
     return True
 
+
+
+def _persist_layer1_market_intelligence(candidates, database_path: str, trend_records=None) -> dict:
+    """Persist real market evidence and auditable candidate decisions; never fabricate scores."""
+    from layer1.foundation import (
+        AssetIdentity, BinanceListingEligibilityEngine, CandidateDiscoveryFilteringEngine,
+        Layer1Store, MarketObservation, RelevanceScore, RelevanceScoringEngine, TrendSignal,
+    )
+
+    store = Layer1Store(database_path)
+    summary = {
+        "observations": 0, "trends": 0, "candidates": 0,
+        "ready": 0, "rejected": 0, "scores_deferred": 0,
+        "ready_asset_ids": [],
+    }
+    trend_signals = []
+    for record in (trend_records or []):
+        asset_id = record.get("asset_id")
+        source = record.get("source")
+        source_item_id = record.get("source_item_id")
+        observed_at = record.get("observed_at")
+        topic = record.get("topic")
+        if not all(isinstance(value, str) and value for value in (asset_id, source, observed_at, topic)):
+            continue
+        signal = TrendSignal(
+            topic, source, observed_at, record.get("rank"), (asset_id,),
+            source_item_id or "", record.get("content_hash") or "",
+        )
+        try:
+            signal.validate()
+            trend_signals.append(signal)
+        except ValueError:
+            LOGGER.warning("Layer 1 ignored invalid trend evidence from %s", source)
+    try:
+        allowed_quotes = {
+            value.strip().upper()
+            for value in os.getenv("BINANCE_ALLOWED_QUOTE_ASSETS", "USDT").split(",")
+            if value.strip()
+        }
+        if not allowed_quotes:
+            raise RuntimeError("BINANCE_ALLOWED_QUOTE_ASSETS is empty; Layer 1 cannot verify Spot eligibility")
+        snapshot_observed_at = _binance_spot_snapshot_observed_at
+        eligibility_engine = BinanceListingEligibilityEngine(tuple(sorted(allowed_quotes)))
+        candidate_engine = CandidateDiscoveryFilteringEngine()
+        scoring_engine = RelevanceScoringEngine()
+        for signal in trend_signals:
+            store.save_trend(signal)
+            summary["trends"] += 1
+        for coin in candidates:
+            asset_id = getattr(coin, "asset_id", "")
+            observed_at = getattr(coin, "observed_at", "")
+            if not asset_id.startswith("coingecko:") or not observed_at:
+                LOGGER.warning("Layer 1 rejected %s: canonical asset ID or source timestamp missing", coin.symbol)
+                continue
+            base = coin.symbol.upper()
+            pairs = sorted(
+                [
+                    pair for pair in _binance_spot_pairs_cache.get(base, [])
+                    if pair.get("quoteAsset") in allowed_quotes
+                ],
+                key=lambda pair: (pair.get("quoteAsset", ""), pair.get("symbol", "")),
+            )
+            identity = AssetIdentity(
+                asset_id, coin.name, base,
+                pairs[0]["quoteAsset"] if pairs else sorted(allowed_quotes)[0]
+            )
+            eligibility = eligibility_engine.evaluate(
+                identity, {"symbols": pairs}, verified_at=snapshot_observed_at
+            )
+            market = MarketObservation(
+                asset_id=asset_id,
+                provider=getattr(coin, "market_data_source", "unknown"),
+                endpoint="https://api.coingecko.com/api/v3/coins/markets",
+                observed_at=observed_at,
+                price=float(coin.price),
+                currency="USD",
+                change_24h=float(coin.change_24h),
+                volume_24h=float(coin.volume_24h),
+                market_cap=float(coin.market_cap),
+                history=tuple(float(value) for value in (coin.history or [])),
+                published_at=getattr(coin, "provider_published_at", None),
+                data_hash=getattr(coin, "market_data_hash", ""),
+            )
+            store.save_market(market)
+            summary["observations"] += 1
+            asset_trends = [signal for signal in trend_signals if asset_id in signal.asset_ids]
+            candidate = candidate_engine.build(identity, eligibility, [market], [], asset_trends)
+            store.save_candidate(candidate)
+            summary["candidates"] += 1
+            summary["ready" if candidate.state == "READY_FOR_RESEARCH" else "rejected"] += 1
+            if candidate.state == "READY_FOR_RESEARCH":
+                summary["ready_asset_ids"].append(asset_id)
+            # The five editorial relevance inputs are not all available in market data.
+            # Persist an explicit deferred score rather than inventing evidence.
+            score = scoring_engine.score(candidate, {
+                "event_materiality": None,
+                "source_credibility": None,
+                "freshness": None,
+                "audience_relevance": None,
+                "novelty": None,
+            })
+            store.save_score(score)
+            if score.score == 0 and "deferred" in score.reason:
+                summary["scores_deferred"] += 1
+        LOGGER.info("Layer 1 evidence persisted: %s", json.dumps(summary, sort_keys=True))
+        return summary
+    finally:
+        store.close()
 
 def run_once(config, scanner, announcement_engine, research, generator, publisher,
              posted_symbols, hot_search_engine=None) -> bool:
