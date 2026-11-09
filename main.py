@@ -181,10 +181,12 @@ TOP_5_COINS = {"BTC", "ETH", "BNB", "SOL", "XRP"}
 _binance_listed_cache = None
 _binance_listed_cache_time = 0
 _binance_spot_pairs_cache = {}
+_binance_spot_snapshot_observed_at = None
 
 def _get_binance_listed() -> set:
-    """Return active Binance Spot base assets and retain exact verified pair metadata."""
-    global _binance_listed_cache, _binance_listed_cache_time, _binance_spot_pairs_cache
+    """Return active Binance Spot base assets and retain the provider's exact snapshot time."""
+    global _binance_listed_cache, _binance_listed_cache_time
+    global _binance_spot_pairs_cache, _binance_spot_snapshot_observed_at
     now = time.time()
     if _binance_listed_cache is not None and (now - _binance_listed_cache_time) < 300:
         return _binance_listed_cache
@@ -228,6 +230,9 @@ def _get_binance_listed() -> set:
         _binance_listed_cache = eligible
         _binance_spot_pairs_cache = verified_pairs
         _binance_listed_cache_time = now
+        _binance_spot_snapshot_observed_at = datetime.fromtimestamp(
+            float(server_time) / 1000.0, timezone.utc
+        ).isoformat()
         LOGGER.info("Binance Spot eligibility snapshot loaded: %d base assets", len(eligible))
         return eligible
     except Exception as exc:
@@ -235,6 +240,7 @@ def _get_binance_listed() -> set:
         _binance_listed_cache = None
         _binance_listed_cache_time = 0
         _binance_spot_pairs_cache = {}
+        _binance_spot_snapshot_observed_at = None
         return set()
 
 
@@ -1853,6 +1859,7 @@ class MarketScanner:
                 symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
 
         coins: List[Coin] = []
+        provider_observed_at = datetime.now(timezone.utc).isoformat()
         for item in payload:
             try:
                 symbol = (item.get("symbol") or "").upper()
@@ -1877,8 +1884,12 @@ class MarketScanner:
                 continue
             coin = Coin(symbol, name, price, change_24h, volume_24h, volume_ratio, market_cap, history)
             coin.asset_id = "coingecko:" + coin_id
-            coin.observed_at = datetime.now(timezone.utc).isoformat()
+            coin.observed_at = provider_observed_at
+            coin.provider_published_at = item.get("last_updated")
             coin.market_data_source = "coingecko_markets"
+            coin.market_data_hash = hashlib.sha256(
+                json.dumps(item, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
             coins.append(coin)
 
         return coins
@@ -3575,6 +3586,9 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             for value in os.getenv("BINANCE_ALLOWED_QUOTE_ASSETS", "USDT").split(",")
             if value.strip()
         }
+        if not allowed_quotes:
+            raise RuntimeError("BINANCE_ALLOWED_QUOTE_ASSETS is empty; Layer 1 cannot verify Spot eligibility")
+        snapshot_observed_at = _binance_spot_snapshot_observed_at
         eligibility_engine = BinanceListingEligibilityEngine(tuple(sorted(allowed_quotes)))
         candidate_engine = CandidateDiscoveryFilteringEngine()
         scoring_engine = RelevanceScoringEngine()
@@ -3588,16 +3602,19 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 LOGGER.warning("Layer 1 rejected %s: canonical asset ID or source timestamp missing", coin.symbol)
                 continue
             base = coin.symbol.upper()
-            pairs = [
-                pair for pair in _binance_spot_pairs_cache.get(base, [])
-                if pair.get("quoteAsset") in allowed_quotes
-            ]
+            pairs = sorted(
+                [
+                    pair for pair in _binance_spot_pairs_cache.get(base, [])
+                    if pair.get("quoteAsset") in allowed_quotes
+                ],
+                key=lambda pair: (pair.get("quoteAsset", ""), pair.get("symbol", "")),
+            )
             identity = AssetIdentity(
                 asset_id, coin.name, base,
-                pairs[0]["quoteAsset"] if pairs else next(iter(sorted(allowed_quotes)))
+                pairs[0]["quoteAsset"] if pairs else sorted(allowed_quotes)[0]
             )
             eligibility = eligibility_engine.evaluate(
-                identity, {"symbols": pairs}, verified_at=observed_at
+                identity, {"symbols": pairs}, verified_at=snapshot_observed_at
             )
             market = MarketObservation(
                 asset_id=asset_id,
@@ -3610,6 +3627,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 volume_24h=float(coin.volume_24h),
                 market_cap=float(coin.market_cap),
                 history=tuple(float(value) for value in (coin.history or [])),
+                published_at=getattr(coin, "provider_published_at", None),
+                data_hash=getattr(coin, "market_data_hash", ""),
             )
             store.save_market(market)
             summary["observations"] += 1
@@ -4134,21 +4153,31 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     """Execute one Layer 1+ downstream cycle under a durable run lease."""
     from layer1.foundation import AgentConfig, ConfigurationOrchestrator, RunLease
 
+    # The application Config remains the single authority. Layer 1 receives a
+    # validated projection plus a secret-free fingerprint of all runtime settings.
+    config.validate()
     layer_config = AgentConfig(
         database_path=config.database_path,
         http_timeout_seconds=config.http_timeout_seconds,
         max_daily_posts=config.max_daily_posts,
         dry_run=config.dry_run,
-        allowed_quote_assets=tuple(
+        allowed_quote_assets=tuple(sorted({
             item.strip().upper()
             for item in os.getenv("BINANCE_ALLOWED_QUOTE_ASSETS", "USDT").split(",")
             if item.strip()
-        ),
+        })),
     )
-    context = ConfigurationOrchestrator(layer_config).create_context()
+    safe_runtime_config = {
+        key: value for key, value in config.__dict__.items()
+        if key not in {"gemini_api_key", "square_api_key"}
+    }
+    safe_runtime_config["gemini_api_key_configured"] = bool(config.gemini_api_key)
+    safe_runtime_config["square_api_key_configured"] = bool(config.square_api_key)
+    safe_runtime_config["github_token_configured"] = bool(os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN"))
+    context = ConfigurationOrchestrator(layer_config).create_context(safe_runtime_config)
     lease = RunLease(config.database_path)
     status = "FAILED"
-    summary = {"run_id": context.run_id, "layer1_version": "1.0.0"}
+    summary = {"run_id": context.run_id, "layer1_version": "1.1.0"}
     try:
         lease.acquire(context)
         LOGGER.info("Layer 1 run started: run_id=%s config_hash=%s",
