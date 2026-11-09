@@ -235,6 +235,8 @@ class Layer1FoundationTests(unittest.TestCase):
         coin.asset_id = "coingecko:bitcoin"
         coin.observed_at = iso()
         coin.market_data_source = "coingecko_markets"
+        coin.provider_published_at = iso()
+        coin.market_data_hash = "sha256:market-fixture"
         old_pairs = main._binance_spot_pairs_cache
         old_snapshot = main._binance_spot_snapshot_observed_at
         main._binance_spot_snapshot_observed_at = iso()
@@ -252,6 +254,7 @@ class Layer1FoundationTests(unittest.TestCase):
             self.assertEqual(result["observations"], 1)
             self.assertEqual(result["trends"], 1)
             self.assertEqual(result["candidates"], 1)
+            self.assertEqual(result["ready_asset_ids"], ["coingecko:bitcoin"])
             conn = sqlite3.connect(self.db)
             try:
                 row = conn.execute("SELECT state, evidence_refs_json FROM layer1_candidates").fetchone()
@@ -454,6 +457,118 @@ class Layer1FoundationTests(unittest.TestCase):
             "audience_relevance": 70, "novelty": 60,
         })
         self.assertEqual(engine.rank([deferred, first]), [first, deferred])
+
+
+
+    def test_module6_stale_provider_update_is_not_refreshed_by_recent_observation(self):
+        eligibility = BinanceListingEligibilityEngine().evaluate(
+            self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
+             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]},
+            verified_at=iso()
+        )
+        market = MarketObservation(
+            self.identity.asset_id, "coingecko_markets", "/markets", iso(),
+            price=65000, published_at=iso(-3600)
+        )
+        result = CandidateDiscoveryFilteringEngine().build(self.identity, eligibility, [market], [], [])
+        self.assertEqual(result.state, "REJECTED")
+        self.assertIn("market_observation_stale", result.rejection_reasons)
+
+    def test_module6_stale_announcement_is_not_refreshed_by_recent_retrieval(self):
+        eligibility = BinanceListingEligibilityEngine().evaluate(
+            self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
+             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]},
+            verified_at=iso()
+        )
+        event = AnnouncementEvidence(
+            "old-event", "https://www.binance.com/en/support/announcement/old",
+            "Binance", "listing", "Old BTC listing notice", iso(-900000), iso(),
+            (self.identity.asset_id,)
+        )
+        result = CandidateDiscoveryFilteringEngine().build(self.identity, eligibility, [], [event], [])
+        self.assertEqual(result.state, "REJECTED")
+        self.assertIn("announcement_evidence_stale", result.rejection_reasons)
+
+    def test_module4_future_event_time_is_valid_but_not_published_time(self):
+        event = AnnouncementEvidence(
+            "scheduled-event", "https://www.binance.com/en/support/announcement/scheduled",
+            "Binance", "upgrade", "Scheduled network upgrade", iso(), iso(),
+            (self.identity.asset_id,), event_at=iso(3600)
+        )
+        event.validate()
+
+    def test_layer1_store_retains_announcement_revisions(self):
+        older = AnnouncementEvidence(
+            "revisioned-article", "https://www.binance.com/en/support/announcement/update",
+            "Binance", "listing", "Listing notice", iso(-120), iso(-120),
+            (self.identity.asset_id,), "revision-1", updated_at=iso(-120)
+        )
+        newer = AnnouncementEvidence(
+            "revisioned-article", "https://www.binance.com/en/support/announcement/update",
+            "Binance", "listing", "Listing notice amended", iso(-120), iso(),
+            (self.identity.asset_id,), "revision-2", updated_at=iso()
+        )
+        store = Layer1Store(self.db)
+        try:
+            store.save_announcement(older)
+            store.save_announcement(newer)
+            self.assertEqual(
+                store.conn.execute(
+                    "SELECT COUNT(*) FROM layer1_announcement_revisions WHERE source_id='revisioned-article'"
+                ).fetchone()[0], 2
+            )
+            latest = store.conn.execute(
+                "SELECT payload_json FROM layer1_announcement_evidence WHERE source_id='revisioned-article'"
+            ).fetchone()[0]
+            self.assertIn("revision-2", latest)
+        finally:
+            store.close()
+
+    def test_hot_search_preserves_same_topic_from_independent_sources(self):
+        engine = main.HotSearchEngine()
+        announcement = {
+            "topic": "BTC", "source": "official-announcement",
+            "source_item_id": "article-1", "rank": 1,
+        }
+        trending = {
+            "topic": "BTC", "source": "coingecko-trending",
+            "source_item_id": "bitcoin", "rank": 2,
+        }
+        with patch.object(engine, "_from_announcements", return_value=[announcement]), \
+             patch.object(engine, "_from_coingecko_trending", return_value=[trending]), \
+             patch.object(engine, "_from_market_data", return_value=[]):
+            merged = engine.get_trending(force_refresh=True)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual({item["source"] for item in merged},
+                         {"official-announcement", "coingecko-trending"})
+
+    def test_final_spot_revalidation_refreshes_and_checks_exact_pair(self):
+        old_cache = main._binance_listed_cache
+        old_cache_time = main._binance_listed_cache_time
+        old_pairs = main._binance_spot_pairs_cache
+        old_snapshot = main._binance_spot_snapshot_observed_at
+        payload = {
+            "serverTime": int(time.time() * 1000),
+            "symbols": [{
+                "symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
+                "status": "TRADING", "isSpotTradingAllowed": True,
+            }],
+        }
+        try:
+            main._binance_listed_cache = {"OLD"}
+            main._binance_listed_cache_time = time.time()
+            with patch.dict(os.environ, {"BINANCE_ALLOWED_QUOTE_ASSETS": "USDT"}), \
+                 patch("main.urllib.request.urlopen", return_value=FakeHTTPResponse(payload)) as fetch:
+                self.assertTrue(main._revalidate_binance_spot_asset("BTC", "coingecko:bitcoin"))
+                fetch.assert_called_once()
+            with patch("main.urllib.request.urlopen") as fetch:
+                self.assertFalse(main._revalidate_binance_spot_asset("BTC", "ticker-only"))
+                fetch.assert_not_called()
+        finally:
+            main._binance_listed_cache = old_cache
+            main._binance_listed_cache_time = old_cache_time
+            main._binance_spot_pairs_cache = old_pairs
+            main._binance_spot_snapshot_observed_at = old_snapshot
 
 
 if __name__ == "__main__":
