@@ -182,7 +182,7 @@ class PublisherSafetyTests(unittest.TestCase):
             migrated.close()
 
     def test_legacy_node_script_cannot_issue_direct_publication(self):
-        script = Path("scripts/post-text.mjs").read_text(encoding="utf-8")
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "post-text.mjs").read_text(encoding="utf-8")
         self.assertIn("Direct publishing is disabled", script)
         self.assertNotIn("content/add", script)
         self.assertNotIn("fetch(", script)
