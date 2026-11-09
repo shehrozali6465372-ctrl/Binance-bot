@@ -1,12 +1,37 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AnnouncementStore, SCHEMA_SQL } from "../src/store.js";
+import { readFile } from "node:fs/promises";
+import { AnnouncementStore, SCHEMA_CHECK_SQL } from "../src/store.js";
 
-test("schema is idempotent and enforces exact topic and content uniqueness", () => {
-  assert.match(SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS binance_announcement_events/);
-  assert.match(SCHEMA_SQL, /content_hash CHAR\(64\) NOT NULL UNIQUE/);
-  assert.match(SCHEMA_SQL, /CHECK \(topic = 'com_announcement_en'\)/);
-  assert.match(SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS binance_announcement_worker_state/);
+test("runtime schema check is read-only and requires pre-applied tables", async () => {
+  let captured;
+  const pool = {
+    async query(sql) {
+      captured = sql;
+      return { rows: [{ events_table: "binance_announcement_events", state_table: "binance_announcement_worker_state" }] };
+    },
+  };
+  await new AnnouncementStore(pool).initialize();
+  assert.match(captured, /to_regclass/);
+  assert.doesNotMatch(captured, /CREATE|ALTER|DROP/i);
+  assert.match(SCHEMA_CHECK_SQL, /^\s*SELECT/i);
+});
+
+test("runtime initialization fails clearly when migrations have not been applied", async () => {
+  const pool = { async query() { return { rows: [{ events_table: null, state_table: null }] }; } };
+  await assert.rejects(
+    new AnnouncementStore(pool).initialize(),
+    /apply migrations\/001_create_announcement_tables\.sql/,
+  );
+});
+
+test("versioned migration defines constrained event and worker-state tables", async () => {
+  const sql = await readFile(new URL("../migrations/001_create_announcement_tables.sql", import.meta.url), "utf8");
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.binance_announcement_events/);
+  assert.match(sql, /content_hash CHAR\(64\) NOT NULL UNIQUE/);
+  assert.match(sql, /CHECK \(topic = 'com_announcement_en'\)/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.binance_announcement_worker_state/);
+  assert.match(sql, /idx_binance_announcement_published_at/);
 });
 
 test("save uses parameterized SQL and reports inserted versus duplicate", async () => {

@@ -1,36 +1,7 @@
-export const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS binance_announcement_events (
-  id BIGSERIAL PRIMARY KEY,
-  source_id CHAR(64) NOT NULL,
-  content_hash CHAR(64) NOT NULL UNIQUE,
-  topic TEXT NOT NULL CHECK (topic = 'com_announcement_en'),
-  catalog_id TEXT NOT NULL,
-  catalog_name TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  title TEXT NOT NULL,
-  body TEXT NOT NULL DEFAULT '',
-  disclaimer TEXT NOT NULL DEFAULT '',
-  publisher TEXT NOT NULL CHECK (publisher = 'Binance'),
-  source_url TEXT NOT NULL,
-  published_at TIMESTAMPTZ NOT NULL,
-  observed_at TIMESTAMPTZ NOT NULL,
-  raw_payload JSONB NOT NULL,
-  inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_binance_announcement_published_at
-  ON binance_announcement_events (published_at DESC);
-CREATE INDEX IF NOT EXISTS idx_binance_announcement_source_id
-  ON binance_announcement_events (source_id);
-
-CREATE TABLE IF NOT EXISTS binance_announcement_worker_state (
-  worker_name TEXT PRIMARY KEY,
-  status TEXT NOT NULL,
-  started_at TIMESTAMPTZ,
-  last_message_at TIMESTAMPTZ,
-  last_persisted_at TIMESTAMPTZ,
-  last_error TEXT,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+export const SCHEMA_CHECK_SQL = `
+SELECT
+  to_regclass('public.binance_announcement_events') AS events_table,
+  to_regclass('public.binance_announcement_worker_state') AS state_table
 `;
 
 export class AnnouncementStore {
@@ -39,7 +10,13 @@ export class AnnouncementStore {
   }
 
   async initialize() {
-    await this.pool.query(SCHEMA_SQL);
+    // Runtime credentials must not need CREATE/ALTER privileges. Apply the
+    // versioned migration with a separate administrative role before startup.
+    const result = await this.pool.query(SCHEMA_CHECK_SQL);
+    const tables = result.rows?.[0];
+    if (!tables?.events_table || !tables?.state_table) {
+      throw new Error("Announcement database schema is missing; apply migrations/001_create_announcement_tables.sql");
+    }
   }
 
   async save(event) {
