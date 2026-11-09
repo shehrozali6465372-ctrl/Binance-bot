@@ -32,8 +32,13 @@ def utc_now() -> str:
 
 
 def _parse_time(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("timestamp must be a non-empty ISO-8601 string")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp must be valid ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamps must include timezone")
     normalized = parsed.astimezone(timezone.utc)
     if normalized.timestamp() > time.time() + 300:
@@ -73,16 +78,22 @@ class AgentConfig:
         return cfg
 
     def validate(self) -> None:
-        if not self.database_path.strip():
+        if not isinstance(self.database_path, str) or not self.database_path.strip():
             raise ValueError("DATABASE_PATH must be non-empty")
         for name in ("http_timeout_seconds", "market_data_ttl_seconds", "eligibility_ttl_seconds",
                      "max_candidates", "max_daily_posts"):
-            if getattr(self, name) <= 0:
-                raise ValueError(f"{name} must be > 0")
-        if not self.allowed_quote_assets:
-            raise ValueError("at least one allowed quote asset is required")
-        if any(not q.isalnum() for q in self.allowed_quote_assets):
-            raise ValueError("quote assets must be alphanumeric symbols")
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(self.dry_run, bool):
+            raise ValueError("dry_run must be boolean")
+        if not self.allowed_quote_assets or any(
+            not isinstance(q, str) or not q or not q.isalnum() or q != q.upper()
+            for q in self.allowed_quote_assets
+        ):
+            raise ValueError("quote assets must be non-empty uppercase alphanumeric symbols")
+        if len(set(self.allowed_quote_assets)) != len(self.allowed_quote_assets):
+            raise ValueError("quote assets must not contain duplicates")
 
 
 @dataclass(frozen=True)
@@ -134,16 +145,25 @@ class RunLease:
     def finish(self, status: str, summary: Mapping[str, Any] | None = None) -> None:
         if not self.run_id:
             return
+        allowed_statuses = {"SUCCEEDED", "NO_CANDIDATE_OR_BLOCKED", "FAILED", "INTERRUPTED"}
+        if status not in allowed_statuses:
+            raise ValueError(f"unsupported run status: {status}")
+        encoded_summary = json.dumps(dict(summary or {}), sort_keys=True, allow_nan=False)
         self.conn.execute("BEGIN IMMEDIATE")
         try:
-            self.conn.execute(
-                "UPDATE layer1_runs SET finished_at=?, status=?, summary_json=? WHERE run_id=?",
-                (utc_now(), status, json.dumps(dict(summary or {}), sort_keys=True), self.run_id),
+            cursor = self.conn.execute(
+                "UPDATE layer1_runs SET finished_at=?, status=?, summary_json=? "
+                "WHERE run_id=? AND status='RUNNING'",
+                (utc_now(), status, encoded_summary, self.run_id),
             )
-            self.conn.execute(
+            if cursor.rowcount != 1:
+                raise RuntimeError("run record is missing or no longer RUNNING; refusing lease release")
+            lease_cursor = self.conn.execute(
                 "DELETE FROM layer1_run_lease WHERE lease_name='agent' AND run_id=?",
                 (self.run_id,),
             )
+            if lease_cursor.rowcount != 1:
+                raise RuntimeError("run lease ownership was lost; refusing to mark run complete")
             self.conn.commit()
             self.run_id = None
         except Exception:
@@ -159,11 +179,18 @@ class ConfigurationOrchestrator:
         config.validate()
         self.config = config
 
-    def create_context(self) -> RunContext:
-        config_json = json.dumps({
-            **self.config.__dict__,
-            "allowed_quote_assets": list(self.config.allowed_quote_assets),
-        }, sort_keys=True, separators=(",", ":"))
+    def create_context(self, runtime_metadata: Optional[Mapping[str, Any]] = None) -> RunContext:
+        safe_metadata = dict(runtime_metadata or {})
+        try:
+            config_json = json.dumps({
+                "layer1": {
+                    **self.config.__dict__,
+                    "allowed_quote_assets": list(self.config.allowed_quote_assets),
+                },
+                "runtime": safe_metadata,
+            }, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("runtime metadata must be finite JSON-compatible non-secret values") from exc
         return RunContext(
             run_id=str(uuid.uuid4()),
             started_at=utc_now(),
@@ -192,38 +219,70 @@ class EligibilityDecision:
 
 
 class BinanceListingEligibilityEngine:
-    """Exact Binance Spot pair eligibility. No ticker allow-list fallback."""
-    def __init__(self, allowed_quote_assets: Sequence[str] = ("USDT",)):
-        self.allowed_quotes = {q.upper() for q in allowed_quote_assets}
+    """Exact Binance Spot pair eligibility against a fresh official metadata snapshot."""
+    def __init__(self, allowed_quote_assets: Sequence[str] = ("USDT",), max_snapshot_age_seconds: int = 300):
+        normalized = [str(q).upper() for q in allowed_quote_assets]
+        if not normalized or len(set(normalized)) != len(normalized) or any(not q.isalnum() for q in normalized):
+            raise ValueError("allowed quote assets must be unique uppercase alphanumeric symbols")
+        if isinstance(max_snapshot_age_seconds, bool) or not isinstance(max_snapshot_age_seconds, int) or max_snapshot_age_seconds <= 0:
+            raise ValueError("max_snapshot_age_seconds must be a positive integer")
+        self.allowed_quotes = set(normalized)
+        self.max_snapshot_age_seconds = max_snapshot_age_seconds
 
     def evaluate(self, identity: AssetIdentity, exchange_info: Mapping[str, Any],
                  verified_at: Optional[str] = None) -> EligibilityDecision:
         if not identity.asset_id or not identity.asset_name or not identity.base_asset:
             return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
                                        reason="canonical asset identity incomplete")
+        if identity.quote_asset not in self.allowed_quotes:
+            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
+                                       reason="requested quote asset is not allowed by configuration")
+        if not isinstance(exchange_info, Mapping):
+            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
+                                       reason="exchangeInfo snapshot is not an object")
+        snapshot_time = verified_at
+        if not snapshot_time:
+            server_time = exchange_info.get("serverTime")
+            if isinstance(server_time, (int, float)) and not isinstance(server_time, bool):
+                snapshot_time = datetime.fromtimestamp(float(server_time) / 1000.0, timezone.utc).isoformat()
+        if not snapshot_time:
+            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
+                                       reason="exchangeInfo snapshot timestamp missing")
+        try:
+            normalized_snapshot_time = _parse_time(snapshot_time)
+        except (TypeError, ValueError, OverflowError):
+            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
+                                       reason="exchangeInfo snapshot timestamp invalid")
+        age_seconds = (datetime.now(timezone.utc) - normalized_snapshot_time).total_seconds()
+        if age_seconds < -300 or age_seconds > self.max_snapshot_age_seconds:
+            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
+                                       reason="exchangeInfo snapshot is stale or clock-skewed",
+                                       verified_at=normalized_snapshot_time.isoformat())
         symbols = exchange_info.get("symbols")
         if not isinstance(symbols, list) or not symbols:
             return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
-                                       reason="exchangeInfo symbols missing/empty")
+                                       reason="exchangeInfo symbols missing/empty",
+                                       verified_at=normalized_snapshot_time.isoformat())
         matches = []
         for item in symbols:
             if not isinstance(item, dict):
                 continue
             if (item.get("baseAsset") != identity.base_asset
+                or item.get("quoteAsset") != identity.quote_asset
                 or item.get("quoteAsset") not in self.allowed_quotes
                 or item.get("status") != "TRADING"
                 or item.get("isSpotTradingAllowed") is not True):
                 continue
             pair = item.get("symbol")
-            if isinstance(pair, str) and pair:
+            if isinstance(pair, str) and pair and pair.isalnum():
                 matches.append(pair)
         if not matches:
             return EligibilityDecision("INELIGIBLE", identity.asset_id, identity.base_asset,
-                                       reason="no active Spot pair in configured quote assets",
-                                       verified_at=verified_at or utc_now())
+                                       reason="no active exact Spot pair for canonical base/quote identity",
+                                       verified_at=normalized_snapshot_time.isoformat())
         return EligibilityDecision("ELIGIBLE", identity.asset_id, identity.base_asset,
-                                   tuple(sorted(set(matches))), "active Binance Spot pair verified",
-                                   verified_at or utc_now())
+                                   tuple(sorted(set(matches))), "active exact Binance Spot pair verified",
+                                   normalized_snapshot_time.isoformat())
 
 
 @dataclass(frozen=True)
@@ -242,19 +301,34 @@ class MarketObservation:
     data_hash: str = ""
 
     def validate(self) -> None:
-        if not self.asset_id or not self.provider or not self.endpoint:
-            raise ValueError("market observation identity/provenance missing")
+        if not all(isinstance(value, str) and value.strip() for value in
+                   (self.asset_id, self.provider, self.endpoint, self.currency)):
+            raise ValueError("market observation identity/provenance/currency missing")
+        if not self.currency.isalnum() or self.currency != self.currency.upper():
+            raise ValueError("market observation currency must be an uppercase asset/currency code")
         _parse_time(self.observed_at)
         if self.published_at:
             _parse_time(self.published_at)
         for name in ("price", "change_24h", "volume_24h", "market_cap"):
             value = getattr(self, name)
-            if value is not None and (not isinstance(value, (int, float)) or not math.isfinite(value)):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+            ):
                 raise ValueError(f"invalid {name}")
         if self.price is not None and self.price <= 0:
             raise ValueError("price must be positive")
-        if any(not isinstance(point, (int, float)) or point <= 0 for point in self.history):
-            raise ValueError("history must contain actual positive numeric observations")
+        for name in ("volume_24h", "market_cap"):
+            value = getattr(self, name)
+            if value is not None and value < 0:
+                raise ValueError(f"{name} cannot be negative")
+        if not isinstance(self.history, (tuple, list)):
+            raise ValueError("history must be a sequence of provider observations")
+        if any(
+            isinstance(point, bool) or not isinstance(point, (int, float))
+            or not math.isfinite(point) or point <= 0
+            for point in self.history
+        ):
+            raise ValueError("history must contain finite positive provider observations")
 
 
 class MarketDataIntelligenceEngine:
@@ -263,21 +337,28 @@ class MarketDataIntelligenceEngine:
         self.fetch_json = fetch_json
         self.timeout = timeout
 
-    def fetch_binance_24h(self, symbol: str, asset_id: str) -> MarketObservation:
-        if not symbol or not asset_id:
-            raise ValueError("exact symbol and canonical asset_id are required")
+    def fetch_binance_24h(self, symbol: str, asset_id: str, quote_asset: str = "USDT") -> MarketObservation:
+        if not isinstance(symbol, str) or not symbol.isalnum() or not symbol.isupper() or not asset_id:
+            raise ValueError("exact uppercase Binance symbol and canonical asset_id are required")
+        if not isinstance(quote_asset, str) or not quote_asset.isalnum() or not quote_asset.isupper():
+            raise ValueError("quote_asset must be an uppercase alphanumeric code")
         url = f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={symbol}"
         payload = self.fetch_json(url, self.timeout)
         if not isinstance(payload, dict) or payload.get("symbol") != symbol:
             raise ValueError("Binance ticker response schema/symbol mismatch")
         close_time = payload.get("closeTime")
-        observed_at = datetime.fromtimestamp(float(close_time) / 1000, timezone.utc).isoformat() if close_time else utc_now()
-        observation = MarketObservation(
-            asset_id=asset_id, provider="binance_spot", endpoint=url, observed_at=observed_at,
-            price=float(payload["lastPrice"]), currency="USDT",
-            change_24h=float(payload["priceChangePercent"]),
-            volume_24h=float(payload["quoteVolume"]),
-        )
+        if isinstance(close_time, bool) or not isinstance(close_time, (int, float)) or close_time <= 0:
+            raise ValueError("Binance ticker response missing a valid provider closeTime")
+        try:
+            observed_at = datetime.fromtimestamp(float(close_time) / 1000, timezone.utc).isoformat()
+            observation = MarketObservation(
+                asset_id=asset_id, provider="binance_spot", endpoint=url, observed_at=observed_at,
+                price=float(payload["lastPrice"]), currency=quote_asset,
+                change_24h=float(payload["priceChangePercent"]),
+                volume_24h=float(payload["quoteVolume"]),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Binance ticker response contains missing or invalid required fields") from exc
         observation.validate()
         return observation
 
@@ -294,16 +375,31 @@ class AnnouncementEvidence:
     asset_ids: tuple[str, ...] = ()
     content_hash: str = ""
 
+    updated_at: Optional[str] = None
+    event_at: Optional[str] = None
+
     def validate(self) -> None:
-        host = (urlparse(self.source_url).hostname or "").lower()
-        if not self.source_id or not self.title or not self.publisher:
-            raise ValueError("announcement identity/publisher/title missing")
-        if not any(host == allowed or host.endswith("." + allowed) for allowed in OFFICIAL_BINANCE_HOSTS):
-            raise ValueError("announcement source is not an approved official Binance host")
+        parsed_url = urlparse(self.source_url)
+        host = (parsed_url.hostname or "").lower()
+        if not all(isinstance(value, str) and value.strip() for value in
+                   (self.source_id, self.source_url, self.title, self.publisher)):
+            raise ValueError("announcement identity/publisher/title/source URL missing")
+        if (
+            parsed_url.scheme != "https" or parsed_url.username or parsed_url.password
+            or parsed_url.port not in (None, 443)
+            or not any(host == allowed or host.endswith("." + allowed) for allowed in OFFICIAL_BINANCE_HOSTS)
+        ):
+            raise ValueError("announcement source is not an approved HTTPS Binance host")
         if self.event_type not in ALLOWED_ANNOUNCEMENT_TYPES:
             raise ValueError("unsupported announcement event type")
+        if not isinstance(self.asset_ids, tuple) or any(not isinstance(item, str) or not item for item in self.asset_ids):
+            raise ValueError("announcement asset identities must be non-empty canonical IDs")
         _parse_time(self.published_at)
         _parse_time(self.observed_at)
+        if self.updated_at:
+            _parse_time(self.updated_at)
+        if self.event_at:
+            _parse_time(self.event_at)
 
 
 class AnnouncementIntelligenceEngine:
@@ -314,11 +410,20 @@ class AnnouncementIntelligenceEngine:
     def fetch(self) -> tuple[list[AnnouncementEvidence], str]:
         if self.adapter is None:
             return [], "UNAVAILABLE: no verified documented official announcement adapter configured"
-        results = []
+        latest_by_source: dict[str, AnnouncementEvidence] = {}
         for item in self.adapter():
             item.validate()
-            results.append(item)
-        return results, "AVAILABLE"
+            previous = latest_by_source.get(item.source_id)
+            if previous is None:
+                latest_by_source[item.source_id] = item
+                continue
+            previous_version = previous.updated_at or previous.published_at
+            current_version = item.updated_at or item.published_at
+            if _parse_time(current_version) > _parse_time(previous_version):
+                latest_by_source[item.source_id] = item
+            elif _parse_time(current_version) == _parse_time(previous_version) and item.content_hash != previous.content_hash:
+                raise ValueError(f"conflicting announcement revisions for source_id={item.source_id}")
+        return sorted(latest_by_source.values(), key=lambda item: (item.published_at, item.source_id)), "AVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -329,24 +434,52 @@ class TrendSignal:
     rank: Optional[int] = None
     asset_ids: tuple[str, ...] = ()
     source_item_id: str = ""
+    content_hash: str = ""
 
     def validate(self) -> None:
-        if not self.topic.strip() or not self.source.strip():
+        if not isinstance(self.topic, str) or not self.topic.strip() or not isinstance(self.source, str) or not self.source.strip():
             raise ValueError("trend topic/source missing")
         _parse_time(self.observed_at)
-        if self.rank is not None and self.rank <= 0:
-            raise ValueError("trend rank must be positive")
+        if self.rank is not None and (
+            isinstance(self.rank, bool) or not isinstance(self.rank, int) or self.rank <= 0
+        ):
+            raise ValueError("trend rank must be a positive integer")
+        if not isinstance(self.asset_ids, tuple) or any(not isinstance(item, str) or not item for item in self.asset_ids):
+            raise ValueError("trend asset identities must be canonical non-empty IDs")
+        if self.content_hash and not isinstance(self.content_hash, str):
+            raise ValueError("trend content_hash must be a string")
 
 
 class TrendingNarrativeIntelligenceEngine:
-    """Only accepts sourced observations; static/synthetic narrative fixtures are rejected."""
+    """Only accepts sourced observations; preserves independent-source provenance."""
     def normalize(self, signals: Iterable[TrendSignal]) -> list[TrendSignal]:
         selected: dict[tuple[str, str, str], TrendSignal] = {}
         for signal in signals:
             signal.validate()
-            key = (signal.topic.casefold(), signal.source, signal.source_item_id)
-            selected.setdefault(key, signal)
-        return sorted(selected.values(), key=lambda s: (s.rank or 10**9, s.topic.casefold()))
+            key = (signal.topic.casefold(), signal.source.casefold(), signal.source_item_id)
+            previous = selected.get(key)
+            if previous is None:
+                selected[key] = signal
+                continue
+            # For repeated observations of one provider item, keep its newest
+            # version; rank is only a deterministic tie-breaker, not event proof.
+            current_time = _parse_time(signal.observed_at)
+            previous_time = _parse_time(previous.observed_at)
+            if current_time > previous_time or (
+                current_time == previous_time and (signal.rank or 10**9) < (previous.rank or 10**9)
+            ):
+                selected[key] = signal
+        return sorted(selected.values(), key=lambda s: (s.rank or 10**9, s.topic.casefold(), s.source.casefold()))
+
+    @staticmethod
+    def independent_source_count(signals: Iterable[TrendSignal]) -> int:
+        """Count independent source/content pairs, not copied syndication."""
+        groups = set()
+        for signal in signals:
+            signal.validate()
+            fingerprint = signal.content_hash or f"{signal.source.casefold()}:{signal.source_item_id}"
+            groups.add(fingerprint)
+        return len(groups)
 
 
 @dataclass(frozen=True)
@@ -372,34 +505,74 @@ class CandidateDiscoveryFilteringEngine:
               markets: Sequence[MarketObservation], events: Sequence[AnnouncementEvidence],
               trends: Sequence[TrendSignal]) -> Candidate:
         reasons = []
+        if eligibility.asset_id != identity.asset_id:
+            reasons.append("canonical_asset_identity_mismatch")
         if eligibility.status != "ELIGIBLE":
             reasons.append("binance_spot_eligibility_" + eligibility.status.lower())
+        if not eligibility.eligible_pairs:
+            reasons.append("binance_spot_exact_pair_missing")
         matching_markets = [m for m in markets if m.asset_id == identity.asset_id]
         matching_events = [e for e in events if identity.asset_id in e.asset_ids]
         matching_trends = [t for t in trends if identity.asset_id in t.asset_ids]
+
+        valid_markets = []
+        for item in matching_markets:
+            try:
+                item.validate()
+                valid_markets.append(item)
+            except (TypeError, ValueError):
+                reasons.append("market_observation_invalid")
+        valid_events = []
+        for item in matching_events:
+            try:
+                item.validate()
+                valid_events.append(item)
+            except (TypeError, ValueError):
+                reasons.append("announcement_evidence_invalid")
+        valid_trends = []
+        for item in matching_trends:
+            try:
+                item.validate()
+                valid_trends.append(item)
+            except (TypeError, ValueError):
+                reasons.append("trend_signal_invalid")
+
         now = datetime.now(timezone.utc)
-        fresh_markets = [m for m in matching_markets if (now - _parse_time(m.observed_at)).total_seconds() <= self.max_market_age_seconds]
-        fresh_events = [e for e in matching_events if (now - _parse_time(e.observed_at)).total_seconds() <= self.max_event_age_seconds]
-        fresh_trends = [t for t in matching_trends if (now - _parse_time(t.observed_at)).total_seconds() <= self.max_trend_age_seconds]
-        if matching_markets and not fresh_markets:
+        fresh_markets = [m for m in valid_markets if (now - _parse_time(m.observed_at)).total_seconds() <= self.max_market_age_seconds]
+        fresh_events = [e for e in valid_events if (now - _parse_time(e.observed_at)).total_seconds() <= self.max_event_age_seconds]
+        fresh_trends = [t for t in valid_trends if (now - _parse_time(t.observed_at)).total_seconds() <= self.max_trend_age_seconds]
+        if valid_markets and not fresh_markets:
             reasons.append("market_observation_stale")
-        if matching_events and not fresh_events:
+        if valid_events and not fresh_events:
             reasons.append("announcement_evidence_stale")
-        if matching_trends and not fresh_trends:
+        if valid_trends and not fresh_trends:
             reasons.append("trend_signal_stale")
         matching_markets, matching_events, matching_trends = fresh_markets, fresh_events, fresh_trends
         if not matching_markets and not matching_events and not matching_trends:
             reasons.append("no_source_backed_discovery_signal")
-        if any(m.asset_id != identity.asset_id for m in matching_markets):
-            reasons.append("canonical_asset_identity_mismatch")
-        state = "READY_FOR_RESEARCH" if not reasons else "REJECTED"
-        fingerprint = "|".join((identity.asset_id, ",".join(sorted(e.source_id for e in matching_events)),
-                                ",".join(sorted(m.endpoint for m in matching_markets))))
+
+        # Candidate identity is stable across repeated scans but changes when an
+        # event's content/revision or a meaningful trend item changes.
+        event_refs = sorted(
+            f"{e.source_id}:{e.content_hash}:{e.updated_at or e.published_at}"
+            for e in matching_events
+        )
+        market_refs = sorted(set(f"{m.provider}:{m.endpoint}:{m.currency}" for m in matching_markets))
+        trend_refs = sorted(set(
+            f"{t.topic.casefold()}:{t.source.casefold()}:{t.source_item_id}:{t.content_hash}"
+            for t in matching_trends
+        ))
+        fingerprint = json.dumps(
+            {"asset_id": identity.asset_id, "events": event_refs,
+             "markets": market_refs, "trends": trend_refs},
+            sort_keys=True, separators=(",", ":"),
+        )
         cid = hashlib.sha256(fingerprint.encode()).hexdigest()
         return Candidate(cid, identity.asset_id, tuple(sorted(e.source_id for e in matching_events)),
                          eligibility, tuple(sorted(m.data_hash or m.endpoint for m in matching_markets)),
                          tuple(sorted(f"{t.source}:{t.source_item_id or t.topic}" for t in matching_trends)),
-                         state, tuple(reasons))
+                         "READY_FOR_RESEARCH" if not reasons else "REJECTED",
+                         tuple(sorted(set(reasons))))
 
 
 @dataclass(frozen=True)
@@ -521,8 +694,20 @@ class RelevanceScoringEngine:
         if any(v is None for v in components.values()):
             return RelevanceScore(candidate.candidate_id, 0.0, dict(components), SCORE_VERSION,
                                   "missing score evidence; candidate deferred")
-        if any(not 0 <= float(v) <= 100 for v in components.values()):
-            raise ValueError("score components must be between 0 and 100")
+        if any(
+            isinstance(v, bool) or not isinstance(v, (int, float))
+            or not math.isfinite(float(v)) or not 0 <= float(v) <= 100
+            for v in components.values()
+        ):
+            raise ValueError("score components must be finite numbers between 0 and 100")
         total = sum(float(components[k]) * self.WEIGHTS[k] for k in self.WEIGHTS)
         return RelevanceScore(candidate.candidate_id, round(total, 4), dict(components),
-                              SCORE_VERSION, "weighted evidence-backed relevance score")
+                              SCORE_VERSION, "weighted evidence-backed research-priority score")
+
+    @staticmethod
+    def rank(scores: Iterable[RelevanceScore]) -> list[RelevanceScore]:
+        """Order research-priority scores deterministically; never grants publication authority."""
+        materialized = list(scores)
+        if any(not isinstance(item, RelevanceScore) for item in materialized):
+            raise TypeError("rank accepts only RelevanceScore records")
+        return sorted(materialized, key=lambda item: (-item.score, item.candidate_id))
