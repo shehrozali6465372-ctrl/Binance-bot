@@ -31,7 +31,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_time(value: str) -> datetime:
+def _parse_time(value: str, allow_future: bool = False) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("timestamp must be a non-empty ISO-8601 string")
     try:
@@ -41,7 +41,7 @@ def _parse_time(value: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamps must include timezone")
     normalized = parsed.astimezone(timezone.utc)
-    if normalized.timestamp() > time.time() + 300:
+    if not allow_future and normalized.timestamp() > time.time() + 300:
         raise ValueError("timestamp is more than 5 minutes in the future")
     return normalized
 
@@ -309,6 +309,8 @@ class MarketObservation:
         _parse_time(self.observed_at)
         if self.published_at:
             _parse_time(self.published_at)
+        if self.provider == "coingecko_markets" and not self.published_at:
+            raise ValueError("CoinGecko market observation is missing provider last_updated time")
         for name in ("price", "change_24h", "volume_24h", "market_cap"):
             value = getattr(self, name)
             if value is not None and (
@@ -399,9 +401,11 @@ class AnnouncementEvidence:
         _parse_time(self.published_at)
         _parse_time(self.observed_at)
         if self.updated_at:
-            _parse_time(self.updated_at)
+            updated = _parse_time(self.updated_at)
+            if updated < _parse_time(self.published_at):
+                raise ValueError("announcement updated_at cannot precede published_at")
         if self.event_at:
-            _parse_time(self.event_at)
+            _parse_time(self.event_at, allow_future=True)
 
 
 class AnnouncementIntelligenceEngine:
@@ -540,9 +544,20 @@ class CandidateDiscoveryFilteringEngine:
                 reasons.append("trend_signal_invalid")
 
         now = datetime.now(timezone.utc)
-        fresh_markets = [m for m in valid_markets if (now - _parse_time(m.observed_at)).total_seconds() <= self.max_market_age_seconds]
-        fresh_events = [e for e in valid_events if (now - _parse_time(e.observed_at)).total_seconds() <= self.max_event_age_seconds]
-        fresh_trends = [t for t in valid_trends if (now - _parse_time(t.observed_at)).total_seconds() <= self.max_trend_age_seconds]
+        fresh_markets = [
+            m for m in valid_markets
+            if (now - _parse_time(m.published_at or m.observed_at)).total_seconds()
+            <= self.max_market_age_seconds
+        ]
+        fresh_events = [
+            e for e in valid_events
+            if (now - _parse_time(e.updated_at or e.published_at)).total_seconds()
+            <= self.max_event_age_seconds
+        ]
+        fresh_trends = [
+            t for t in valid_trends
+            if (now - _parse_time(t.observed_at)).total_seconds() <= self.max_trend_age_seconds
+        ]
         if valid_markets and not fresh_markets:
             reasons.append("market_observation_stale")
         if valid_events and not fresh_events:
@@ -565,8 +580,8 @@ class CandidateDiscoveryFilteringEngine:
             for t in matching_trends
         ))
         fingerprint = json.dumps(
-            {"asset_id": identity.asset_id, "events": event_refs,
-             "markets": market_refs, "trends": trend_refs},
+            {"asset_id": identity.asset_id, "eligible_pairs": list(eligibility.eligible_pairs),
+             "events": event_refs, "markets": market_refs, "trends": trend_refs},
             sort_keys=True, separators=(",", ":"),
         )
         cid = hashlib.sha256(fingerprint.encode()).hexdigest()
