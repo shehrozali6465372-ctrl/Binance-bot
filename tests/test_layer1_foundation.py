@@ -156,8 +156,9 @@ class Layer1FoundationTests(unittest.TestCase):
         second = engine.score(candidate, components)
         self.assertEqual(first.score, second.score)
         self.assertEqual(first.score_version, second.score_version)
-        with self.assertRaises(ValueError):
-            engine.score(candidate, {**components, "freshness": None})
+        deferred = engine.score(candidate, {**components, "freshness": None})
+        self.assertEqual(deferred.score, 0.0)
+        self.assertIn("deferred", deferred.reason)
         ineligible = CandidateDiscoveryFilteringEngine().build(
             self.identity,
             type(eligibility)("INELIGIBLE", self.identity.asset_id, "BTC", reason="not listed"),
