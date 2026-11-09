@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -92,6 +93,8 @@ class RunContext:
 class RunLease:
     """Persistent single-run lease; a stale lease is not silently stolen."""
     def __init__(self, database_path: str):
+        from pathlib import Path
+        Path(database_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(database_path, timeout=30, isolation_level=None)
         self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS layer1_run_lease (
@@ -243,7 +246,7 @@ class MarketObservation:
             _parse_time(self.published_at)
         for name in ("price", "change_24h", "volume_24h", "market_cap"):
             value = getattr(self, name)
-            if value is not None and (not isinstance(value, (int, float)) or value != value):
+            if value is not None and (not isinstance(value, (int, float)) or not math.isfinite(value)):
                 raise ValueError(f"invalid {name}")
         if self.price is not None and self.price <= 0:
             raise ValueError("price must be positive")
@@ -264,8 +267,10 @@ class MarketDataIntelligenceEngine:
         payload = self.fetch_json(url, self.timeout)
         if not isinstance(payload, dict) or payload.get("symbol") != symbol:
             raise ValueError("Binance ticker response schema/symbol mismatch")
+        close_time = payload.get("closeTime")
+        observed_at = datetime.fromtimestamp(float(close_time) / 1000, timezone.utc).isoformat() if close_time else utc_now()
         observation = MarketObservation(
-            asset_id=asset_id, provider="binance_spot", endpoint=url, observed_at=utc_now(),
+            asset_id=asset_id, provider="binance_spot", endpoint=url, observed_at=observed_at,
             price=float(payload["lastPrice"]), currency="USDT",
             change_24h=float(payload["priceChangePercent"]),
             volume_24h=float(payload["quoteVolume"]),
@@ -354,6 +359,12 @@ class Candidate:
 
 
 class CandidateDiscoveryFilteringEngine:
+    def __init__(self, max_market_age_seconds: int = 1800, max_event_age_seconds: int = 604800,
+                 max_trend_age_seconds: int = 3600):
+        self.max_market_age_seconds = max_market_age_seconds
+        self.max_event_age_seconds = max_event_age_seconds
+        self.max_trend_age_seconds = max_trend_age_seconds
+
     def build(self, identity: AssetIdentity, eligibility: EligibilityDecision,
               markets: Sequence[MarketObservation], events: Sequence[AnnouncementEvidence],
               trends: Sequence[TrendSignal]) -> Candidate:
@@ -363,6 +374,17 @@ class CandidateDiscoveryFilteringEngine:
         matching_markets = [m for m in markets if m.asset_id == identity.asset_id]
         matching_events = [e for e in events if identity.asset_id in e.asset_ids]
         matching_trends = [t for t in trends if identity.asset_id in t.asset_ids]
+        now = datetime.now(timezone.utc)
+        fresh_markets = [m for m in matching_markets if (now - _parse_time(m.observed_at)).total_seconds() <= self.max_market_age_seconds]
+        fresh_events = [e for e in matching_events if (now - _parse_time(e.observed_at)).total_seconds() <= self.max_event_age_seconds]
+        fresh_trends = [t for t in matching_trends if (now - _parse_time(t.observed_at)).total_seconds() <= self.max_trend_age_seconds]
+        if matching_markets and not fresh_markets:
+            reasons.append("market_observation_stale")
+        if matching_events and not fresh_events:
+            reasons.append("announcement_evidence_stale")
+        if matching_trends and not fresh_trends:
+            reasons.append("trend_signal_stale")
+        matching_markets, matching_events, matching_trends = fresh_markets, fresh_events, fresh_trends
         if not matching_markets and not matching_events and not matching_trends:
             reasons.append("no_source_backed_discovery_signal")
         if any(m.asset_id != identity.asset_id for m in matching_markets):
