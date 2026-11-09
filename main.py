@@ -3312,8 +3312,13 @@ class PostPublisher:
                     error="Success response lacked remote post ID; no retry permitted",
                 )
 
-            # Remote acceptance is confirmed. Keep the ledger SUBMITTING until local
-            # post/analytics persistence succeeds; on local failure it remains non-retryable.
+            # Persist remote identity before local post/analytics writes. If local
+            # persistence fails, operators can reconcile using the known remote ID.
+            self._finish_attempt(
+                key, "PUBLICATION_UNKNOWN", post_id=post_id, share_link=share_link,
+                http_status=http_status,
+                error="Remote acceptance confirmed; local persistence pending",
+            )
             local_post_id = self.db.save_post({
                 "content": content,
                 "coin_symbol": symbol,
