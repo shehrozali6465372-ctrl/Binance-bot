@@ -633,6 +633,11 @@ class Layer1Store:
             rejection_reasons_json TEXT NOT NULL, evidence_refs_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS layer1_candidate_rejections (
+            rejection_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, reason_code TEXT NOT NULL,
+            source TEXT NOT NULL, source_observed_at TEXT, recorded_at TEXT NOT NULL,
+            details_json TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS layer1_candidate_scores (
             candidate_id TEXT NOT NULL, score_version TEXT NOT NULL, score REAL NOT NULL,
             components_json TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -696,6 +701,37 @@ class Layer1Store:
             (candidate.candidate_id, candidate.asset_id, candidate.state,
              json.dumps(list(candidate.rejection_reasons)),
              json.dumps(evidence, sort_keys=True), utc_now()),
+        )
+        self.conn.commit()
+
+    def save_rejection(
+        self, symbol: str, reason_code: str, source: str,
+        source_observed_at: Optional[str] = None,
+        details: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Persist a rejected raw input with a stable fingerprint and explicit reason."""
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (symbol, reason_code, source)
+        ):
+            raise ValueError("candidate rejection symbol/reason/source must be non-empty")
+        payload = json.dumps(dict(details or {}), sort_keys=True, allow_nan=False)
+        fingerprint = json.dumps(
+            {
+                "symbol": symbol.upper(),
+                "reason_code": reason_code,
+                "source": source,
+                "source_observed_at": source_observed_at,
+                "details": json.loads(payload),
+            },
+            sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+        rejection_id = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO layer1_candidate_rejections "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (rejection_id, symbol.upper(), reason_code, source,
+             source_observed_at, utc_now(), payload),
         )
         self.conn.commit()
 
