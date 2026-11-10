@@ -3,7 +3,7 @@
 **Assessment date:** 2026-11-10 UTC  
 **Repository:** `shehrozali6465372-ctrl/Binance-bot`  
 **Branch:** `feature/binance-cms-announcement-worker`  
-**Current code commit:** `e7436f899290f83dda9dbe053e9d0bbb0de1b16a`
+**Current code commit:** `a4fc2f9780238e5f87b90b93e850e7f01eb05fc8`
 
 **PR:** [#2 — Draft, open, unmerged](https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/2)
 
@@ -15,7 +15,8 @@
 
 | Area | Status | Evidence / limitation |
 |---|---|---|
-| Worker unit and lifecycle tests | PASS | Latest GitHub Actions run `42736426249`; 29/29 tests passed in PostgreSQL integration job |
+| Worker unit and lifecycle tests | PASS | Latest GitHub Actions run `42780876489`; 35/35 tests passed in PostgreSQL integration job |
+| WebSocket heartbeat monitoring | PASS (unit + SDK contract) | Active ping/pong, timeout degradation, recovery isolation, and shutdown cleanup tested; live Binance heartbeat not exercised |
 | Worker PostgreSQL connection timeout | PASS (configuration) | `connectionTimeoutMillis: 10000` is set and regression-tested; actual blackhole/network timeout behavior not separately exercised |
 | Python Layer 1 tests and compilation | PASS | Same run; `python-layer1-tests` passed |
 | Offline worker SDK contract tests | PASS | Same run; `mocked-announcement-tests` passed |
@@ -23,9 +24,10 @@
 | Runtime role separation | PASS | Worker insert/RETURNING, duplicate suppression, worker-state upsert; importer read-only; unauthorized payload reads, DDL and importer writes rejected |
 | TLS chain and hostname verification | PASS | Disposable test CA trusted; wrong hostname rejected under `sslmode=verify-full` |
 | Production database/provider TLS compatibility | NOT TESTED | CI used a generated test CA, not the selected production provider's certificate chain |
-| Live Binance CMS connectivity | NOT TESTED | No live CMS credentials/socket used |
+| Live Binance CMS connectivity | NOT TESTED | No live CMS credentials/socket used; heartbeat is verified only with deterministic fakes and the pinned SDK contract |
+| Worker liveness state signal | PASS (implementation/tests) | `updated_at` refreshed on pong; missed pong marks `DEGRADED`; no external alert route is configured |
 | Production deployment and runtime health | BLOCKED | No deployment or production environment changes authorized/performed |
-| Monitoring, alerting, rollback and recovery under provider outage | NOT TESTED | Requires deployment/runtime verification and operational configuration review |
+| External monitoring/alert delivery, rollback and recovery under provider outage | NOT TESTED | Requires approved staging deployment and operational configuration review |
 | Real Binance Square publishing | NOT TESTED / PROHIBITED IN TESTS | No real post published; publishing requires separate explicit approval |
 
 ## Corrected integration finding
