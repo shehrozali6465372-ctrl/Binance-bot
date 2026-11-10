@@ -25,6 +25,20 @@ test("worker receives only dedicated secrets and validates verified PostgreSQL T
   assert.match(workflow, /npm ci --omit=dev/);
 });
 
+test("Binance and database secrets are scoped away from dependency installation", () => {
+  const installStep = workflow.split("- name: Install locked worker dependencies")[1].split("- name: Validate required secrets")[0];
+  const jobHeader = workflow.split("jobs:")[1].split("steps:")[0];
+  assert.doesNotMatch(jobHeader, /secrets\./);
+  assert.doesNotMatch(installStep, /secrets\./);
+  const validationStep = workflow.split("- name: Validate required secrets")[1].split("- name: Run CMS listener")[0];
+  const runtimeStep = workflow.split("- name: Run CMS listener")[1];
+  for (const step of [validationStep, runtimeStep]) {
+    assert.match(step, /secrets\.BINANCE_API_KEY/);
+    assert.match(step, /secrets\.BINANCE_API_SECRET/);
+    assert.match(step, /secrets\.BINANCE_ANNOUNCEMENT_DATABASE_URL/);
+  }
+});
+
 test("each run uses a bounded four-minute CMS stream and graceful SIGTERM", () => {
   assert.match(workflow, /timeout --preserve-status --signal=TERM --kill-after=20s 240s node src\/worker\.js/);
   assert.match(workflow, /timeout-minutes:\s*8/);
