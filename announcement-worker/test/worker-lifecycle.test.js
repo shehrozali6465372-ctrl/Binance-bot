@@ -388,3 +388,33 @@ test("attaches transport error handling before awaiting LISTENING state persiste
 
 
 
+
+
+test("connection error diagnostics are sanitized and do not log credentials or URLs", async () => {
+  const captured = [];
+  const connection = new FakeConnection();
+  const pool = new FakePool();
+  const diagnosticLogger = {
+    info: (...args) => captured.push(args),
+    warn() {},
+    error: (...args) => captured.push(args),
+  };
+  const worker = await startAnnouncementWorker({
+    apiKey: "secret-api-key-never-log",
+    apiSecret: "secret-api-secret-never-log",
+    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
+    cmsFactory: () => ({ websocketStreams: { connect: async () => connection } }),
+    poolFactory: () => pool,
+    logger: diagnosticLogger,
+  });
+  connection.emit("error", Object.assign(
+    new Error("Unexpected server response: 451; request URL wss://example.invalid/?signature=do-not-log"),
+    { statusCode: 451, code: "HTTP_451" },
+  ));
+  await new Promise((resolve) => setImmediate(resolve));
+  const serialized = JSON.stringify(captured);
+  assert.match(serialized, /451/);
+  assert.match(serialized, /HTTP_451/);
+  assert.doesNotMatch(serialized, /secret-api-key-never-log|secret-api-secret-never-log|signature=do-not-log/);
+  await worker.shutdown("test");
+});
