@@ -71,3 +71,20 @@ To run the same integration test locally, provide `POSTGRES_WORKER_URL`, `POSTGR
 The worker sends an SDK-level WebSocket ping every 30 seconds and expects a `pong` within 10 seconds. A missing pong marks the worker `DEGRADED`; a later pong clears only the heartbeat degradation reason. Database/message and transport degradation reasons are tracked independently, so a healthy pong cannot incorrectly clear an unrelated persistence failure. The SDK also handles connection renewal and reconnect/resubscription; transport `open` clears transport/heartbeat degradation, while a message-processing or database error remains visible until a successful event is persisted. Heartbeat timers are unreferenced and are cancelled during graceful shutdown.
 
 The `updated_at` field in `binance_announcement_worker_state` is refreshed by heartbeat/state updates and can be used by an external monitor. Suggested alert conditions: status `DEGRADED` for more than 2 minutes; no heartbeat/state update for more than 2 minutes while the process is expected to be running; or repeated worker restarts. These thresholds are operational starting points, not Binance feed delivery SLAs. The CMS stream does not document historical replay, so a healthy ping proves transport responsiveness only—not that no announcements were missed.
+
+
+## Zero-cost GitHub Actions execution (bounded stream windows)
+
+The separate workflow `.github/workflows/binance-cms-announcement-ingestion.yml` is designed for the accepted five-minute cadence. Each scheduled invocation opens the existing official CMS WebSocket worker for at most four minutes, then sends SIGTERM so the worker drains accepted database writes and closes the stream and pool. The remaining minute is a target gap for startup/scheduling variation, not a delivery guarantee. GitHub schedule events are best-effort and may start late or be dropped under platform load.
+
+This is **not REST polling**: Binance's documented CMS interface used here is a WebSocket push stream. Each run gets a fresh connection; the SDK reconnects within that run, but the documented stream has no historical replay guarantee. Announcements arriving during gaps or missed runs may be permanently missed. Do not claim complete feed coverage or production-grade continuous ingestion from this design.
+
+The workflow uses a dedicated worker-role PostgreSQL URL and a read-only Binance API key. Configure these repository Actions secrets without sharing their values in chat:
+
+- `BINANCE_API_KEY`
+- `BINANCE_API_SECRET`
+- `BINANCE_ANNOUNCEMENT_DATABASE_URL` (worker role only; PostgreSQL URL must use `sslmode=verify-full`)
+
+GitHub location: repository **Settings → Secrets and variables → Actions → New repository secret**. Do not use the migrator or importer URL for the worker secret. No credentials are stored in the workflow or repository. The scheduled workflow is intentionally separate from the existing Square publishing workflow and calls only `node src/worker.js`; it cannot publish a Square post.
+
+GitHub limitation: `schedule` events run only from the repository's default branch. The new workflow on this feature branch will not become an automatic schedule until its PR is approved and merged. `workflow_dispatch` can be used for a controlled manual run after secrets are configured, by selecting the feature branch. Do not merge or deploy without separate approval.
