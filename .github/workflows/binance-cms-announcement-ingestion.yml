@@ -1,8 +1,8 @@
 name: Binance CMS Announcement Ingestion
 
 on:
-  # Scheduled workflows execute only from the repository's default branch.
-  # This workflow remains dormant on the feature branch until PR #2 is approved and merged.
+  # Scheduled workflows execute only from the repository's default branch (main).
+  # PR #2 currently targets a non-default branch; an approved path to main is required.
   schedule:
     - cron: "*/5 * * * *"
   # Allows a controlled manual smoke run from a selected branch.
