@@ -1,0 +1,44 @@
+# Production Readiness Report — Binance-bot
+
+**Assessment date:** 2026-11-10 UTC  
+**Repository:** `shehrozali6465372-ctrl/Binance-bot`  
+**Branch:** `feature/binance-cms-announcement-worker`  
+**Current commit:** `656da6d7f1942492f058ebbf8cb944e8346deceb`  
+**PR:** [#2 — Draft, open, unmerged](https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/2)
+
+## Current verdict
+
+**NOT PRODUCTION READY.** The isolated PostgreSQL migration, least-privilege role behavior, and TLS hostname verification now pass in CI. Production provider credentials, live CMS connectivity, deployment health, and operational recovery have not been verified.
+
+## Verification status
+
+| Area | Status | Evidence / limitation |
+|---|---|---|
+| Worker unit and lifecycle tests | PASS | GitHub Actions run `42735817233`; 28/28 tests passed in PostgreSQL integration job |
+| Python Layer 1 tests and compilation | PASS | Same run; `python-layer1-tests` passed |
+| Offline worker SDK contract tests | PASS | Same run; `mocked-announcement-tests` passed |
+| Disposable PostgreSQL migration | PASS | PostgreSQL 16 CI container; dedicated migration role executed schema migration |
+| Runtime role separation | PASS | Worker insert/RETURNING, duplicate suppression, worker-state upsert; importer read-only; unauthorized payload reads, DDL and importer writes rejected |
+| TLS chain and hostname verification | PASS | Disposable test CA trusted; wrong hostname rejected under `sslmode=verify-full` |
+| Production database/provider TLS compatibility | NOT TESTED | CI used a generated test CA, not the selected production provider's certificate chain |
+| Live Binance CMS connectivity | NOT TESTED | No live CMS credentials/socket used |
+| Production deployment and runtime health | BLOCKED | No deployment or production environment changes authorized/performed |
+| Monitoring, alerting, rollback and recovery under provider outage | NOT TESTED | Requires deployment/runtime verification and operational configuration review |
+| Real Binance Square publishing | NOT TESTED / PROHIBITED IN TESTS | No real post published; publishing requires separate explicit approval |
+
+## Corrected integration finding
+
+The first real PostgreSQL CI run exposed a missing worker `SELECT(content_hash)` grant: PostgreSQL requires SELECT on the `ON CONFLICT (content_hash)` arbiter column. The grant was narrowed to `SELECT(id, content_hash)`; payload columns remain inaccessible to the worker. The corrected commit passed the full PostgreSQL integration job on run `42735817233`.
+
+## Remaining blockers
+
+1. **Production database role and migration rollout — BLOCKED.** Cause: no production database credentials or migration authorization used. Impact: production schema and role configuration remain unverified. Fix: provision separate migration, worker and importer roles through the database provider's secure secret UI; verify membership and grants; apply migration only after explicit approval. Verification: read-only diagnostics, migration ledger, role privilege tests and provider TLS handshake.
+2. **Production provider TLS — NOT TESTED.** Cause: CI used a disposable CA and local hostname. Impact: actual provider CA/hostname compatibility is unknown. Fix: obtain provider's documented CA configuration and test against an isolated staging branch/database. Verification: successful `verify-full` handshake plus negative hostname-mismatch test.
+3. **Live CMS read path — NOT TESTED.** Cause: no live credentials or connection used. Impact: authentication, reconnect behavior and actual feed payload compatibility are not confirmed against Binance. Fix: configure a least-privilege read-only key in the approved secret store and run a controlled read-only smoke test. No publishing action is involved.
+4. **Deployment and operations — BLOCKED / NOT TESTED.** Cause: production deployment, monitoring and rollback have not been authorized or executed. Impact: runtime health and recovery cannot be certified. Fix: approve a staging deployment, add health/alerting and validate rollback before production approval.
+
+## Safety boundaries preserved
+
+- PR #2 remains Draft, open and unmerged.
+- No production database, credentials, live CMS connection, deployment, paid infrastructure, or real Binance Square post was used.
+- Existing publisher workflow and schedule were not changed as part of this database integration work.
