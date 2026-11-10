@@ -103,6 +103,11 @@ export async function startAnnouncementWorker({
     heartbeatTimeout = undefined;
   };
 
+  const startHeartbeatLoop = () => {
+    if (closed || heartbeatInterval) return;
+    startHeartbeatLoop();
+  };
+
   try {
     await store.initialize();
     await store.setState("STARTING", { startedAt: new Date().toISOString() });
@@ -121,7 +126,11 @@ export async function startAnnouncementWorker({
     // lifecycle events belong to WebsocketStreamsConnection.on().
     connection.on("open", () => {
       if (!closed) {
+        // The official SDK replaces the underlying socket but keeps this
+        // connection wrapper. Restart our heartbeat loop for every new socket.
         clearPendingHeartbeat();
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        heartbeatInterval = undefined;
         degradationReasons.delete("transport");
         degradationReasons.delete("heartbeat");
         void persistOperationalState().catch((error) => {
@@ -129,6 +138,7 @@ export async function startAnnouncementWorker({
             error: String(error?.message || error).slice(0, 500),
           });
         });
+        startHeartbeatLoop();
       }
     });
     connection.on("error", (error) => {
