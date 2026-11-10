@@ -1,4 +1,5 @@
-import { Cms, CMS_WS_STREAMS_PROD_URL } from "@binance/cms";
+import { CmsWebsocketStreams, CMS_WS_STREAMS_PROD_URL } from "@binance/cms";
+import { WebsocketStreamsBase } from "@binance/common";
 import pg from "pg";
 import { normalizeAnnouncementMessage } from "./normalize.js";
 import { AnnouncementStore } from "./store.js";
@@ -30,7 +31,7 @@ export async function startAnnouncementWorker({
   apiKey = requiredEnv("BINANCE_API_KEY"),
   apiSecret = requiredEnv("BINANCE_API_SECRET"),
   databaseUrl = requiredEnv("DATABASE_URL"),
-  cmsFactory = (configuration) => new Cms({ configurationWebsocketStreams: configuration }),
+  cmsFactory,
   poolFactory = (options) => new Pool(options),
   logger = console,
   shutdownTimeoutMs = 30_000,
@@ -77,18 +78,31 @@ export async function startAnnouncementWorker({
     await store.initialize();
     await store.setState("STARTING", { startedAt: new Date().toISOString() });
 
-    const client = cmsFactory({
+    const configuration = {
       apiKey,
       apiSecret,
       wsURL: process.env.BINANCE_CMS_WS_URL || CMS_WS_STREAMS_PROD_URL,
       reconnectDelay: 5000,
-    });
-    connection = await client.websocketStreams.connect();
+    };
+    let connectTransport;
+    if (cmsFactory) {
+      // Test seam only. Production uses the low-level official SDK base so the
+      // error listener can be attached before its async handshake begins.
+      const client = cmsFactory(configuration);
+      connection = await client.websocketStreams.connect();
+      connectTransport = async () => {};
+    } else {
+      const websocketBase = new WebsocketStreamsBase(configuration);
+      websocketBase.signedStreams = true;
+      connection = new CmsWebsocketStreams.WebsocketStreamsConnection(websocketBase);
+      connectTransport = () => websocketBase.connect();
+    }
 
-    // Register transport handlers immediately: the socket can fail while the
-    // first post-connect database state write is still pending.
-    // The SDK's stream handler only supports "message". Transport-level
-    // lifecycle events belong to WebsocketStreamsConnection.on().
+    // Attach the error listener before connectTransport(): the official
+    // high-level Cms.connect() awaits the handshake before returning its
+    // wrapper, so handshake failures otherwise emit an unhandled EventEmitter
+    // "error" before the caller can subscribe.
+    // The SDK's stream handler only supports "message".
     connection.on("open", () => {
       if (!closed) {
         degradationReasons.delete("transport");
@@ -122,6 +136,7 @@ export async function startAnnouncementWorker({
       logger.warn("Binance CMS connection closed", { code, reason: String(reason ?? "").slice(0, 200) });
       if (!closed) void markDegraded("transport", message);
     });
+    await connectTransport();
     stream = connection.comAnnouncementEn();
     stream.on("message", (message) => {
       if (!acceptingMessages) return;
