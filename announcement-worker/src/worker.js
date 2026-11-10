@@ -101,11 +101,15 @@ export async function startAnnouncementWorker({
     });
     connection.on("error", (error) => {
       const message = String(error?.message || error).slice(0, 500);
+      const statusMatch = message.match(/(?:server response|status(?: code)?)\s*[:=]?\s*(\d{3})/i);
       const diagnostic = {
         errorName: String(error?.name || "Error").slice(0, 80),
         errorCode: String(error?.code || "").slice(0, 80) || null,
-        errorMessage: message,
-        httpStatus: Number.isInteger(error?.statusCode) ? error.statusCode : null,
+        // Never persist arbitrary error text: ws errors can embed a signed URL.
+        errorMessage: message.replace(/wss?:\/\/\S+/gi, "[REDACTED_URL]").slice(0, 250),
+        httpStatus: Number.isInteger(error?.statusCode)
+          ? error.statusCode
+          : (statusMatch ? Number(statusMatch[1]) : null),
       };
       logger.error("Binance CMS connection error", diagnostic);
       if (process.env.BINANCE_CMS_DIAGNOSTIC_MODE === "1") {
