@@ -62,10 +62,11 @@ To run the same integration test locally, provide `POSTGRES_WORKER_URL`, `POSTGR
 
 ## WebSocket liveness monitoring
 
-The worker sends an SDK-level WebSocket ping every 30 seconds and expects a `pong` within 10 seconds. A missing pong marks the worker `DEGRADED`; a later pong clears only the heartbeat degradation reason. Database/message and transport degradation reasons are tracked independently, so a healthy pong cannot incorrectly clear an unrelated persistence failure. The SDK also handles connection renewal and reconnect/resubscription; transport `open` clears transport/heartbeat degradation, while a message-processing or database error remains visible until a successful event is persisted. Heartbeat timers are unreferenced and are cancelled during graceful shutdown.
+The worker does not send custom PING frames or implement a separate PONG timeout. Binance's signed CMS WebSocket SDK owns this protocol: the pinned `@binance/cms@1.0.3` package uses `@binance/common@2.5.3`, which sends an empty WebSocket PING every 30 seconds, clears the timer with the underlying socket, and schedules the keepalive again when a replacement socket opens. The WebSocket implementation automatically replies to server PING frames with PONG.
 
-The `updated_at` field in `binance_announcement_worker_state` is refreshed by heartbeat/state updates and can be used by an external monitor. Suggested alert conditions: status `DEGRADED` for more than 2 minutes; no heartbeat/state update for more than 2 minutes while the process is expected to be running; or repeated worker restarts. These thresholds are operational starting points, not Binance feed delivery SLAs. The CMS stream does not document historical replay, so a healthy ping proves transport responsiveness only—not that no announcements were missed.
+The worker monitors the SDK's supported `open`, `error`, and `close` lifecycle events and records transport degradation/recovery in `binance_announcement_worker_state`. Message processing and database failures remain independent degradation reasons. A healthy transport event or SDK keepalive does not prove that every announcement was delivered.
 
+The `updated_at` field can be monitored externally. Suggested alert conditions: status `DEGRADED` for more than 2 minutes; no state update for more than 2 minutes while the process is expected to be running; or repeated worker restarts. These are operational thresholds, not Binance feed delivery SLAs. The CMS stream does not document historical replay, so reconnect cannot prove that events missed during an outage were recovered.
 
 ## Zero-cost GitHub Actions execution (bounded stream windows)
 
