@@ -114,37 +114,9 @@ export async function startAnnouncementWorker({
       reconnectDelay: 5000,
     });
     connection = await client.websocketStreams.connect();
-    stream = connection.comAnnouncementEn();
-    await store.setState("LISTENING");
-    logger.info("Binance CMS announcement stream connected; read-only ingestion active");
 
-    stream.on("message", (message) => {
-      if (!acceptingMessages) return;
-      writeQueue = writeQueue.then(async () => {
-        const receivedAt = new Date().toISOString();
-        await persistOperationalState({ lastMessageAt: receivedAt }, "RECEIVING");
-        try {
-          const event = normalizeAnnouncementMessage(message, receivedAt);
-          const inserted = await store.save(event);
-          degradationReasons.delete("message");
-          degradationReasons.delete("queue");
-          if (inserted) {
-            await persistOperationalState({ lastMessageAt: receivedAt, lastPersistedAt: new Date().toISOString() });
-            logger.info("Binance announcement persisted", { catalogId: event.catalogId, eventType: event.eventType, contentHash: event.contentHash });
-          } else {
-            await persistOperationalState({ lastMessageAt: receivedAt });
-            logger.info("Duplicate Binance announcement ignored", { contentHash: event.contentHash });
-          }
-        } catch (error) {
-          await markDegraded("message", error, { lastMessageAt: receivedAt });
-          logger.error("Announcement rejected or persistence failed", { error: String(error?.message || error).slice(0, 500) });
-        }
-      }).catch(async (error) => {
-        await markDegraded("queue", error);
-        logger.error("Announcement processing queue failed", { error: String(error?.message || error).slice(0, 500) });
-      });
-    });
-
+    // Register transport handlers immediately: the socket can fail while the
+    // first post-connect database state write is still pending.
     // The SDK's stream handler only supports "message". Transport-level
     // lifecycle events belong to WebsocketStreamsConnection.on().
     connection.on("open", () => {
@@ -177,6 +149,37 @@ export async function startAnnouncementWorker({
       clearPendingHeartbeat();
       void clearDegraded("heartbeat");
       logger.info("Binance CMS heartbeat pong received");
+    });
+
+    stream = connection.comAnnouncementEn();
+    await persistOperationalState({}, "LISTENING");
+    logger.info("Binance CMS announcement stream connected; read-only ingestion active");
+
+    stream.on("message", (message) => {
+      if (!acceptingMessages) return;
+      writeQueue = writeQueue.then(async () => {
+        const receivedAt = new Date().toISOString();
+        await persistOperationalState({ lastMessageAt: receivedAt }, "RECEIVING");
+        try {
+          const event = normalizeAnnouncementMessage(message, receivedAt);
+          const inserted = await store.save(event);
+          degradationReasons.delete("message");
+          degradationReasons.delete("queue");
+          if (inserted) {
+            await persistOperationalState({ lastMessageAt: receivedAt, lastPersistedAt: new Date().toISOString() });
+            logger.info("Binance announcement persisted", { catalogId: event.catalogId, eventType: event.eventType, contentHash: event.contentHash });
+          } else {
+            await persistOperationalState({ lastMessageAt: receivedAt });
+            logger.info("Duplicate Binance announcement ignored", { contentHash: event.contentHash });
+          }
+        } catch (error) {
+          await markDegraded("message", error, { lastMessageAt: receivedAt });
+          logger.error("Announcement rejected or persistence failed", { error: String(error?.message || error).slice(0, 500) });
+        }
+      }).catch(async (error) => {
+        await markDegraded("queue", error);
+        logger.error("Announcement processing queue failed", { error: String(error?.message || error).slice(0, 500) });
+      });
     });
 
     heartbeatInterval = setInterval(() => {
