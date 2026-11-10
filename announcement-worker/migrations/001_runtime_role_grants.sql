@@ -12,8 +12,9 @@ REVOKE CREATE ON SCHEMA public
 GRANT USAGE ON SCHEMA public TO binance_announcement_worker;
 GRANT USAGE ON SCHEMA public TO binance_announcement_importer;
 
--- Worker: append event rows and read only the generated id returned by INSERT.
-GRANT INSERT, SELECT (id) ON TABLE binance_announcement_events
+-- Worker needs content_hash for ON CONFLICT index inference and id for RETURNING.
+-- No event payload columns are readable by the worker.
+GRANT INSERT, SELECT (id, content_hash) ON TABLE binance_announcement_events
   TO binance_announcement_worker;
 GRANT USAGE ON SEQUENCE binance_announcement_events_id_seq
   TO binance_announcement_worker;

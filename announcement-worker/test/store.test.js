@@ -71,7 +71,7 @@ test("runtime initialization checks required table access without executing DDL"
 test("runtime grants are least privilege and importer cannot mutate the event ledger", async () => {
   const fs = await import("node:fs/promises");
   const grants = await fs.readFile(new URL("../migrations/001_runtime_role_grants.sql", import.meta.url), "utf8");
-  assert.match(grants, /GRANT INSERT, SELECT \(id\).*binance_announcement_worker/s);
+  assert.match(grants, /GRANT INSERT, SELECT \(id, content_hash\).*binance_announcement_worker/s);
   assert.match(grants, /GRANT SELECT, INSERT, UPDATE ON TABLE binance_announcement_worker_state/s);
   assert.match(grants, /GRANT SELECT ON TABLE binance_announcement_events\s+TO binance_announcement_importer/);
   assert.doesNotMatch(grants, /GRANT (ALL|INSERT|UPDATE|DELETE).*binance_announcement_importer/i);
