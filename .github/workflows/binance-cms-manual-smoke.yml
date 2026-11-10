@@ -19,6 +19,15 @@ jobs:
       - name: Checkout selected branch (PR #6)
         uses: actions/checkout@v4
 
+      - name: Report runner outbound IP and geolocation (no secrets)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ip="$(curl --fail --silent --show-error https://api.ipify.org)"
+          echo "GitHub Actions runner outbound IPv4: $ip"
+          curl --fail --silent --show-error "https://ipapi.co/${ip}/json/" \
+            | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const x=JSON.parse(s); console.log(JSON.stringify({ip:x.ip,city:x.city,region:x.region,country_name:x.country_name,country_code:x.country_code,org:x.org,asn:x.asn},null,2));});'
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
