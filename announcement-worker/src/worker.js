@@ -20,11 +20,15 @@ export async function startAnnouncementWorker({
   cmsFactory = (configuration) => new Cms({ configurationWebsocketStreams: configuration }),
   poolFactory = (options) => new Pool(options),
   logger = console,
+  shutdownTimeoutMs = 30_000,
 } = {}) {
   const pool = poolFactory({ connectionString: databaseUrl, max: 3, application_name: "binance-cms-announcement-worker" });
   const store = new AnnouncementStore(pool);
   let connection;
   let closed = false;
+  let acceptingMessages = true;
+  let shutdownPromise;
+  let resourcesClosed = false;
   let writeQueue = Promise.resolve();
 
   try {
@@ -43,8 +47,8 @@ export async function startAnnouncementWorker({
     logger.info("Binance CMS announcement stream connected; read-only ingestion active");
 
     stream.on("message", (message) => {
+      if (!acceptingMessages) return;
       writeQueue = writeQueue.then(async () => {
-        if (closed) return;
         const receivedAt = new Date().toISOString();
         await store.setState("RECEIVING", { lastMessageAt: receivedAt });
         try {
@@ -93,15 +97,55 @@ export async function startAnnouncementWorker({
       }
     });
 
-    const shutdown = async (signal = "shutdown") => {
-      if (closed) return;
-      closed = true;
-      logger.info("Stopping announcement worker", { signal });
-      await writeQueue;
+    const finalizeShutdown = async () => {
+      if (resourcesClosed) return;
+      resourcesClosed = true;
       await store.setState("STOPPED").catch(() => {});
-      try { stream.unsubscribe(); } catch {}
       try { await connection.disconnect(); } catch {}
       await pool.end();
+    };
+
+    const shutdown = (signal = "shutdown") => {
+      if (shutdownPromise) return shutdownPromise;
+
+      // Stop intake synchronously before observing the queue. Message callbacks
+      // accepted before this point remain in writeQueue and must be drained.
+      acceptingMessages = false;
+      closed = true;
+      logger.info("Stopping announcement worker", { signal });
+      try { stream.unsubscribe(); } catch {}
+
+      const acceptedWrites = writeQueue;
+      shutdownPromise = (async () => {
+        let timeoutHandle;
+        const timeout = new Promise((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            const error = new Error(`Announcement worker shutdown exceeded ${shutdownTimeoutMs}ms while draining accepted writes`);
+            error.code = "ERR_SHUTDOWN_TIMEOUT";
+            reject(error);
+          }, shutdownTimeoutMs);
+        });
+
+        try {
+          await Promise.race([acceptedWrites, timeout]);
+        } catch (error) {
+          if (error?.code === "ERR_SHUTDOWN_TIMEOUT") {
+            // Do not close the pool under in-flight writes. Report the bounded
+            // shutdown timeout now, then release resources once the queue settles.
+            void acceptedWrites.finally(finalizeShutdown).catch((cleanupError) => {
+              logger.error("Deferred shutdown cleanup failed", {
+                error: String(cleanupError?.message || cleanupError).slice(0, 500),
+              });
+            });
+          }
+          throw error;
+        } finally {
+          clearTimeout(timeoutHandle);
+        }
+
+        await finalizeShutdown();
+      })();
+      return shutdownPromise;
     };
 
     return { shutdown, stream, connection, store, pool };

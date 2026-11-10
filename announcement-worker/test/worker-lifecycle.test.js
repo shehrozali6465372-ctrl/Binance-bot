@@ -3,10 +3,12 @@ import test from "node:test";
 import { startAnnouncementWorker } from "../src/worker.js";
 
 class FakePool {
-  constructor({ failInitialize = false } = {}) {
+  constructor({ failInitialize = false, insertBarrier = null, onInsertStarted = null } = {}) {
     this.queries = [];
     this.ended = false;
     this.failInitialize = failInitialize;
+    this.insertBarrier = insertBarrier;
+    this.onInsertStarted = onInsertStarted;
   }
 
   async query(sql, values = []) {
@@ -15,7 +17,9 @@ class FakePool {
       throw new Error("offline simulated schema initialization failure");
     }
     if (sql.includes("INSERT INTO binance_announcement_events")) {
-      return { rowCount: 1, rows: [{ id: 7 }] };
+      this.onInsertStarted?.();
+      if (this.insertBarrier) await this.insertBarrier;
+      return { rowCount: 1, rows: [{ id: this.queries.length }] };
     }
     return { rowCount: 1, rows: [] };
   }
@@ -75,8 +79,8 @@ const logger = {
   error() {},
 };
 
-async function startWithFakes({ connectError } = {}) {
-  const pool = new FakePool();
+async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs } = {}) {
+  const pool = new FakePool(poolOptions);
   const connection = new FakeConnection();
   const configuration = {};
   const worker = await startAnnouncementWorker({
@@ -96,6 +100,7 @@ async function startWithFakes({ connectError } = {}) {
     },
     poolFactory: () => pool,
     logger,
+    shutdownTimeoutMs,
   });
   return { worker, pool, connection, configuration };
 }
@@ -124,6 +129,83 @@ test("worker consumes a mocked CMS message and shuts down all resources", async 
   assert.equal(connection.disconnected, true);
   assert.equal(pool.ended, true);
   assert.ok(pool.queries.some(({ values }) => values[0] === "STOPPED"));
+});
+
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("shutdown drains every accepted message queued behind a delayed database write", async () => {
+  const insertBarrier = deferred();
+  const firstInsertStarted = deferred();
+  const { worker, pool, connection } = await startWithFakes({
+    poolOptions: {
+      insertBarrier: insertBarrier.promise,
+      onInsertStarted: () => firstInsertStarted.resolve(),
+    },
+  });
+  const message = (title) => ({
+    catalogId: 48,
+    catalogName: "New Cryptocurrency Listing",
+    publishDate: Date.now(),
+    title,
+    body: "Mock announcement body",
+    disclaimer: "",
+  });
+
+  connection.stream.emitMessage(message("First queued announcement (AAA)"));
+  connection.stream.emitMessage(message("Second queued announcement (BBB)"));
+  await firstInsertStarted.promise;
+
+  const shutdown = worker.shutdown("SIGTERM");
+  connection.stream.emitMessage(message("Must not be accepted after shutdown (CCC)"));
+  insertBarrier.resolve();
+  await shutdown;
+
+  const persistedCount = pool.queries.filter(({ sql }) =>
+    sql.includes("INSERT INTO binance_announcement_events"),
+  ).length;
+  assert.equal(persistedCount, 2, "both messages accepted before shutdown must persist");
+  assert.equal(connection.stream.unsubscribed, true);
+  assert.equal(connection.disconnected, true);
+  assert.equal(pool.ended, true);
+});
+
+test("shutdown timeout leaves the pool open until accepted writes settle", async () => {
+  const insertBarrier = deferred();
+  const firstInsertStarted = deferred();
+  const { worker, pool, connection } = await startWithFakes({
+    poolOptions: {
+      insertBarrier: insertBarrier.promise,
+      onInsertStarted: () => firstInsertStarted.resolve(),
+    },
+    shutdownTimeoutMs: 10,
+  });
+
+  connection.stream.emitMessage({
+    catalogId: 48,
+    catalogName: "New Cryptocurrency Listing",
+    publishDate: Date.now(),
+    title: "Delayed announcement (DDD)",
+    body: "Mock announcement body",
+    disclaimer: "",
+  });
+  await firstInsertStarted.promise;
+
+  await assert.rejects(worker.shutdown("SIGTERM"), {
+    code: "ERR_SHUTDOWN_TIMEOUT",
+  });
+  assert.equal(connection.stream.unsubscribed, true);
+  assert.equal(pool.ended, false, "pool must stay open while an accepted write is in flight");
+
+  insertBarrier.resolve();
+  for (let attempt = 0; attempt < 10 && !pool.ended; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(pool.ended, true, "resources close after the accepted write settles");
 });
 
 test("transport errors mark DEGRADED and reconnect open restores LISTENING", async () => {

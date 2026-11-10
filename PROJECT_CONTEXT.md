@@ -358,3 +358,28 @@ This section supersedes earlier status/gap statements above where they conflict.
 5. Inspect the diff and run the gh-review-loop cycle summary before pushing any code change.
 6. Push the fix to the same feature branch, request Codex re-review using the plugin script, and wait for a response against the new commit. Keep the review request cap at 3.
 7. Keep PR #2 Draft and unmerged; do not deploy or publish a real Square post.
+
+## Codex shutdown finding — implementation and local verification (2026-11-10 UTC)
+
+- User approved adjusting the local gh-review-loop verification profile to match the repository's actual GitHub Actions scope rather than compiling every unrelated legacy Python file.
+- Saved customized verification profile for `shehrozali6465372-ctrl/Binance-bot`:
+  1. `npm test` in `announcement-worker/`.
+  2. Create an isolated Python virtual environment at `/tmp/binance-bot-verify-venv`.
+  3. Install Pillow in that environment, matching the CI dependency.
+  4. `python -m compileall -q main.py image_engine.py layer1`.
+  5. `python -m unittest discover -s tests -v`.
+- The previous broad `python -m compileall -q .` was not aligned with CI and included the unrelated legacy tracked file `python agent_bot.py`, which currently has an existing syntax error. It was narrowed to the exact Python sources compiled by CI; no legacy Python source was edited.
+- The host Python installation is PEP 668 externally managed, so Pillow was installed in an isolated `/tmp` virtual environment instead of modifying system Python.
+- The saved profile runner completed successfully: all five required checks passed (Node worker tests, venv setup, Pillow install, Python compile, Python unit tests).
+- Implemented the Codex P2 shutdown fix in `announcement-worker/src/worker.js`: stop message intake synchronously, unsubscribe, preserve already accepted callbacks in the write queue, await those writes before normal resource closure, make shutdown idempotent, and bound waiting with an injectable 30-second default timeout. If the timeout expires, the pool is deliberately kept open until accepted writes settle, then cleanup runs asynchronously.
+- Added two lifecycle regressions in `announcement-worker/test/worker-lifecycle.test.js`: queued accepted messages are drained and post-shutdown messages are rejected; timeout does not close the pool underneath an in-flight write and cleanup happens after it settles.
+- Focused worker lifecycle suite passed 6/6 tests before the full profile run. The complete saved verification profile also passed.
+- Added `announcement-worker/node_modules/` to `.gitignore`; dependencies are local only and must not be committed.
+- At this handoff, these changes are local and uncommitted. The PR review thread remains unresolved pending Codex re-review. No push or re-review request has yet been made in this cycle.
+- PR #2 remains Draft, open, and unmerged. No production publisher workflow, deployment, live Binance CMS connection, production database, secrets, paid resources, or real Square post were touched.
+
+### Next actions
+1. Inspect final diff and run `git diff --check` plus the saved profile once more after context/ignore updates.
+2. Obtain the gh-review-loop cycle summary before commit/push, then commit and push only the scoped fix, tests, `.gitignore`, and this context update.
+3. Request Codex re-review with the official gh-review-loop request script and wait for the review result; do not resolve the thread manually.
+4. Keep PR #2 Draft/unmerged and retain all production gates listed above.
