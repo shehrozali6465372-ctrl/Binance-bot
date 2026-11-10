@@ -51,7 +51,7 @@ jobs:
           openssl genrsa -out /tmp/binance-pg-tls/ca.key 2048
           openssl req -x509 -new -nodes -key /tmp/binance-pg-tls/ca.key -sha256 -days 2 -subj "/CN=Binance CI Test CA" -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" -out /tmp/binance-pg-tls/ca.crt
           openssl req -new -newkey rsa:2048 -nodes -keyout /tmp/binance-pg-tls/server.key -out /tmp/binance-pg-tls/server.csr -subj "/CN=localhost"
-          printf 'subjectAltName=DNS:localhost\\nextendedKeyUsage=serverAuth\\nkeyUsage=digitalSignature,keyEncipherment\\n' > /tmp/binance-pg-tls/server.ext
+          printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\nkeyUsage=digitalSignature,keyEncipherment\n' > /tmp/binance-pg-tls/server.ext
           openssl x509 -req -in /tmp/binance-pg-tls/server.csr -CA /tmp/binance-pg-tls/ca.crt -CAkey /tmp/binance-pg-tls/ca.key -CAcreateserial -out /tmp/binance-pg-tls/server.crt -days 2 -sha256 -extfile /tmp/binance-pg-tls/server.ext
           sudo chown 999:999 /tmp/binance-pg-tls/server.key /tmp/binance-pg-tls/server.crt
           sudo chmod 600 /tmp/binance-pg-tls/server.key
