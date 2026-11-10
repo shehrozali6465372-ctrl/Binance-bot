@@ -1,0 +1,62 @@
+name: Binance CMS Manual Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binance-cms-manual-smoke
+  cancel-in-progress: false
+
+jobs:
+  cms-smoke:
+    name: Bounded read-only CMS connection test
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout PR branch with diagnostic worker
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: announcement-worker/package-lock.json
+
+      - name: Install locked worker dependencies
+        working-directory: announcement-worker
+        run: npm ci --omit=dev
+
+      - name: Test Neon database URL TLS normalization
+        run: node --test .github/scripts/test/prepare-neon-database-url.test.mjs
+
+      - name: Validate secrets and enforce verified Neon TLS
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+          BINANCE_ANNOUNCEMENT_DATABASE_URL: ${{ secrets.BINANCE_ANNOUNCEMENT_DATABASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in BINANCE_API_KEY BINANCE_API_SECRET BINANCE_ANNOUNCEMENT_DATABASE_URL; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required GitHub Actions secret is missing: $name" >&2
+              exit 1
+            fi
+          done
+          node .github/scripts/prepare-neon-database-url.mjs
+
+      - name: Run read-only CMS diagnostics and bounded listener
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+          BINANCE_CMS_DIAGNOSTIC_MODE: "1"
+        working-directory: announcement-worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --preserve-status --signal=TERM --kill-after=20s 240s node src/worker.js
