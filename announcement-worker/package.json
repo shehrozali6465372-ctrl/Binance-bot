@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node src/worker.js",
+    "migrate": "node src/migrate.js",
     "test": "node --test"
   },
   "dependencies": {

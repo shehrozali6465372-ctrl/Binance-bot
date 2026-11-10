@@ -13,6 +13,19 @@ function requiredEnv(name) {
   return value.trim();
 }
 
+function requireVerifiedPostgresUrl(value, name) {
+  let parsed;
+  try { parsed = new URL(value); }
+  catch { throw new Error(`${name} must be a valid PostgreSQL connection URL`); }
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol)) {
+    throw new Error(`${name} must use the PostgreSQL protocol`);
+  }
+  if (parsed.searchParams.get("sslmode") !== "verify-full") {
+    throw new Error(`${name} must include sslmode=verify-full`);
+  }
+  return value;
+}
+
 export async function startAnnouncementWorker({
   apiKey = requiredEnv("BINANCE_API_KEY"),
   apiSecret = requiredEnv("BINANCE_API_SECRET"),
@@ -22,6 +35,7 @@ export async function startAnnouncementWorker({
   logger = console,
   shutdownTimeoutMs = 30_000,
 } = {}) {
+  databaseUrl = requireVerifiedPostgresUrl(databaseUrl, "DATABASE_URL");
   const pool = poolFactory({ connectionString: databaseUrl, max: 3, application_name: "binance-cms-announcement-worker" });
   const store = new AnnouncementStore(pool);
   let connection;

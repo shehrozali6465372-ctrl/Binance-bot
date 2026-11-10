@@ -39,7 +39,10 @@ export class AnnouncementStore {
   }
 
   async initialize() {
-    await this.pool.query(SCHEMA_SQL);
+    // Runtime credentials must not own the schema. These zero-row reads verify
+    // the narrow privileges required by the worker without executing DDL.
+    await this.pool.query("SELECT id FROM binance_announcement_events LIMIT 0");
+    await this.pool.query("SELECT worker_name FROM binance_announcement_worker_state LIMIT 0");
   }
 
   async save(event) {

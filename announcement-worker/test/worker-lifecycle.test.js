@@ -14,8 +14,8 @@ class FakePool {
 
   async query(sql, values = []) {
     this.queries.push({ sql, values });
-    if (this.failInitialize && sql.includes("CREATE TABLE IF NOT EXISTS")) {
-      throw new Error("offline simulated schema initialization failure");
+    if (this.failInitialize && sql.includes("SELECT id FROM binance_announcement_events")) {
+      throw new Error("offline simulated runtime schema permission failure");
     }
     if (sql.includes("binance_announcement_worker_state")) {
       const state = values[0];
@@ -94,7 +94,7 @@ async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs } =
   const worker = await startAnnouncementWorker({
     apiKey: "offline-test-key",
     apiSecret: "offline-test-secret",
-    databaseUrl: "postgresql://offline.invalid/db",
+    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
     cmsFactory: (value) => {
       Object.assign(configuration, value);
       return {
@@ -222,7 +222,7 @@ test("write queue recovers after RECEIVING and DEGRADED state updates both fail"
   const worker = await startAnnouncementWorker({
     apiKey: "offline-test-key",
     apiSecret: "offline-test-secret",
-    databaseUrl: "postgresql://offline.invalid/db",
+    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
     cmsFactory: () => ({ websocketStreams: { connect: async () => connection } }),
     poolFactory: () => pool,
     logger,
@@ -255,7 +255,7 @@ test("startup failure after websocket connect disconnects the opened connection"
     startAnnouncementWorker({
       apiKey: "offline-test-key",
       apiSecret: "offline-test-secret",
-      databaseUrl: "postgresql://offline.invalid/db",
+      databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
       cmsFactory: () => ({ websocketStreams: { connect: async () => connection } }),
       poolFactory: () => pool,
       logger,
@@ -287,7 +287,7 @@ test("failed initial connection records FAILED and closes the database pool", as
     startAnnouncementWorker({
       apiKey: "offline-test-key",
       apiSecret: "offline-test-secret",
-      databaseUrl: "postgresql://offline.invalid/db",
+      databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
       cmsFactory: () => ({
         websocketStreams: {
           connect: async () => {
@@ -305,14 +305,14 @@ test("failed initial connection records FAILED and closes the database pool", as
 });
 
 
-test("database initialization failure still closes the pool", async () => {
+test("runtime schema permission failure prevents CMS startup and closes the pool", async () => {
   const pool = new FakePool({ failInitialize: true });
   let cmsFactoryCalled = false;
   await assert.rejects(
     startAnnouncementWorker({
       apiKey: "offline-test-key",
       apiSecret: "offline-test-secret",
-      databaseUrl: "postgresql://offline.invalid/db",
+      databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
       cmsFactory: () => {
         cmsFactoryCalled = true;
         throw new Error("CMS must not initialize after database failure");
@@ -320,9 +320,22 @@ test("database initialization failure still closes the pool", async () => {
       poolFactory: () => pool,
       logger,
     }),
-    /offline simulated schema initialization failure/,
+    /offline simulated runtime schema permission failure/,
   );
   assert.equal(cmsFactoryCalled, false);
   assert.ok(pool.queries.some(({ values }) => values[0] === "FAILED"));
   assert.equal(pool.ended, true);
+});
+
+
+test("worker rejects a database URL without verified TLS before creating a pool", async () => {
+  let poolFactoryCalled = false;
+  await assert.rejects(startAnnouncementWorker({
+    apiKey: "offline-test-key",
+    apiSecret: "offline-test-secret",
+    databaseUrl: "postgresql://offline.invalid/db",
+    poolFactory: () => { poolFactoryCalled = true; throw new Error("pool must not be created"); },
+    logger,
+  }), /DATABASE_URL must include sslmode=verify-full/);
+  assert.equal(poolFactoryCalled, false);
 });

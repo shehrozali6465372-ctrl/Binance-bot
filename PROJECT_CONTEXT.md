@@ -435,3 +435,13 @@ This section supersedes earlier status/gap statements above where they conflict.
 - Reproduced the existing importer TLS weakness test-first: changed the test expectation to `sslmode=verify-full`; it failed because the importer still passed `require`.
 - Updated the read-only Python importer to request `sslmode=verify-full`. This verifies the certificate chain and server hostname using the driver's trusted CA configuration, rather than merely requiring encrypted transport. `default_transaction_read_only=on` and the 5-second connection timeout remain unchanged.
 - This is code-level configuration verification only. No actual PostgreSQL connection or certificate handshake was attempted; compatibility with the eventual selected database provider and its CA chain remains a deployment integration gate.
+
+
+## Database role separation implementation (2026-11-10 UTC)
+
+- Refactored worker startup schema initialization: `AnnouncementStore.initialize()` now performs only zero-row SELECT permission checks against the event and worker-state tables. It no longer executes CREATE TABLE or other DDL using runtime credentials. The worker fails startup before opening the CMS socket if these checks fail.
+- Added an explicit `npm run migrate` command backed by `src/migrate.js`. It requires the separate `MIGRATION_DATABASE_URL`, validates PostgreSQL URL plus `sslmode=verify-full`, applies the idempotent schema SQL, and always closes its pool. The migration URL is not read by worker startup.
+- Added `migrations/001_runtime_role_grants.sql`: worker receives event INSERT plus SELECT(id), sequence USAGE, and worker-state SELECT/INSERT/UPDATE; importer receives only SELECT on the event ledger. PUBLIC table/sequence grants are revoked. The SQL expects the two login roles to be created securely by the database owner first; no passwords are stored in the repo.
+- Enforced `sslmode=verify-full` in the Node worker and migration connection URLs, matching the Python importer. Missing/unverified TLS URLs fail before a database pool is created.
+- Added mocked tests for runtime no-DDL privilege checks, migration URL isolation/cleanup, least-privilege grant declarations, and rejection of database URLs without verified TLS. No live database, credentials, role creation, or migration execution was performed.
+- This implementation still requires disposable PostgreSQL integration to prove exact role grants, sequence behavior, schema ownership, and TLS certificate hostname validation with the selected provider.

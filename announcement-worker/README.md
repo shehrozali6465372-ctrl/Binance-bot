@@ -12,8 +12,10 @@ This is an isolated, read-only consumer of Binance's official English CMS announ
 
 - `BINANCE_API_KEY`: read-only Binance API key used for CMS stream authentication
 - `BINANCE_API_SECRET`: matching secret used by the official SDK to sign the connection
-- `DATABASE_URL`: PostgreSQL connection string for the shared announcement event store
+- `DATABASE_URL`: PostgreSQL connection string for the worker runtime role; it must include `sslmode=verify-full`
 - Optional `BINANCE_CMS_WS_URL`: defaults to the SDK's production CMS WebSocket URL
+
+The Layer 1 importer uses a separate `ANNOUNCEMENT_DATABASE_URL` with a read-only importer role and `sslmode=verify-full`. Schema setup uses a separate, manually supplied `MIGRATION_DATABASE_URL`; never reuse the worker or importer runtime credentials for migrations.
 
 Never put credentials in source control or chat. Do not enable trading or withdrawal permissions for this key. Confirm the minimum required permission in Binance's current API-key UI/documentation before enabling the stream.
 
@@ -35,7 +37,7 @@ The tests are fully mocked and do not connect to Binance, PostgreSQL, or Binance
 - Runtime: Node 22.12.0+
 - Set the three required environment variables in Render's secret environment configuration.
 
-The worker creates its two PostgreSQL tables idempotently at startup. The database must be durable and shared with the agent's ingestion adapter; a worker-local SQLite file or Render filesystem is not a valid substitute.
+The worker does not create or alter schema at startup. As the database owner, create two fresh login roles (`binance_announcement_worker` and `binance_announcement_importer`) without embedding passwords in SQL files; set their passwords through the database provider's secret UI or an interactive `psql` `\password` prompt. Then run `npm run migrate` with `MIGRATION_DATABASE_URL` set to a dedicated schema-owner/migration connection URL, and apply `migrations/001_runtime_role_grants.sql` as the schema owner. Set `DATABASE_URL` to the worker role and `ANNOUNCEMENT_DATABASE_URL` to the importer role. Ensure these roles have no membership in broader privileged roles. All PostgreSQL URLs must include `sslmode=verify-full`. The database must be durable and shared with the agent's ingestion adapter; a worker-local SQLite file or Render filesystem is not a valid substitute.
 
 ## Event identity and replay limitations
 
@@ -54,4 +56,4 @@ Worker state is stored in `binance_announcement_worker_state`. A `LISTENING` sta
 
 The Python Layer 1 importer connects with `sslmode=verify-full`, which requires a trusted certificate chain and a certificate hostname matching the database host. Do not weaken this to `require` or disable certificate verification to work around a CA/hostname error. Verify the selected provider's CA configuration in a disposable database integration test before production activation.
 
-The worker currently runs idempotent DDL at startup, so its database role is not yet least-privilege. Before production, move schema creation into a separately credentialed migration step and grant the worker only the required event-table INSERT and worker-state SELECT/INSERT/UPDATE privileges; grant the Layer 1 importer only SELECT on the event ledger. Do not reuse a database owner credential for either runtime.
+Schema creation is separated from runtime startup. The worker verifies required table access using zero-row SELECTs and does not execute DDL. `MIGRATION_DATABASE_URL` is used only by the explicit `npm run migrate` command. Apply `migrations/001_runtime_role_grants.sql` after securely creating the `binance_announcement_worker` and `binance_announcement_importer` login roles. The worker gets event INSERT plus SELECT(id) and sequence USAGE, plus worker-state SELECT/INSERT/UPDATE. The importer gets only SELECT on the event ledger. Do not reuse a database owner or migration credential for either runtime.

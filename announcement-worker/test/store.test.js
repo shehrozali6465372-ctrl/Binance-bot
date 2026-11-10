@@ -52,3 +52,28 @@ test("worker state updates use a fixed worker identity and bound values", async 
   assert.equal(captured.params[0], "DEGRADED");
   assert.equal(captured.params[4], "test error");
 });
+
+
+test("runtime initialization checks required table access without executing DDL", async () => {
+  const calls = [];
+  const pool = { async query(sql) { calls.push(sql); return { rowCount: 0, rows: [] }; } };
+  const store = new AnnouncementStore(pool);
+
+  await store.initialize();
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[0], /^SELECT id FROM binance_announcement_events LIMIT 0$/);
+  assert.match(calls[1], /^SELECT worker_name FROM binance_announcement_worker_state LIMIT 0$/);
+  assert.ok(calls.every((sql) => !/\b(CREATE|ALTER|DROP)\b/i.test(sql)));
+});
+
+
+test("runtime grants are least privilege and importer cannot mutate the event ledger", async () => {
+  const fs = await import("node:fs/promises");
+  const grants = await fs.readFile(new URL("../migrations/001_runtime_role_grants.sql", import.meta.url), "utf8");
+  assert.match(grants, /GRANT INSERT, SELECT \(id\).*binance_announcement_worker/s);
+  assert.match(grants, /GRANT SELECT, INSERT, UPDATE ON TABLE binance_announcement_worker_state/s);
+  assert.match(grants, /GRANT SELECT ON TABLE binance_announcement_events\s+TO binance_announcement_importer/);
+  assert.doesNotMatch(grants, /GRANT (ALL|INSERT|UPDATE|DELETE).*binance_announcement_importer/i);
+  assert.doesNotMatch(grants, /GRANT ALL/i);
+});
