@@ -3,7 +3,7 @@
 **Assessment date:** 2026-11-10 UTC  
 **Repository:** `shehrozali6465372-ctrl/Binance-bot`  
 **Branch:** `feature/binance-cms-announcement-worker`  
-**Current code commit:** `a4fc2f9780238e5f87b90b93e850e7f01eb05fc8`
+**Current code commit:** `8c864932f250233434d3e100b4dfd0f933eced5b`
 
 **PR:** [#2 — Draft, open, unmerged](https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/2)
 
@@ -15,14 +15,14 @@
 
 | Area | Status | Evidence / limitation |
 |---|---|---|
-| Worker unit and lifecycle tests | PASS | Latest GitHub Actions run `42780876489`; 35/35 tests passed in PostgreSQL integration job |
+| Worker unit and lifecycle tests | PASS | GitHub Actions run `42797656785`; 38/38 tests passed in PostgreSQL integration job; offline Node job had 37 passed and 1 expected integration skip |
 | WebSocket heartbeat monitoring | PASS (unit + SDK contract) | Active ping/pong, timeout degradation, recovery isolation, and shutdown cleanup tested; live Binance heartbeat not exercised |
 | Worker PostgreSQL connection timeout | PASS (configuration) | `connectionTimeoutMillis: 10000` is set and regression-tested; actual blackhole/network timeout behavior not separately exercised |
-| Python Layer 1 tests and compilation | PASS | Same run; `python-layer1-tests` passed |
+| Python Layer 1 tests and compilation | PASS | GitHub Actions run `42797656785`; 65 tests passed and Python compilation passed |
 | Offline worker SDK contract tests | PASS | Same run; `mocked-announcement-tests` passed |
-| Disposable PostgreSQL migration | PASS | PostgreSQL 16 CI container; dedicated migration role executed schema migration |
-| Runtime role separation | PASS | Worker insert/RETURNING, duplicate suppression, worker-state upsert; importer read-only; unauthorized payload reads, DDL and importer writes rejected |
-| TLS chain and hostname verification | PASS | Disposable test CA trusted; wrong hostname rejected under `sslmode=verify-full` |
+| Disposable PostgreSQL migration | PASS | PostgreSQL 16 CI container; dedicated migration role executed schema migration and migration ledger assertion passed on run `42797656785` |
+| Runtime role separation | PASS | Worker insert/RETURNING, duplicate suppression, worker-state upsert; importer read-only; unauthorized payload reads, DDL and importer writes rejected in CI and Neon staging |
+| TLS chain and hostname verification | PASS | Disposable test CA trusted; wrong hostname rejected in CI; actual Neon staging endpoint also accepted `sslmode=verify-full` |
 | Production database/provider TLS compatibility | NOT TESTED | CI used a generated test CA, not the selected production provider's certificate chain |
 | Live Binance CMS connectivity | NOT TESTED | No live CMS credentials/socket used; heartbeat is verified only with deterministic fakes and the pinned SDK contract |
 | Worker liveness state signal | PASS (implementation/tests) | `updated_at` refreshed on pong; missed pong marks `DEGRADED`; no external alert route is configured |
@@ -66,3 +66,12 @@ The first real PostgreSQL CI run exposed a missing worker `SELECT(content_hash)`
 - Migration runner now uses a transaction-scoped advisory lock, a version/checksum ledger, same-checksum skip, and checksum-drift rollback. Focused migration tests passed 6/6. Workflow YAML parsing and `git diff --check` passed.
 - Neon staging migration ledger currently contains one `001_initial_schema` row with the expected SHA-256 checksum. Runtime role grants and schema ownership were independently inspected on the live staging database.
 - The selected Render Free plan is explicitly unsuitable for production background processing: Render says Free instances are not for production, and Free web services can spin down after 15 minutes without inbound HTTP or WebSocket messages; Render can also restart them. Official docs: https://render.com/docs/free. No Render service has been created.
+
+
+## Migration-ledger release verification (2026-11-10 UTC)
+
+- Commit 8c864932f250233434d3e100b4dfd0f933eced5b pushed to the existing feature branch. No merge or deployment performed.
+- GitHub push workflow run 42797656785 and PR workflow run 42797667878 both completed SUCCESS; all three jobs passed in both runs.
+- PostgreSQL security integration job: 38/38 passed, 0 failed, 0 skipped. This includes migration-ledger existence/checksum, migrator execution, worker insert/RETURNING, duplicate suppression, worker-state upsert, importer read-only enforcement, worker payload-column/DDL denial, importer write denial, and TLS hostname mismatch rejection.
+- Python Layer 1 job: 65 tests passed, compilation passed. Offline Node job: 37 passed, 1 expected PostgreSQL integration skip. npm ci completed and reported 0 dependency vulnerabilities.
+- PR #2 remains OPEN, Draft, unmerged, and mergeable. Existing publishing workflow/schedule untouched; no live CMS connection or real Binance Square post.
