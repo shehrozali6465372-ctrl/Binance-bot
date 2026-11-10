@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -54,6 +55,20 @@ def row(source_id="a" * 64, content_hash="b" * 64, event_type="listing",
         "https://www.binance.com/en/support/announcement",
         PUBLISHED, PUBLISHED,
     )
+
+
+class AnnouncementImporterDependencyTests(unittest.TestCase):
+    def test_optional_importer_runtime_declares_psycopg3(self):
+        manifest = Path(__file__).resolve().parents[1] / "requirements-announcement-importer.txt"
+        self.assertTrue(manifest.is_file(), "optional importer dependency manifest is missing")
+        requirements = [
+            line.split("#", 1)[0].strip().lower()
+            for line in manifest.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertTrue(
+            any(line.startswith("psycopg[binary]") for line in requirements),
+            "the optional importer runtime must declare psycopg 3 with its binary extra",
+        )
 
 
 class AnnouncementImporterTests(unittest.TestCase):
