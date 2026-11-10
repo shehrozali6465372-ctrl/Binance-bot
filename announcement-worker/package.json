@@ -13,7 +13,8 @@
   },
   "dependencies": {
     "@binance/cms": "1.0.3",
-    "pg": "8.16.3"
+    "pg": "8.16.3",
+    "@binance/common": "2.5.3"
   },
   "type": "module"
 }
