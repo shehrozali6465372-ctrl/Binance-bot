@@ -55,6 +55,7 @@ jobs:
           BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
           DATABASE_URL: ${{ env.DATABASE_URL }}
           BINANCE_CMS_DIAGNOSTIC_MODE: "1"
+          LOG_LEVEL: "warn"
         working-directory: announcement-worker
         shell: bash
         run: |
