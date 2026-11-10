@@ -56,3 +56,96 @@ jobs:
         run: python -m compileall -q main.py image_engine.py layer1
       - name: Run full mocked Python test suite
         run: python -m unittest discover -s tests -v
+
+
+  postgres-security-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+      - name: Install locked worker dependencies
+        working-directory: announcement-worker
+        run: npm ci
+      - name: Create disposable PostgreSQL TLS certificates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/binance-pg-tls
+          openssl genrsa -out /tmp/binance-pg-tls/ca.key 2048
+          openssl req -x509 -new -nodes -key /tmp/binance-pg-tls/ca.key \
+            -sha256 -days 2 -subj "/CN=Binance CI Test CA" \
+            -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign" \
+            -out /tmp/binance-pg-tls/ca.crt
+          openssl req -new -newkey rsa:2048 -nodes \
+            -keyout /tmp/binance-pg-tls/server.key \
+            -out /tmp/binance-pg-tls/server.csr -subj "/CN=localhost"
+          printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\nkeyUsage=digitalSignature,keyEncipherment\n' \
+            > /tmp/binance-pg-tls/server.ext
+          openssl x509 -req -in /tmp/binance-pg-tls/server.csr \
+            -CA /tmp/binance-pg-tls/ca.crt -CAkey /tmp/binance-pg-tls/ca.key \
+            -CAcreateserial -out /tmp/binance-pg-tls/server.crt \
+            -days 2 -sha256 -extfile /tmp/binance-pg-tls/server.ext
+          sudo chown 999:999 /tmp/binance-pg-tls/server.key /tmp/binance-pg-tls/server.crt
+          sudo chmod 600 /tmp/binance-pg-tls/server.key
+          sudo chmod 644 /tmp/binance-pg-tls/server.crt
+          sudo chmod 755 /tmp/binance-pg-tls
+      - name: Start isolated PostgreSQL 16 with TLS enabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name binance-pg-security-test \
+            --publish 127.0.0.1:55432:5432 \
+            --env POSTGRES_PASSWORD=ci-superuser-only \
+            --env POSTGRES_DB=binance_test \
+            --volume /tmp/binance-pg-tls:/etc/postgresql/tls:ro \
+            postgres:16 \
+            -c ssl=on \
+            -c ssl_cert_file=/etc/postgresql/tls/server.crt \
+            -c ssl_key_file=/etc/postgresql/tls/server.key
+          for attempt in $(seq 1 45); do
+            if docker exec binance-pg-security-test pg_isready -U postgres -d binance_test; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs binance-pg-security-test
+          exit 1
+      - name: Create isolated migration and runtime roles
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec binance-pg-security-test psql -v ON_ERROR_STOP=1 \
+            -U postgres -d binance_test \
+            -c "CREATE ROLE binance_announcement_migrator LOGIN PASSWORD 'ci-migrator-password';" \
+            -c "CREATE ROLE binance_announcement_worker LOGIN PASSWORD 'ci-worker-password';" \
+            -c "CREATE ROLE binance_announcement_importer LOGIN PASSWORD 'ci-importer-password';" \
+            -c "GRANT CONNECT ON DATABASE binance_test TO binance_announcement_migrator, binance_announcement_worker, binance_announcement_importer;" \
+            -c "GRANT CREATE, USAGE ON SCHEMA public TO binance_announcement_migrator;"
+      - name: Run migration with the dedicated migration role
+        working-directory: announcement-worker
+        env:
+          MIGRATION_DATABASE_URL: postgresql://binance_announcement_migrator:ci-migrator-password@localhost:55432/binance_test?sslmode=verify-full&sslrootcert=/tmp/binance-pg-tls/ca.crt
+        run: npm run migrate
+      - name: Apply least-privilege grants as database owner
+        run: |
+          docker exec -i binance-pg-security-test \
+            psql -v ON_ERROR_STOP=1 -U postgres -d binance_test \
+            < announcement-worker/migrations/001_runtime_role_grants.sql
+      - name: Verify runtime permissions and TLS hostname validation
+        working-directory: announcement-worker
+        env:
+          POSTGRES_WORKER_URL: postgresql://binance_announcement_worker:ci-worker-password@localhost:55432/binance_test?sslmode=verify-full&sslrootcert=/tmp/binance-pg-tls/ca.crt
+          POSTGRES_IMPORTER_URL: postgresql://binance_announcement_importer:ci-importer-password@localhost:55432/binance_test?sslmode=verify-full&sslrootcert=/tmp/binance-pg-tls/ca.crt
+          POSTGRES_TLS_MISMATCH_URL: postgresql://binance_announcement_worker:ci-worker-password@wrong.localhost:55432/binance_test?sslmode=verify-full&sslrootcert=/tmp/binance-pg-tls/ca.crt
+        run: |
+          echo '127.0.0.1 wrong.localhost' | sudo tee -a /etc/hosts
+          npm test
+      - name: Remove disposable PostgreSQL container
+        if: always()
+        run: docker rm --force binance-pg-security-test || true

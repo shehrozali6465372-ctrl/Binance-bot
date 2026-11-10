@@ -57,3 +57,10 @@ Worker state is stored in `binance_announcement_worker_state`. A `LISTENING` sta
 The Python Layer 1 importer connects with `sslmode=verify-full`, which requires a trusted certificate chain and a certificate hostname matching the database host. Do not weaken this to `require` or disable certificate verification to work around a CA/hostname error. Verify the selected provider's CA configuration in a disposable database integration test before production activation.
 
 Schema creation is separated from runtime startup. The worker verifies required table access using zero-row SELECTs and does not execute DDL. `MIGRATION_DATABASE_URL` is used only by the explicit `npm run migrate` command. Apply `migrations/001_runtime_role_grants.sql` after securely creating the `binance_announcement_worker` and `binance_announcement_importer` login roles. The worker gets event INSERT plus SELECT(id) and sequence USAGE, plus worker-state SELECT/INSERT/UPDATE. The importer gets only SELECT on the event ledger. Do not reuse a database owner or migration credential for either runtime.
+
+
+### Disposable PostgreSQL security integration test
+
+The `postgres-security-integration` CI job starts an isolated PostgreSQL 16 container with a short-lived test CA and server certificate. It creates separate migration, worker, and importer roles, runs `npm run migrate` with the migration role, applies `migrations/001_runtime_role_grants.sql` as the database owner, and verifies runtime permissions plus TLS hostname rejection. It uses disposable CI credentials and data only; it does not connect to a production database or the Binance CMS.
+
+To run the same integration test locally, provide `POSTGRES_WORKER_URL`, `POSTGRES_IMPORTER_URL`, and `POSTGRES_TLS_MISMATCH_URL` for an isolated PostgreSQL instance configured with verified TLS, after applying the migration and role grants. Without these three variables, the integration test is skipped; the ordinary mocked test suite remains runnable offline.

@@ -448,3 +448,12 @@ This section supersedes earlier status/gap statements above where they conflict.
 - Database-role separation implementation commit: `2eaf4da27336daf304778300be486956ce975ed9`. The saved local verification profile passed all five checks; the worker suite passed 27/27 tests. GitHub Actions push run `42734335239` and PR run `42734343713` both completed SUCCESS for that exact commit.
 - PR #2 remains OPEN, Draft, and mergeable; no merge or deployment was performed. The branch working tree was clean after push.
 - Local environment has the PostgreSQL client (`psql`) but no running PostgreSQL server (`pg_isready` reports no response); therefore the grant SQL and migration were not executed against a database. Disposable real-PostgreSQL role/TLS integration remains a hard gate before production.
+
+## Disposable PostgreSQL security integration CI (2026-11-10 UTC)
+
+- Added `announcement-worker/test/postgres-integration.test.js` to exercise the real PostgreSQL role boundary when three disposable test connection URLs are supplied. It verifies worker schema access, event insert plus `RETURNING id`, content-hash duplicate suppression, worker-state upsert, importer ledger read, worker payload-column/DDL denial, importer write denial, and TLS hostname mismatch rejection.
+- Added a dedicated `postgres-security-integration` job to `.github/workflows/announcement-worker-tests.yml`. The job creates a short-lived test CA/server certificate, starts an isolated PostgreSQL 16 Docker container, creates separate migration/worker/importer login roles with CI-only passwords, runs the migration as the migration role, applies the grants as database owner, and runs the integration suite. A cleanup step removes the container even after failure.
+- Documented the disposable integration test in `announcement-worker/README.md`.
+- Local verification: YAML parsed successfully and `git diff --check` passed. `npm test` passed 27 tests with 1 PostgreSQL integration test skipped because this device has no local PostgreSQL server or Docker daemon. This is not evidence that the real database assertions pass.
+- The integration job has not yet run on GitHub Actions. Actual SQL grant execution, runtime-role behavior, and TLS chain/hostname verification remain NOT TESTED until the CI job succeeds.
+- No production DB credentials, live CMS socket, production publisher workflow/schedule changes, deployment, or real Binance Square post were used. PR #2 must remain Draft/open/unmerged.
