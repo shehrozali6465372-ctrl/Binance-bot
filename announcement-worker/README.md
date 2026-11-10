@@ -48,3 +48,10 @@ The documented CMS push payload contains catalog metadata, publish timestamp, ti
 - The documented stream has no historical replay guarantee. Reconnection can resume future events but cannot prove that events missed during an outage were recovered.
 
 Worker state is stored in `binance_announcement_worker_state`. A `LISTENING` status proves connection initialization, not complete feed coverage. Do not mark the announcement provider fully healthy without monitoring disconnects and coverage gaps.
+
+
+## PostgreSQL TLS and privileges
+
+The Python Layer 1 importer connects with `sslmode=verify-full`, which requires a trusted certificate chain and a certificate hostname matching the database host. Do not weaken this to `require` or disable certificate verification to work around a CA/hostname error. Verify the selected provider's CA configuration in a disposable database integration test before production activation.
+
+The worker currently runs idempotent DDL at startup, so its database role is not yet least-privilege. Before production, move schema creation into a separately credentialed migration step and grant the worker only the required event-table INSERT and worker-state SELECT/INSERT/UPDATE privileges; grant the Layer 1 importer only SELECT on the event ledger. Do not reuse a database owner credential for either runtime.

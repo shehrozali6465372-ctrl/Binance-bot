@@ -119,7 +119,7 @@ class AnnouncementImporterTests(unittest.TestCase):
         )
         self.assertTrue(connection.fake_cursor.closed)
         self.assertTrue(connection.closed)
-        self.assertEqual(self.connect_calls[0][1]["sslmode"], "require")
+        self.assertEqual(self.connect_calls[0][1]["sslmode"], "verify-full")
         self.assertEqual(
             self.connect_calls[0][1]["options"],
             "-c default_transaction_read_only=on",

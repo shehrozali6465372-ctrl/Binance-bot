@@ -128,7 +128,7 @@ def import_recent_binance_announcements(
         connection = connect_factory(
             database_url,
             connect_timeout=5,
-            sslmode="require",
+            sslmode="verify-full",
             options="-c default_transaction_read_only=on",
         )
         cursor = connection.cursor()

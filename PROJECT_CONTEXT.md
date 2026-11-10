@@ -428,3 +428,10 @@ This section supersedes earlier status/gap statements above where they conflict.
 - Both importer dependency tests passed. The full saved verification profile passed all 5 required checks. Installed the manifest into the isolated verification venv and confirmed `import psycopg` succeeds with psycopg 3.3.8. This is a local dependency/import check only; no PostgreSQL connection was made.
 - `git diff --check` passed. GitHub Actions will provide the final workflow-level verification after push.
 - The gh-review-loop re-review cap is currently exhausted (3/3 requests); no further Codex re-review request was sent. PR remains Draft/open/unmerged; no deployment or live post publishing occurred.
+
+
+## TLS hostname verification hardening (2026-11-10 UTC)
+
+- Reproduced the existing importer TLS weakness test-first: changed the test expectation to `sslmode=verify-full`; it failed because the importer still passed `require`.
+- Updated the read-only Python importer to request `sslmode=verify-full`. This verifies the certificate chain and server hostname using the driver's trusted CA configuration, rather than merely requiring encrypted transport. `default_transaction_read_only=on` and the 5-second connection timeout remain unchanged.
+- This is code-level configuration verification only. No actual PostgreSQL connection or certificate handshake was attempted; compatibility with the eventual selected database provider and its CA chain remains a deployment integration gate.
