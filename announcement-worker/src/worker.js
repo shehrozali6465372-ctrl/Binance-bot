@@ -34,17 +34,8 @@ export async function startAnnouncementWorker({
   poolFactory = (options) => new Pool(options),
   logger = console,
   shutdownTimeoutMs = 30_000,
-  heartbeatIntervalMs = 30_000,
-  heartbeatTimeoutMs = 10_000,
 } = {}) {
   databaseUrl = requireVerifiedPostgresUrl(databaseUrl, "DATABASE_URL");
-  const maxTimerDelayMs = 2_147_483_647;
-  if (!Number.isSafeInteger(heartbeatIntervalMs) || heartbeatIntervalMs < 1 || heartbeatIntervalMs > maxTimerDelayMs) {
-    throw new RangeError(`heartbeatIntervalMs must be between 1 and ${maxTimerDelayMs}`);
-  }
-  if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 1 || heartbeatTimeoutMs > maxTimerDelayMs) {
-    throw new RangeError(`heartbeatTimeoutMs must be between 1 and ${maxTimerDelayMs}`);
-  }
   const pool = poolFactory({
     connectionString: databaseUrl,
     max: 3,
@@ -59,9 +50,6 @@ export async function startAnnouncementWorker({
   let shutdownPromise;
   let resourcesClosed = false;
   let writeQueue = Promise.resolve();
-  let heartbeatInterval;
-  let heartbeatTimeout;
-  let awaitingHeartbeatPong = false;
   const degradationReasons = new Map();
 
   const persistOperationalState = async (fields = {}, healthyStatus = "LISTENING") => {
@@ -85,53 +73,6 @@ export async function startAnnouncementWorker({
     }
   };
 
-  const clearDegraded = async (kind, fields = {}) => {
-    degradationReasons.delete(kind);
-    try {
-      await persistOperationalState(fields);
-    } catch (stateError) {
-      logger.error("Could not persist recovered announcement worker state", {
-        reason: kind,
-        error: String(stateError?.message || stateError).slice(0, 500),
-      });
-    }
-  };
-
-  const clearPendingHeartbeat = () => {
-    awaitingHeartbeatPong = false;
-    if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
-    heartbeatTimeout = undefined;
-  };
-
-  const startHeartbeatLoop = () => {
-    if (closed || heartbeatInterval) return;
-    heartbeatInterval = setInterval(() => {
-      if (closed || awaitingHeartbeatPong) return;
-      let connected = false;
-      try { connected = connection.isConnected(); } catch {}
-      if (!connected) {
-        void markDegraded("transport", new Error("Binance CMS connection is not open during heartbeat check"));
-        return;
-      }
-
-      awaitingHeartbeatPong = true;
-      heartbeatTimeout = setTimeout(() => {
-        if (closed || !awaitingHeartbeatPong) return;
-        clearPendingHeartbeat();
-        void markDegraded("heartbeat", new Error("Binance CMS heartbeat pong timeout"));
-      }, heartbeatTimeoutMs);
-      heartbeatTimeout.unref?.();
-
-      try {
-        connection.pingServer();
-      } catch (error) {
-        clearPendingHeartbeat();
-        void markDegraded("heartbeat", error);
-      }
-    }, heartbeatIntervalMs);
-    heartbeatInterval.unref?.();
-  };
-
   try {
     await store.initialize();
     await store.setState("STARTING", { startedAt: new Date().toISOString() });
@@ -150,19 +91,12 @@ export async function startAnnouncementWorker({
     // lifecycle events belong to WebsocketStreamsConnection.on().
     connection.on("open", () => {
       if (!closed) {
-        // The official SDK replaces the underlying socket but keeps this
-        // connection wrapper. Restart our heartbeat loop for every new socket.
-        clearPendingHeartbeat();
-        if (heartbeatInterval) clearInterval(heartbeatInterval);
-        heartbeatInterval = undefined;
         degradationReasons.delete("transport");
-        degradationReasons.delete("heartbeat");
         void persistOperationalState().catch((error) => {
           logger.error("Could not persist recovered WebSocket state", {
             error: String(error?.message || error).slice(0, 500),
           });
         });
-        startHeartbeatLoop();
       }
     });
     connection.on("error", (error) => {
@@ -173,18 +107,8 @@ export async function startAnnouncementWorker({
     connection.on("close", (code, reason) => {
       const message = `WebSocket closed (code=${code ?? "unknown"}, reason=${String(reason ?? "").slice(0, 200)})`;
       logger.warn("Binance CMS connection closed", { code, reason: String(reason ?? "").slice(0, 200) });
-      if (!closed) {
-        clearPendingHeartbeat();
-        void markDegraded("transport", message);
-      }
+      if (!closed) void markDegraded("transport", message);
     });
-    connection.on("pong", () => {
-      if (closed || !awaitingHeartbeatPong) return;
-      clearPendingHeartbeat();
-      void clearDegraded("heartbeat");
-      logger.info("Binance CMS heartbeat pong received");
-    });
-
     stream = connection.comAnnouncementEn();
     stream.on("message", (message) => {
       if (!acceptingMessages) return;
@@ -216,32 +140,6 @@ export async function startAnnouncementWorker({
     await persistOperationalState({}, "LISTENING");
     logger.info("Binance CMS announcement stream connected; read-only ingestion active");
 
-    heartbeatInterval = setInterval(() => {
-      if (closed || awaitingHeartbeatPong) return;
-      let connected = false;
-      try { connected = connection.isConnected(); } catch {}
-      if (!connected) {
-        void markDegraded("transport", new Error("Binance CMS connection is not open during heartbeat check"));
-        return;
-      }
-
-      awaitingHeartbeatPong = true;
-      heartbeatTimeout = setTimeout(() => {
-        if (closed || !awaitingHeartbeatPong) return;
-        clearPendingHeartbeat();
-        void markDegraded("heartbeat", new Error("Binance CMS heartbeat pong timeout"));
-      }, heartbeatTimeoutMs);
-      heartbeatTimeout.unref?.();
-
-      try {
-        connection.pingServer();
-      } catch (error) {
-        clearPendingHeartbeat();
-        void markDegraded("heartbeat", error);
-      }
-    }, heartbeatIntervalMs);
-    heartbeatInterval.unref?.();
-
     const finalizeShutdown = async () => {
       if (resourcesClosed) return;
       resourcesClosed = true;
@@ -257,8 +155,6 @@ export async function startAnnouncementWorker({
       // accepted before this point remain in writeQueue and must be drained.
       acceptingMessages = false;
       closed = true;
-      if (heartbeatInterval) clearInterval(heartbeatInterval);
-      clearPendingHeartbeat();
       logger.info("Stopping announcement worker", { signal });
       try { stream.unsubscribe(); } catch {}
 
