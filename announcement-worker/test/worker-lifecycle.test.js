@@ -62,6 +62,17 @@ class FakeConnection {
     this.listeners = new Map();
     this.stream = new FakeStream();
     this.disconnected = false;
+    this.pingCount = 0;
+    this.onPing = null;
+  }
+
+  isConnected() {
+    return !this.disconnected;
+  }
+
+  pingServer() {
+    this.pingCount += 1;
+    this.onPing?.();
   }
 
   comAnnouncementEn() {
@@ -87,7 +98,7 @@ const logger = {
   error() {},
 };
 
-async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs } = {}) {
+async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs, heartbeatIntervalMs, heartbeatTimeoutMs } = {}) {
   const pool = new FakePool(poolOptions);
   const connection = new FakeConnection();
   const configuration = {};
@@ -112,6 +123,8 @@ async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs } =
     },
     logger,
     shutdownTimeoutMs,
+    heartbeatIntervalMs,
+    heartbeatTimeoutMs,
   });
   return { worker, pool, connection, configuration, poolOptions: configuration.poolOptions };
 }
@@ -120,6 +133,81 @@ test("worker bounds PostgreSQL connection establishment", async () => {
   const { worker, poolOptions } = await startWithFakes();
   assert.equal(poolOptions.connectionTimeoutMillis, 10_000);
   await worker.shutdown();
+});
+
+test("worker rejects invalid heartbeat timing before creating a database pool", async () => {
+  let poolFactoryCalled = false;
+  await assert.rejects(startAnnouncementWorker({
+    apiKey: "offline-test-key",
+    apiSecret: "offline-test-secret",
+    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
+    heartbeatIntervalMs: 0,
+    poolFactory: () => { poolFactoryCalled = true; throw new Error("pool must not be created"); },
+    logger,
+  }), /heartbeatIntervalMs must be between 1 and 2147483647/);
+  assert.equal(poolFactoryCalled, false);
+});
+
+test("worker sends WebSocket heartbeats and restores LISTENING after a pong", async () => {
+  const { worker, pool, connection } = await startWithFakes({ heartbeatIntervalMs: 5, heartbeatTimeoutMs: 20 });
+  connection.onPing = () => setImmediate(() => connection.emit("pong"));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(connection.pingCount > 0, "worker should actively ping the CMS socket");
+  const states = pool.queries
+    .filter(({ sql }) => sql.includes("binance_announcement_worker_state"))
+    .map(({ values }) => values[0]);
+  assert.equal(states.at(-1), "LISTENING", "a successful pong should refresh healthy state");
+  await worker.shutdown("test");
+});
+
+test("worker marks the CMS stream DEGRADED when heartbeat pong times out", async () => {
+  const { worker, pool, connection } = await startWithFakes({ heartbeatIntervalMs: 5, heartbeatTimeoutMs: 5 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(connection.pingCount > 0, "worker should send a ping before waiting for pong");
+  const degraded = pool.queries.find(({ sql, values }) =>
+    sql.includes("binance_announcement_worker_state") && values[0] === "DEGRADED" &&
+    String(values[4] || "").includes("heartbeat pong timeout"),
+  );
+  assert.ok(degraded, "missing pong should be recorded as DEGRADED with a diagnostic");
+  await worker.shutdown("test");
+});
+
+test("shutdown stops heartbeat scheduling and cancels an outstanding pong timeout", async () => {
+  const { worker, connection, pool } = await startWithFakes({ heartbeatIntervalMs: 5, heartbeatTimeoutMs: 100 });
+  await new Promise((resolve) => setTimeout(resolve, 12));
+  assert.ok(connection.pingCount > 0);
+  await worker.shutdown("test");
+  const pingCountAtShutdown = connection.pingCount;
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(connection.pingCount, pingCountAtShutdown, "no heartbeat should run after shutdown");
+  const states = pool.queries
+    .filter(({ sql }) => sql.includes("binance_announcement_worker_state"))
+    .map(({ values }) => values[0]);
+  assert.equal(states.at(-1), "STOPPED");
+});
+
+test("heartbeat recovery does not erase an unrelated database degradation", async () => {
+  const { worker, pool, connection } = await startWithFakes({
+    poolOptions: { failStateUpdates: { RECEIVING: 1 } },
+    heartbeatIntervalMs: 5,
+    heartbeatTimeoutMs: 20,
+  });
+  connection.onPing = () => setImmediate(() => connection.emit("pong"));
+  connection.stream.emitMessage({
+    catalogId: 48,
+    catalogName: "New Cryptocurrency Listing",
+    publishDate: Date.now(),
+    title: "Database failure must remain degraded (DBX)",
+    body: "Mock announcement body",
+    disclaimer: "",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const latest = pool.queries
+    .filter(({ sql }) => sql.includes("binance_announcement_worker_state"))
+    .at(-1);
+  assert.equal(latest.values[0], "DEGRADED");
+  assert.match(latest.values[4], /offline simulated RECEIVING state update failure/);
+  await worker.shutdown("test");
 });
 
 test("worker consumes a mocked CMS message and shuts down all resources", async () => {
