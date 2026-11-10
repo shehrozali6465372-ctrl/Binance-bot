@@ -70,6 +70,14 @@ class AnnouncementImporterDependencyTests(unittest.TestCase):
             "the optional importer runtime must declare psycopg 3 with its binary extra",
         )
 
+    def test_scheduled_agent_installs_optional_importer_dependencies(self):
+        workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "run_bot.yml"
+        self.assertIn(
+            "pip install -r requirements-announcement-importer.txt",
+            workflow.read_text(encoding="utf-8"),
+            "the scheduled agent must install the optional importer driver",
+        )
+
 
 class AnnouncementImporterTests(unittest.TestCase):
     def setUp(self):

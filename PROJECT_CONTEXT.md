@@ -419,3 +419,12 @@ This section supersedes earlier status/gap statements above where they conflict.
 - No real CMS connection, production database, real Square post, deployment, secrets change, paid resource, or publisher schedule change occurred.
 - The new dependency-manifest regression passed after adding the manifest. The saved five-check repo-aware verification profile also passed in full on this working tree: worker npm tests, isolated Python venv setup, Pillow install, CI-scoped compileall, and all Python unit tests. `git diff --check` passed.
 - Scope limitation: the saved profile does not install `requirements-announcement-importer.txt`; no real PostgreSQL driver connection was attempted. The manifest declaration is verified, but scheduled-runtime installation remains unverified and intentionally awaits separate approval to touch `run_bot.yml`.
+
+## Approved scheduled-runtime dependency installation (2026-11-10 UTC)
+
+- User explicitly approved the narrow `run_bot.yml` dependency-installation change.
+- Added only `pip install -r requirements-announcement-importer.txt` to the existing Install dependencies step, after Pillow. No schedule, trigger, publisher code, environment variables, `DRY_RUN`, post limits, cache, or artifact behavior was changed.
+- Added a regression assertion that the scheduled agent workflow installs the optional importer dependency. It failed before the workflow edit and passed afterward.
+- Both importer dependency tests passed. The full saved verification profile passed all 5 required checks. Installed the manifest into the isolated verification venv and confirmed `import psycopg` succeeds with psycopg 3.3.8. This is a local dependency/import check only; no PostgreSQL connection was made.
+- `git diff --check` passed. GitHub Actions will provide the final workflow-level verification after push.
+- The gh-review-loop re-review cap is currently exhausted (3/3 requests); no further Codex re-review request was sent. PR remains Draft/open/unmerged; no deployment or live post publishing occurred.
