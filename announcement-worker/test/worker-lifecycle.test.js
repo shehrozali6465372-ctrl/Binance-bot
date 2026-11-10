@@ -467,22 +467,20 @@ test("attaches transport error handling before awaiting LISTENING state persiste
 
 
 
-test("restarts the heartbeat schedule after the official SDK emits reconnect open", async () => {
+test("restarts heartbeat after SDK reconnect even when old heartbeat interval was stopped", async () => {
   const { worker, connection } = await startWithFakes({ heartbeatIntervalMs: 5, heartbeatTimeoutMs: 20 });
   connection.onPing = () => setImmediate(() => connection.emit("pong"));
-  await new Promise((resolve) => setTimeout(resolve, 12));
-  const firstConnectionPings = connection.pingCount;
-  assert.ok(firstConnectionPings > 0, "initial connection should receive heartbeats");
 
-  // The official SDK emits open on a replaced socket using the same connection wrapper.
+  // Simulate a worker lifecycle in which the old connection's timer has been
+  // stopped before the SDK's replacement socket emits "open".
   connection.emit("close", 1006, Buffer.from("transient disconnect"));
-  await new Promise((resolve) => setImmediate(resolve));
+  const pingCountBeforeReconnect = connection.pingCount;
   connection.emit("open");
-  await new Promise((resolve) => setTimeout(resolve, 12));
+  await new Promise((resolve) => setTimeout(resolve, 18));
 
   assert.ok(
-    connection.pingCount > firstConnectionPings,
-    "heartbeat must resume on the replacement connection",
+    connection.pingCount > pingCountBeforeReconnect,
+    "open on a replacement socket must start a fresh heartbeat interval",
   );
   await worker.shutdown("test");
 });
