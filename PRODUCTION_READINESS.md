@@ -3,7 +3,8 @@
 **Assessment date:** 2026-11-10 UTC  
 **Repository:** `shehrozali6465372-ctrl/Binance-bot`  
 **Branch:** `feature/binance-cms-announcement-worker`  
-**Current commit:** `656da6d7f1942492f058ebbf8cb944e8346deceb`  
+**Current code commit:** `e7436f899290f83dda9dbe053e9d0bbb0de1b16a`
+
 **PR:** [#2 — Draft, open, unmerged](https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/2)
 
 ## Current verdict
@@ -14,7 +15,8 @@
 
 | Area | Status | Evidence / limitation |
 |---|---|---|
-| Worker unit and lifecycle tests | PASS | GitHub Actions run `42735817233`; 28/28 tests passed in PostgreSQL integration job |
+| Worker unit and lifecycle tests | PASS | Latest GitHub Actions run `42736426249`; 29/29 tests passed in PostgreSQL integration job |
+| Worker PostgreSQL connection timeout | PASS (configuration) | `connectionTimeoutMillis: 10000` is set and regression-tested; actual blackhole/network timeout behavior not separately exercised |
 | Python Layer 1 tests and compilation | PASS | Same run; `python-layer1-tests` passed |
 | Offline worker SDK contract tests | PASS | Same run; `mocked-announcement-tests` passed |
 | Disposable PostgreSQL migration | PASS | PostgreSQL 16 CI container; dedicated migration role executed schema migration |

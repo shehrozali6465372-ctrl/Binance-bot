@@ -475,3 +475,13 @@ This section supersedes earlier status/gap statements above where they conflict.
 - No production database/credentials, live CMS connection, deployment, paid resource, publisher workflow/schedule change, or real Binance Square post was used.
 
 - Follow-up verification after the `content_hash` grant correction: the saved repo-aware profile passed all 5 required checks again (worker npm tests, venv setup, Pillow install, scoped Python compileall, full Python unittest suite). `git diff --check` and workflow YAML parsing also passed. The real PostgreSQL proof remains the GitHub CI run `42735817233` and PR run `42735828025`.
+
+## PostgreSQL startup timeout hardening (2026-11-10 UTC)
+
+- Added a test-first regression requiring the worker PostgreSQL pool to set a bounded connection establishment timeout. The test failed before implementation because `connectionTimeoutMillis` was unset (node-postgres default is 0/no timeout per its official Pool docs: https://node-postgres.com/apis/pool).
+- Worker pool now sets `connectionTimeoutMillis: 10_000` while retaining `max: 3` and the existing application name. Ten seconds allows more tolerance for a cold-starting managed database than a five-second limit; this is a configuration bound, not proof that every network failure mode times out at exactly ten seconds.
+- Focused lifecycle tests passed 10/10; full worker suite passed 28/29 with only the PostgreSQL integration test skipped locally (no local server). Saved five-check repo-aware profile had passed before this small addition; GitHub CI is the definitive integration proof.
+- Commit `e7436f899290f83dda9dbe053e9d0bbb0de1b16a` pushed. GitHub Actions push run `42736426249` and PR run `42736434207` both passed all three jobs. PostgreSQL integration job ran 29/29 tests, 0 failures, 0 skips, including the real TLS/role integration and connection-timeout configuration regression.
+- PR #2 remains OPEN, Draft, mergeable. No production DB credentials, CMS live connection, deployment, or publishing side effect occurred.
+
+- After the 10-second connection-timeout change, the saved five-check repo-aware verification profile was rerun and passed all 5 checks. `git diff --check` also passes. The code commit remains `e7436f8`; the production-readiness report now includes the bounded-connection configuration and its test evidence.
