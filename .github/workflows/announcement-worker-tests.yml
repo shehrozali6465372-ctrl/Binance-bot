@@ -142,6 +142,7 @@ jobs:
         env:
           POSTGRES_WORKER_URL: postgresql://binance_announcement_worker:ci-worker-password@localhost:55432/binance_test?sslmode=verify-full&sslrootcert=/tmp/binance-pg-tls/ca.crt
           POSTGRES_IMPORTER_URL: postgresql://binance_announcement_importer:ci-importer-password@localhost:55432/binance_test?sslmode=verify-full&sslrootcert=/tmp/binance-pg-tls/ca.crt
+          POSTGRES_MIGRATION_URL: postgresql://binance_announcement_migrator:ci-migrator-password@localhost:55432/binance_test?sslmode=verify-full&sslrootcert=/tmp/binance-pg-tls/ca.crt
           POSTGRES_TLS_MISMATCH_URL: postgresql://binance_announcement_worker:ci-worker-password@wrong.localhost:55432/binance_test?sslmode=verify-full&sslrootcert=/tmp/binance-pg-tls/ca.crt
         run: |
           echo '127.0.0.1 wrong.localhost' | sudo tee -a /etc/hosts

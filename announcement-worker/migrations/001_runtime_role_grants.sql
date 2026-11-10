@@ -6,8 +6,8 @@ REVOKE ALL PRIVILEGES ON TABLE binance_announcement_worker_state
   FROM PUBLIC, binance_announcement_worker, binance_announcement_importer;
 REVOKE ALL PRIVILEGES ON SEQUENCE binance_announcement_events_id_seq
   FROM PUBLIC, binance_announcement_worker, binance_announcement_importer;
-REVOKE CREATE ON SCHEMA public
-  FROM binance_announcement_worker, binance_announcement_importer;
+-- Runtime roles must be created without schema CREATE privileges. The integration
+-- test verifies both roles cannot create objects in the public schema.
 
 GRANT USAGE ON SCHEMA public TO binance_announcement_worker;
 GRANT USAGE ON SCHEMA public TO binance_announcement_importer;

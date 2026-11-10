@@ -8,6 +8,7 @@ const { Pool, Client } = pg;
 const workerUrl = process.env.POSTGRES_WORKER_URL;
 const importerUrl = process.env.POSTGRES_IMPORTER_URL;
 const tlsMismatchUrl = process.env.POSTGRES_TLS_MISMATCH_URL;
+const migrationUrl = process.env.POSTGRES_MIGRATION_URL;
 const enabled = Boolean(workerUrl && importerUrl && tlsMismatchUrl);
 
 function makeEvent() {
@@ -31,13 +32,43 @@ function makeEvent() {
 }
 
 test("PostgreSQL roles enforce runtime least privilege over verified TLS", { skip: !enabled }, async () => {
+  if (migrationUrl) {
+    const migrator = new Pool({ connectionString: migrationUrl, max: 1 });
+    try {
+      const ledger = await migrator.query(
+        "SELECT version, checksum FROM binance_announcement_schema_migrations WHERE version = $1",
+        ["001_initial_schema"],
+      );
+      assert.equal(ledger.rowCount, 1, "the applied schema migration is recorded exactly once");
+      assert.match(ledger.rows[0].checksum.trim(), /^[a-f0-9]{64}$/);
+    } finally {
+      await migrator.end();
+    }
+  }
+
+  let previousWorkerState = null;
+  if (migrationUrl) {
+    const migrator = new Pool({ connectionString: migrationUrl, max: 1 });
+    try {
+      const previous = await migrator.query(
+        "SELECT worker_name, status, started_at, last_message_at, last_persisted_at, last_error, updated_at FROM binance_announcement_worker_state WHERE worker_name = $1",
+        ["binance-cms-announcements"],
+      );
+      previousWorkerState = previous.rows[0] ?? null;
+    } finally {
+      await migrator.end();
+    }
+  }
+
   const worker = new Pool({ connectionString: workerUrl, max: 1 });
   const importer = new Pool({ connectionString: importerUrl, max: 1 });
+  let testEvent;
   try {
     const store = new AnnouncementStore(worker);
     await store.initialize();
 
     const event = makeEvent();
+    testEvent = event;
     assert.equal(await store.save(event), true, "worker can insert an event and RETURNING id");
     assert.equal(await store.save(event), false, "content hash uniqueness prevents duplicate persistence");
     await store.setState("LISTENING", { startedAt: new Date().toISOString() });
@@ -66,6 +97,46 @@ test("PostgreSQL roles enforce runtime least privilege over verified TLS", { ski
     );
   } finally {
     await Promise.all([worker.end(), importer.end()]);
+    if (migrationUrl && testEvent) {
+      const cleanup = new Pool({ connectionString: migrationUrl, max: 1 });
+      try {
+        const deleted = await cleanup.query(
+          "DELETE FROM binance_announcement_events WHERE content_hash = $1 RETURNING id",
+          [testEvent.contentHash],
+        );
+        assert.equal(deleted.rowCount, 1, "staging integration fixture is removed");
+        if (previousWorkerState) {
+          await cleanup.query(
+            `INSERT INTO binance_announcement_worker_state
+             (worker_name, status, started_at, last_message_at, last_persisted_at, last_error, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (worker_name) DO UPDATE SET
+               status = EXCLUDED.status,
+               started_at = EXCLUDED.started_at,
+               last_message_at = EXCLUDED.last_message_at,
+               last_persisted_at = EXCLUDED.last_persisted_at,
+               last_error = EXCLUDED.last_error,
+               updated_at = EXCLUDED.updated_at`,
+            [
+              previousWorkerState.worker_name,
+              previousWorkerState.status,
+              previousWorkerState.started_at,
+              previousWorkerState.last_message_at,
+              previousWorkerState.last_persisted_at,
+              previousWorkerState.last_error,
+              previousWorkerState.updated_at,
+            ],
+          );
+        } else {
+          await cleanup.query(
+            "DELETE FROM binance_announcement_worker_state WHERE worker_name = $1",
+            ["binance-cms-announcements"],
+          );
+        }
+      } finally {
+        await cleanup.end();
+      }
+    }
   }
 
   const wrongHost = new Client({ connectionString: tlsMismatchUrl, connectionTimeoutMillis: 5000 });

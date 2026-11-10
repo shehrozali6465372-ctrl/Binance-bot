@@ -46,3 +46,23 @@ The first real PostgreSQL CI run exposed a missing worker `SELECT(content_hash)`
 - PR #2 remains Draft, open and unmerged.
 - No production database, credentials, live CMS connection, deployment, paid infrastructure, or real Binance Square post was used.
 - Existing publisher workflow and schedule were not changed as part of this database integration work.
+
+
+## Isolated Neon staging verification (2026-11-10 UTC)
+
+- **Staging database:** Neon account `Binance bot`; project `Binance-bot-staging` (`orange-glade-36037611`); PostgreSQL 16; AWS Singapore; branch `staging`; database `binance_bot_staging`.
+- **Migration/TLS:** the schema migration was executed against the actual Neon staging endpoint using the dedicated migrator role and `sslmode=verify-full`; the provider certificate chain and hostname validated successfully. A migration ledger now records `001_initial_schema` with SHA-256 checksum `ec11200ac7003be7f289b4d9f7724b9d5230570bc050de6bf5fb9876f3cb4377`. Migration unit tests cover advisory locking, first application, idempotent skip, checksum drift rollback, and failure cleanup.
+- **Roles:** three distinct non-superuser logins exist. The migrator owns the announcement tables and can create schema objects. Worker can INSERT events, read only `id` and `content_hash`, use the event sequence, and SELECT/INSERT/UPDATE worker state. Importer can SELECT the event ledger only. Both runtime roles lack schema CREATE; worker payload SELECT/DDL and importer INSERT were rejected in actual staging checks.
+- **Staging integration:** worker insert/RETURNING, duplicate suppression, state upsert, importer read, and forbidden-operation checks passed through the Neon database connector. The disposable verification event and worker-state row were deleted. No real announcement or publishing action was generated.
+- **Scope:** staging DB and roles are verified; this is not production DB certification. The CI-generated CA test remains useful for negative hostname testing. The selected provider's staging TLS path is now additionally verified.
+- **Still blocked:** live Binance CMS authentication/connection and real ping/pong require a read-only Binance API key/secret; no such credential has been supplied. No Render service has been created. Render Free Web Service sleeps when idle and is unsuitable for a reliable always-on WebSocket worker; a continuously running Background Worker plan or another always-on runtime is needed. External alert delivery, rollback and outage recovery remain untested.
+- **Safety:** PR #2 remains Draft/open/unmerged. Existing scheduled Square publisher workflow and schedule remain unchanged. No real Binance Square post was published.
+
+
+## Verification after migration-ledger hardening (2026-11-10 UTC)
+
+- Worker Node suite: 37 passed, 0 failed, 1 skipped locally. The skipped test is the real PostgreSQL integration test because the local runner was not supplied direct database URLs; actual Neon role behavior was separately verified through the connected Neon database tools. The GitHub PostgreSQL CI job is configured to run all tests, including the migration-ledger assertion, with the migration URL and cleanup credentials.
+- Python Layer 1 suite: 65 passed, 0 failed. Python compileall passed using the isolated verification venv with Pillow installed.
+- Migration runner now uses a transaction-scoped advisory lock, a version/checksum ledger, same-checksum skip, and checksum-drift rollback. Focused migration tests passed 6/6. Workflow YAML parsing and `git diff --check` passed.
+- Neon staging migration ledger currently contains one `001_initial_schema` row with the expected SHA-256 checksum. Runtime role grants and schema ownership were independently inspected on the live staging database.
+- The selected Render Free plan is explicitly unsuitable for production background processing: Render says Free instances are not for production, and Free web services can spin down after 15 minutes without inbound HTTP or WebSocket messages; Render can also restart them. Official docs: https://render.com/docs/free. No Render service has been created.
