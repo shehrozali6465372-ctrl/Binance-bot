@@ -32,6 +32,14 @@ export async function startAnnouncementWorker({
   apiSecret = requiredEnv("BINANCE_API_SECRET"),
   databaseUrl = requiredEnv("DATABASE_URL"),
   cmsFactory,
+  transportFactory = (configuration) => {
+    const websocketBase = new WebsocketStreamsBase(configuration);
+    websocketBase.signedStreams = true;
+    return {
+      connection: new CmsWebsocketStreams.WebsocketStreamsConnection(websocketBase),
+      connect: () => websocketBase.connect(),
+    };
+  },
   poolFactory = (options) => new Pool(options),
   logger = console,
   shutdownTimeoutMs = 30_000,
@@ -62,7 +70,7 @@ export async function startAnnouncementWorker({
   };
 
   const markDegraded = async (kind, error, fields = {}) => {
-    const message = String(error?.message || error).slice(0, 500);
+    const message = String(error?.message || error).replace(/wss?:\/\/\S+/gi, "[REDACTED_URL]").slice(0, 500);
     degradationReasons.set(kind, message);
     try {
       await persistOperationalState(fields);
@@ -86,16 +94,14 @@ export async function startAnnouncementWorker({
     };
     let connectTransport;
     if (cmsFactory) {
-      // Test seam only. Production uses the low-level official SDK base so the
-      // error listener can be attached before its async handshake begins.
+      // Backward-compatible test seam. Production uses transportFactory below.
       const client = cmsFactory(configuration);
       connection = await client.websocketStreams.connect();
       connectTransport = async () => {};
     } else {
-      const websocketBase = new WebsocketStreamsBase(configuration);
-      websocketBase.signedStreams = true;
-      connection = new CmsWebsocketStreams.WebsocketStreamsConnection(websocketBase);
-      connectTransport = () => websocketBase.connect();
+      const transport = transportFactory(configuration);
+      connection = transport.connection;
+      connectTransport = transport.connect;
     }
 
     // Attach the error listener before connectTransport(): the official
