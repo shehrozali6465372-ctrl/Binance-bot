@@ -105,7 +105,31 @@ export async function startAnnouncementWorker({
 
   const startHeartbeatLoop = () => {
     if (closed || heartbeatInterval) return;
-    startHeartbeatLoop();
+    heartbeatInterval = setInterval(() => {
+      if (closed || awaitingHeartbeatPong) return;
+      let connected = false;
+      try { connected = connection.isConnected(); } catch {}
+      if (!connected) {
+        void markDegraded("transport", new Error("Binance CMS connection is not open during heartbeat check"));
+        return;
+      }
+
+      awaitingHeartbeatPong = true;
+      heartbeatTimeout = setTimeout(() => {
+        if (closed || !awaitingHeartbeatPong) return;
+        clearPendingHeartbeat();
+        void markDegraded("heartbeat", new Error("Binance CMS heartbeat pong timeout"));
+      }, heartbeatTimeoutMs);
+      heartbeatTimeout.unref?.();
+
+      try {
+        connection.pingServer();
+      } catch (error) {
+        clearPendingHeartbeat();
+        void markDegraded("heartbeat", error);
+      }
+    }, heartbeatIntervalMs);
+    heartbeatInterval.unref?.();
   };
 
   try {
