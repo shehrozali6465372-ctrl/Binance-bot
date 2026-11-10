@@ -16,6 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
+      - name: Checkout workflow repository and TLS helper
+        uses: actions/checkout@v4
+
       - name: Checkout isolated CMS worker branch
         uses: actions/checkout@v4
         with:
