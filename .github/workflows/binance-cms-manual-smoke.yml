@@ -1,0 +1,67 @@
+name: Binance CMS Manual Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binance-cms-manual-smoke
+  cancel-in-progress: false
+
+jobs:
+  cms-smoke:
+    name: Bounded read-only CMS connection test
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout isolated CMS worker branch
+        uses: actions/checkout@v4
+        with:
+          ref: integration/binance-cms-worker-main
+          path: worker-source
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: worker-source/announcement-worker/package-lock.json
+
+      - name: Install locked worker dependencies
+        working-directory: worker-source/announcement-worker
+        run: npm ci --omit=dev
+
+      - name: Validate required secrets without printing values
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+          DATABASE_URL: ${{ secrets.BINANCE_ANNOUNCEMENT_DATABASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in BINANCE_API_KEY BINANCE_API_SECRET DATABASE_URL; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required GitHub Actions secret is missing: $name" >&2
+              exit 1
+            fi
+          done
+          node --input-type=module -e '
+            const url = new URL(process.env.DATABASE_URL);
+            if (!["postgres:", "postgresql:"].includes(url.protocol) || url.searchParams.get("sslmode") !== "verify-full") {
+              throw new Error("BINANCE_ANNOUNCEMENT_DATABASE_URL must be PostgreSQL with sslmode=verify-full");
+            }
+          '
+
+      - name: Run CMS listener for a bounded four-minute window
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+          DATABASE_URL: ${{ secrets.BINANCE_ANNOUNCEMENT_DATABASE_URL }}
+        working-directory: worker-source/announcement-worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Read-only CMS ingestion only. This worker has no Square publishing capability.
+          timeout --preserve-status --signal=TERM --kill-after=20s 240s node src/worker.js
