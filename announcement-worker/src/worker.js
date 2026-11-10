@@ -101,7 +101,16 @@ export async function startAnnouncementWorker({
     });
     connection.on("error", (error) => {
       const message = String(error?.message || error).slice(0, 500);
-      logger.error("Binance CMS connection error", { error: message });
+      const diagnostic = {
+        errorName: String(error?.name || "Error").slice(0, 80),
+        errorCode: String(error?.code || "").slice(0, 80) || null,
+        errorMessage: message,
+        httpStatus: Number.isInteger(error?.statusCode) ? error.statusCode : null,
+      };
+      logger.error("Binance CMS connection error", diagnostic);
+      if (process.env.BINANCE_CMS_DIAGNOSTIC_MODE === "1") {
+        logger.info("Binance CMS sanitized connection diagnostic", diagnostic);
+      }
       if (!closed) void markDegraded("transport", message);
     });
     connection.on("close", (code, reason) => {
