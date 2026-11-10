@@ -152,9 +152,6 @@ export async function startAnnouncementWorker({
     });
 
     stream = connection.comAnnouncementEn();
-    await persistOperationalState({}, "LISTENING");
-    logger.info("Binance CMS announcement stream connected; read-only ingestion active");
-
     stream.on("message", (message) => {
       if (!acceptingMessages) return;
       writeQueue = writeQueue.then(async () => {
@@ -181,6 +178,9 @@ export async function startAnnouncementWorker({
         logger.error("Announcement processing queue failed", { error: String(error?.message || error).slice(0, 500) });
       });
     });
+
+    await persistOperationalState({}, "LISTENING");
+    logger.info("Binance CMS announcement stream connected; read-only ingestion active");
 
     heartbeatInterval = setInterval(() => {
       if (closed || awaitingHeartbeatPong) return;
