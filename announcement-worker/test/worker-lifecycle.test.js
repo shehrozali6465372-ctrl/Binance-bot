@@ -3,13 +3,14 @@ import test from "node:test";
 import { startAnnouncementWorker } from "../src/worker.js";
 
 class FakePool {
-  constructor({ failInitialize = false, insertBarrier = null, onInsertStarted = null, failStateUpdates = {} } = {}) {
+  constructor({ failInitialize = false, insertBarrier = null, onInsertStarted = null, failStateUpdates = {}, onStateUpdate = null } = {}) {
     this.queries = [];
     this.ended = false;
     this.failInitialize = failInitialize;
     this.insertBarrier = insertBarrier;
     this.onInsertStarted = onInsertStarted;
     this.failStateUpdates = { ...failStateUpdates };
+    this.onStateUpdate = onStateUpdate;
   }
 
   async query(sql, values = []) {
@@ -19,6 +20,7 @@ class FakePool {
     }
     if (sql.includes("binance_announcement_worker_state")) {
       const state = values[0];
+      this.onStateUpdate?.(state);
       if ((this.failStateUpdates[state] || 0) > 0) {
         this.failStateUpdates[state] -= 1;
         throw new Error(`offline simulated ${state} state update failure`);
@@ -435,4 +437,30 @@ test("worker rejects a database URL without verified TLS before creating a pool"
     logger,
   }), /DATABASE_URL must include sslmode=verify-full/);
   assert.equal(poolFactoryCalled, false);
+});
+
+
+test("attaches transport error handling before awaiting LISTENING state persistence", async () => {
+  const connection = new FakeConnection();
+  const pool = new FakePool({
+    onStateUpdate: (state) => {
+      if (state === "LISTENING") {
+        assert.ok(
+          connection.listeners.has("error"),
+          "the WebSocket error listener must exist before the first awaited post-connect database write",
+        );
+      }
+    },
+  });
+
+  const worker = await startAnnouncementWorker({
+    apiKey: "offline-test-key",
+    apiSecret: "offline-test-secret",
+    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
+    cmsFactory: () => ({ websocketStreams: { connect: async () => connection } }),
+    poolFactory: () => pool,
+    logger,
+  });
+
+  await worker.shutdown("test");
 });
