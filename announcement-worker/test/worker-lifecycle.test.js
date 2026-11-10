@@ -418,3 +418,27 @@ test("connection error diagnostics are sanitized and do not log credentials or U
   assert.doesNotMatch(serialized, /secret-api-key-never-log|secret-api-secret-never-log|signature=do-not-log/);
   await worker.shutdown("test");
 });
+
+
+test("registers SDK error listener before the WebSocket handshake starts", async () => {
+  const connection = new FakeConnection();
+  const pool = new FakePool();
+  let connectStarted = false;
+  const worker = await startAnnouncementWorker({
+    apiKey: "offline-test-key",
+    apiSecret: "offline-test-secret",
+    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
+    transportFactory: () => ({
+      connection,
+      connect: async () => {
+        connectStarted = true;
+        assert.ok(connection.listeners.has("error"), "error listener must be attached before SDK handshake");
+        connection.emit("error", Object.assign(new Error("Unexpected server response: 451"), { statusCode: 451 }));
+      },
+    }),
+    poolFactory: () => pool,
+    logger,
+  });
+  assert.equal(connectStarted, true);
+  await worker.shutdown("test");
+});
