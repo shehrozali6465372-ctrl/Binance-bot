@@ -316,3 +316,45 @@ This section supersedes earlier status/gap statements above where they conflict.
 - GitHub PR #2 is now open, draft, unmerged, and mergeable=true. It has NOT been merged.
 - GitHub Actions push run 42722549557 and PR run 42722558943 both completed SUCCESS on merge commit 0aa7aed7cf2e47c64fbdb6d6c65a0cc3d1e9dc19. In each run, both mocked-announcement-tests and python-layer1-tests passed.
 - The publisher workflow .github/workflows/run_bot.yml was not changed. No deployment, live Binance stream connection, Square post, secrets change, database creation, or paid infrastructure provisioning occurred.
+
+## Codex review loop update — 2026-11-10 UTC
+
+### Reviewer selection and review result
+- User explicitly selected Codex as the AI reviewer for PR #2.
+- Reviewer selection was persisted by the gh-review-loop plugin for `chatgpt-codex-connector`, with trigger phrase `@codex review`. Automatic reviews remain disabled; only explicit review requests should trigger a cycle.
+- Posted the first review request on PR #2 at `2026-11-10T00:10:11Z`: https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/2#issuecomment-6754990725.
+- Codex completed its code review against commit `11bd1567e2ca69cfe4099ebba2396755a9864184` at `2026-11-10T00:13:33Z` and reported one unresolved P2 (medium) finding.
+- Finding: `announcement-worker/src/worker.js`, line 47 — **Drain queued messages before honoring shutdown**. If SIGTERM/SIGINT arrives while callbacks are queued behind a slow database write, shutdown sets `closed` before awaiting `writeQueue`; queued callbacks then return without persisting already-received announcements. Because Binance CMS historical replay is not documented/guaranteed, this can cause permanent event loss.
+- Required behavior: stop accepting new stream messages first, allow already accepted/queued writes to drain, then close the database pool and finish shutdown. Preserve error handling and bounded shutdown behavior; do not silently discard accepted messages.
+- Review thread: https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/2#discussion_r4519545553.
+- Review thread remains unresolved. No reviewer finding has been marked resolved or replied to.
+
+### Verification profile gate and current work state
+- gh-review-loop first-run detection identified a monorepo and one candidate check: `npm test` in `announcement-worker/`.
+- The full GitHub CI workflow also includes Python compile and Layer 1 unit tests. A proposed customized verification profile was presented with these checks:
+  1. `npm test` (working directory `announcement-worker/`)
+  2. `python -m compileall -q .`
+  3. `python -m unittest discover -s tests -v`
+- The verification profile has NOT yet been saved; user has not confirmed the proposed profile. Do not edit code until the profile decision is saved (confirmed or explicit skip) under the gh-review-loop first-run gate.
+- No code fix has been made for the P2 finding yet. No code files have changed as part of this review cycle.
+- The review-loop cycle receipt recorded 0 fixes, 0 repeat-review requests, and verification skipped because the review finding had not yet been addressed.
+- Codex review is complete for commit `11bd1567e2ca69cfe4099ebba2396755a9864184`; the loop has not yet completed the fix/re-review/verification phase.
+
+### Current repository / PR state at this handoff
+- Repository: https://github.com/shehrozali6465372-ctrl/Binance-bot
+- Branch: `feature/binance-cms-announcement-worker`
+- Working clone used for review: `/tmp/Binance-bot-gh-review-loop` on the authorized Remote Desktop Commander device; no personal browser used.
+- Feature branch HEAD at review time: `11bd1567e2ca69cfe4099ebba2396755a9864184`.
+- PR #2 remains open, Draft, unmerged. Do not mark ready, merge, or deploy without separate explicit approval.
+- Existing Binance Square publisher, its schedule, credentials, and production workflow remain untouched.
+- No real Binance Square post was published. No live Binance WebSocket or production database was contacted during this review.
+- No infrastructure, secrets, database resources, or paid services were created or changed.
+
+### Next steps
+1. Obtain user's decision on the proposed verification profile; save it before any code edit.
+2. Write a failing regression test that simulates SIGTERM/SIGINT while at least one accepted announcement write is queued behind a delayed database write. Confirm it fails on the current shutdown behavior.
+3. Implement the minimal intake-stop / queue-drain / pool-close ordering fix without changing the existing publisher.
+4. Run the focused worker test, full worker tests, Python compile, and complete Python Layer 1 suite using the saved profile.
+5. Inspect the diff and run the gh-review-loop cycle summary before pushing any code change.
+6. Push the fix to the same feature branch, request Codex re-review using the plugin script, and wait for a response against the new commit. Keep the review request cap at 3.
+7. Keep PR #2 Draft and unmerged; do not deploy or publish a real Square post.
