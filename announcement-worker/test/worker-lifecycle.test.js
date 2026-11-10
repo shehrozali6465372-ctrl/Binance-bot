@@ -3,18 +3,26 @@ import test from "node:test";
 import { startAnnouncementWorker } from "../src/worker.js";
 
 class FakePool {
-  constructor({ failInitialize = false, insertBarrier = null, onInsertStarted = null } = {}) {
+  constructor({ failInitialize = false, insertBarrier = null, onInsertStarted = null, failStateUpdates = {} } = {}) {
     this.queries = [];
     this.ended = false;
     this.failInitialize = failInitialize;
     this.insertBarrier = insertBarrier;
     this.onInsertStarted = onInsertStarted;
+    this.failStateUpdates = { ...failStateUpdates };
   }
 
   async query(sql, values = []) {
     this.queries.push({ sql, values });
     if (this.failInitialize && sql.includes("CREATE TABLE IF NOT EXISTS")) {
       throw new Error("offline simulated schema initialization failure");
+    }
+    if (sql.includes("binance_announcement_worker_state")) {
+      const state = values[0];
+      if ((this.failStateUpdates[state] || 0) > 0) {
+        this.failStateUpdates[state] -= 1;
+        throw new Error(`offline simulated ${state} state update failure`);
+      }
     }
     if (sql.includes("INSERT INTO binance_announcement_events")) {
       this.onInsertStarted?.();
@@ -206,6 +214,56 @@ test("shutdown timeout leaves the pool open until accepted writes settle", async
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.equal(pool.ended, true, "resources close after the accepted write settles");
+});
+
+test("write queue recovers after RECEIVING and DEGRADED state updates both fail", async () => {
+  const pool = new FakePool({ failStateUpdates: { RECEIVING: 1, DEGRADED: 1 } });
+  const connection = new FakeConnection();
+  const worker = await startAnnouncementWorker({
+    apiKey: "offline-test-key",
+    apiSecret: "offline-test-secret",
+    databaseUrl: "postgresql://offline.invalid/db",
+    cmsFactory: () => ({ websocketStreams: { connect: async () => connection } }),
+    poolFactory: () => pool,
+    logger,
+  });
+
+  const message = (symbol) => ({
+    catalogId: 48,
+    catalogName: "New Cryptocurrency Listing",
+    publishDate: Date.now(),
+    title: `Recovery announcement (${symbol})`,
+    body: "Mock announcement body",
+    disclaimer: "",
+  });
+  connection.stream.emitMessage(message("FIRST"));
+  await new Promise((resolve) => setImmediate(resolve));
+  connection.stream.emitMessage(message("RECOVERED"));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const inserted = pool.queries.filter(({ sql }) => sql.includes("INSERT INTO binance_announcement_events"));
+  assert.equal(inserted.length, 1, "the next accepted message must run after the prior callback rejects");
+  assert.match(inserted[0].values[6], /RECOVERED/);
+  await worker.shutdown("test");
+});
+
+test("startup failure after websocket connect disconnects the opened connection", async () => {
+  const pool = new FakePool({ failStateUpdates: { LISTENING: 1 } });
+  const connection = new FakeConnection();
+  await assert.rejects(
+    startAnnouncementWorker({
+      apiKey: "offline-test-key",
+      apiSecret: "offline-test-secret",
+      databaseUrl: "postgresql://offline.invalid/db",
+      cmsFactory: () => ({ websocketStreams: { connect: async () => connection } }),
+      poolFactory: () => pool,
+      logger,
+    }),
+    /offline simulated LISTENING state update failure/,
+  );
+  assert.equal(connection.disconnected, true, "startup cleanup must close a socket opened before failure");
+  assert.equal(pool.ended, true);
 });
 
 test("transport errors mark DEGRADED and reconnect open restores LISTENING", async () => {

@@ -25,6 +25,7 @@ export async function startAnnouncementWorker({
   const pool = poolFactory({ connectionString: databaseUrl, max: 3, application_name: "binance-cms-announcement-worker" });
   const store = new AnnouncementStore(pool);
   let connection;
+  let stream;
   let closed = false;
   let acceptingMessages = true;
   let shutdownPromise;
@@ -42,7 +43,7 @@ export async function startAnnouncementWorker({
       reconnectDelay: 5000,
     });
     connection = await client.websocketStreams.connect();
-    const stream = connection.comAnnouncementEn();
+    stream = connection.comAnnouncementEn();
     await store.setState("LISTENING");
     logger.info("Binance CMS announcement stream connected; read-only ingestion active");
 
@@ -66,8 +67,13 @@ export async function startAnnouncementWorker({
           logger.error("Announcement rejected or persistence failed", { error: String(error?.message || error).slice(0, 500) });
         }
       }).catch(async (error) => {
-        await store.setState("DEGRADED", { lastError: String(error?.message || error).slice(0, 500) });
-        logger.error("Announcement processing queue failed", { error: String(error?.message || error).slice(0, 500) });
+        const message = String(error?.message || error).slice(0, 500);
+        await store.setState("DEGRADED", { lastError: message }).catch((stateError) => {
+          logger.error("Could not record degraded announcement worker state", {
+            error: String(stateError?.message || stateError).slice(0, 500),
+          });
+        });
+        logger.error("Announcement processing queue failed", { error: message });
       });
     });
 
@@ -151,6 +157,8 @@ export async function startAnnouncementWorker({
     return { shutdown, stream, connection, store, pool };
   } catch (error) {
     await store.setState("FAILED", { lastError: String(error?.message || error).slice(0, 500) }).catch(() => {});
+    try { stream?.unsubscribe(); } catch {}
+    try { await connection?.disconnect(); } catch {}
     await pool.end().catch(() => {});
     throw error;
   }

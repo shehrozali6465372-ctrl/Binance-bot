@@ -383,3 +383,28 @@ This section supersedes earlier status/gap statements above where they conflict.
 2. Obtain the gh-review-loop cycle summary before commit/push, then commit and push only the scoped fix, tests, `.gitignore`, and this context update.
 3. Request Codex re-review with the official gh-review-loop request script and wait for the review result; do not resolve the thread manually.
 4. Keep PR #2 Draft/unmerged and retain all production gates listed above.
+
+
+## Codex follow-up review — recovery and startup cleanup (2026-11-10 UTC)
+
+- Codex re-reviewed commit `84b74912cc1d018760933b6256813fd7df172efc` after one re-review request (cap usage: 1/3).
+- The prior P2 shutdown-drain finding is now outdated and was automatically cleared by the review-loop fetch.
+- Codex reported two new P2 findings:
+  1. `announcement-worker/src/worker.js` — if both the `RECEIVING` state write and subsequent `DEGRADED` state write fail, the chained `writeQueue` remains rejected; later accepted messages are skipped even after the database recovers.
+  2. Startup cleanup — if `connect()` succeeds but a later startup step (for example, writing `LISTENING`) fails, the opened WebSocket connection is not disconnected and may keep the process alive.
+- A changed-files-only pattern sweep was attempted for the queue recovery cluster. It returned `pattern_too_thin` (0 significant shared tokens; no safe sibling candidates), so no additional files were swept or edited.
+- Added two regression tests first and confirmed both failed against the reviewed implementation:
+  - `write queue recovers after RECEIVING and DEGRADED state updates both fail` (the queue rejected and caused an unhandled rejection).
+  - `startup failure after websocket connect disconnects the opened connection` (connection remained open).
+- Implemented scoped fixes in `announcement-worker/src/worker.js`:
+  - Queue failure reporting now catches and logs a secondary `DEGRADED` state-write failure without allowing the queue chain to remain rejected. Subsequent message callbacks can execute after transient database recovery.
+  - The opened connection and stream are tracked during startup. Startup failure unsubscribes the stream when created, disconnects an already-open connection, and closes the pool.
+- Focused worker lifecycle tests now pass 8/8, including both new regressions. These follow-up changes are currently local and uncommitted; full saved-profile verification, review receipt, push, and Codex re-review remain pending.
+- PR #2 remains Draft, open, and unmerged. Existing production publisher workflow and schedule remain unchanged. No live Binance CMS connection, real Square post, production database, secret, paid resource, or deployment was used.
+
+### Follow-up fixes verified and pushed to be recorded
+
+- Both new Codex P2 findings were reproduced with failing tests before implementation; the focused lifecycle suite then passed 8/8.
+- The saved repo-aware verification profile passed all 5 required checks after the fixes: npm worker tests, isolated venv setup, Pillow dependency install, Python compileall over CI-scoped sources, and the complete Python unittest suite.
+- `git diff --check` passed. The gh-review-loop cycle 3 receipt recorded 2 findings fixed locally, 2 still open pending reviewer confirmation, verification passed, and no re-review request yet for this follow-up cycle.
+- Queue recovery change suppresses secondary status-write failure after logging it, preventing a rejected promise from poisoning subsequent accepted queue callbacks. Startup cleanup now unsubscribes the stream when available and disconnects the opened connection before closing the pool.
