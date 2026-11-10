@@ -106,12 +106,21 @@ async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs } =
         },
       };
     },
-    poolFactory: () => pool,
+    poolFactory: (options) => {
+      Object.assign(configuration.poolOptions ??= {}, options);
+      return pool;
+    },
     logger,
     shutdownTimeoutMs,
   });
-  return { worker, pool, connection, configuration };
+  return { worker, pool, connection, configuration, poolOptions: configuration.poolOptions };
 }
+
+test("worker bounds PostgreSQL connection establishment", async () => {
+  const { worker, poolOptions } = await startWithFakes();
+  assert.equal(poolOptions.connectionTimeoutMillis, 10_000);
+  await worker.shutdown();
+});
 
 test("worker consumes a mocked CMS message and shuts down all resources", async () => {
   const { worker, pool, connection, configuration } = await startWithFakes();

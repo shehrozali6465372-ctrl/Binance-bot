@@ -36,7 +36,12 @@ export async function startAnnouncementWorker({
   shutdownTimeoutMs = 30_000,
 } = {}) {
   databaseUrl = requireVerifiedPostgresUrl(databaseUrl, "DATABASE_URL");
-  const pool = poolFactory({ connectionString: databaseUrl, max: 3, application_name: "binance-cms-announcement-worker" });
+  const pool = poolFactory({
+    connectionString: databaseUrl,
+    max: 3,
+    connectionTimeoutMillis: 10_000,
+    application_name: "binance-cms-announcement-worker",
+  });
   const store = new AnnouncementStore(pool);
   let connection;
   let stream;
