@@ -3,13 +3,14 @@ import test from "node:test";
 import { startAnnouncementWorker } from "../src/worker.js";
 
 class FakePool {
-  constructor({ failInitialize = false, insertBarrier = null, onInsertStarted = null, failStateUpdates = {} } = {}) {
+  constructor({ failInitialize = false, insertBarrier = null, onInsertStarted = null, failStateUpdates = {}, onStateUpdate = null } = {}) {
     this.queries = [];
     this.ended = false;
     this.failInitialize = failInitialize;
     this.insertBarrier = insertBarrier;
     this.onInsertStarted = onInsertStarted;
     this.failStateUpdates = { ...failStateUpdates };
+    this.onStateUpdate = onStateUpdate;
   }
 
   async query(sql, values = []) {
@@ -19,6 +20,7 @@ class FakePool {
     }
     if (sql.includes("binance_announcement_worker_state")) {
       const state = values[0];
+      this.onStateUpdate?.(state);
       if ((this.failStateUpdates[state] || 0) > 0) {
         this.failStateUpdates[state] -= 1;
         throw new Error(`offline simulated ${state} state update failure`);
@@ -62,17 +64,10 @@ class FakeConnection {
     this.listeners = new Map();
     this.stream = new FakeStream();
     this.disconnected = false;
-    this.pingCount = 0;
-    this.onPing = null;
   }
 
   isConnected() {
     return !this.disconnected;
-  }
-
-  pingServer() {
-    this.pingCount += 1;
-    this.onPing?.();
   }
 
   comAnnouncementEn() {
@@ -98,7 +93,7 @@ const logger = {
   error() {},
 };
 
-async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs, heartbeatIntervalMs, heartbeatTimeoutMs } = {}) {
+async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs } = {}) {
   const pool = new FakePool(poolOptions);
   const connection = new FakeConnection();
   const configuration = {};
@@ -123,8 +118,6 @@ async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs, he
     },
     logger,
     shutdownTimeoutMs,
-    heartbeatIntervalMs,
-    heartbeatTimeoutMs,
   });
   return { worker, pool, connection, configuration, poolOptions: configuration.poolOptions };
 }
@@ -135,80 +128,10 @@ test("worker bounds PostgreSQL connection establishment", async () => {
   await worker.shutdown();
 });
 
-test("worker rejects invalid heartbeat timing before creating a database pool", async () => {
-  let poolFactoryCalled = false;
-  await assert.rejects(startAnnouncementWorker({
-    apiKey: "offline-test-key",
-    apiSecret: "offline-test-secret",
-    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
-    heartbeatIntervalMs: 0,
-    poolFactory: () => { poolFactoryCalled = true; throw new Error("pool must not be created"); },
-    logger,
-  }), /heartbeatIntervalMs must be between 1 and 2147483647/);
-  assert.equal(poolFactoryCalled, false);
-});
 
-test("worker sends WebSocket heartbeats and restores LISTENING after a pong", async () => {
-  const { worker, pool, connection } = await startWithFakes({ heartbeatIntervalMs: 5, heartbeatTimeoutMs: 20 });
-  connection.onPing = () => setImmediate(() => connection.emit("pong"));
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.ok(connection.pingCount > 0, "worker should actively ping the CMS socket");
-  const states = pool.queries
-    .filter(({ sql }) => sql.includes("binance_announcement_worker_state"))
-    .map(({ values }) => values[0]);
-  assert.equal(states.at(-1), "LISTENING", "a successful pong should refresh healthy state");
-  await worker.shutdown("test");
-});
 
-test("worker marks the CMS stream DEGRADED when heartbeat pong times out", async () => {
-  const { worker, pool, connection } = await startWithFakes({ heartbeatIntervalMs: 5, heartbeatTimeoutMs: 5 });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.ok(connection.pingCount > 0, "worker should send a ping before waiting for pong");
-  const degraded = pool.queries.find(({ sql, values }) =>
-    sql.includes("binance_announcement_worker_state") && values[0] === "DEGRADED" &&
-    String(values[4] || "").includes("heartbeat pong timeout"),
-  );
-  assert.ok(degraded, "missing pong should be recorded as DEGRADED with a diagnostic");
-  await worker.shutdown("test");
-});
 
-test("shutdown stops heartbeat scheduling and cancels an outstanding pong timeout", async () => {
-  const { worker, connection, pool } = await startWithFakes({ heartbeatIntervalMs: 5, heartbeatTimeoutMs: 100 });
-  await new Promise((resolve) => setTimeout(resolve, 12));
-  assert.ok(connection.pingCount > 0);
-  await worker.shutdown("test");
-  const pingCountAtShutdown = connection.pingCount;
-  await new Promise((resolve) => setTimeout(resolve, 15));
-  assert.equal(connection.pingCount, pingCountAtShutdown, "no heartbeat should run after shutdown");
-  const states = pool.queries
-    .filter(({ sql }) => sql.includes("binance_announcement_worker_state"))
-    .map(({ values }) => values[0]);
-  assert.equal(states.at(-1), "STOPPED");
-});
 
-test("heartbeat recovery does not erase an unrelated database degradation", async () => {
-  const { worker, pool, connection } = await startWithFakes({
-    poolOptions: { failStateUpdates: { RECEIVING: 1 } },
-    heartbeatIntervalMs: 5,
-    heartbeatTimeoutMs: 20,
-  });
-  connection.onPing = () => setImmediate(() => connection.emit("pong"));
-  connection.stream.emitMessage({
-    catalogId: 48,
-    catalogName: "New Cryptocurrency Listing",
-    publishDate: Date.now(),
-    title: "Database failure must remain degraded (DBX)",
-    body: "Mock announcement body",
-    disclaimer: "",
-  });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  const latest = pool.queries
-    .filter(({ sql }) => sql.includes("binance_announcement_worker_state"))
-    .at(-1);
-  assert.equal(latest.values[0], "DEGRADED");
-  assert.match(latest.values[4], /offline simulated RECEIVING state update failure/);
-  await worker.shutdown("test");
-});
 
 test("worker consumes a mocked CMS message and shuts down all resources", async () => {
   const { worker, pool, connection, configuration } = await startWithFakes();
@@ -435,4 +358,87 @@ test("worker rejects a database URL without verified TLS before creating a pool"
     logger,
   }), /DATABASE_URL must include sslmode=verify-full/);
   assert.equal(poolFactoryCalled, false);
+});
+
+
+test("attaches transport error handling before awaiting LISTENING state persistence", async () => {
+  const connection = new FakeConnection();
+  const pool = new FakePool({
+    onStateUpdate: (state) => {
+      if (state === "LISTENING") {
+        assert.ok(
+          connection.listeners.has("error"),
+          "the WebSocket error listener must exist before the first awaited post-connect database write",
+        );
+      }
+    },
+  });
+
+  const worker = await startAnnouncementWorker({
+    apiKey: "offline-test-key",
+    apiSecret: "offline-test-secret",
+    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
+    cmsFactory: () => ({ websocketStreams: { connect: async () => connection } }),
+    poolFactory: () => pool,
+    logger,
+  });
+
+  await worker.shutdown("test");
+});
+
+
+
+
+
+test("connection error diagnostics are sanitized and do not log credentials or URLs", async () => {
+  const captured = [];
+  const connection = new FakeConnection();
+  const pool = new FakePool();
+  const diagnosticLogger = {
+    info: (...args) => captured.push(args),
+    warn() {},
+    error: (...args) => captured.push(args),
+  };
+  const worker = await startAnnouncementWorker({
+    apiKey: "secret-api-key-never-log",
+    apiSecret: "secret-api-secret-never-log",
+    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
+    cmsFactory: () => ({ websocketStreams: { connect: async () => connection } }),
+    poolFactory: () => pool,
+    logger: diagnosticLogger,
+  });
+  connection.emit("error", Object.assign(
+    new Error("Unexpected server response: 451; request URL wss://example.invalid/?signature=do-not-log"),
+    { statusCode: 451, code: "HTTP_451" },
+  ));
+  await new Promise((resolve) => setImmediate(resolve));
+  const serialized = JSON.stringify(captured);
+  assert.match(serialized, /451/);
+  assert.match(serialized, /HTTP_451/);
+  assert.doesNotMatch(serialized, /secret-api-key-never-log|secret-api-secret-never-log|signature=do-not-log/);
+  await worker.shutdown("test");
+});
+
+
+test("registers SDK error listener before the WebSocket handshake starts", async () => {
+  const connection = new FakeConnection();
+  const pool = new FakePool();
+  let connectStarted = false;
+  const worker = await startAnnouncementWorker({
+    apiKey: "offline-test-key",
+    apiSecret: "offline-test-secret",
+    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
+    transportFactory: () => ({
+      connection,
+      connect: async () => {
+        connectStarted = true;
+        assert.ok(connection.listeners.has("error"), "error listener must be attached before SDK handshake");
+        connection.emit("error", Object.assign(new Error("Unexpected server response: 451"), { statusCode: 451 }));
+      },
+    }),
+    poolFactory: () => pool,
+    logger,
+  });
+  assert.equal(connectStarted, true);
+  await worker.shutdown("test");
 });

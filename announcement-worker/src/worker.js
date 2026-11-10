@@ -1,4 +1,5 @@
-import { Cms, CMS_WS_STREAMS_PROD_URL } from "@binance/cms";
+import { CmsWebsocketStreams, CMS_WS_STREAMS_PROD_URL } from "@binance/cms";
+import { WebsocketStreamsBase } from "@binance/common";
 import pg from "pg";
 import { normalizeAnnouncementMessage } from "./normalize.js";
 import { AnnouncementStore } from "./store.js";
@@ -30,21 +31,20 @@ export async function startAnnouncementWorker({
   apiKey = requiredEnv("BINANCE_API_KEY"),
   apiSecret = requiredEnv("BINANCE_API_SECRET"),
   databaseUrl = requiredEnv("DATABASE_URL"),
-  cmsFactory = (configuration) => new Cms({ configurationWebsocketStreams: configuration }),
+  cmsFactory,
+  transportFactory = (configuration) => {
+    const websocketBase = new WebsocketStreamsBase(configuration);
+    websocketBase.signedStreams = true;
+    return {
+      connection: new CmsWebsocketStreams.WebsocketStreamsConnection(websocketBase),
+      connect: () => websocketBase.connect(),
+    };
+  },
   poolFactory = (options) => new Pool(options),
   logger = console,
   shutdownTimeoutMs = 30_000,
-  heartbeatIntervalMs = 30_000,
-  heartbeatTimeoutMs = 10_000,
 } = {}) {
   databaseUrl = requireVerifiedPostgresUrl(databaseUrl, "DATABASE_URL");
-  const maxTimerDelayMs = 2_147_483_647;
-  if (!Number.isSafeInteger(heartbeatIntervalMs) || heartbeatIntervalMs < 1 || heartbeatIntervalMs > maxTimerDelayMs) {
-    throw new RangeError(`heartbeatIntervalMs must be between 1 and ${maxTimerDelayMs}`);
-  }
-  if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 1 || heartbeatTimeoutMs > maxTimerDelayMs) {
-    throw new RangeError(`heartbeatTimeoutMs must be between 1 and ${maxTimerDelayMs}`);
-  }
   const pool = poolFactory({
     connectionString: databaseUrl,
     max: 3,
@@ -59,9 +59,6 @@ export async function startAnnouncementWorker({
   let shutdownPromise;
   let resourcesClosed = false;
   let writeQueue = Promise.resolve();
-  let heartbeatInterval;
-  let heartbeatTimeout;
-  let awaitingHeartbeatPong = false;
   const degradationReasons = new Map();
 
   const persistOperationalState = async (fields = {}, healthyStatus = "LISTENING") => {
@@ -73,7 +70,7 @@ export async function startAnnouncementWorker({
   };
 
   const markDegraded = async (kind, error, fields = {}) => {
-    const message = String(error?.message || error).slice(0, 500);
+    const message = String(error?.message || error).replace(/wss?:\/\/\S+/gi, "[REDACTED_URL]").slice(0, 500);
     degradationReasons.set(kind, message);
     try {
       await persistOperationalState(fields);
@@ -85,39 +82,68 @@ export async function startAnnouncementWorker({
     }
   };
 
-  const clearDegraded = async (kind, fields = {}) => {
-    degradationReasons.delete(kind);
-    try {
-      await persistOperationalState(fields);
-    } catch (stateError) {
-      logger.error("Could not persist recovered announcement worker state", {
-        reason: kind,
-        error: String(stateError?.message || stateError).slice(0, 500),
-      });
-    }
-  };
-
-  const clearPendingHeartbeat = () => {
-    awaitingHeartbeatPong = false;
-    if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
-    heartbeatTimeout = undefined;
-  };
-
   try {
     await store.initialize();
     await store.setState("STARTING", { startedAt: new Date().toISOString() });
 
-    const client = cmsFactory({
+    const configuration = {
       apiKey,
       apiSecret,
       wsURL: process.env.BINANCE_CMS_WS_URL || CMS_WS_STREAMS_PROD_URL,
       reconnectDelay: 5000,
-    });
-    connection = await client.websocketStreams.connect();
-    stream = connection.comAnnouncementEn();
-    await store.setState("LISTENING");
-    logger.info("Binance CMS announcement stream connected; read-only ingestion active");
+    };
+    let connectTransport;
+    if (cmsFactory) {
+      // Backward-compatible test seam. Production uses transportFactory below.
+      const client = cmsFactory(configuration);
+      connection = await client.websocketStreams.connect();
+      connectTransport = async () => {};
+    } else {
+      const transport = transportFactory(configuration);
+      connection = transport.connection;
+      connectTransport = transport.connect;
+    }
 
+    // Attach the error listener before connectTransport(): the official
+    // high-level Cms.connect() awaits the handshake before returning its
+    // wrapper, so handshake failures otherwise emit an unhandled EventEmitter
+    // "error" before the caller can subscribe.
+    // The SDK's stream handler only supports "message".
+    connection.on("open", () => {
+      if (!closed) {
+        degradationReasons.delete("transport");
+        void persistOperationalState().catch((error) => {
+          logger.error("Could not persist recovered WebSocket state", {
+            error: String(error?.message || error).slice(0, 500),
+          });
+        });
+      }
+    });
+    connection.on("error", (error) => {
+      const message = String(error?.message || error).slice(0, 500);
+      const statusMatch = message.match(/(?:server response|status(?: code)?)\s*[:=]?\s*(\d{3})/i);
+      const diagnostic = {
+        errorName: String(error?.name || "Error").slice(0, 80),
+        errorCode: String(error?.code || "").slice(0, 80) || null,
+        // Never persist arbitrary error text: ws errors can embed a signed URL.
+        errorMessage: message.replace(/wss?:\/\/\S+/gi, "[REDACTED_URL]").slice(0, 250),
+        httpStatus: Number.isInteger(error?.statusCode)
+          ? error.statusCode
+          : (statusMatch ? Number(statusMatch[1]) : null),
+      };
+      logger.error("Binance CMS connection error", diagnostic);
+      if (process.env.BINANCE_CMS_DIAGNOSTIC_MODE === "1") {
+        logger.info("Binance CMS sanitized connection diagnostic", diagnostic);
+      }
+      if (!closed) void markDegraded("transport", message);
+    });
+    connection.on("close", (code, reason) => {
+      const message = `WebSocket closed (code=${code ?? "unknown"}, reason=${String(reason ?? "").slice(0, 200)})`;
+      logger.warn("Binance CMS connection closed", { code, reason: String(reason ?? "").slice(0, 200) });
+      if (!closed) void markDegraded("transport", message);
+    });
+    await connectTransport();
+    stream = connection.comAnnouncementEn();
     stream.on("message", (message) => {
       if (!acceptingMessages) return;
       writeQueue = writeQueue.then(async () => {
@@ -145,65 +171,8 @@ export async function startAnnouncementWorker({
       });
     });
 
-    // The SDK's stream handler only supports "message". Transport-level
-    // lifecycle events belong to WebsocketStreamsConnection.on().
-    connection.on("open", () => {
-      if (!closed) {
-        clearPendingHeartbeat();
-        degradationReasons.delete("transport");
-        degradationReasons.delete("heartbeat");
-        void persistOperationalState().catch((error) => {
-          logger.error("Could not persist recovered WebSocket state", {
-            error: String(error?.message || error).slice(0, 500),
-          });
-        });
-      }
-    });
-    connection.on("error", (error) => {
-      const message = String(error?.message || error).slice(0, 500);
-      logger.error("Binance CMS connection error", { error: message });
-      if (!closed) void markDegraded("transport", message);
-    });
-    connection.on("close", (code, reason) => {
-      const message = `WebSocket closed (code=${code ?? "unknown"}, reason=${String(reason ?? "").slice(0, 200)})`;
-      logger.warn("Binance CMS connection closed", { code, reason: String(reason ?? "").slice(0, 200) });
-      if (!closed) {
-        clearPendingHeartbeat();
-        void markDegraded("transport", message);
-      }
-    });
-    connection.on("pong", () => {
-      if (closed || !awaitingHeartbeatPong) return;
-      clearPendingHeartbeat();
-      void clearDegraded("heartbeat");
-      logger.info("Binance CMS heartbeat pong received");
-    });
-
-    heartbeatInterval = setInterval(() => {
-      if (closed || awaitingHeartbeatPong) return;
-      let connected = false;
-      try { connected = connection.isConnected(); } catch {}
-      if (!connected) {
-        void markDegraded("transport", new Error("Binance CMS connection is not open during heartbeat check"));
-        return;
-      }
-
-      awaitingHeartbeatPong = true;
-      heartbeatTimeout = setTimeout(() => {
-        if (closed || !awaitingHeartbeatPong) return;
-        clearPendingHeartbeat();
-        void markDegraded("heartbeat", new Error("Binance CMS heartbeat pong timeout"));
-      }, heartbeatTimeoutMs);
-      heartbeatTimeout.unref?.();
-
-      try {
-        connection.pingServer();
-      } catch (error) {
-        clearPendingHeartbeat();
-        void markDegraded("heartbeat", error);
-      }
-    }, heartbeatIntervalMs);
-    heartbeatInterval.unref?.();
+    await persistOperationalState({}, "LISTENING");
+    logger.info("Binance CMS announcement stream connected; read-only ingestion active");
 
     const finalizeShutdown = async () => {
       if (resourcesClosed) return;
@@ -220,8 +189,6 @@ export async function startAnnouncementWorker({
       // accepted before this point remain in writeQueue and must be drained.
       acceptingMessages = false;
       closed = true;
-      if (heartbeatInterval) clearInterval(heartbeatInterval);
-      clearPendingHeartbeat();
       logger.info("Stopping announcement worker", { signal });
       try { stream.unsubscribe(); } catch {}
 
