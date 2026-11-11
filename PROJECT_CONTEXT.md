@@ -763,3 +763,12 @@ Implement PostgreSQL schema/migration and real PostgreSQL transaction/concurrenc
 ### Runtime boundary
 - Normal `run_once()` continues with `onchain_aggregation_by_asset=None`; no automatic on-chain worker startup or live RPC occurs. On-chain candidate corroboration only activates when an external orchestrator passes current validated aggregation results keyed by canonical CoinGecko asset ID.
 - No buy/sell inference, order placement, candidate-only discovery or Binance Square publishing authority was added.
+
+### Final GitHub handoff — 2026-11-11
+- Latest implementation commit: `cb1a118887da08efdfe9d436dd550ddd35b5c8e0` (`feat(layer1): attach on-chain corroboration to candidates`). Local and fetched remote branch matched after push.
+- PR #13: OPEN, Draft, unmerged; head `cb1a118887da08efdfe9d436dd550ddd35b5c8e0`; base `layer-1/module8-market-analysis` at `f7e6fc511e146b6bfb6f25afb0009c369d8afd4a`.
+- PR #13 GitHub Actions run `43070205665` (`Phase 1 Safety Tests`): completed SUCCESS; job `mocked-safety-tests` completed SUCCESS. Commit status endpoint has no separate status contexts; workflow run is the verified CI result.
+- PR #12 remains OPEN, non-draft, unmerged and unchanged; head `f7e6fc511e146b6bfb6f25afb0009c369d8afd4a`, base `8b46af4bbe0afb73d5650a1bb64a761024e53dec`.
+- Full repository suite: 313 passed, 0 failed. Focused aggregation + candidate integration: 27 passed. `compileall` and `git diff --check` passed.
+- Tracked working tree clean after push; `.venv/` remains untracked and untouched.
+- No production deployment, PR merge, live on-chain RPC, secrets change, production database mutation, paid infrastructure, or real Binance Square post was performed.
