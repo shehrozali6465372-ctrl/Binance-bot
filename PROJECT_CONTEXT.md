@@ -602,3 +602,31 @@ Build the bounded Bitcoin address-history ingestion worker on the existing inges
 - Exact fixed slot-filter schema and pagination stability for the current `getTransactionsForAddress` endpoint remain unverified. Do not implement a worker using assumed filter semantics.
 - No Solana normalizer/worker or extra package was added. Next: verify slot filters/pagination; compare maintained Python parsing options against a minimal Node interop boundary; write tests for legacy/v0, lookup tables, outer/inner Transfer and TransferChecked, Token-2022 and stable instruction identity; then implement only if exact evidence is available.
 - Official references: Alchemy getTransactionsForAddress and getBlock; Solana transaction introspection, RPC JSON structures and SPL token transfer instructions (URLs recorded in `ONCHAIN_INTELLIGENCE.md`).
+
+## Solana SPL token worker progress — 2026-11-11
+
+### Implemented
+- Added fixed inclusive slot filters to Alchemy `getTransactionsForAddress`; query uses finalized full transactions, desc ordering, `encoding=json`, `maxSupportedTransactionVersion=1` and tokenAccounts=balanceChanged. Provider validates each record remains in requested slots and requires transactionIndex for fixed-slot queries.
+- Added finalized slot/header/produced-slot provider helpers: genesis-checked getSlot(finalized), getBlocks(finalized) and getBlock(finalized, transactionDetails=none).
+- Added narrow Python `normalize_solana_token_transfer_instructions` for SPL Token Program Transfer and TransferChecked. It resolves static + loaded lookup addresses, outer and inner CPI instructions, exact u64 base-unit amounts, mint/decimals, source/destination token accounts and wallet owner evidence. Stable identity includes signature + exact outer/inner trace index.
+- Added `layer1/onchain_solana_worker.py`: explicit address seeds and start slots, bounded fixed slot windows, opaque cursor checkpointing, descending slot/transaction-index validation, cursor-loop rejection, finalized headers, exact transaction normalizer, and atomic page+checkpoint+slot-journal commits.
+- Added dedicated slot journal table recording both produced and skipped slots without fabricating block hashes or timestamps. Reorg reconciliation detects changed hashes and produced/skipped transitions, tombstones affected events and replays from the earliest changed slot; active page ranges are checked before resuming.
+- Unsupported native SOL and Token-2022 mappings are deliberately skipped. Token-2022 is not enabled until extension-aware transfer-fee/hook instruction handling is implemented. No transfer is inferred from aggregate balance deltas.
+- Official MIT `@solana/transaction-introspection` v8.6.0 (legacy/v0/v1 + ALT + inner CPI support) was reviewed but not added because it requires a Node/Kit runtime boundary in this Python service; the in-repo decoder is deliberately limited to known SPL Token instruction layouts. No external source code was copied.
+
+### Cost and coverage limits
+- Alchemy docs list getTransactionsForAddress full page = 100 CUs, getBlock = 40 CUs, getBlocks = 10 CUs. Worst-case 100-slot range with 100 produced blocks costs about 4,010 CUs per address plus 100 CUs per full transaction page; reorg lookback incurs more header reads. Seed count and slot window must remain conservative.
+- The worker is address-seeded, not network-wide. Native SOL and Token-2022 not supported. Produced slots with missing blockTime fail closed. Owner-address attribution requires token balance owner metadata.
+- Reorg recovery is bounded by configured lookback plus active range. SQLite remains the local/test store; Postgres migration/concurrency, scheduler lifecycle, metrics/alerts, runbook and live provider verification remain outstanding.
+- All tests are deterministic local fixtures; no live Alchemy call or credentials used.
+
+### Exact next task
+Assess XRPL payment/issued-currency extraction and transaction history pagination using Chainstack's validated ledger boundaries. Only normalize actual validated Payment/issued-currency transfer records with exact transaction hash, ledger index/hash, delivered amount, currency/issuer and account-side evidence. Do not treat balance changes as synthetic payments or infer missing delivered amounts. Reuse maintained open-source code only after checking license, support and Python integration. Preserve all non-negotiable rules and never publish a real Binance Square post.
+
+## Solana worker verification — 2026-11-11
+- Full repository suite: 260 passed, 0 failed.
+- Focused Solana normalizer + worker + provider suite: 65 passed, 0 failed.
+- compileall and git diff --check passed.
+- No live Alchemy calls, credentials, deployment, production DB mutation, PR merge or real Binance Square post.
+- Current exact implementation scope: base SPL Token Program Transfer/TransferChecked only; native SOL and Token-2022 skipped; address-seeded finalized slot windows with opaque page cursor, per-slot produced/skipped journal and bounded reorg recovery.
+- Next exact task: XRPL validated ledger/account_tx extraction assessment and payment normalization. Only real Payment/issued-currency delivered transfers with exact validated ledger, tx hash, delivered amount/currency/issuer and account-side evidence; no balance-delta synthetic events.

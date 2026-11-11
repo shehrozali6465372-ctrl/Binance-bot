@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from .onchain_providers import BitcoinAddressTransaction, EvmTokenTransferLog
+from .onchain_providers import BitcoinAddressTransaction, EvmTokenTransferLog, SolanaAddressTransaction, ProviderTransportError
 
 
 @dataclass(frozen=True)
@@ -92,6 +92,12 @@ class OnChainIngestionStore:
             updated_at TEXT NOT NULL,
             PRIMARY KEY(network_id, provider, scope, block_number)
         );
+        CREATE TABLE IF NOT EXISTS layer1_onchain_solana_slot_journal (
+            network_id TEXT NOT NULL, provider TEXT NOT NULL, scope TEXT NOT NULL,
+            slot INTEGER NOT NULL, produced INTEGER NOT NULL,
+            block_hash TEXT, block_time TEXT, updated_at TEXT NOT NULL,
+            PRIMARY KEY(network_id, provider, scope, slot)
+        );
         """)
 
     @staticmethod
@@ -153,7 +159,8 @@ class OnChainIngestionStore:
     def commit_page(self, cursor_key: str, next_cursor: Any,
                     events: Iterable[NormalizedTransferEvent], *,
                     allow_recanonicalized: bool = False,
-                    canonical_blocks: Iterable[dict] = ()) -> dict:
+                    canonical_blocks: Iterable[dict] = (),
+                    canonical_slots: Iterable[dict] = ()) -> dict:
         if not isinstance(cursor_key, str) or not cursor_key.strip():
             raise ValueError("cursor_key must be a non-empty string")
         if not isinstance(allow_recanonicalized, bool):
@@ -161,6 +168,7 @@ class OnChainIngestionStore:
         cursor_json = self._canonical(next_cursor)
         batch = tuple(events)
         blocks = tuple(canonical_blocks)
+        slots = tuple(canonical_slots)
         for event in batch:
             self._validate_event(event)
         for block in blocks:
@@ -179,6 +187,26 @@ class OnChainIngestionStore:
                 raise ValueError("canonical block time must be timezone-aware ISO-8601") from None
             if parsed.tzinfo is None or parsed.utcoffset() is None:
                 raise ValueError("canonical block time must be timezone-aware ISO-8601")
+        for slot in slots:
+            if (not isinstance(slot, dict)
+                    or slot.get("network_id") != "solana-mainnet"
+                    or not isinstance(slot.get("provider"), str) or not slot["provider"].strip()
+                    or not isinstance(slot.get("scope"), str) or not slot["scope"].strip()
+                    or isinstance(slot.get("slot"), bool)
+                    or not isinstance(slot.get("slot"), int) or slot["slot"] < 0
+                    or not isinstance(slot.get("produced"), bool)):
+                raise ValueError("canonical Solana slot journal record is malformed")
+            if slot["produced"]:
+                if not isinstance(slot.get("block_hash"), str) or not slot["block_hash"].strip() or not isinstance(slot.get("block_time"), str):
+                    raise ValueError("produced Solana slots require canonical block hash and time")
+                try:
+                    parsed = datetime.fromisoformat(slot["block_time"].replace("Z", "+00:00"))
+                except ValueError:
+                    raise ValueError("Solana slot block time must be timezone-aware ISO-8601") from None
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise ValueError("Solana slot block time must be timezone-aware ISO-8601")
+            elif slot.get("block_hash") is not None or slot.get("block_time") is not None:
+                raise ValueError("skipped Solana slots must not carry fabricated block hash or time")
         now = datetime.now(timezone.utc).isoformat()
         inserted = duplicates = tombstoned = 0
         self.conn.execute("BEGIN IMMEDIATE")
@@ -254,6 +282,17 @@ class OnChainIngestionStore:
                     (block["network_id"], block["provider"], block["scope"],
                      block["block_number"], block["block_hash"], block["block_time"], now),
                 )
+            for slot in slots:
+                self.conn.execute(
+                    """INSERT INTO layer1_onchain_solana_slot_journal
+                       (network_id, provider, scope, slot, produced, block_hash, block_time, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(network_id, provider, scope, slot) DO UPDATE SET
+                         produced=excluded.produced, block_hash=excluded.block_hash,
+                         block_time=excluded.block_time, updated_at=excluded.updated_at""",
+                    (slot["network_id"], slot["provider"], slot["scope"], slot["slot"],
+                     int(slot["produced"]), slot.get("block_hash"), slot.get("block_time"), now),
+                )
             self.conn.execute(
                 """INSERT INTO layer1_onchain_ingestion_checkpoints(cursor_key, cursor_json, updated_at)
                    VALUES (?, ?, ?)
@@ -307,6 +346,25 @@ class OnChainIngestionStore:
             (network_id, provider, scope, block_number),
         ).fetchone()
         return row[0] if row else None
+
+    def get_solana_slot_journal(self, network_id: str, provider: str, scope: str,
+                                start_slot: int, end_slot: int) -> dict[int, dict]:
+        if (not isinstance(network_id, str) or not isinstance(provider, str)
+                or not isinstance(scope, str) or isinstance(start_slot, bool)
+                or not isinstance(start_slot, int) or isinstance(end_slot, bool)
+                or not isinstance(end_slot, int) or start_slot < 0 or end_slot < start_slot):
+            raise ValueError("Solana slot journal query bounds are invalid")
+        rows = self.conn.execute(
+            """SELECT slot, produced, block_hash, block_time
+               FROM layer1_onchain_solana_slot_journal
+               WHERE network_id=? AND provider=? AND scope=? AND slot BETWEEN ? AND ?
+               ORDER BY slot""",
+            (network_id, provider, scope, start_slot, end_slot),
+        ).fetchall()
+        return {
+            row[0]: {"produced": bool(row[1]), "block_hash": row[2], "block_time": row[3]}
+            for row in rows
+        }
 
     def reconcile_block(self, network_id: str, block_number: int,
                         canonical_block_hash: str, provider: Optional[str] = None,
@@ -398,6 +456,257 @@ def normalize_evm_transfer_log(event: EvmTokenTransferLog, *, asset_id: str,
                           else "CANONICAL"),
         provenance="eth_getLogs:ERC20.Transfer",
     )
+
+
+
+def _solana_base58_decode(value: str) -> bytes:
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    if not isinstance(value, str) or not value:
+        raise ProviderTransportError("INVALID_SOLANA_INSTRUCTION", "Solana base58 value is empty")
+    number = 0
+    for char in value:
+        try:
+            digit = alphabet.index(char)
+        except ValueError:
+            raise ProviderTransportError("INVALID_SOLANA_INSTRUCTION", "Solana instruction contains invalid base58") from None
+        number = number * 58 + digit
+    body = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+    leading = len(value) - len(value.lstrip("1"))
+    return b"\x00" * leading + body
+
+
+def _solana_account_keys(message: dict, meta: dict) -> list[str]:
+    keys = message.get("accountKeys")
+    if not isinstance(keys, list) or not keys:
+        raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana transaction static account keys are missing")
+    static = []
+    for item in keys:
+        key = item.get("pubkey") if isinstance(item, dict) else item
+        if not isinstance(key, str) or not key.strip() or len(_solana_base58_decode(key)) != 32:
+            raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana transaction contains an invalid static account key")
+        static.append(key)
+    lookups = message.get("addressTableLookups", [])
+    if not isinstance(lookups, list):
+        raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana address table lookup metadata is malformed")
+    expected_writable = expected_readonly = 0
+    for lookup in lookups:
+        if not isinstance(lookup, dict):
+            raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana address table lookup entry is malformed")
+        writable_indexes = lookup.get("writableIndexes")
+        readonly_indexes = lookup.get("readonlyIndexes")
+        if (not isinstance(writable_indexes, list) or not isinstance(readonly_indexes, list)
+                or any(isinstance(index, bool) or not isinstance(index, int) or index < 0
+                       for index in writable_indexes + readonly_indexes)):
+            raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana address table lookup indexes are malformed")
+        expected_writable += len(writable_indexes)
+        expected_readonly += len(readonly_indexes)
+    loaded = meta.get("loadedAddresses")
+    if loaded is None:
+        if lookups:
+            raise ProviderTransportError("SOLANA_LOADED_ADDRESSES_MISSING", "versioned Solana transaction is missing resolved lookup-table addresses")
+        loaded = {"writable": [], "readonly": []}
+    if not isinstance(loaded, dict):
+        raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana loaded address metadata is malformed")
+    writable, readonly = loaded.get("writable", []), loaded.get("readonly", [])
+    if (not isinstance(writable, list) or not isinstance(readonly, list)
+            or any(not isinstance(key, str) or not key.strip() or len(_solana_base58_decode(key)) != 32
+                   for key in writable + readonly)
+            or len(writable) != expected_writable or len(readonly) != expected_readonly):
+        raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana loaded writable/readonly addresses are malformed or incomplete")
+    return static + writable + readonly
+
+
+def _solana_balance_evidence(meta: dict, account_index: int, mint: str) -> tuple[set[str], set[int], set[str]]:
+    owners, decimal_values, mints = set(), set(), set()
+    for field in ("preTokenBalances", "postTokenBalances"):
+        balances = meta.get(field, [])
+        if balances is None:
+            continue
+        if not isinstance(balances, list):
+            raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", f"Solana {field} metadata is malformed")
+        for balance in balances:
+            if not isinstance(balance, dict):
+                raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", f"Solana {field} entry is malformed")
+            record_index = balance.get("accountIndex")
+            if isinstance(record_index, bool) or not isinstance(record_index, int):
+                raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana token balance accountIndex is invalid")
+            if record_index != account_index:
+                continue
+            record_mint = balance.get("mint")
+            if not isinstance(record_mint, str) or not record_mint:
+                raise ProviderTransportError("SOLANA_TOKEN_MINT_EVIDENCE_MISSING", "Solana token balance lacks its mint")
+            mints.add(record_mint)
+            if record_mint != mint:
+                continue
+            owner = balance.get("owner")
+            if owner is not None:
+                if not isinstance(owner, str) or not owner or len(_solana_base58_decode(owner)) != 32:
+                    raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana token balance owner address is invalid")
+                owners.add(owner)
+            ui = balance.get("uiTokenAmount")
+            if not isinstance(ui, dict):
+                raise ProviderTransportError("SOLANA_TOKEN_DECIMALS_MISSING", "Solana token balance lacks uiTokenAmount decimals")
+            decimals = ui.get("decimals")
+            if isinstance(decimals, bool) or not isinstance(decimals, int) or not 0 <= decimals <= 36:
+                raise ProviderTransportError("SOLANA_TOKEN_DECIMALS_MISSING", "Solana token balance decimals are invalid")
+            decimal_values.add(decimals)
+    if len(mints) > 1:
+        raise ProviderTransportError("SOLANA_TOKEN_MINT_CONFLICT", "one token account index has conflicting mint evidence")
+    if len(owners) > 1:
+        raise ProviderTransportError("SOLANA_TOKEN_OWNER_CONFLICT", "one token account index has conflicting owner evidence")
+    if len(decimal_values) > 1:
+        raise ProviderTransportError("SOLANA_TOKEN_DECIMALS_CONFLICT", "one token account has conflicting decimal evidence")
+    return owners, decimal_values, mints
+
+
+def normalize_solana_token_transfer_instructions(
+    history: SolanaAddressTransaction, *, asset_id: str, mapping_id: str,
+    mint: str, token_standard: str, decimals: int, monitored_address: str,
+    canonical_block_hash: str, canonical_block_time: str, observed_at: str,
+) -> tuple[NormalizedTransferEvent, ...]:
+    """Extract only standard SPL Transfer / TransferChecked instructions.
+
+    Static and lookup-table account indexes are resolved in Solana's canonical
+    order. Inner CPI identities use their actual outer/inner trace coordinates.
+    Balance metadata proves mint and monitored-owner scope; it never supplies
+    synthetic transfer amounts.
+    """
+    if not isinstance(history, SolanaAddressTransaction):
+        raise ValueError("Solana address history record is required")
+    if any(not isinstance(value, str) or not value.strip() for value in (
+        asset_id, mapping_id, mint, monitored_address, canonical_block_hash,
+        canonical_block_time, observed_at,
+    )):
+        raise ValueError("Solana mapping, scope, canonical block and timestamp evidence are required")
+    if token_standard != "SPL_TOKEN":
+        raise ValueError("only the base SPL Token Program is supported; Token-2022 requires extension-aware decoding")
+    if any(len(_solana_base58_decode(value)) != 32 for value in (mint, monitored_address, canonical_block_hash)):
+        raise ValueError("Solana mint, monitored address and canonical blockhash must decode to 32 bytes")
+    if isinstance(decimals, bool) or not isinstance(decimals, int) or not 0 <= decimals <= 36:
+        raise ValueError("Solana token mapping decimals are invalid")
+    program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    try:
+        canonical_time = datetime.fromisoformat(canonical_block_time.replace("Z", "+00:00"))
+        observed_time = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("Solana timestamps must be valid timezone-aware ISO-8601") from None
+    if (canonical_time.tzinfo is None or canonical_time.utcoffset() is None
+            or observed_time.tzinfo is None or observed_time.utcoffset() is None):
+        raise ValueError("Solana timestamps must be timezone-aware")
+    if (isinstance(history.slot, bool) or not isinstance(history.slot, int) or history.slot <= 0
+            or not isinstance(history.signature, str)
+            or not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", history.signature)
+            or len(_solana_base58_decode(history.signature)) != 64):
+        raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana transaction signature or slot is invalid")
+    raw = history.raw
+    if not isinstance(raw, dict) or raw.get("slot") != history.slot:
+        raise ProviderTransportError("SOLANA_SLOT_MISMATCH", "Solana full transaction does not match address-history slot")
+    if raw.get("signature") not in (None, history.signature):
+        raise ProviderTransportError("SOLANA_SIGNATURE_MISMATCH", "Solana full transaction signature does not match address history")
+    if history.block_time is not None:
+        if isinstance(history.block_time, bool) or not isinstance(history.block_time, int) or history.block_time <= 0:
+            raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana address-history block time is invalid")
+        if int(canonical_time.timestamp()) != history.block_time:
+            raise ProviderTransportError("SOLANA_BLOCK_TIME_MISMATCH", "Solana address-history block time differs from canonical block time")
+    transaction, meta = raw.get("transaction"), raw.get("meta")
+    if not isinstance(transaction, dict) or not isinstance(meta, dict):
+        raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana full transaction and metadata are required")
+    if meta.get("err") is not None:
+        raise ProviderTransportError("SOLANA_TRANSACTION_FAILED", "failed Solana transactions are not transfer evidence")
+    signatures = transaction.get("signatures")
+    if not isinstance(signatures, list) or not signatures or signatures[0] != history.signature:
+        raise ProviderTransportError("SOLANA_SIGNATURE_MISMATCH", "transaction message must carry the exact address-history signature")
+    message = transaction.get("message")
+    if not isinstance(message, dict):
+        raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana compiled message is missing")
+    keys = _solana_account_keys(message, meta)
+    outer, inner_groups = message.get("instructions"), meta.get("innerInstructions", [])
+    if not isinstance(outer, list) or not isinstance(inner_groups, list):
+        raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana outer/inner instruction arrays are malformed")
+    groups = {}
+    for group in inner_groups:
+        if not isinstance(group, dict) or isinstance(group.get("index"), bool) or not isinstance(group.get("index"), int):
+            raise ProviderTransportError("INVALID_SOLANA_INSTRUCTION", "Solana inner instruction trace group is malformed")
+        parent = group["index"]
+        if not 0 <= parent < len(outer) or parent in groups or not isinstance(group.get("instructions"), list):
+            raise ProviderTransportError("INVALID_SOLANA_INSTRUCTION", "Solana inner instruction parent index is invalid or duplicated")
+        groups[parent] = group["instructions"]
+
+    events = []
+    for outer_index, outer_instruction in enumerate(outer):
+        traces = [("outer", outer_index, None, outer_instruction)]
+        traces.extend(("inner", outer_index, inner_index, instruction)
+                      for inner_index, instruction in enumerate(groups.get(outer_index, [])))
+        for kind, parent_index, inner_index, instruction in traces:
+            if not isinstance(instruction, dict):
+                raise ProviderTransportError("INVALID_SOLANA_INSTRUCTION", "Solana compiled instruction is malformed")
+            program_index, accounts, data = (
+                instruction.get("programIdIndex"), instruction.get("accounts"), instruction.get("data")
+            )
+            if (isinstance(program_index, bool) or not isinstance(program_index, int)
+                    or not 0 <= program_index < len(keys)
+                    or not isinstance(accounts, list)
+                    or any(isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(keys)
+                           for index in accounts)
+                    or not isinstance(data, str)):
+                raise ProviderTransportError("INVALID_SOLANA_INSTRUCTION", "Solana instruction account/program indexes or data are malformed")
+            if keys[program_index] != program_id:
+                continue
+            decoded = _solana_base58_decode(data)
+            if not decoded:
+                raise ProviderTransportError("INVALID_SOLANA_INSTRUCTION", "SPL Token instruction data is empty")
+            opcode = decoded[0]
+            if opcode not in (3, 12):
+                continue
+            expected_len, required_accounts = (9, 3) if opcode == 3 else (10, 4)
+            if len(decoded) != expected_len or len(accounts) < required_accounts:
+                raise ProviderTransportError("INVALID_SOLANA_TRANSFER", "SPL Token Transfer instruction data/accounts are malformed")
+            amount = int.from_bytes(decoded[1:9], "little")
+            if opcode == 12 and decoded[9] != decimals:
+                raise ProviderTransportError("SOLANA_TOKEN_DECIMALS_MISMATCH", "TransferChecked decimals differ from verified asset mapping")
+            source_index = accounts[0]
+            if opcode == 12:
+                mint_index, destination_index = accounts[1], accounts[2]
+                if keys[mint_index] != mint:
+                    continue
+            else:
+                destination_index = accounts[1]
+            source_account, destination_account = keys[source_index], keys[destination_index]
+            if source_account == destination_account:
+                raise ProviderTransportError("INVALID_SOLANA_TRANSFER", "SPL Token transfer source and destination accounts are identical")
+            source_owners, source_decimals, source_mints = _solana_balance_evidence(meta, source_index, mint)
+            destination_owners, destination_decimals, destination_mints = _solana_balance_evidence(meta, destination_index, mint)
+            if not source_mints or not destination_mints:
+                raise ProviderTransportError("SOLANA_TOKEN_MINT_EVIDENCE_MISSING", "both token accounts require balance metadata proving their mint")
+            if source_mints != destination_mints:
+                raise ProviderTransportError("SOLANA_TOKEN_MINT_CONFLICT", "source and destination token-account mints disagree")
+            if opcode == 12 and source_mints != {mint}:
+                raise ProviderTransportError("SOLANA_TOKEN_MINT_MISMATCH", "TransferChecked balance metadata disagrees with its encoded mapped mint")
+            if opcode == 3 and source_mints != {mint}:
+                continue
+            if (source_decimals and source_decimals != {decimals}) or (destination_decimals and destination_decimals != {decimals}):
+                raise ProviderTransportError("SOLANA_TOKEN_DECIMALS_MISMATCH", "token account balance decimals differ from verified asset mapping")
+            if monitored_address not in {source_account, destination_account} | source_owners | destination_owners:
+                continue
+            path = f"outer:{parent_index}" if kind == "outer" else f"inner:{parent_index}:{inner_index}"
+            provenance = (
+                f"alchemy:solana:{token_standard}:instruction={path};mint={mint};"
+                f"source_owner={','.join(sorted(source_owners))};"
+                f"destination_owner={','.join(sorted(destination_owners))};program={program_id}"
+            )
+            events.append(NormalizedTransferEvent(
+                event_id=f"{history.signature}:{path}", network_id="solana-mainnet",
+                provider="alchemy", scope=f"address:{monitored_address}:mapping:{mapping_id}",
+                asset_id=asset_id, mapping_id=mapping_id,
+                transaction_hash=history.signature, block_number=history.slot,
+                block_hash=canonical_block_hash, event_index=None,
+                from_address=source_account, to_address=destination_account,
+                amount_raw=str(amount), decimals=decimals,
+                block_time=canonical_time.astimezone(timezone.utc).isoformat(),
+                observed_at=observed_time.astimezone(timezone.utc).isoformat(),
+                canonical_status="CANONICAL", provenance=provenance,
+            ))
+    return tuple(events)
 
 
 def normalize_bitcoin_transaction_outputs(

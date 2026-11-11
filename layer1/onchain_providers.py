@@ -185,6 +185,7 @@ class SolanaAddressTransaction:
     slot: int
     block_time: Optional[int]
     raw: dict
+    transaction_index: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -253,7 +254,7 @@ class AlchemyReadOnlyAdapter:
     _READ_METHODS = {
         "bitcoin-mainnet": frozenset({"getblockcount", "getblockhash", "getblockheader"}),
         "ethereum-mainnet": frozenset({"eth_chainId", "eth_getBlockByNumber", "alchemy_getAssetTransfers", "eth_getLogs"}),
-        "solana-mainnet": frozenset({"getGenesisHash", "getSlot", "getTransactionsForAddress"}),
+        "solana-mainnet": frozenset({"getGenesisHash", "getSlot", "getBlock", "getBlocks", "getTransactionsForAddress"}),
         "bnb-smart-chain-mainnet": frozenset({"eth_chainId", "eth_getFinalizedHeader", "eth_getLogs", "eth_getBlockByNumber"}),
     }
 
@@ -675,23 +676,35 @@ class AlchemyReadOnlyAdapter:
 
     def fetch_solana_address_transactions(self, address: str,
                                           pagination_token: Optional[str] = None,
-                                          limit: int = 100) -> ProviderDataPage:
+                                          limit: int = 100,
+                                          slot_start: Optional[int] = None,
+                                          slot_end: Optional[int] = None) -> ProviderDataPage:
         if not _is_base58_pubkey(address):
             raise ValueError("Solana account must be a valid base58 public key")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ValueError("Solana full transaction page limit must be between 1 and 100")
         if pagination_token is not None and (not isinstance(pagination_token, str) or not pagination_token.strip()):
             raise ValueError("Solana pagination_token must be a non-empty opaque string")
+        if (slot_start is None) != (slot_end is None):
+            raise ValueError("Solana fixed slot queries require both slot_start and slot_end")
+        if slot_start is not None and (
+            isinstance(slot_start, bool) or not isinstance(slot_start, int) or slot_start < 0
+            or isinstance(slot_end, bool) or not isinstance(slot_end, int) or slot_end < slot_start
+        ):
+            raise ValueError("Solana slot range must be a fixed non-negative inclusive range")
         genesis = self._call("solana-mainnet", "getGenesisHash")
         if genesis != SOLANA_MAINNET_GENESIS_HASH:
             raise ProviderTransportError("NETWORK_ID_MISMATCH", "Alchemy endpoint returned the wrong Solana genesis hash")
         config = {
             "transactionDetails": "full", "sortOrder": "desc", "limit": limit,
-            "commitment": "finalized",
+            "commitment": "finalized", "encoding": "json",
+            "maxSupportedTransactionVersion": 1,
             "filters": {"status": "succeeded", "tokenAccounts": "balanceChanged"},
         }
         if pagination_token is not None:
             config["paginationToken"] = pagination_token
+        if slot_start is not None:
+            config["filters"]["slot"] = {"gte": slot_start, "lte": slot_end}
         result = self._call("solana-mainnet", "getTransactionsForAddress", [address, config])
         if not isinstance(result, dict):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Alchemy Solana transaction page has an invalid shape")
@@ -705,13 +718,20 @@ class AlchemyReadOnlyAdapter:
                 signatures = item["transaction"].get("signatures")
                 signature = signatures[0] if isinstance(signatures, list) and signatures else None
             slot, block_time = item.get("slot"), item.get("blockTime")
+            transaction_index = item.get("transactionIndex")
             if (not _is_base58_signature(signature)
                     or isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0
+                    or (transaction_index is not None and (
+                        isinstance(transaction_index, bool) or not isinstance(transaction_index, int)
+                        or transaction_index < 0))
+                    or (slot_start is not None and not slot_start <= slot <= slot_end)
+                    or (slot_start is not None and transaction_index is None)
                     or not isinstance(item.get("transaction"), dict)
                     or not isinstance(item.get("meta"), dict)
                     or (block_time is not None and (isinstance(block_time, bool) or not isinstance(block_time, int) or block_time <= 0))):
                 raise ProviderTransportError("INVALID_PROVIDER_DATA", "Alchemy Solana transaction lacks a valid signature, slot, transaction metadata or block time")
-            records.append(SolanaAddressTransaction(signature, slot, block_time, item))
+            records.append(SolanaAddressTransaction(
+                signature, slot, block_time, item, transaction_index))
         cursor = result.get("paginationToken")
         if cursor == "":
             cursor = None
@@ -719,6 +739,54 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Alchemy Solana pagination token is invalid")
         return ProviderDataPage("alchemy", "solana-mainnet", address, tuple(records), cursor,
                                 finality_reference="commitment=finalized")
+
+    def fetch_solana_finalized_slot(self) -> int:
+        """Return the Solana mainnet finalized slot after genesis verification."""
+        genesis = self._call("solana-mainnet", "getGenesisHash")
+        if genesis != SOLANA_MAINNET_GENESIS_HASH:
+            raise ProviderTransportError("NETWORK_ID_MISMATCH", "Alchemy endpoint returned the wrong Solana genesis hash")
+        slot = self._call("solana-mainnet", "getSlot", [{"commitment": "finalized"}])
+        if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana finalized slot is invalid")
+        return slot
+
+    def fetch_solana_produced_slots(self, start_slot: int, end_slot: int) -> tuple[int, ...]:
+        """Return only produced block slots; skipped slots are not fake blocks."""
+        if (isinstance(start_slot, bool) or not isinstance(start_slot, int) or start_slot < 0
+                or isinstance(end_slot, bool) or not isinstance(end_slot, int) or end_slot < start_slot):
+            raise ValueError("Solana produced-slot range must be fixed and non-negative")
+        slots = self._call("solana-mainnet", "getBlocks", [
+            start_slot, end_slot, {"commitment": "finalized"},
+        ])
+        if (not isinstance(slots, list)
+                or any(isinstance(slot, bool) or not isinstance(slot, int)
+                       or not start_slot <= slot <= end_slot for slot in slots)
+                or slots != sorted(set(slots))):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana getBlocks returned malformed or unordered produced slots")
+        return tuple(slots)
+
+    def fetch_solana_block_header(self, slot: int) -> Optional[dict]:
+        """Fetch finalized block identity/time; None means the slot has no block."""
+        if isinstance(slot, bool) or not isinstance(slot, int) or slot < 0:
+            raise ValueError("Solana slot must be a non-negative integer")
+        block = self._call("solana-mainnet", "getBlock", [
+            slot, {"commitment": "finalized", "transactionDetails": "none",
+                   "rewards": False, "maxSupportedTransactionVersion": 1},
+        ])
+        if block is None:
+            return None
+        if (not isinstance(block, dict)
+                or not isinstance(block.get("blockhash"), str)
+                or not _is_base58_pubkey(block.get("blockhash"))
+                or isinstance(block.get("blockTime"), bool)
+                or not isinstance(block.get("blockTime"), int) or block["blockTime"] <= 0):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana finalized block header is malformed")
+        return {
+            "number": slot, "hash": block["blockhash"],
+            "timestamp": block["blockTime"],
+            "parent_slot": block.get("parentSlot"),
+            "finality_reference": "commitment=finalized",
+        }
 
     def probe(self, network_id: str) -> ProviderHealthResult:
         observed_at = datetime.now(timezone.utc).isoformat()

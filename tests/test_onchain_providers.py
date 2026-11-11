@@ -435,20 +435,69 @@ class OnChainProviderTests(unittest.TestCase):
         address = "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY"
         adapter, calls = self.adapter([
             SOLANA_MAINNET_GENESIS_HASH,
-            {"transactions": [{"signature": "A" * 88, "slot": 300,
-                                "transaction": {"signatures": ["A" * 88]}, "meta": {"err": None}}],
+            {"transactions": [{"signature": "3jUKrQp1UGq5ih6FTDUUt2kkqUfoG2o4kY5T1DoVHK2tXXDLdxJSXzuJGY4JPoRivgbi45U2bc7LZfMa6C4R3szX",
+                                "slot": 300, "transactionIndex": 17,
+                                "transaction": {"signatures": ["3jUKrQp1UGq5ih6FTDUUt2kkqUfoG2o4kY5T1DoVHK2tXXDLdxJSXzuJGY4JPoRivgbi45U2bc7LZfMa6C4R3szX"]},
+                                "meta": {"err": None}}],
              "paginationToken": "next"},
         ])
-        page = adapter.fetch_solana_address_transactions(address, pagination_token="prev", limit=50)
+        page = adapter.fetch_solana_address_transactions(
+            address, pagination_token="prev", limit=50, slot_start=200, slot_end=300)
         self.assertEqual(page.next_cursor, "next")
         self.assertEqual(page.finality_reference, "commitment=finalized")
         self.assertIsInstance(page.records[0], SolanaAddressTransaction)
-        self.assertEqual(page.records[0].signature, "A" * 88)
+        self.assertEqual(page.records[0].transaction_index, 17)
         self.assertEqual(calls[1][0], "getTransactionsForAddress")
         self.assertEqual(calls[1][1][1]["transactionDetails"], "full")
         self.assertEqual(calls[1][1][1]["commitment"], "finalized")
-        self.assertEqual(calls[1][1][1]["filters"], {"status": "succeeded", "tokenAccounts": "balanceChanged"})
+        self.assertEqual(calls[1][1][1]["encoding"], "json")
+        self.assertEqual(calls[1][1][1]["maxSupportedTransactionVersion"], 1)
+        self.assertEqual(calls[1][1][1]["filters"], {
+            "status": "succeeded", "tokenAccounts": "balanceChanged",
+            "slot": {"gte": 200, "lte": 300},
+        })
         self.assertEqual(calls[1][1][1]["paginationToken"], "prev")
+        self.assertEqual(calls[1][1][1]["filters"]["slot"], {"gte": 200, "lte": 300})
+
+    def test_solana_address_history_rejects_records_outside_fixed_slot_range(self):
+        address = "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY"
+        signature = "3jUKrQp1UGq5ih6FTDUUt2kkqUfoG2o4kY5T1DoVHK2tXXDLdxJSXzuJGY4JPoRivgbi45U2bc7LZfMa6C4R3szX"
+        adapter, _ = self.adapter([
+            SOLANA_MAINNET_GENESIS_HASH,
+            {"transactions": [{
+                "signature": signature, "slot": 301, "transactionIndex": 3,
+                "transaction": {"signatures": [signature]}, "meta": {"err": None},
+            }], "paginationToken": None},
+        ])
+        with self.assertRaises(ProviderTransportError):
+            adapter.fetch_solana_address_transactions(address, slot_start=200, slot_end=300)
+
+    def test_solana_slot_range_requires_both_fixed_bounds(self):
+        address = "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY"
+        adapter, _ = self.adapter([SOLANA_MAINNET_GENESIS_HASH])
+        with self.assertRaises(ValueError):
+            adapter.fetch_solana_address_transactions(address, slot_start=100)
+
+    def test_solana_finalized_slot_and_canonical_block_header(self):
+        blockhash = "11111111111111111111111111111111"
+        adapter, calls = self.adapter([
+            SOLANA_MAINNET_GENESIS_HASH, 300,
+            {"blockhash": blockhash, "blockTime": 1794398400, "parentSlot": 299},
+        ])
+        self.assertEqual(adapter.fetch_solana_finalized_slot(), 300)
+        header = adapter.fetch_solana_block_header(300)
+        self.assertEqual(header["number"], 300)
+        self.assertEqual(header["hash"], blockhash)
+        self.assertEqual(header["timestamp"], 1794398400)
+        self.assertEqual(header["finality_reference"], "commitment=finalized")
+        self.assertEqual(calls[2][1][1]["maxSupportedTransactionVersion"], 1)
+        self.assertEqual([call[0] for call in calls], ["getGenesisHash", "getSlot", "getBlock"])
+
+    def test_solana_produced_slots_and_skipped_slot_are_explicit(self):
+        adapter, calls = self.adapter([[100, 102, 105], None])
+        self.assertEqual(adapter.fetch_solana_produced_slots(100, 105), (100, 102, 105))
+        self.assertIsNone(adapter.fetch_solana_block_header(101))
+        self.assertEqual(calls[0][1], [100, 105, {"commitment": "finalized"}])
 
     def test_bitcoin_transaction_details_fetches_vin_vout_by_exact_txid(self):
         txid = "a" * 64

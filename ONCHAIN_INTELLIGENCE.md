@@ -242,3 +242,61 @@ Official references:
 - Solana transaction introspection and account lookup resolution: https://solana.com/docs/core/transactions/transaction-introspection
 - Solana RPC JSON structures (inner instructions, token balances, loaded addresses): https://solana.com/docs/rpc/json-structures
 - SPL token transfer instructions: https://solana.com/docs/tokens/basics/transfer-tokens
+
+## Solana SPL token address-history ingestion implemented — 2026-11-11
+
+### Provider contract and pagination
+- Alchemy `getTransactionsForAddress` now accepts paired inclusive fixed slot bounds and passes `filters.slot = {gte, lte}`, with `commitment=finalized`, `transactionDetails=full`, `sortOrder=desc`, `encoding=json`, `maxSupportedTransactionVersion=1`, and `tokenAccounts=balanceChanged`. Explicit JSON encoding retains compiled instruction bytes and resolved loaded-address metadata; version 1 opt-in is required to avoid rejecting v1 transactions.
+- The adapter requires returned transaction slots to remain inside the requested range and requires the provider's transactionIndex for bounded slot queries. The returned opaque paginationToken is persisted with the exact address/mapping/range query.
+- The official Alchemy endpoint page documents slot filters, transactionIndex, full transaction pages and pagination. QuickNode's current method reference documents inclusive slot gte/lte semantics and cursor positioning; the worker does not parse or synthesize the opaque cursor.
+- Finalized slot is independently obtained through genesis-checked `getSlot(commitment=finalized)`. `getBlocks` identifies produced slots; `getBlock(commitment=finalized, transactionDetails=none)` verifies blockhash and blockTime for each produced slot.
+
+### Instruction-level normalizer
+- Added `normalize_solana_token_transfer_instructions()` for the base SPL Token Program only: standard `Transfer` (opcode 3) and `TransferChecked` (opcode 12).
+- Resolves instruction program/account indexes using static message keys followed by metadata loaded writable and readonly addresses. Versioned transactions with missing/incomplete lookup-table address resolution fail closed.
+- Walks each outer instruction followed by the corresponding inner CPI instructions. Stable event identity is `signature:outer:<index>` or `signature:inner:<outerIndex>:<innerIndex>`; no synthetic instruction indexes are generated.
+- `TransferChecked` mint and decimals are checked against the verified mapping. Unchecked `Transfer` requires source and destination pre/post token-balance metadata to prove the same mapped mint and decimals.
+- Monitored wallet ownership is proven using token-balance owner metadata. Event `from_address` and `to_address` are the actual source/destination token-account addresses; owner addresses are preserved in provenance. Aggregate balance deltas are never converted into individual transfer amounts.
+- Amounts remain exact raw u64 base units. Failed transactions, missing metadata, inconsistent mint/owner/decimal evidence, invalid account indexes and mismatched signatures/slots fail closed.
+- A single transaction with multiple token transfers produces separate instruction-trace event identities.
+
+### Bounded worker and durability
+- Added `layer1/onchain_solana_worker.py`. It requires explicit monitored address seeds and explicit starting slot per verified token mapping; it is not a network-wide Solana scan.
+- Scans caller-bounded fixed slot windows and follows the opaque page cursor. It verifies descending (slot, transactionIndex) order, rejects repeated/looping cursors, and only advances after the event page, full per-slot canonical journal and checkpoint commit atomically.
+- New SQLite `layer1_onchain_solana_slot_journal` records every slot in the scanned range. Produced slots store canonical blockhash/time; skipped slots store `produced=false` with null hash/time—no fabricated block is created.
+- Bounded reorg reconciliation compares produced-slot membership and blockhashes, including empty/skipped slots. It tombstones events on removed/changed blocks, rewinds to the earliest changed slot, and replays the fixed range. Active partially paginated ranges are rechecked before resuming.
+- Provider timeout/network/rate-limit/5xx failures use bounded retries. Non-finalized pages, wrong address scope, out-of-range records, malformed headers and invalid cursor progression do not advance the page checkpoint.
+
+### Deliberate exclusions / production limits
+- Native SOL System Program transfer extraction is not implemented; lamport balance deltas are not used as a substitute.
+- Token-2022 is deliberately excluded from this first normalizer/worker. Token-2022 has extension-specific instructions including transfer-fee variants and transfer hooks; the worker skips Token-2022 mappings rather than silently missing or misreporting those events. Add extension-aware parsing before enabling those mappings.
+- The official MIT `@solana/transaction-introspection` package v8.6.0 was reviewed; it supports legacy/v0/v1, lookup tables and inner CPI. No Node runtime or package was added to this Python-only service. The current Python parser is intentionally narrow and fixture-tested for the exact SPL instruction layouts it accepts. It does not claim to be a general Solana transaction decoder.
+- Alchemy documents `getTransactionsForAddress` at 100 CUs/full page, `getBlock` at 40 CUs per produced slot and `getBlocks` at 10 CUs per range call. A worst-case 100-slot range with 100 produced blocks is approximately 4,010 CUs per address before full transaction pages; the bounded reorg lookback adds further header reads. Keep ranges and seed count conservative. This is not a low-cost global whale-indexing strategy.
+- A produced slot with unavailable/null blockTime currently fails closed. Wallet-owner matching also requires provider token-balance owner metadata; missing owner evidence can mean the event is omitted for owner-address scope.
+- Reorg recovery is limited to the configured lookback and active range. Deep finalized-chain reorganization requires operator-approved wider rescan.
+- No live Alchemy request, API key, paid quota or production deployment was used. Local deterministic tests do not establish live endpoint behavior, provider billing or archival retention.
+
+Verification for this implementation:
+- New Solana normalizer, worker and provider tests are included in the repository suite. Full-suite result is recorded in the final progress entry below.
+- No real Binance Square post or earning workflow was executed.
+
+Official references:
+- Alchemy `getTransactionsForAddress`: https://www.alchemy.com/docs/chains/solana/solana-api-endpoints/get-transactions-for-address
+- Alchemy `getTransaction` v1 support and encoding options: https://www.alchemy.com/docs/chains/solana/solana-api-endpoints/get-transaction
+- Solana maxSupportedTransactionVersion rules: https://solana.com/docs/rpc/http/gettransaction
+- Alchemy `getBlocks`: https://www.alchemy.com/docs/chains/solana/solana-api-endpoints/get-blocks
+- Alchemy `getBlock`: https://www.alchemy.com/docs/chains/solana/solana-api-endpoints/get-block
+- Solana transaction introspection and account lookup resolution: https://solana.com/docs/core/transactions/transaction-introspection
+- Solana RPC JSON structures: https://solana.com/docs/rpc/json-structures
+- SPL token transfers: https://solana.com/docs/tokens/basics/transfer-tokens
+- Token-2022 transfer fee extension: https://solana.com/docs/tokens/extensions/transfer-fees
+
+## Solana worker final verification — 2026-11-11
+
+- Full repository suite: **260 passed, 0 failed**.
+- Focused Solana normalizer + worker + provider suite: **65 passed, 0 failed**.
+- `compileall`: passed.
+- `git diff --check`: passed.
+- Tests use deterministic local fixtures only; no live Alchemy request or credentials used.
+- New code includes no Node package or runtime dependency. The decoder is Python and intentionally accepts only the exact base SPL Token transfer layouts covered by tests.
+- The implementation is not production-approved: PostgreSQL migration/concurrency tests, live provider/plan verification, scheduler lifecycle, operational monitoring, and a wider reorg recovery/runbook remain pending.
