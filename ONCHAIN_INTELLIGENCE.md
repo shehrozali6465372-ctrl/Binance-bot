@@ -300,3 +300,8 @@ Official references:
 - Tests use deterministic local fixtures only; no live Alchemy request or credentials used.
 - New code includes no Node package or runtime dependency. The decoder is Python and intentionally accepts only the exact base SPL Token transfer layouts covered by tests.
 - The implementation is not production-approved: PostgreSQL migration/concurrency tests, live provider/plan verification, scheduler lifecycle, operational monitoring, and a wider reorg recovery/runbook remain pending.
+
+## Solana implementation commit and remote push — 2026-11-11
+- Implementation commit: `ca567bc7ea64f278bf2564191333a3f460918cd1` — `feat(layer1): add bounded Solana SPL token ingestion`.
+- Commit was pushed to `origin/layer-1/module9-onchain-intelligence` after confirming the remote head was the expected prior commit `f1198983757f1c5cc1fa4125afedaec9ae07c84b`.
+- Local tracked tree is clean; only the pre-existing untracked `.venv/` remains.

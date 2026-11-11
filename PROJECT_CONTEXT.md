@@ -630,3 +630,9 @@ Assess XRPL payment/issued-currency extraction and transaction history paginatio
 - No live Alchemy calls, credentials, deployment, production DB mutation, PR merge or real Binance Square post.
 - Current exact implementation scope: base SPL Token Program Transfer/TransferChecked only; native SOL and Token-2022 skipped; address-seeded finalized slot windows with opaque page cursor, per-slot produced/skipped journal and bounded reorg recovery.
 - Next exact task: XRPL validated ledger/account_tx extraction assessment and payment normalization. Only real Payment/issued-currency delivered transfers with exact validated ledger, tx hash, delivered amount/currency/issuer and account-side evidence; no balance-delta synthetic events.
+
+## Latest Solana implementation commit — 2026-11-11
+- Commit `ca567bc7ea64f278bf2564191333a3f460918cd1` adds the bounded Solana SPL token address-history worker and normalizer, fixed slot filtering, finalized header verification, produced/skipped slot journal and reorg-safe pagination.
+- Successfully pushed to `origin/layer-1/module9-onchain-intelligence` after remote SHA guard. Branch local/remote head verified at this commit before this context-only update.
+- Full suite 260 passed, focused Solana/provider suite 65 passed, compileall and git diff --check passed.
+- Tracked tree clean; existing untracked `.venv/` preserved.
