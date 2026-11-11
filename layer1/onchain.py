@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Mapping, Optional
 from urllib.parse import urlparse
 
+from .onchain_providers import is_valid_xrpl_classic_address
+
 from .foundation import BinanceListingEligibilityEngine, EligibilityDecision
 
 
@@ -176,7 +178,7 @@ class OnChainIntelligenceEngine:
             valid_hex_currency = isinstance(currency, str) and re.fullmatch(r"[0-9a-fA-F]{40}", currency) is not None
             if (mapping.contract_address is not None
                     or mapping.token_standard != "XRPL_ISSUED_CURRENCY"
-                    or not isinstance(mapping.issuer_address, str) or not mapping.issuer_address.strip()
+                    or not is_valid_xrpl_classic_address(mapping.issuer_address)
                     or not (valid_standard_currency or valid_hex_currency)):
                 return OnChainValidationResult("UNVERIFIED", "XRPL_ISSUER_CURRENCY_MAPPING_REQUIRED", "non-native XRPL assets require the exact issuer and a valid non-XRP 3-character or 160-bit hex currency code")
         elif (not isinstance(mapping.contract_address, str) or not mapping.contract_address.strip()

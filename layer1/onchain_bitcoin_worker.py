@@ -12,7 +12,7 @@ from typing import Callable
 
 from .onchain import OnChainAssetMapping, OnChainStore
 from .onchain_ingestion import OnChainIngestionStore, normalize_bitcoin_transaction_outputs
-from .onchain_providers import BitcoinAddressTransaction, ProviderTransportError
+from .onchain_providers import BitcoinAddressTransaction, ProviderTransportError, retry_provider_operation
 
 
 _RETRYABLE = {"TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"}
@@ -68,16 +68,9 @@ class BitcoinAddressIngestionWorker:
         self.sleep, self.clock = sleep, clock
 
     def _retry(self, operation):
-        for attempt in range(self.retry_attempts):
-            try:
-                return operation()
-            except ProviderTransportError as exc:
-                retryable = exc.reason_code in _RETRYABLE or (
-                    exc.reason_code == "HTTP_ERROR" and exc.http_status is not None and exc.http_status >= 500
-                )
-                if not retryable or attempt + 1 >= self.retry_attempts:
-                    raise
-                self.sleep(min(0.25 * (2 ** attempt), 2.0))
+        return retry_provider_operation(
+            operation, attempts=self.retry_attempts, sleep=self.sleep,
+        )
 
     @staticmethod
     def _validate_mapping(mapping: OnChainAssetMapping):
@@ -165,9 +158,11 @@ class BitcoinAddressIngestionWorker:
                 summary["reorg_blocks_detected"] += reorg_blocks
                 if rewind is not None:
                     next_block, range_start, range_end, page_number = rewind, None, None, 1
-                    self.ingestion_store.commit_page(cursor_key, {
-                        "next_block": rewind, "reorg_rewind": True,
-                    }, ())
+                    rewind_cursor = {"next_block": rewind, "reorg_rewind": True}
+                    self.ingestion_store.commit_page(
+                        cursor_key, rewind_cursor, (), expected_cursor=cursor,
+                        scope_identity=("bitcoin-mainnet", "alchemy", scope))
+                    cursor = rewind_cursor
                 if range_start is None:
                     if next_block > safe_height:
                         continue
@@ -251,7 +246,9 @@ class BitcoinAddressIngestionWorker:
                 } for height, header in headers.items())
                 committed = self.ingestion_store.commit_page(
                     cursor_key, next_cursor, normalized, allow_recanonicalized=True,
-                    canonical_blocks=blocks)
+                    canonical_blocks=blocks, expected_cursor=cursor,
+                    scope_identity=("bitcoin-mainnet", "alchemy", scope))
+                cursor = next_cursor
                 summary["events_inserted"] += committed["inserted"]
                 summary["duplicates"] += committed["duplicates"]
                 summary["tombstoned"] += committed["tombstoned"]

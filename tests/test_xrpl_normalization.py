@@ -5,7 +5,7 @@ from layer1.onchain_providers import XrplAccountTransaction
 
 
 ACCOUNT = "rLNaPoKeeBjZe2qs6x52yVPZpZ8td4dc6w"
-DESTINATION = "rBqiK7z9a7M8w2F7yQzvVJ5QJ8qQh2vKQ"
+DESTINATION = "rf1BiGeXwwQoi8Z2ueFYTEXSwuJYfV2Jpn"
 ISSUER = "rhub8VRN55s94qWKDv6jmDy1pUykJzF3wq"
 TX_HASH = "A" * 64
 LEDGER_HASH = "B" * 64

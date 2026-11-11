@@ -163,7 +163,7 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
             "xrpl-btc-v1", ASSET, "BTC", "xrpl-mainnet", "XRPL", "xrpl-mainnet",
             "TOKEN", None, "XRPL_ISSUED_CURRENCY", 8, "VERIFIED", "OFFICIAL_PROJECT",
             "https://xrpl.org", (NOW - timedelta(minutes=10)).isoformat(),
-            issuer_address="rIssuerExample", issued_currency="BTC")
+            issuer_address="rhub8VRN55s94qWKDv6jmDy1pUykJzF3wq", issued_currency="BTC")
         stamp = (NOW - timedelta(minutes=10)).isoformat()
         xrpl_obs = OnChainObservation("xrpl-proof", xrpl.mapping_id, ASSET, "xrpl-mainnet", "xrpl-mainnet",
             "chainstack", "xrpl-mainnet", "TRANSFER", 100, "e" * 64, "f" * 64,

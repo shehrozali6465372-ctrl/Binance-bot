@@ -18,6 +18,9 @@ from typing import Any, Iterable, Optional
 from .onchain_providers import BitcoinAddressTransaction, EvmTokenTransferLog, SolanaAddressTransaction, ProviderTransportError
 
 
+_UNSET = object()
+
+
 @dataclass(frozen=True)
 class NormalizedTransferEvent:
     event_id: str
@@ -161,7 +164,9 @@ class OnChainIngestionStore:
                     events: Iterable[NormalizedTransferEvent], *,
                     allow_recanonicalized: bool = False,
                     canonical_blocks: Iterable[dict] = (),
-                    canonical_slots: Iterable[dict] = ()) -> dict:
+                    canonical_slots: Iterable[dict] = (),
+                    expected_cursor: Any = _UNSET,
+                    scope_identity: Any = None) -> dict:
         if not isinstance(cursor_key, str) or not cursor_key.strip():
             raise ValueError("cursor_key must be a non-empty string")
         if not isinstance(allow_recanonicalized, bool):
@@ -208,10 +213,30 @@ class OnChainIngestionStore:
                     raise ValueError("Solana slot block time must be timezone-aware ISO-8601")
             elif slot.get("block_hash") is not None or slot.get("block_time") is not None:
                 raise ValueError("skipped Solana slots must not carry fabricated block hash or time")
+        if scope_identity is not None:
+            if (not isinstance(scope_identity, (tuple, list)) or len(scope_identity) != 3
+                    or any(not isinstance(part, str) or not part.strip() for part in scope_identity)):
+                raise ValueError("scope_identity must be (network_id, provider, scope)")
+            if any((event.network_id, event.provider, event.scope) != tuple(scope_identity) for event in batch):
+                raise ValueError("event identity does not match checkpoint scope_identity")
+            if any((block["network_id"], block["provider"], block["scope"]) != tuple(scope_identity)
+                   for block in blocks):
+                raise ValueError("canonical block identity does not match checkpoint scope_identity")
+            if any((slot["network_id"], slot["provider"], slot["scope"]) != tuple(scope_identity)
+                   for slot in slots):
+                raise ValueError("canonical slot identity does not match checkpoint scope_identity")
         now = datetime.now(timezone.utc).isoformat()
         inserted = duplicates = tombstoned = 0
         self.conn.execute("BEGIN IMMEDIATE")
         try:
+            if expected_cursor is not _UNSET:
+                current = self.conn.execute(
+                    "SELECT cursor_json FROM layer1_onchain_ingestion_checkpoints WHERE cursor_key=?",
+                    (cursor_key,),
+                ).fetchone()
+                current_cursor = json.loads(current[0]) if current else None
+                if current_cursor != expected_cursor:
+                    raise RuntimeError("checkpoint changed before commit")
             for event in batch:
                 payload_json = self._canonical(asdict(event))
                 identity = (event.network_id, event.provider, event.scope, event.event_id)
@@ -273,6 +298,23 @@ class OnChainIngestionStore:
                 if event.canonical_status == "REORGED":
                     tombstoned += 1
             for block in blocks:
+                prior = self.conn.execute(
+                    """SELECT block_hash, block_time FROM layer1_onchain_ingestion_blocks
+                       WHERE network_id=? AND provider=? AND scope=? AND block_number=?""",
+                    (block["network_id"], block["provider"], block["scope"], block["block_number"]),
+                ).fetchone()
+                if prior and prior[0] == block["block_hash"] and prior[1] != block["block_time"]:
+                    raise ValueError("canonical block journal timestamp conflict")
+                if prior and prior[0] != block["block_hash"]:
+                    active = self.conn.execute(
+                        """SELECT 1 FROM layer1_onchain_transfer_events
+                           WHERE network_id=? AND provider=? AND scope=? AND block_number=?
+                             AND block_hash=? AND canonical_status='CANONICAL' LIMIT 1""",
+                        (block["network_id"], block["provider"], block["scope"],
+                         block["block_number"], prior[0]),
+                    ).fetchone()
+                    if not allow_recanonicalized or active:
+                        raise ValueError("canonical block hash conflict")
                 self.conn.execute(
                     """INSERT INTO layer1_onchain_ingestion_blocks
                        (network_id, provider, scope, block_number, block_hash, block_time, updated_at)
@@ -284,6 +326,24 @@ class OnChainIngestionStore:
                      block["block_number"], block["block_hash"], block["block_time"], now),
                 )
             for slot in slots:
+                prior = self.conn.execute(
+                    """SELECT produced, block_hash, block_time FROM layer1_onchain_solana_slot_journal
+                       WHERE network_id=? AND provider=? AND scope=? AND slot=?""",
+                    (slot["network_id"], slot["provider"], slot["scope"], slot["slot"]),
+                ).fetchone()
+                incoming = (int(slot["produced"]), slot.get("block_hash"), slot.get("block_time"))
+                if prior and prior[:2] == incoming[:2] and prior[2] != incoming[2]:
+                    raise ValueError("canonical Solana slot timestamp conflict")
+                if prior and prior != incoming:
+                    active = self.conn.execute(
+                        """SELECT 1 FROM layer1_onchain_transfer_events
+                           WHERE network_id='solana-mainnet' AND provider=? AND scope=?
+                             AND block_number=? AND block_hash IS ?
+                             AND canonical_status='CANONICAL' LIMIT 1""",
+                        (slot["provider"], slot["scope"], slot["slot"], prior[1]),
+                    ).fetchone()
+                    if not allow_recanonicalized or active:
+                        raise ValueError("canonical Solana slot journal conflict")
                 self.conn.execute(
                     """INSERT INTO layer1_onchain_solana_slot_journal
                        (network_id, provider, scope, slot, produced, block_hash, block_time, updated_at)
@@ -448,7 +508,7 @@ def normalize_xrpl_payment(
     substituted for a missing delivered amount. The configured decimal scale
     must represent the delivered value exactly or normalization fails closed.
     """
-    from .onchain_providers import XrplAccountTransaction
+    from .onchain_providers import XrplAccountTransaction, is_valid_xrpl_classic_address
 
     if not isinstance(record, XrplAccountTransaction):
         raise ValueError("record must be a validated XRPL account transaction")
@@ -467,10 +527,10 @@ def normalize_xrpl_payment(
         return None
     if record.metadata.get("TransactionResult") != "tesSUCCESS":
         return None
-    if (not isinstance(monitored_account, str) or not monitored_account.startswith("r")
+    if (not is_valid_xrpl_classic_address(monitored_account)
             or not isinstance(asset_id, str) or not asset_id.strip()
             or not isinstance(mapping_id, str) or not mapping_id.strip()
-            or not isinstance(issuer_address, str) or not issuer_address.startswith("r")
+            or not is_valid_xrpl_classic_address(issuer_address)
             or not isinstance(issued_currency, str) or not issued_currency.strip()
             or not ((len(issued_currency) == 3 and all(0x21 <= ord(char) <= 0x7E for char in issued_currency)
                      and issued_currency != "XRP")
@@ -481,9 +541,9 @@ def normalize_xrpl_payment(
         raise ValueError("canonical XRPL ledger hash must be 32-byte hex")
     source = record.transaction.get("Account")
     destination = record.transaction.get("Destination")
-    if (not isinstance(source, str) or not source.startswith("r")
-            or not isinstance(destination, str) or not destination.startswith("r")):
-        raise ValueError("XRPL Payment source and destination accounts are required")
+    if (not is_valid_xrpl_classic_address(source)
+            or not is_valid_xrpl_classic_address(destination)):
+        raise ValueError("XRPL Payment source and destination must be checksum-valid classic addresses")
     if monitored_account not in {source, destination}:
         raise ValueError("monitored account is not the payment source or destination")
     delivered = record.metadata.get("delivered_amount")

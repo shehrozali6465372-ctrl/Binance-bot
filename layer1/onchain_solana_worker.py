@@ -10,7 +10,7 @@ from .onchain_ingestion import (
     OnChainIngestionStore, normalize_solana_token_transfer_instructions,
     _solana_base58_decode,
 )
-from .onchain_providers import ProviderTransportError, SolanaAddressTransaction
+from .onchain_providers import ProviderTransportError, SolanaAddressTransaction, retry_provider_operation
 
 _RETRYABLE = {"TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"}
 
@@ -60,16 +60,9 @@ class SolanaAddressIngestionWorker:
         self.sleep, self.clock = sleep, clock
 
     def _retry(self, operation):
-        for attempt in range(self.retry_attempts):
-            try:
-                return operation()
-            except ProviderTransportError as exc:
-                retryable = exc.reason_code in _RETRYABLE or (
-                    exc.reason_code == "HTTP_ERROR" and exc.http_status is not None and exc.http_status >= 500
-                )
-                if not retryable or attempt + 1 >= self.retry_attempts:
-                    raise
-                self.sleep(min(0.25 * (2 ** attempt), 2.0))
+        return retry_provider_operation(
+            operation, attempts=self.retry_attempts, sleep=self.sleep,
+        )
 
     @staticmethod
     def _validate_mapping(mapping: OnChainAssetMapping):
@@ -203,10 +196,14 @@ class SolanaAddressIngestionWorker:
                     summary["reorg_events_tombstoned"] += tombstones
                     summary["reorg_slots_detected"] += changed
                     if rewind is not None:
+                        rewind_cursor = {"next_slot": rewind, "from_slot": None,
+                                         "to_slot": None, "pagination_token": None}
                         self.ingestion_store.commit_page(
-                            cursor_key, {"next_slot": rewind, "from_slot": None,
-                                         "to_slot": None, "pagination_token": None},
-                            (), canonical_slots=self._journal_payload(scope, fresh))
+                            cursor_key, rewind_cursor, (), expected_cursor=cursor,
+                            scope_identity=("solana-mainnet", "alchemy", scope),
+                            allow_recanonicalized=True,
+                            canonical_slots=self._journal_payload(scope, fresh))
+                        cursor = rewind_cursor
                         next_slot, range_start, range_end, pagination_token = rewind, None, None, None
                         seen_tokens, last_position = [], None
 
@@ -312,7 +309,10 @@ class SolanaAddressIngestionWorker:
                 } for slot, state in active.items() if state["produced"])
                 committed = self.ingestion_store.commit_page(
                     cursor_key, next_cursor, events, allow_recanonicalized=True,
-                    canonical_blocks=canonical_blocks, canonical_slots=canonical_slots)
+                    canonical_blocks=canonical_blocks, canonical_slots=canonical_slots,
+                    expected_cursor=cursor,
+                    scope_identity=("solana-mainnet", "alchemy", scope))
+                cursor = next_cursor
                 summary["events_inserted"] += committed["inserted"]
                 summary["duplicates"] += committed["duplicates"]
                 summary["tombstoned"] += committed["tombstoned"]

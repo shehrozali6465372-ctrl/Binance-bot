@@ -11,7 +11,7 @@ from layer1.onchain_xrpl_worker import XrplIssuedCurrencyIngestionWorker
 
 NOW = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
 ACCOUNT = "rLNaPoKeeBjZe2qs6x52yVPZpZ8td4dc6w"
-DESTINATION = "rBqiK7z9a7M8w2F7yQzvVJ5QJ8qQh2vKQ"
+DESTINATION = "rf1BiGeXwwQoi8Z2ueFYTEXSwuJYfV2Jpn"
 ISSUER = "rhub8VRN55s94qWKDv6jmDy1pUykJzF3wq"
 TX_HASH = "A" * 64
 BLOCK_HASH = "B" * 64
@@ -97,6 +97,27 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
         self.ingestion_store.close()
         self.mapping_store.close()
         self.tmp.cleanup()
+
+    def test_rejects_monitored_account_with_invalid_classic_address_checksum(self):
+        with self.assertRaisesRegex(ValueError, "checksum-valid classic XRPL account seeds"):
+            XrplIssuedCurrencyIngestionWorker(
+                self.provider, self.mapping_store, self.ingestion_store,
+                monitored_accounts={MAPPING_ID: ("rBqiK7z9a7M8w2F7yQzvVJ5QJ8qQh2vKQ",)},
+                start_ledgers={MAPPING_ID: 500}, max_ledgers_per_run=3,
+            )
+
+    def test_rejects_mapping_with_invalid_issuer_checksum(self):
+        from dataclasses import replace
+        invalid_mapping = replace(
+            self.mapping, issuer_address="rBqiK7z9a7M8w2F7yQzvVJ5QJ8qQh2vKQ")
+        with self.assertRaisesRegex(ValueError, "checksum-valid classic XRPL issuer address"):
+            self.worker._validate_mapping(invalid_mapping)
+
+    def test_payment_source_and_destination_require_valid_classic_addresses(self):
+        self.provider.pages = {None: ((record(destination="rBqiK7z9a7M8w2F7yQzvVJ5QJ8qQh2vKQ"),), None)}
+        with self.assertRaisesRegex(ValueError, "checksum-valid classic addresses"):
+            self.worker.run_once()
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
 
     def test_ingests_only_actual_delivered_issued_currency_payment(self):
         self.provider.pages = {None: ((record(),), None)}

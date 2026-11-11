@@ -778,3 +778,66 @@ Implement PostgreSQL schema/migration and real PostgreSQL transaction/concurrenc
 - PR #13 head is therefore `88ebe86394dfac109170515866ee50154cc81eb8` (not the immediately preceding implementation commit `cb1a118887da08efdfe9d436dd550ddd35b5c8e0`).
 - The implementation commit's Phase 1 Safety Tests run `43070205665` passed; the documentation-only handoff commit's run `43070324062` also passed (`mocked-safety-tests`).
 - PR #12 remains unchanged/open/unmerged.
+
+## Module 9 PostgreSQL persistence progress — 2026-11-11
+
+- Verified actual local/remote branch head 9b2f1e636ea6298901de05aaee63415e72856e19 on layer-1/module9-onchain-intelligence. PR #13 remains OPEN/Draft/unmerged; PR #12 remains OPEN/non-draft/unmerged and unchanged. Tracked tree was clean before edits; the existing untracked .venv/ remains untouched.
+- Added layer1/onchain_postgres.py with explicit-DSN PostgreSQL implementations PostgresOnChainStore and PostgresOnChainIngestionStore plus a versioned migration runner with migration SHA-256 checksums and a transaction-level advisory lock. Store construction does not auto-run migrations or consult production environment variables.
+- Added layer1/migrations/postgresql/0001_onchain_storage.sql for verified mappings, accepted observations, transfer events, checkpoints, canonical block journal and Solana slot journal. Database constraints enforce scoped uniqueness, event idempotency, mapping/observation foreign keys and slot consistency.
+- PostgreSQL ingestion commit uses a transaction-scoped scope advisory lock, row-locked checkpoint and expected-cursor compare-and-swap. Events, canonical journal changes and checkpoint revision are atomic. Conflicting block hashes, stale checkpoint writes and conflicting identity reuse fail closed. Reorg reconciliation takes the same scope lock.
+- SQLite remains supported. Its store gained optional expected-cursor/scope checks and fail-closed canonical block/slot conflict handling. EVM, Bitcoin, Solana and XRPL workers now pass their persisted checkpoint snapshot and (network, provider, scope) identity on each commit.
+- Optional Psycopg 3 driver is documented in requirements-onchain-postgres.txt and shared with the existing importer requirements. No SQLAlchemy/Alembic dependency was added.
+- Added tests/test_onchain_postgres.py guarded by TEST_POSTGRES_DSN. The integration suite refuses non-local hosts and any database name other than binance_onchain_test. SQLite regression tests cover stale checkpoint and canonical block conflict behavior.
+- Verification: full suite 326 passed, 0 failed, 10 skipped; compileall passed; git diff --check passed; migration SQL parsed as 11 PostgreSQL statements; Psycopg 3.3.8 import verified in /tmp without modifying .venv/.
+- PostgreSQL runtime/concurrency remains unverified: no TEST_POSTGRES_DSN was available. An isolated PostgreSQL 16 cluster could not initialize because the sandbox's shmget syscall returned Function not implemented. No real PostgreSQL migration or multi-connection integration test ran.
+- Changes are local and uncommitted. No push, PR update, merge, deployment, production database mutation, secret change, live provider RPC or real Binance Square post occurred.
+- Exact next task: execute the guarded integration suite against a dedicated local/test PostgreSQL 16+ database. Fix any real-server failures, rerun full tests and static checks, then perform a final diff review before a guarded commit/push. Keep PR #13 Draft and PR #12 unchanged. Continue afterward with worker lifecycle, leases, retries, observability, retention/runbook and chain-specific verification.
+
+
+
+### Final verification addendum — 2026-11-11
+- Final full repository suite after the last storage/test changes: **327 passed, 0 failed, 10 skipped**. The skipped tests are the guarded PostgreSQL integration cases; TEST_POSTGRES_DSN is not configured.
+- Final compileall and git diff --check both passed.
+- PostgreSQL SQL grammar parser accepted all 11 migration statements.
+- Canonical block and Solana slot journal timestamps are now immutable when the canonical hash/produced identity is unchanged; a timestamp-only mutation fails closed. A focused SQLite regression test covers the block timestamp invariant.
+- The PostgreSQL integration DSN guard was tightened: it requires the dedicated binance_onchain_test database, an explicit local hostname or Unix socket, no remote hostaddr and no PostgreSQL service alias.
+
+### Neon staging-branch validation — 2026-11-12
+- Located the existing Binance bot Neon account and project `Binance-bot-staging` (`orange-glade-36037611`), PostgreSQL 16, branch `staging` (`br-rough-mud-az28jpxs`), database `binance_bot_staging`. Existing announcement tables were inspected read-only and left unchanged.
+- Created isolated copy-on-write branch `module9-pg-integration-test` (`br-falling-bread-azl8rggt`) from the staging branch. A 0.25 CU read-write compute was provisioned for the test branch; the account rejected changing the suspend interval, so the project default remains in effect.
+- Applied the 11 statements from `0001_onchain_storage.sql` only to the isolated test branch, in a transaction. PostgreSQL 16.15 accepted the DDL. Verified all six Module 9 tables, their primary/unique/foreign/check constraints and indexes through PostgreSQL catalogs. The parent `staging` branch was not modified.
+- Re-ran the full local unittest suite: **327 passed, 0 failed, 10 skipped**; the 10 PostgreSQL adapter integration tests remain skipped because their safety guard only permits a dedicated local `binance_onchain_test` DSN. `compileall` and `git diff --check` passed.
+- This verifies the migration DDL against a real Neon PostgreSQL 16 server, but does **not** verify the Python Psycopg adapter, multi-connection concurrency or rollback against Neon. Do not claim full PostgreSQL integration readiness yet.
+- No existing announcement rows/tables were changed, no on-chain fixture rows were inserted, no provider RPC or Binance publishing was invoked, and no schema was applied to the parent staging branch.
+- Next: review/fix the adapter and test harness, then run the integration suite against this dedicated Neon test branch using an explicit, narrowly scoped test-only DSN path. Preserve the local-only guard by default; do not point tests at the parent staging branch or production.
+
+### Final Neon PostgreSQL integration update — 2026-11-12
+- Created database `binance_onchain_test` on the isolated `module9-pg-integration-test` branch; it is separate from the inherited `binance_bot_staging` database and from the parent `staging` branch.
+- Ran the guarded Psycopg integration suite against that exact Neon branch endpoint and dedicated test database. The first 11-test run reported 10 passing and one failure because the canonical-block conflict test expected `ValueError` while the adapter intentionally raises the more specific `CanonicalBlockConflict`. The assertion was corrected. The corrected canonical-conflict, explicit-reorg-scope guard, and reorg replay tests then passed **3/3** against Neon. The other eight tests had passed in the first run. The entire Neon integration suite has not yet been rerun as one batch after the assertion correction; treat the combined result as strong but not final batch verification.
+- The Neon run verified the real migration runner, mapping/observation round-trip and idempotency, atomic event+journal+checkpoint writes, rollback on a mid-transaction timestamp error, competing checkpoint writers, duplicate-event retry, canonical block conflict, reorg replay and Solana slot journal behavior.
+- Added a fail-closed requirement that PostgreSQL `reconcile_block()` must receive explicit provider and scope so it always takes the same transaction advisory lock as page commits. All four workers already pass those identities.
+- Final local full suite after this change: **328 passed, 0 failed, 11 skipped**. The 11 skipped are the PostgreSQL integration tests when no `TEST_POSTGRES_DSN` is set; the dedicated Neon run above executed them separately. `compileall` and `git diff --check` passed.
+- The dedicated Neon test database contains only isolated synthetic test fixtures. The inherited announcement database/tables and the parent staging branch were not modified. The test branch has a 0.25 CU compute; the account rejected changing its suspend interval, so its default behavior remains.
+- No commit, push, PR update, merge, deployment, production database mutation, provider RPC or real Binance Square publication occurred.
+- Next: rerun the complete Neon integration suite once as a single clean batch, inspect/fix any issues, then perform final code/diff review. Do not promote the migration to the parent staging branch without explicit approval.
+
+### Complete Neon PostgreSQL integration batch — 2026-11-12
+- Re-ran the entire PostgreSQL integration module against the isolated Neon PostgreSQL 16.15 branch and dedicated `binance_onchain_test` database using an explicit exact-host allowlist plus TLS. Result: **13 tests passed, 0 failed** in 122.899 seconds. This includes the adapter contract test and all 12 live PostgreSQL integration tests.
+- The earlier canonical-block test assertion mismatch is corrected to expect `CanonicalBlockConflict`; the dedicated reorg reconciliation API now requires explicit provider and scope.
+- Tightened PostgreSQL Solana journal validation: a Solana slot journal record is accepted only when the checkpoint identity itself is `solana-mainnet`, and the slot network must equal that identity. Added a regression test for cross-network slot injection. The transaction rollback test now injects a bad canonical block timestamp after event insertion, proving rollback without using an invalid cross-network slot.
+- The PostgreSQL test harness remains local-only by default. A remote endpoint is accepted only when `TEST_POSTGRES_ALLOWED_HOST` exactly matches the DSN hostname, database is exactly `binance_onchain_test`, TLS mode is required/verified, and no hostaddr or service alias is present.
+- Final local repository suite: **329 passed, 0 failed, 12 skipped**. The 12 skips are the live PostgreSQL integration cases when `TEST_POSTGRES_DSN` is absent; the same 12 were executed in the dedicated Neon run above. `compileall` and `git diff --check` passed.
+- No source was committed or pushed. `.venv/` remains pre-existing and untracked; it was not modified or staged. PR #13 remains Draft and PR #12 remains unchanged. No parent staging schema changes, production DB writes, live chain RPC, deployment, or Binance Square publishing occurred.
+- PostgreSQL persistence/transaction adapter now has live integration evidence, but this does not by itself make the whole Module 9 service production-ready. Remaining work includes worker lifecycle/supervision, distributed ownership/leases, retry classification and backoff, observability, retention/runbook, and chain-specific validation decisions.
+
+
+### Final local recovery and verification — 2026-11-12
+- Recovered the existing uncommitted Module 9 PostgreSQL persistence work from the original development working tree; no reimplementation of completed modules was performed.
+- Completed provider retry integration across EVM, Bitcoin, Solana and XRPL workers. Retry classification is limited to timeout, network errors, HTTP 429 and HTTP 5xx; bounded exponential backoff honors a capped Retry-After value. Retry delay configuration rejects non-finite values.
+- XRPL normalization and aggregation fixtures now use checksum-valid classic addresses, matching the production validation boundary.
+- Full repository unittest suite: **336 passed, 0 failed, 12 skipped**. The skips are the guarded PostgreSQL live integration cases when TEST_POSTGRES_DSN is absent from the ordinary suite.
+- Dedicated isolated Neon PostgreSQL 16 integration batch: **13 passed, 0 failed** in 203.386 seconds, using the dedicated binance_onchain_test database, exact-host allowlist and TLS. No parent staging database was targeted.
+- Focused provider/ingestion/XRPL/aggregation regression batch: **86 passed, 0 failed**. compileall and git diff --check passed.
+- The pre-existing .venv/ directory was not staged. The temporary test DSN file is test-only and will be removed after the integration run.
+- No real Binance Square post, provider RPC, production database mutation, deployment, PR merge or publishing workflow activation occurred.
+- Module 9 remains not production-ready: worker supervision/lifecycle, distributed ownership/leases, observability/alerts, retention/runbook, and live provider verification still require separate work and approval.

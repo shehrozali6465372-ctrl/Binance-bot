@@ -1,0 +1,2 @@
+# Optional Module 9 PostgreSQL runtime dependency.
+-r requirements-announcement-importer.txt

@@ -14,7 +14,10 @@ from typing import Callable
 
 from .onchain import OnChainAssetMapping, OnChainStore
 from .onchain_ingestion import OnChainIngestionStore, normalize_xrpl_payment
-from .onchain_providers import ProviderTransportError, XrplAccountTransaction
+from .onchain_providers import (
+    ProviderTransportError, XrplAccountTransaction, is_valid_xrpl_classic_address,
+    retry_provider_operation,
+)
 
 
 _RETRYABLE = {"TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"}
@@ -38,9 +41,9 @@ class XrplIssuedCurrencyIngestionWorker:
         for mapping_id, accounts in monitored_accounts.items():
             if (not isinstance(mapping_id, str) or not mapping_id.strip()
                     or not isinstance(accounts, (tuple, list)) or not accounts
-                    or any(not isinstance(a, str) or not re.fullmatch(r"r[1-9A-HJ-NP-Za-km-z]{24,34}", a) for a in accounts)
+                    or any(not is_valid_xrpl_classic_address(a) for a in accounts)
                     or len(set(accounts)) != len(accounts)):
-                raise ValueError("each mapping requires unique valid-looking classic XRPL account seeds")
+                raise ValueError("each mapping requires unique checksum-valid classic XRPL account seeds")
         for mapping_id, ledger in start_ledgers.items():
             if not isinstance(mapping_id, str) or isinstance(ledger, bool) or not isinstance(ledger, int) or ledger < 1:
                 raise ValueError("start ledger mapping IDs and indexes are invalid")
@@ -62,16 +65,9 @@ class XrplIssuedCurrencyIngestionWorker:
         self.retry_attempts, self.sleep, self.clock = retry_attempts, sleep, clock
 
     def _retry(self, operation):
-        for attempt in range(self.retry_attempts):
-            try:
-                return operation()
-            except ProviderTransportError as exc:
-                retryable = exc.reason_code in _RETRYABLE or (
-                    exc.reason_code == "HTTP_ERROR" and exc.http_status is not None and exc.http_status >= 500
-                )
-                if not retryable or attempt + 1 >= self.retry_attempts:
-                    raise
-                self.sleep(min(0.25 * (2 ** attempt), 2.0))
+        return retry_provider_operation(
+            operation, attempts=self.retry_attempts, sleep=self.sleep,
+        )
 
     @staticmethod
     def _scope(mapping: OnChainAssetMapping, account: str) -> str:
@@ -87,9 +83,9 @@ class XrplIssuedCurrencyIngestionWorker:
                 or mapping.chain_id != "xrpl-mainnet" or mapping.mapping_status != "VERIFIED"
                 or mapping.representation != "TOKEN" or mapping.contract_address is not None
                 or mapping.token_standard != "XRPL_ISSUED_CURRENCY"
-                or not isinstance(mapping.issuer_address, str) or not mapping.issuer_address.startswith("r")
+                or not is_valid_xrpl_classic_address(mapping.issuer_address)
                 or not isinstance(mapping.issued_currency, str) or not mapping.issued_currency.strip()):
-            raise ValueError("worker encountered a mapping outside verified XRPL issued-currency scope")
+            raise ValueError("worker requires a checksum-valid classic XRPL issuer address and verified issued-currency mapping")
 
     def _header(self, ledger_index: int) -> dict:
         header = self._retry(lambda: self.provider.fetch_ledger_header(ledger_index))
@@ -153,6 +149,7 @@ class XrplIssuedCurrencyIngestionWorker:
                 cursor_key = self._cursor_key(account, mapping)
                 initial = self.start_ledgers[mapping.mapping_id]
                 checkpoint = self.ingestion_store.get_checkpoint(cursor_key)
+                expected_checkpoint = checkpoint
                 if checkpoint is None:
                     checkpoint = {"mapping_id": mapping.mapping_id, "account": account,
                                   "next_ledger": initial, "range_start": None,
@@ -172,7 +169,10 @@ class XrplIssuedCurrencyIngestionWorker:
                     checkpoint = {"mapping_id": mapping.mapping_id, "account": account,
                                   "next_ledger": rewind, "range_start": None,
                                   "range_end": None, "marker": None, "seen_markers": []}
-                    self.ingestion_store.commit_page(cursor_key, checkpoint, ())
+                    self.ingestion_store.commit_page(
+                        cursor_key, checkpoint, (), expected_cursor=expected_checkpoint,
+                        scope_identity=("xrpl-mainnet", "chainstack", scope))
+                    expected_checkpoint = checkpoint
                 range_start = checkpoint.get("range_start")
                 range_end = checkpoint.get("range_end")
                 if range_start is None:
@@ -182,7 +182,10 @@ class XrplIssuedCurrencyIngestionWorker:
                         continue
                     checkpoint = {**checkpoint, "range_start": range_start,
                                   "range_end": range_end, "marker": None, "seen_markers": []}
-                    self.ingestion_store.commit_page(cursor_key, checkpoint, ())
+                    self.ingestion_store.commit_page(
+                        cursor_key, checkpoint, (), expected_cursor=expected_checkpoint,
+                        scope_identity=("xrpl-mainnet", "chainstack", scope))
+                    expected_checkpoint = checkpoint
                 if (isinstance(range_start, bool) or not isinstance(range_start, int)
                         or isinstance(range_end, bool) or not isinstance(range_end, int)
                         or range_start < initial or range_end < range_start
@@ -208,7 +211,10 @@ class XrplIssuedCurrencyIngestionWorker:
                     checkpoint = {"mapping_id": mapping.mapping_id, "account": account,
                                   "next_ledger": active_rewind, "range_start": range_start,
                                   "range_end": range_end, "marker": None, "seen_markers": []}
-                    self.ingestion_store.commit_page(cursor_key, checkpoint, ())
+                    self.ingestion_store.commit_page(
+                        cursor_key, checkpoint, (), expected_cursor=expected_checkpoint,
+                        scope_identity=("xrpl-mainnet", "chainstack", scope))
+                    expected_checkpoint = checkpoint
                 pages = 0
                 while pages < self.max_pages_per_run:
                     try:
@@ -221,7 +227,10 @@ class XrplIssuedCurrencyIngestionWorker:
                             reset = {"mapping_id": mapping.mapping_id, "account": account,
                                      "next_ledger": range_start, "range_start": range_start,
                                      "range_end": range_end, "marker": None, "seen_markers": []}
-                            self.ingestion_store.commit_page(cursor_key, reset, ())
+                            self.ingestion_store.commit_page(
+                                cursor_key, reset, (), expected_cursor=expected_checkpoint,
+                                scope_identity=("xrpl-mainnet", "chainstack", scope))
+                            expected_checkpoint = reset
                             summary["markers_reset"] += 1
                             break
                         raise
@@ -279,7 +288,10 @@ class XrplIssuedCurrencyIngestionWorker:
                     committed = self.ingestion_store.commit_page(
                         cursor_key, next_checkpoint, events, allow_recanonicalized=True,
                         canonical_blocks=canonical_blocks,
+                        expected_cursor=expected_checkpoint,
+                        scope_identity=("xrpl-mainnet", "chainstack", scope),
                     )
+                    expected_checkpoint = next_checkpoint
                     summary["events_inserted"] += committed["inserted"]
                     summary["duplicates"] += committed["duplicates"]
                     summary["pages_committed"] += 1

@@ -215,11 +215,24 @@ class OnChainIntelligenceTests(unittest.TestCase):
             "network_id": "xrpl-mainnet", "network_family": "XRPL",
             "chain_id": "xrpl-mainnet", "representation": "TOKEN",
             "token_standard": "XRPL_ISSUED_CURRENCY",
-            "issuer_address": "rIssuerAddressExample",
+            "issuer_address": "rhub8VRN55s94qWKDv6jmDy1pUykJzF3wq",
             "issued_currency": "USD",
         })
         result = self.engine._validate_mapping(xrpl_mapping)
         self.assertIsNone(result)
+
+    def test_xrpl_issued_token_rejects_invalid_classic_issuer_checksum(self):
+        mapping = OnChainAssetMapping(**{
+            **self.mapping.__dict__, "mapping_id": "xrpl-invalid-issuer-v1",
+            "asset_id": "coingecko:usd-coin", "binance_symbol": "USDC",
+            "network_id": "xrpl-mainnet", "network_family": "XRPL",
+            "chain_id": "xrpl-mainnet", "representation": "TOKEN",
+            "token_standard": "XRPL_ISSUED_CURRENCY",
+            "issuer_address": "rBqiK7z9a7M8w2F7yQzvVJ5QJ8qQh2vKQ",
+            "issued_currency": "USD",
+        })
+        result = self.engine._validate_mapping(mapping)
+        self.assertEqual(result.reason_code, "XRPL_ISSUER_CURRENCY_MAPPING_REQUIRED")
 
     def test_xrpl_issued_token_rejects_reserved_xrp_or_malformed_currency_codes(self):
         for currency in ("XRP", "US", "USD ", "G" * 40):
@@ -229,7 +242,7 @@ class OnChainIntelligenceTests(unittest.TestCase):
                 "network_id": "xrpl-mainnet", "network_family": "XRPL",
                 "chain_id": "xrpl-mainnet", "representation": "TOKEN",
                 "token_standard": "XRPL_ISSUED_CURRENCY",
-                "issuer_address": "rIssuerAddressExample", "issued_currency": currency,
+                "issuer_address": "rhub8VRN55s94qWKDv6jmDy1pUykJzF3wq", "issued_currency": currency,
             })
             result = self.engine._validate_mapping(mapping)
             self.assertEqual(result.reason_code, "XRPL_ISSUER_CURRENCY_MAPPING_REQUIRED")

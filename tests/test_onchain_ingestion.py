@@ -42,6 +42,48 @@ class OnChainIngestionStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_checkpoint("alchemy:bnb-smart-chain-mainnet:contract-1"), cursor)
         self.assertEqual(len(self.store.list_events("bnb-smart-chain-mainnet")), 1)
 
+    def test_expected_checkpoint_rejects_a_stale_worker_commit(self):
+        key = "alchemy:bnb-smart-chain:contract-1"
+        identity = ("bnb-smart-chain-mainnet", "alchemy", "contract:0x" + "1" * 40)
+        self.store.commit_page(key, {"next_block": 101}, [self.event()],
+                               expected_cursor=None, scope_identity=identity)
+        with self.assertRaisesRegex(RuntimeError, "checkpoint changed"):
+            self.store.commit_page(key, {"next_block": 102}, (),
+                                   expected_cursor=None, scope_identity=identity)
+        self.assertEqual(self.store.get_checkpoint(key), {"next_block": 101})
+
+    def test_canonical_block_hash_conflict_fails_closed_and_preserves_checkpoint(self):
+        key = "canonical-block"
+        first = {
+            "network_id": "bnb-smart-chain-mainnet", "provider": "alchemy",
+            "scope": "contract:0x" + "1" * 40, "block_number": 100,
+            "block_hash": "b" * 64, "block_time": "2026-11-11T12:00:00+00:00",
+        }
+        self.store.commit_page(key, {"next_block": 101}, (), canonical_blocks=(first,))
+        conflicting = {**first, "block_hash": "c" * 64}
+        with self.assertRaisesRegex(ValueError, "canonical block hash conflict"):
+            self.store.commit_page(key, {"next_block": 102}, (),
+                                   expected_cursor={"next_block": 101},
+                                   canonical_blocks=(conflicting,))
+        self.assertEqual(self.store.get_checkpoint(key), {"next_block": 101})
+        self.assertEqual(self.store.get_block_hash(
+            "bnb-smart-chain-mainnet", "alchemy", first["scope"], 100), "b" * 64)
+
+    def test_canonical_block_timestamp_cannot_change_without_a_hash_change(self):
+        key = "canonical-time"
+        block = {
+            "network_id": "bnb-smart-chain-mainnet", "provider": "alchemy",
+            "scope": "contract:0x" + "1" * 40, "block_number": 100,
+            "block_hash": "b" * 64, "block_time": "2026-11-11T12:00:00+00:00",
+        }
+        self.store.commit_page(key, {"next_block": 101}, (), canonical_blocks=(block,))
+        changed_time = {**block, "block_time": "2026-11-11T12:01:00+00:00"}
+        with self.assertRaisesRegex(ValueError, "timestamp conflict"):
+            self.store.commit_page(key, {"next_block": 102}, (),
+                                   expected_cursor={"next_block": 101},
+                                   canonical_blocks=(changed_time,))
+        self.assertEqual(self.store.get_checkpoint(key), {"next_block": 101})
+
     def test_replayed_page_is_idempotent_and_conflicting_event_identity_is_rejected(self):
         key = "alchemy:bnb-smart-chain-mainnet:contract-1"
         self.store.commit_page(key, {"next": "x"}, [self.event()])

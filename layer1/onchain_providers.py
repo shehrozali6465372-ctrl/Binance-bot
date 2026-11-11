@@ -5,10 +5,14 @@ transactions, infer whale intent, or fabricate transaction-level observations.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import re
+import time
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
@@ -26,10 +30,70 @@ SOLANA_MAINNET_GENESIS_HASH = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
 
 
 class ProviderTransportError(RuntimeError):
-    def __init__(self, reason_code: str, message: str, http_status: Optional[int] = None):
+    def __init__(self, reason_code: str, message: str, http_status: Optional[int] = None,
+                 retry_after_seconds: Optional[float] = None):
         super().__init__(message)
         self.reason_code = reason_code
         self.http_status = http_status
+        self.retry_after_seconds = retry_after_seconds
+
+
+def retry_provider_operation(
+    operation: Callable[[], Any], *, attempts: int = 3,
+    sleep: Callable[[float], None] = time.sleep,
+    base_delay_seconds: float = 0.25,
+    max_delay_seconds: float = 2.0,
+    max_retry_after_seconds: float = 120.0,
+):
+    """Retry only transient provider failures with bounded backoff and Retry-After."""
+    if not callable(operation) or not callable(sleep):
+        raise ValueError("operation and sleep must be callable")
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or not 1 <= attempts <= 10:
+        raise ValueError("attempts must be between 1 and 10")
+    for value, name in (
+        (base_delay_seconds, "base_delay_seconds"),
+        (max_delay_seconds, "max_delay_seconds"),
+        (max_retry_after_seconds, "max_retry_after_seconds"),
+    ):
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise ValueError(f"{name} must be a finite non-negative number")
+    if base_delay_seconds <= 0 or max_delay_seconds <= 0:
+        raise ValueError("base and maximum backoff delays must be positive")
+
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except ProviderTransportError as exc:
+            retryable = exc.reason_code in {"TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"} or (
+                exc.reason_code == "HTTP_ERROR" and exc.http_status is not None
+                and exc.http_status >= 500
+            )
+            if not retryable or attempt + 1 >= attempts:
+                raise
+            delay = min(base_delay_seconds * (2 ** attempt), max_delay_seconds)
+            if exc.retry_after_seconds is not None:
+                delay = max(delay, min(float(exc.retry_after_seconds), max_retry_after_seconds))
+            sleep(delay)
+
+
+def _retry_after_seconds(headers) -> Optional[float]:
+    if headers is None:
+        return None
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw)
+        return max(0.0, seconds) if seconds == seconds and seconds not in (float("inf"), float("-inf")) else None
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(raw))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 class ReadOnlyJsonRpcTransport:
@@ -70,7 +134,10 @@ class ReadOnlyJsonRpcTransport:
         except HTTPError as exc:
             status = int(exc.code)
             reason = "RATE_LIMITED" if status == 429 else "HTTP_ERROR"
-            raise ProviderTransportError(reason, f"provider returned HTTP {status}", status) from None
+            raise ProviderTransportError(
+                reason, f"provider returned HTTP {status}", status,
+                retry_after_seconds=_retry_after_seconds(exc.headers),
+            ) from None
         except URLError:
             raise ProviderTransportError("NETWORK_ERROR", "provider network request failed") from None
         except TimeoutError:
@@ -107,7 +174,10 @@ class ReadOnlyJsonRpcTransport:
         except HTTPError as exc:
             status = int(exc.code)
             reason = "RATE_LIMITED" if status == 429 else "HTTP_ERROR"
-            raise ProviderTransportError(reason, f"provider returned HTTP {status}", status) from None
+            raise ProviderTransportError(
+                reason, f"provider returned HTTP {status}", status,
+                retry_after_seconds=_retry_after_seconds(exc.headers),
+            ) from None
         except URLError:
             raise ProviderTransportError("NETWORK_ERROR", "provider network request failed") from None
         except TimeoutError:
@@ -240,6 +310,36 @@ def _is_base58_pubkey(value: Any) -> bool:
 
 def _is_base58_signature(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", value) is not None
+
+
+_XRPL_BASE58_ALPHABET = "rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz"
+_XRPL_BASE58_INDEX = {character: index for index, character in enumerate(_XRPL_BASE58_ALPHABET)}
+
+
+def is_valid_xrpl_classic_address(value: Any) -> bool:
+    """Validate a classic XRPL AccountID address, including version and checksum.
+
+    XRPL classic addresses encode a 0x00 version byte, 20-byte AccountID and
+    four-byte double-SHA256 checksum using XRPL's own base58 alphabet.
+    X-addresses are intentionally not accepted as account_tx account seeds.
+    """
+    if (not isinstance(value, str) or not 25 <= len(value) <= 35
+            or not value.startswith("r")):
+        return False
+    number = 0
+    for character in value:
+        digit = _XRPL_BASE58_INDEX.get(character)
+        if digit is None:
+            return False
+        number = number * 58 + digit
+    decoded = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+    leading_zeroes = len(value) - len(value.lstrip(_XRPL_BASE58_ALPHABET[0]))
+    decoded = (b"\x00" * leading_zeroes) + decoded
+    if len(decoded) != 25 or decoded[0] != 0:
+        return False
+    payload, checksum = decoded[:-4], decoded[-4:]
+    expected = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+    return checksum == expected
 
 
 def _parse_hex_quantity(value: Any, field: str) -> int:
@@ -874,8 +974,8 @@ class ChainstackXrplReadOnlyAdapter:
     def fetch_account_transactions(self, account: str,
                                    ledger_index_min: int, ledger_index_max: int,
                                    marker=None, limit: int = 200) -> ProviderDataPage:
-        if not isinstance(account, str) or not account.startswith("r") or not 25 <= len(account) <= 35:
-            raise ValueError("XRPL account must be a valid-looking mainnet address")
+        if not is_valid_xrpl_classic_address(account):
+            raise ValueError("XRPL account must be a checksum-valid classic mainnet address")
         if (isinstance(ledger_index_min, bool) or not isinstance(ledger_index_min, int) or ledger_index_min < 0
                 or isinstance(ledger_index_max, bool) or not isinstance(ledger_index_max, int)
                 or ledger_index_max < ledger_index_min):

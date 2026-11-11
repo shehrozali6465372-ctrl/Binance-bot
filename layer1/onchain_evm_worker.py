@@ -12,7 +12,7 @@ from typing import Callable
 
 from .onchain import OnChainAssetMapping, OnChainStore
 from .onchain_ingestion import OnChainIngestionStore, normalize_evm_transfer_log
-from .onchain_providers import EvmTokenTransferLog, ProviderTransportError
+from .onchain_providers import EvmTokenTransferLog, ProviderTransportError, retry_provider_operation
 
 
 EVM_NETWORKS = {
@@ -67,16 +67,9 @@ class EvmTransferIngestionWorker:
         self.clock = clock
 
     def _retry(self, operation):
-        for attempt in range(self.retry_attempts):
-            try:
-                return operation()
-            except ProviderTransportError as exc:
-                retryable = exc.reason_code in _RETRYABLE or (
-                    exc.reason_code == "HTTP_ERROR" and exc.http_status is not None and exc.http_status >= 500
-                )
-                if not retryable or attempt + 1 >= self.retry_attempts:
-                    raise
-                self.sleep(min(0.25 * (2 ** attempt), 2.0))
+        return retry_provider_operation(
+            operation, attempts=self.retry_attempts, sleep=self.sleep,
+        )
 
     @staticmethod
     def _cursor_key(mapping: OnChainAssetMapping) -> str:
@@ -150,6 +143,7 @@ class EvmTransferIngestionWorker:
                 raise ValueError(f"no explicit start block configured for mapping {mapping.mapping_id}")
             summary["mappings"] += 1
             cursor_key = self._cursor_key(mapping)
+            scope = f"contract:{mapping.contract_address.lower()}"
             checkpoint = self.ingestion_store.get_checkpoint(cursor_key)
             initial_block = self.start_blocks[mapping.mapping_id]
             if checkpoint is None:
@@ -165,11 +159,14 @@ class EvmTransferIngestionWorker:
                 # Rewind the durable cursor before replaying the changed finalized range.
                 # A crash here is safe: the next run repeats this bounded reconciliation.
                 next_block = rewind_to
-                self.ingestion_store.commit_page(cursor_key, {
+                rewind_checkpoint = {
                     "mapping_id": mapping.mapping_id, "network_id": mapping.network_id,
-                    "scope": f"contract:{mapping.contract_address.lower()}",
-                    "next_block": rewind_to, "reorg_rewind": True,
-                }, ())
+                    "scope": scope, "next_block": rewind_to, "reorg_rewind": True,
+                }
+                self.ingestion_store.commit_page(
+                    cursor_key, rewind_checkpoint, (), expected_cursor=checkpoint,
+                    scope_identity=(mapping.network_id, "alchemy", scope))
+                checkpoint = rewind_checkpoint
             prefix = EVM_NETWORKS[mapping.network_id]["provider_prefix"]
             finalized_method = getattr(self.provider, f"fetch_{prefix}_finalized_height")
             logs_method = getattr(self.provider, f"fetch_{prefix}_erc20_transfer_logs")
@@ -179,7 +176,6 @@ class EvmTransferIngestionWorker:
             bounded_end = min(finalized_height, next_block + self.max_blocks_per_run - 1)
             if next_block > bounded_end:
                 continue
-            scope = f"contract:{mapping.contract_address.lower()}"
             for range_start in range(next_block, bounded_end + 1, MAX_PROVIDER_BLOCK_SPAN):
                 range_end = min(bounded_end, range_start + MAX_PROVIDER_BLOCK_SPAN - 1)
                 page = self._retry(lambda: logs_method(
@@ -242,7 +238,10 @@ class EvmTransferIngestionWorker:
                         "block_number": height, "block_hash": header["hash"].lower(),
                         "block_time": datetime.fromtimestamp(header["timestamp"], timezone.utc).isoformat(),
                     } for height, header in headers.items()),
+                    expected_cursor=checkpoint,
+                    scope_identity=(mapping.network_id, "alchemy", scope),
                 )
+                checkpoint = next_cursor
                 summary["events_inserted"] += committed["inserted"]
                 summary["duplicates"] += committed["duplicates"]
                 summary["tombstoned"] += committed["tombstoned"]

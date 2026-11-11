@@ -13,6 +13,8 @@ from layer1.onchain_providers import (
     ProviderTransportError,
     ReadOnlyJsonRpcTransport,
     SOLANA_MAINNET_GENESIS_HASH,
+    is_valid_xrpl_classic_address,
+    retry_provider_operation,
 )
 
 
@@ -51,6 +53,38 @@ class OnChainProviderTests(unittest.TestCase):
             self.assertEqual(timeout, 10)
             return FakeTransport(responses, calls)
         return AlchemyReadOnlyAdapter("test-key", transport_factory=factory), calls
+
+    def test_provider_retry_policy_honors_retry_after_and_caps_exponential_backoff(self):
+        delays = []
+        attempts = []
+        def operation():
+            attempts.append(len(attempts) + 1)
+            if len(attempts) == 1:
+                raise ProviderTransportError("RATE_LIMITED", "slow down", 429, retry_after_seconds=7)
+            return "ok"
+        result = retry_provider_operation(
+            operation, attempts=3, sleep=delays.append,
+            base_delay_seconds=0.25, max_delay_seconds=2.0,
+        )
+        self.assertEqual(result, "ok")
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(delays, [7.0])
+
+    def test_provider_retry_policy_does_not_retry_permanent_errors(self):
+        delays = []
+        def operation():
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "bad payload")
+        with self.assertRaises(ProviderTransportError):
+            retry_provider_operation(operation, attempts=4, sleep=delays.append)
+        self.assertEqual(delays, [])
+
+    def test_xrpl_classic_address_validation_checks_version_and_checksum(self):
+        self.assertTrue(is_valid_xrpl_classic_address("rLNaPoKeeBjZe2qs6x52yVPZpZ8td4dc6w"))
+        self.assertTrue(is_valid_xrpl_classic_address("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"))
+        self.assertTrue(is_valid_xrpl_classic_address("rf1BiGeXwwQoi8Z2ueFYTEXSwuJYfV2Jpn"))
+        self.assertFalse(is_valid_xrpl_classic_address("rBqiK7z9a7M8w2F7yQzvVJ5QJ8qQh2vKQ"))
+        self.assertFalse(is_valid_xrpl_classic_address("X7F9A2D3E4B5C6D7E8F9A2D3E4B5C6D7E8F9A2D3"))
+        self.assertFalse(is_valid_xrpl_classic_address("r" + "1" * 24))
 
     def test_alchemy_bitcoin_probe_uses_read_only_header_and_preserves_confirmation_count(self):
         adapter, calls = self.adapter([
