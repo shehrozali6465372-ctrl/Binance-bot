@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import os
 import sqlite3
 import time
@@ -21,6 +22,7 @@ from urllib.parse import urlparse
 LAYER1_VERSION = "1.1.0"
 SCORE_VERSION = "layer1-relevance-v1"
 OFFICIAL_BINANCE_HOSTS = {"binance.com", "www.binance.com", "developers.binance.com"}
+BINANCE_ANNOUNCEMENT_LANDING_URL = "https://www.binance.com/en/support/announcement"
 ALLOWED_ANNOUNCEMENT_TYPES = {
     "listing", "delisting", "suspension", "maintenance", "upgrade",
     "governance", "integration", "security_incident", "launch", "release", "other",
@@ -945,16 +947,51 @@ class AnnouncementEvidence:
     observed_at: str
     asset_ids: tuple[str, ...] = ()
     content_hash: str = ""
-
     updated_at: Optional[str] = None
     event_at: Optional[str] = None
+    source_id_kind: str = "provider_id"
+    source_url_kind: str = "article_permalink"
+    raw_evidence_ref: str = ""
+    revision_correlation_status: str = "STABLE_PROVIDER_ID"
+    revision_match_reason: str = "Provider-stable source ID is available for revision ordering."
+
+    def __post_init__(self) -> None:
+        # The CMS worker's source_id is a local SHA-256 fingerprint of
+        # catalogId + publishDate + title, not a Binance-issued article ID.
+        # Its URL is the official announcements landing page, not a permalink.
+        source_is_fingerprint = isinstance(self.source_id, str) and bool(
+            re.fullmatch(r"[0-9a-f]{64}", self.source_id)
+        )
+        content_is_hash = isinstance(self.content_hash, str) and bool(
+            re.fullmatch(r"[0-9a-f]{64}", self.content_hash)
+        )
+        if (isinstance(self.publisher, str) and self.publisher.casefold() == "binance"
+                and isinstance(self.source_url, str)
+                and self.source_url.rstrip("/") == BINANCE_ANNOUNCEMENT_LANDING_URL
+                and source_is_fingerprint):
+            object.__setattr__(self, "source_id_kind", "payload_fingerprint")
+            object.__setattr__(self, "source_url_kind", "official_landing_page")
+            object.__setattr__(self, "revision_correlation_status", "UNRESOLVED_NO_STABLE_PROVIDER_ID")
+            object.__setattr__(
+                self, "revision_match_reason",
+                "CMS source_id is a deterministic payload fingerprint (catalogId + publishDate + title), "
+                "not a stable Binance article ID; title edits cannot be confidently correlated. "
+                "Keep observations separate and review manually.",
+            )
+            if content_is_hash:
+                object.__setattr__(
+                    self, "raw_evidence_ref",
+                    f"postgres:binance_announcement_events:content_hash:{self.content_hash}",
+                )
 
     def validate(self) -> None:
-        parsed_url = urlparse(self.source_url)
-        host = (parsed_url.hostname or "").lower()
         if not all(isinstance(value, str) and value.strip() for value in
                    (self.source_id, self.source_url, self.title, self.publisher)):
             raise ValueError("announcement identity/publisher/title/source URL missing")
+        if self.publisher.strip().casefold() != "binance":
+            raise ValueError("announcement publisher does not match the approved Binance source")
+        parsed_url = urlparse(self.source_url)
+        host = (parsed_url.hostname or "").lower()
         if (
             parsed_url.scheme != "https" or parsed_url.username or parsed_url.password
             or parsed_url.port not in (None, 443)
@@ -963,8 +1000,36 @@ class AnnouncementEvidence:
             raise ValueError("announcement source is not an approved HTTPS Binance host")
         if self.event_type not in ALLOWED_ANNOUNCEMENT_TYPES:
             raise ValueError("unsupported announcement event type")
-        if not isinstance(self.asset_ids, tuple) or any(not isinstance(item, str) or not item for item in self.asset_ids):
-            raise ValueError("announcement asset identities must be non-empty canonical IDs")
+        if not isinstance(self.asset_ids, tuple) or any(
+            not isinstance(item, str) or not item.startswith("coingecko:") for item in self.asset_ids
+        ):
+            raise ValueError("announcement asset identities must be canonical CoinGecko IDs")
+        if self.content_hash and (not isinstance(self.content_hash, str)
+                                  or not re.fullmatch(r"[0-9a-f]{64}", self.content_hash)):
+            raise ValueError("announcement content_hash must be a lowercase SHA-256 hex digest")
+        if not isinstance(self.source_id_kind, str) or self.source_id_kind not in {"provider_id", "payload_fingerprint"}:
+            raise ValueError("announcement source_id_kind is invalid")
+        if not isinstance(self.source_url_kind, str) or self.source_url_kind not in {"article_permalink", "official_landing_page"}:
+            raise ValueError("announcement source_url_kind is invalid")
+        if (not isinstance(self.revision_correlation_status, str)
+                or self.revision_correlation_status not in {"STABLE_PROVIDER_ID", "UNRESOLVED_NO_STABLE_PROVIDER_ID"}):
+            raise ValueError("announcement revision correlation status is invalid")
+        if not isinstance(self.revision_match_reason, str) or not self.revision_match_reason.strip():
+            raise ValueError("announcement revision match reason is required")
+        if not isinstance(self.raw_evidence_ref, str):
+            raise ValueError("announcement raw evidence reference must be a string")
+        if self.source_url.rstrip("/") == BINANCE_ANNOUNCEMENT_LANDING_URL:
+            if self.source_url_kind != "official_landing_page":
+                raise ValueError("Binance CMS landing page must not be represented as an article permalink")
+        if self.source_id_kind == "payload_fingerprint":
+            expected_ref = f"postgres:binance_announcement_events:content_hash:{self.content_hash}"
+            if (self.source_url_kind != "official_landing_page"
+                    or self.source_url.rstrip("/") != BINANCE_ANNOUNCEMENT_LANDING_URL
+                    or not re.fullmatch(r"[0-9a-f]{64}", self.source_id)
+                    or not re.fullmatch(r"[0-9a-f]{64}", self.content_hash)
+                    or self.raw_evidence_ref != expected_ref
+                    or self.revision_correlation_status != "UNRESOLVED_NO_STABLE_PROVIDER_ID"):
+                raise ValueError("CMS fingerprint evidence requires a Postgres content-hash reference and unresolved revision status")
         _parse_time(self.published_at)
         _parse_time(self.observed_at)
         if self.updated_at:
@@ -976,25 +1041,52 @@ class AnnouncementEvidence:
 
 
 class AnnouncementIntelligenceEngine:
-    """Accepts evidence from a documented official adapter; no private BAPI scraping."""
+    """Accepts documented official evidence and never invents stable article IDs."""
     def __init__(self, official_source_adapter: Optional[Callable[[], Iterable[AnnouncementEvidence]]] = None):
         self.adapter = official_source_adapter
+        self.revision_correlation_status = "STABLE_PROVIDER_ID"
+        self.revision_warnings: list[dict[str, str]] = []
 
     def fetch(self) -> tuple[list[AnnouncementEvidence], str]:
+        self.revision_warnings = []
+        self.revision_correlation_status = "STABLE_PROVIDER_ID"
         if self.adapter is None:
             return [], "UNAVAILABLE: no verified documented official announcement adapter configured"
         latest_by_source: dict[str, AnnouncementEvidence] = {}
         for item in self.adapter():
             item.validate()
+            if item.source_id_kind == "payload_fingerprint":
+                self.revision_correlation_status = "UNRESOLVED_NO_STABLE_PROVIDER_ID"
+                self.revision_warnings.append({
+                    "source_id": item.source_id,
+                    "content_hash": item.content_hash,
+                    "status": item.revision_correlation_status,
+                    "reason": item.revision_match_reason,
+                })
             previous = latest_by_source.get(item.source_id)
             if previous is None:
                 latest_by_source[item.source_id] = item
+                continue
+            if item.content_hash == previous.content_hash:
+                if _parse_time(item.observed_at) > _parse_time(previous.observed_at):
+                    latest_by_source[item.source_id] = item
+                continue
+            if item.source_id_kind == "payload_fingerprint" or previous.source_id_kind == "payload_fingerprint":
+                # Fingerprints are not provider-stable IDs. Prefer the latest
+                # observed payload for the same fingerprint, but retain the
+                # explicit unresolved-correlation warning for operator review.
+                current_version = _parse_time(item.observed_at)
+                previous_version = _parse_time(previous.observed_at)
+                if current_version > previous_version:
+                    latest_by_source[item.source_id] = item
+                elif current_version == previous_version:
+                    raise ValueError("conflicting CMS fingerprint revisions have identical observed_at")
                 continue
             previous_version = previous.updated_at or previous.published_at
             current_version = item.updated_at or item.published_at
             if _parse_time(current_version) > _parse_time(previous_version):
                 latest_by_source[item.source_id] = item
-            elif _parse_time(current_version) == _parse_time(previous_version) and item.content_hash != previous.content_hash:
+            elif _parse_time(current_version) == _parse_time(previous_version):
                 raise ValueError(f"conflicting announcement revisions for source_id={item.source_id}")
         return sorted(latest_by_source.values(), key=lambda item: (item.published_at, item.source_id)), "AVAILABLE"
 

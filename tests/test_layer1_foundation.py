@@ -1,5 +1,6 @@
 import ast
 import json
+import inspect
 import time
 import os
 import sqlite3
@@ -403,9 +404,104 @@ class Layer1FoundationTests(unittest.TestCase):
         evidence = AnnouncementEvidence(
             "article-1", "https://www.binance.com/en/support/announcement/example",
             "Binance", "listing", "BTC Spot listing", iso(-30), iso(),
-            (self.identity.asset_id,), "sha256:abc"
+            (self.identity.asset_id,), "a" * 64
         )
         evidence.validate()
+
+    def test_runtime_imports_official_announcements_before_objective_filtering(self):
+        source = inspect.getsource(main._run_once_impl)
+        self.assertNotIn("get_trending_announcements()", source)
+        self.assertLess(
+            source.index("_persist_layer1_market_intelligence("),
+            source.index("_passes_objective_filters("),
+        )
+
+    def test_module4_cms_evidence_labels_fingerprints_and_retains_raw_reference(self):
+        evidence = AnnouncementEvidence(
+            "a" * 64, "https://www.binance.com/en/support/announcement", "Binance",
+            "listing", "Binance lists Bitcoin (BTC)", iso(-30), iso(),
+            (self.identity.asset_id,), "b" * 64,
+        )
+        evidence.validate()
+        self.assertEqual(evidence.source_id_kind, "payload_fingerprint")
+        self.assertEqual(evidence.source_url_kind, "official_landing_page")
+        self.assertEqual(evidence.revision_correlation_status, "UNRESOLVED_NO_STABLE_PROVIDER_ID")
+        self.assertEqual(
+            evidence.raw_evidence_ref,
+            "postgres:binance_announcement_events:content_hash:" + ("b" * 64),
+        )
+        self.assertIn("not a stable Binance article ID", evidence.revision_match_reason)
+
+    def test_module4_fingerprint_revisions_choose_latest_observation_and_warn(self):
+        source_id = "a" * 64
+        first = AnnouncementEvidence(
+            source_id, "https://www.binance.com/en/support/announcement", "Binance",
+            "listing", "Binance lists Bitcoin (BTC)", iso(-60), iso(-30),
+            (self.identity.asset_id,), "b" * 64,
+        )
+        latest = AnnouncementEvidence(
+            source_id, "https://www.binance.com/en/support/announcement", "Binance",
+            "listing", "Binance lists Bitcoin (BTC)", iso(-60), iso(),
+            (self.identity.asset_id,), "c" * 64,
+        )
+        engine = AnnouncementIntelligenceEngine(lambda: [first, latest])
+        selected, status = engine.fetch()
+        self.assertEqual(status, "AVAILABLE")
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].content_hash, "c" * 64)
+        self.assertEqual(engine.revision_correlation_status, "UNRESOLVED_NO_STABLE_PROVIDER_ID")
+        self.assertGreaterEqual(len(engine.revision_warnings), 1)
+
+    def test_module4_fingerprint_events_with_different_ids_are_not_merged(self):
+        one = AnnouncementEvidence(
+            "a" * 64, "https://www.binance.com/en/support/announcement", "Binance",
+            "listing", "Binance lists Bitcoin (BTC)", iso(-60), iso(),
+            (self.identity.asset_id,), "b" * 64,
+        )
+        two = AnnouncementEvidence(
+            "c" * 64, "https://www.binance.com/en/support/announcement", "Binance",
+            "listing", "Binance adds BTC Spot trading", iso(-55), iso(),
+            (self.identity.asset_id,), "d" * 64,
+        )
+        selected, _ = AnnouncementIntelligenceEngine(lambda: [one, two]).fetch()
+        self.assertEqual(len(selected), 2)
+        self.assertEqual({item.source_id for item in selected}, {"a" * 64, "c" * 64})
+
+    def test_module4_rejects_publisher_spoofing_on_an_official_binance_host(self):
+        evidence = AnnouncementEvidence(
+            "article-1", "https://www.binance.com/en/support/announcement/article-1",
+            "Impersonator", "listing", "Binance lists Bitcoin (BTC)", iso(-30), iso(),
+            (self.identity.asset_id,), "a" * 64,
+        )
+        with self.assertRaisesRegex(ValueError, "publisher does not match"):
+            evidence.validate()
+
+    def test_module4_announcement_evidence_cannot_bypass_module3_eligibility(self):
+        event = AnnouncementEvidence(
+            "article-1", "https://www.binance.com/en/support/announcement/article-1", "Binance",
+            "listing", "Binance lists Bitcoin (BTC)", iso(-30), iso(),
+            (self.identity.asset_id,), "a" * 64,
+        )
+        market = MarketObservation(self.identity.asset_id, "coingecko_markets", "/markets", iso(), price=65000)
+        ineligible = eligibility_for(self.identity)
+        ineligible = replace(ineligible, status="UNVERIFIED", reason="identity proof missing")
+        candidate = CandidateDiscoveryFilteringEngine().build(
+            self.identity, ineligible, [market], [event], []
+        )
+        self.assertEqual(candidate.state, "REJECTED")
+        self.assertIn("binance_spot_eligibility_unverified", candidate.rejection_reasons)
+
+    def test_module4_fingerprint_without_raw_evidence_reference_is_rejected(self):
+        evidence = AnnouncementEvidence(
+            "a" * 64, "https://www.binance.com/en/support/announcement/article-1", "Binance",
+            "listing", "Binance lists Bitcoin (BTC)", iso(-30), iso(),
+            (self.identity.asset_id,), "b" * 64,
+            source_id_kind="payload_fingerprint", source_url_kind="official_landing_page",
+            revision_correlation_status="UNRESOLVED_NO_STABLE_PROVIDER_ID",
+            revision_match_reason="Provider ID is not stable; manual review required.",
+        )
+        with self.assertRaisesRegex(ValueError, "Postgres content-hash reference"):
+            evidence.validate()
 
     def test_module5_rejects_bad_timestamps_and_deduplicates_same_source_item(self):
         engine = TrendingNarrativeIntelligenceEngine()
@@ -658,7 +754,7 @@ class Layer1FoundationTests(unittest.TestCase):
             self.assertEqual(result["provider_health"]["coingecko_trending"], "AVAILABLE")
             self.assertEqual(
                 result["provider_health"]["binance_announcements"],
-                "UNAVAILABLE_NO_VERIFIED_DOCUMENTED_ADAPTER",
+                "UNAVAILABLE_MISSING_ANNOUNCEMENT_DATABASE_URL",
             )
             conn = sqlite3.connect(self.db)
             try:
@@ -992,17 +1088,17 @@ class Layer1FoundationTests(unittest.TestCase):
         older = AnnouncementEvidence(
             "article-1", "https://www.binance.com/en/support/announcement/example",
             "Binance", "listing", "BTC listing", iso(-120), iso(-120),
-            (self.identity.asset_id,), "hash-old", updated_at=iso(-120)
+            (self.identity.asset_id,), "a" * 64, updated_at=iso(-120)
         )
         newer = AnnouncementEvidence(
             "article-1", "https://www.binance.com/en/support/announcement/example",
             "Binance", "listing", "BTC listing updated", iso(-120), iso(),
-            (self.identity.asset_id,), "hash-new", updated_at=iso()
+            (self.identity.asset_id,), "b" * 64, updated_at=iso()
         )
         results, status = AnnouncementIntelligenceEngine(lambda: [older, newer]).fetch()
         self.assertEqual(status, "AVAILABLE")
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].content_hash, "hash-new")
+        self.assertEqual(results[0].content_hash, "b" * 64)
 
     def test_module5_syndicated_trend_is_not_counted_as_independent_source(self):
         signals = [
@@ -1087,12 +1183,12 @@ class Layer1FoundationTests(unittest.TestCase):
         older = AnnouncementEvidence(
             "revisioned-article", "https://www.binance.com/en/support/announcement/update",
             "Binance", "listing", "Listing notice", iso(-120), iso(-120),
-            (self.identity.asset_id,), "revision-1", updated_at=iso(-120)
+            (self.identity.asset_id,), "c" * 64, updated_at=iso(-120)
         )
         newer = AnnouncementEvidence(
             "revisioned-article", "https://www.binance.com/en/support/announcement/update",
             "Binance", "listing", "Listing notice amended", iso(-120), iso(),
-            (self.identity.asset_id,), "revision-2", updated_at=iso()
+            (self.identity.asset_id,), "d" * 64, updated_at=iso()
         )
         store = Layer1Store(self.db)
         try:
@@ -1106,7 +1202,7 @@ class Layer1FoundationTests(unittest.TestCase):
             latest = store.conn.execute(
                 "SELECT payload_json FROM layer1_announcement_evidence WHERE source_id='revisioned-article'"
             ).fetchone()[0]
-            self.assertIn("revision-2", latest)
+            self.assertIn("d" * 64, latest)
         finally:
             store.close()
 
