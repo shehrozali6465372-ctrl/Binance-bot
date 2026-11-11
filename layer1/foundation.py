@@ -27,6 +27,18 @@ ALLOWED_ANNOUNCEMENT_TYPES = {
 }
 
 
+def _parse_env_bool(name: str, value: Optional[str], default: bool) -> bool:
+    """Parse explicit boolean environment values without silently guessing."""
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be an explicit boolean (true/false)")
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -71,7 +83,7 @@ class AgentConfig:
             eligibility_ttl_seconds=int(environ.get("ELIGIBILITY_TTL_SECONDS", "300")),
             max_candidates=int(environ.get("MAX_CANDIDATES", "50")),
             max_daily_posts=int(environ.get("MAX_DAILY_POSTS", "6")),
-            dry_run=environ.get("DRY_RUN", "1").strip().lower() not in {"0", "false", "no"},
+            dry_run=_parse_env_bool("DRY_RUN", environ.get("DRY_RUN"), True),
             allowed_quote_assets=quotes,
         )
         cfg.validate()
@@ -119,6 +131,29 @@ class RunLease:
             status TEXT NOT NULL, config_hash TEXT NOT NULL, summary_json TEXT
         )""")
         self.run_id: Optional[str] = None
+
+    def inspect_active(self) -> Optional[dict[str, str]]:
+        """Return the current lease and run state without mutating recovery state.
+
+        A RUNNING row may belong to a live process or a process that crashed.
+        This method intentionally does not infer liveness from age and never
+        releases or marks a lease complete.
+        """
+        row = self.conn.execute(
+            "SELECT l.run_id, l.acquired_at, r.started_at, r.status, r.config_hash "
+            "FROM layer1_run_lease AS l "
+            "LEFT JOIN layer1_runs AS r ON r.run_id = l.run_id "
+            "WHERE l.lease_name='agent'"
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "run_id": str(row[0]),
+            "acquired_at": str(row[1]),
+            "started_at": str(row[2] or ""),
+            "status": str(row[3] or "MISSING_RUN_RECORD"),
+            "config_hash": str(row[4] or ""),
+        }
 
     def acquire(self, context: RunContext) -> None:
         self.conn.execute("BEGIN IMMEDIATE")

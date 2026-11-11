@@ -3,6 +3,7 @@ import os
 import hashlib
 import random
 import logging
+import math
 import re
 import sqlite3
 import time
@@ -20,6 +21,18 @@ from pathlib import Path
 from image_engine import ImageComposer, ImageUploader
 
 # Workflow files are deployment configuration and are never self-modified by the agent.
+
+def _parse_env_bool(name: str, value: Optional[str], default: bool) -> bool:
+    """Parse an explicit boolean environment value; reject ambiguous typos."""
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be an explicit boolean (true/false)")
+
 
 @dataclass(frozen=True)
 class Config:
@@ -57,9 +70,9 @@ class Config:
             database_path=os.getenv("DATABASE_PATH", "agent.db"),
             publish_log_path=os.getenv("PUBLISH_LOG_PATH", "published_posts.jsonl"),
             max_iterations=int(os.getenv("MAX_ITERATIONS", "24")),
-            dry_run=os.getenv("DRY_RUN", "1").strip().lower() not in {"0", "false", "no"},
+            dry_run=_parse_env_bool("DRY_RUN", os.getenv("DRY_RUN"), True),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
-            live_market_data=os.getenv("LIVE_MARKET_DATA", "0").strip().lower() in {"1", "true", "yes"},
+            live_market_data=_parse_env_bool("LIVE_MARKET_DATA", os.getenv("LIVE_MARKET_DATA"), False),
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             http_timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "15")),
             gemini_temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.9")),
@@ -72,30 +85,54 @@ class Config:
             min_candidates=int(os.getenv("MIN_CANDIDATES", "3")),
             repetition_hard_hours=int(os.getenv("REPETITION_HARD_HOURS", "12")),
             repetition_soft_hours=int(os.getenv("REPETITION_SOFT_HOURS", "24")),
-            save_research_packages=os.getenv("SAVE_RESEARCH_PACKAGES", "1").strip().lower() in {"1", "true", "yes"},
+            save_research_packages=_parse_env_bool("SAVE_RESEARCH_PACKAGES", os.getenv("SAVE_RESEARCH_PACKAGES"), True),
             max_daily_posts=int(os.getenv("MAX_DAILY_POSTS", "8")),
             min_cap_for_safety=int(os.getenv("MIN_CAP_FOR_SAFETY", "500000")),
         )
 
     def validate(self) -> None:
-        if self.post_interval < 0:
-            raise ValueError("POST_INTERVAL must be >= 0")
-        if self.max_iterations < 0:
-            raise ValueError("MAX_ITERATIONS must be >= 0")
-        if self.http_timeout_seconds <= 0:
-            raise ValueError("HTTP_TIMEOUT_SECONDS must be > 0")
-        if not (0.0 < self.gemini_temperature <= 2.0):
-            raise ValueError("GEMINI_TEMPERATURE must be between 0 and 2")
-        if not (0.0 < self.gemini_top_p <= 1.0):
-            raise ValueError("GEMINI_TOP_P must be between 0 and 1")
-        if self.gemini_max_output_tokens <= 0:
-            raise ValueError("GEMINI_MAX_OUTPUT_TOKENS must be > 0")
-        if self.min_word_count < 30:
-            raise ValueError("MIN_WORD_COUNT must be >= 30")
-        if self.min_hashtags < 2:
-            raise ValueError("MIN_HASHTAGS must be >= 2")
-        if self.min_candidates < 2:
-            raise ValueError("MIN_CANDIDATES must be >= 2")
+        for name in ("database_path", "publish_log_path"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name.upper()} must be a non-empty path")
+        integer_limits = {
+            "post_interval": (0, None),
+            "max_iterations": (0, None),
+            "http_timeout_seconds": (1, None),
+            "gemini_max_output_tokens": (1, None),
+            "min_word_count": (30, None),
+            "min_hashtags": (2, None),
+            "min_candidates": (2, None),
+            "repetition_hard_hours": (1, None),
+            "repetition_soft_hours": (1, None),
+            "max_daily_posts": (1, None),
+            "min_cap_for_safety": (1, None),
+        }
+        for name, (minimum, maximum) in integer_limits.items():
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"{name.upper()} must be an integer >= {minimum}")
+            if maximum is not None and value > maximum:
+                raise ValueError(f"{name.upper()} must be <= {maximum}")
+        if self.repetition_soft_hours < self.repetition_hard_hours:
+            raise ValueError("REPETITION_SOFT_HOURS must be >= REPETITION_HARD_HOURS")
+        if not isinstance(self.log_level, str) or self.log_level.upper() not in {
+            "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+        }:
+            raise ValueError("LOG_LEVEL must be a supported logging level")
+        if not isinstance(self.dry_run, bool) or not isinstance(self.live_market_data, bool):
+            raise ValueError("DRY_RUN and LIVE_MARKET_DATA must be booleans")
+        if not isinstance(self.gemini_model, str) or not self.gemini_model.strip():
+            raise ValueError("GEMINI_MODEL must be non-empty")
+        if not self.dry_run:
+            if not isinstance(self.gemini_api_key, str) or not self.gemini_api_key.strip():
+                raise ValueError("GEMINI_API_KEY is required when DRY_RUN is disabled")
+            if not isinstance(self.square_api_key, str) or not self.square_api_key.strip():
+                raise ValueError("SQUARE_API_KEY is required when DRY_RUN is disabled")
+        if not isinstance(self.gemini_temperature, (int, float)) or isinstance(self.gemini_temperature, bool) or not math.isfinite(self.gemini_temperature) or not (0.0 < self.gemini_temperature <= 2.0):
+            raise ValueError("GEMINI_TEMPERATURE must be finite and between 0 and 2")
+        if not isinstance(self.gemini_top_p, (int, float)) or isinstance(self.gemini_top_p, bool) or not math.isfinite(self.gemini_top_p) or not (0.0 < self.gemini_top_p <= 1.0):
+            raise ValueError("GEMINI_TOP_P must be finite and between 0 and 1")
 
 
 CONFIG = Config.from_env()
@@ -105,6 +142,15 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("agent")
+
+
+def _log_iteration_failure(iteration: int, exc: Exception) -> None:
+    """Log operational failure metadata without exposing untrusted exception text."""
+    LOGGER.error(
+        "Iteration %s failed (%s); exception details redacted",
+        iteration,
+        type(exc).__name__,
+    )
 
 
 def utc_now() -> str:
@@ -4328,6 +4374,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     context = ConfigurationOrchestrator(layer_config).create_context(safe_runtime_config)
     lease = RunLease(config.database_path)
     status = "FAILED"
+    execution_failed = False
     _LAYER1_LAST_SUMMARY = {}
     summary = {"run_id": context.run_id, "layer1_version": "1.1.0"}
     try:
@@ -4343,14 +4390,46 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         if _LAYER1_LAST_SUMMARY:
             summary["layer1"] = dict(_LAYER1_LAST_SUMMARY)
         return outcome
+    except KeyboardInterrupt:
+        execution_failed = True
+        status = "INTERRUPTED"
+        summary["error_type"] = "KeyboardInterrupt"
+        summary["error"] = "run interrupted by operator; details are not persisted"
+        raise
     except Exception as exc:
+        execution_failed = True
         summary["error_type"] = type(exc).__name__
-        summary["error"] = str(exc)[:500]
+        # Exception text is untrusted: HTTP clients and SDKs can include
+        # credentials, signed URLs, request headers, or response bodies.
+        # Persist only the error class, never the raw message.
+        summary["error"] = "runtime execution failed; inspect secured runtime logs"
+        raise
+    except BaseException as exc:
+        # Preserve process-level exits (for example SystemExit/GeneratorExit)
+        # if ledger finalization also fails during shutdown.
+        execution_failed = True
+        status = "INTERRUPTED"
+        summary["error_type"] = type(exc).__name__
+        summary["error"] = "run terminated before normal completion"
         raise
     finally:
         try:
             if lease.run_id:
-                lease.finish(status, summary)
+                try:
+                    lease.finish(status, summary)
+                except Exception as finalize_exc:
+                    # Do not replace the primary runtime exception with a
+                    # secondary bookkeeping failure. If execution succeeded,
+                    # surface the bookkeeping failure to the caller. Never
+                    # log exception text or chained tracebacks: SDK/database
+                    # errors can contain credentials or signed request data.
+                    if not execution_failed:
+                        raise
+                    LOGGER.error(
+                        "Unable to finalize Layer 1 run lease (%s); "
+                        "lease remains for operator recovery",
+                        type(finalize_exc).__name__,
+                    )
         finally:
             lease.close()
 
@@ -4403,9 +4482,7 @@ def main_loop() -> None:
         try:
             run_once(config, scanner, announcement_engine, research, generator, publisher, posted_symbols, hot_search_engine)
         except Exception as e:
-            LOGGER.error("Iteration %d failed: %s", iteration, e)
-            import traceback
-            LOGGER.error(traceback.format_exc())
+            _log_iteration_failure(iteration, e)
         
         if 0 < max_iter <= iteration:
             LOGGER.info("Reached max_iterations=%d, stopping.", max_iter)
@@ -4435,7 +4512,11 @@ def main() -> None:
     publisher.db = publisher_db
     
     posted_symbols = publisher_db.get_posted_symbols(hours=48)
-    run_once(config, scanner, announcement_engine, research, generator, publisher, posted_symbols)
+    try:
+        run_once(config, scanner, announcement_engine, research, generator, publisher, posted_symbols)
+    except Exception as exc:
+        _log_iteration_failure(1, exc)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

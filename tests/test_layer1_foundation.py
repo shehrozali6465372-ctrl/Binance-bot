@@ -57,6 +57,33 @@ class Layer1FoundationTests(unittest.TestCase):
         self.assertTrue(context.run_id)
         self.assertEqual(len(context.config_hash), 64)
 
+    def test_module1_live_mode_requires_generation_and_publisher_credentials(self):
+        with self.assertRaisesRegex(ValueError, "GEMINI_API_KEY"):
+            replace(main.CONFIG, dry_run=False, gemini_api_key="", square_api_key="configured").validate()
+        with self.assertRaisesRegex(ValueError, "SQUARE_API_KEY"):
+            replace(main.CONFIG, dry_run=False, gemini_api_key="configured", square_api_key="").validate()
+        replace(main.CONFIG, dry_run=True, gemini_api_key="", square_api_key="").validate()
+
+    def test_module1_boolean_environment_values_are_strict(self):
+        self.assertTrue(main._parse_env_bool("DRY_RUN", "true", default=False))
+        self.assertFalse(main._parse_env_bool("DRY_RUN", "0", default=True))
+        with self.assertRaisesRegex(ValueError, "DRY_RUN"):
+            main._parse_env_bool("DRY_RUN", "sometimes", default=True)
+        with self.assertRaisesRegex(ValueError, "DRY_RUN"):
+            AgentConfig.from_env({"DRY_RUN": "sometimes"})
+
+    def test_module1_application_config_rejects_invalid_operational_limits(self):
+        for changes in (
+            {"max_daily_posts": 0},
+            {"database_path": ""},
+            {"publish_log_path": ""},
+            {"min_cap_for_safety": 0},
+            {"repetition_soft_hours": 1, "repetition_hard_hours": 2},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    replace(main.CONFIG, **changes).validate()
+
     def test_module1_persistent_lease_blocks_overlapping_run_and_releases(self):
         cfg = AgentConfig(database_path=self.db)
         context = ConfigurationOrchestrator(cfg).create_context()
@@ -201,6 +228,38 @@ class Layer1FoundationTests(unittest.TestCase):
         with patch("main.urllib.request.urlopen", return_value=FakeHTTPResponse(stale)):
             self.assertEqual(main._get_binance_listed(), set())
 
+    def test_module1_iteration_failure_logs_redact_untrusted_exception_text(self):
+        secret = "provider-token-super-secret"
+        with self.assertLogs("agent", level="ERROR") as captured:
+            main._log_iteration_failure(3, RuntimeError(f"request failed with {secret}"))
+        output = "\n".join(captured.output)
+        self.assertIn("RuntimeError", output)
+        self.assertIn("redacted", output.lower())
+        self.assertNotIn(secret, output)
+
+    def test_run_once_rejects_invalid_config_before_database_or_candidate_processing(self):
+        cfg = replace(main.CONFIG, database_path=self.db, max_daily_posts=0, dry_run=True)
+        with patch("main._run_once_impl") as runtime:
+            with self.assertRaisesRegex(ValueError, "MAX_DAILY_POSTS"):
+                main.run_once(cfg, None, None, None, None, None, set())
+            runtime.assert_not_called()
+        self.assertFalse(os.path.exists(self.db))
+
+    def test_run_once_blocks_execution_when_another_process_holds_lease(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
+        active = RunLease(self.db)
+        active_context = ConfigurationOrchestrator(AgentConfig(database_path=self.db)).create_context()
+        try:
+            active.acquire(active_context)
+            with patch("main._run_once_impl") as runtime:
+                with self.assertRaisesRegex(RuntimeError, "lease already held"):
+                    main.run_once(cfg, None, None, None, None, None, set())
+                runtime.assert_not_called()
+            self.assertEqual(active.inspect_active()["run_id"], active_context.run_id)
+        finally:
+            active.finish("INTERRUPTED", {"reason": "test cleanup"})
+            active.close()
+
     def test_run_once_integrates_layer1_run_lease(self):
         cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
         previous_summary = main._LAYER1_LAST_SUMMARY
@@ -229,6 +288,89 @@ class Layer1FoundationTests(unittest.TestCase):
         finally:
             main._LAYER1_LAST_SUMMARY = previous_summary
             conn.close()
+    def test_run_once_redacts_credentials_from_persisted_failure_summary(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
+        secret = "sk-live-super-secret-value"
+        with patch("main._run_once_impl", side_effect=RuntimeError(f"provider rejected key {secret}")):
+            with self.assertRaisesRegex(RuntimeError, "provider rejected"):
+                main.run_once(cfg, None, None, None, None, None, set())
+        conn = sqlite3.connect(self.db)
+        try:
+            summary_json = conn.execute(
+                "SELECT summary_json FROM layer1_runs WHERE status='FAILED'"
+            ).fetchone()[0]
+            self.assertNotIn(secret, summary_json)
+            self.assertIn("inspect secured runtime logs", summary_json)
+        finally:
+            conn.close()
+
+    def test_run_once_surfaces_lease_finalization_failure_after_successful_runtime(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
+        with patch("main._run_once_impl", return_value=True), \
+             patch("layer1.foundation.RunLease.finish", side_effect=OSError("database finalize failure")):
+            with self.assertRaisesRegex(OSError, "database finalize failure"):
+                main.run_once(cfg, None, None, None, None, None, set())
+        conn = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(conn.execute("SELECT status FROM layer1_runs").fetchone()[0], "RUNNING")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_run_lease").fetchone()[0], 1)
+            # Simulate explicit operator recovery for test isolation only.
+            conn.execute("DELETE FROM layer1_run_lease")
+            conn.execute("UPDATE layer1_runs SET status='INTERRUPTED', finished_at=?", (iso(),))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_run_once_preserves_primary_error_if_lease_finalization_also_fails(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
+        with patch("main._run_once_impl", side_effect=RuntimeError("primary runtime failure")), \
+             patch("layer1.foundation.RunLease.finish", side_effect=OSError("database finalize failure")):
+            with self.assertRaisesRegex(RuntimeError, "primary runtime failure"):
+                main.run_once(cfg, None, None, None, None, None, set())
+
+    def test_run_once_redacts_primary_and_finalization_errors_from_logs(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
+        primary_secret = "primary-provider-secret"
+        database_secret = "database-connection-secret"
+        with patch("main._run_once_impl", side_effect=RuntimeError(primary_secret)), \
+             patch("layer1.foundation.RunLease.finish", side_effect=OSError(database_secret)):
+            with self.assertLogs("agent", level="ERROR") as captured:
+                with self.assertRaisesRegex(RuntimeError, primary_secret):
+                    main.run_once(cfg, None, None, None, None, None, set())
+        output = "\n".join(captured.output)
+        self.assertIn("finalize", output.lower())
+        self.assertNotIn(primary_secret, output)
+        self.assertNotIn(database_secret, output)
+
+    def test_run_once_preserves_process_exit_if_lease_finalization_also_fails(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
+        with patch("main._run_once_impl", side_effect=SystemExit(2)), \
+             patch("layer1.foundation.RunLease.finish", side_effect=OSError("database finalize failure")):
+            with self.assertRaises(SystemExit) as raised:
+                main.run_once(cfg, None, None, None, None, None, set())
+        self.assertEqual(raised.exception.code, 2)
+        conn = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(conn.execute("SELECT status FROM layer1_runs").fetchone()[0], "RUNNING")
+            conn.execute("DELETE FROM layer1_run_lease")
+            conn.execute("UPDATE layer1_runs SET status='INTERRUPTED', finished_at=?", (iso(),))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_run_once_records_keyboard_interrupt_as_interrupted(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
+        with patch("main._run_once_impl", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                main.run_once(cfg, None, None, None, None, None, set())
+        conn = sqlite3.connect(self.db)
+        try:
+            status = conn.execute("SELECT status FROM layer1_runs").fetchone()[0]
+            self.assertEqual(status, "INTERRUPTED")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_run_lease").fetchone()[0], 0)
+        finally:
+            conn.close()
+
     def test_legacy_candidate_filter_requires_canonical_asset_identity(self):
         with patch("main._get_binance_listed", return_value={"BTC"}):
             accepted = main._passes_objective_filters(
@@ -359,6 +501,38 @@ class Layer1FoundationTests(unittest.TestCase):
         self.assertNotEqual(base.config_hash, changed.config_hash)
         with self.assertRaises(ValueError):
             orchestrator.create_context({"unsafe": float("nan")})
+
+    def test_run_lease_inspection_reports_orphaned_running_record_without_releasing_it(self):
+        cfg = AgentConfig(database_path=self.db)
+        context = ConfigurationOrchestrator(cfg).create_context()
+        lease = RunLease(self.db)
+        try:
+            lease.acquire(context)
+            # Simulate a process crash: close the connection without finish().
+            lease.close()
+            inspector = RunLease(self.db)
+            try:
+                active = inspector.inspect_active()
+                self.assertEqual(active["run_id"], context.run_id)
+                self.assertEqual(active["status"], "RUNNING")
+                self.assertEqual(active["acquired_at"], context.started_at)
+                self.assertEqual(
+                    inspector.conn.execute("SELECT COUNT(*) FROM layer1_run_lease").fetchone()[0], 1
+                )
+                with self.assertRaisesRegex(RuntimeError, "lease already held"):
+                    inspector.acquire(ConfigurationOrchestrator(cfg).create_context())
+            finally:
+                inspector.close()
+        finally:
+            # Test cleanup only; production code must not silently steal this lease.
+            conn = sqlite3.connect(self.db)
+            try:
+                conn.execute("DELETE FROM layer1_run_lease WHERE lease_name='agent'")
+                conn.execute("UPDATE layer1_runs SET status='INTERRUPTED', finished_at=? WHERE run_id=?",
+                             (iso(), context.run_id))
+                conn.commit()
+            finally:
+                conn.close()
 
     def test_run_lease_does_not_release_when_finish_status_is_invalid(self):
         cfg = AgentConfig(database_path=self.db)
