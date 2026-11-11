@@ -1039,6 +1039,22 @@ class AnnouncementEvidence:
         if self.event_at:
             _parse_time(self.event_at, allow_future=True)
 
+    def canonical_event_id(self, asset_id: str) -> str:
+        """Local asset/event grouping key; never a provider-issued event ID."""
+        self.validate()
+        if not isinstance(asset_id, str) or asset_id not in self.asset_ids:
+            raise ValueError("canonical event ID requires an asset linked by this evidence")
+        title_key = " ".join(re.findall(r"[a-z0-9]+", self.title.casefold()))
+        if not title_key:
+            raise ValueError("announcement title has no canonical event tokens")
+        event_time = self.event_at or self.published_at
+        event_day = _parse_time(event_time).astimezone(timezone.utc).date().isoformat()
+        event_type = {"new_listing": "listing"}.get(self.event_type, self.event_type)
+        payload = {"asset_id": asset_id, "event_type": event_type,
+                   "title_key": title_key, "event_day": event_day}
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
 
 class AnnouncementIntelligenceEngine:
     """Accepts documented official evidence and never invents stable article IDs."""
@@ -1109,42 +1125,138 @@ class TrendSignal:
             isinstance(self.rank, bool) or not isinstance(self.rank, int) or self.rank <= 0
         ):
             raise ValueError("trend rank must be a positive integer")
-        if not isinstance(self.asset_ids, tuple) or any(not isinstance(item, str) or not item for item in self.asset_ids):
-            raise ValueError("trend asset identities must be canonical non-empty IDs")
-        if self.content_hash and not isinstance(self.content_hash, str):
-            raise ValueError("trend content_hash must be a string")
+        if not isinstance(self.asset_ids, tuple) or not self.asset_ids or any(
+            not isinstance(item, str) or not item.startswith("coingecko:") for item in self.asset_ids
+        ) or len(set(self.asset_ids)) != len(self.asset_ids):
+            raise ValueError("trend asset identities must be unique canonical CoinGecko IDs")
+        if not isinstance(self.source_item_id, str) or (self.source_item_id and not self.source_item_id.strip()):
+            raise ValueError("trend source_item_id must be a non-empty string when supplied")
+        if not self.source_item_id and not self.content_hash:
+            raise ValueError("trend signal requires a provider item ID or content hash")
+        if self.content_hash and (
+            not isinstance(self.content_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", self.content_hash)
+        ):
+            raise ValueError("trend content_hash must be a lowercase SHA-256 hex digest")
+
+
+@dataclass(frozen=True)
+class TrendCluster:
+    cluster_id: str
+    topic_key: str
+    asset_ids: tuple[str, ...]
+    source_count: int
+    independent_source_count: int
+    signal_count: int
+    observed_at: str
+    source_refs: tuple[str, ...]
+    confidence_limit: str = "ATTENTION_ONLY_NOT_EVENT_PROOF"
+
+    def validate(self) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}", self.cluster_id or ""):
+            raise ValueError("trend cluster ID must be a SHA-256 hex digest")
+        if not isinstance(self.topic_key, str) or not self.topic_key.strip():
+            raise ValueError("trend cluster topic key is required")
+        if not isinstance(self.asset_ids, tuple) or not self.asset_ids or any(
+            not isinstance(asset_id, str) or not asset_id.startswith("coingecko:")
+            for asset_id in self.asset_ids
+        ):
+            raise ValueError("trend cluster asset IDs must be canonical CoinGecko IDs")
+        counts = (self.source_count, self.independent_source_count, self.signal_count)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in counts):
+            raise ValueError("trend cluster counts must be positive integers")
+        if self.source_count > self.signal_count or self.independent_source_count > self.signal_count:
+            raise ValueError("trend cluster counts cannot exceed signal_count")
+        _parse_time(self.observed_at)
+        if not isinstance(self.source_refs, tuple) or not self.source_refs or any(
+            not isinstance(ref, str) or not ref for ref in self.source_refs
+        ):
+            raise ValueError("trend cluster source references are required")
+        if self.confidence_limit != "ATTENTION_ONLY_NOT_EVENT_PROOF":
+            raise ValueError("trend cluster confidence limit must preserve attention-only semantics")
 
 
 class TrendingNarrativeIntelligenceEngine:
-    """Only accepts sourced observations; preserves independent-source provenance."""
+    """Normalize and cluster sourced attention signals without merging assets."""
+    @staticmethod
+    def normalize_topic(topic: str) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", topic.casefold()))
+
     def normalize(self, signals: Iterable[TrendSignal]) -> list[TrendSignal]:
-        selected: dict[tuple[str, str, str], TrendSignal] = {}
+        selected: dict[tuple[str, str, str, tuple[str, ...]], TrendSignal] = {}
         for signal in signals:
             signal.validate()
-            key = (signal.topic.casefold(), signal.source.casefold(), signal.source_item_id)
+            topic_key = self.normalize_topic(signal.topic)
+            if not topic_key:
+                raise ValueError("trend topic must contain alphanumeric tokens")
+            item_key = signal.source_item_id or signal.content_hash
+            asset_key = tuple(sorted(signal.asset_ids))
+            key = (topic_key, signal.source.casefold(), item_key, asset_key)
             previous = selected.get(key)
             if previous is None:
                 selected[key] = signal
                 continue
-            # For repeated observations of one provider item, keep its newest
-            # version; rank is only a deterministic tie-breaker, not event proof.
             current_time = _parse_time(signal.observed_at)
             previous_time = _parse_time(previous.observed_at)
             if current_time > previous_time or (
                 current_time == previous_time and (signal.rank or 10**9) < (previous.rank or 10**9)
             ):
                 selected[key] = signal
-        return sorted(selected.values(), key=lambda s: (s.rank or 10**9, s.topic.casefold(), s.source.casefold()))
+        return sorted(
+            selected.values(),
+            key=lambda signal: (signal.rank or 10**9, self.normalize_topic(signal.topic),
+                                tuple(sorted(signal.asset_ids)), signal.source.casefold()),
+        )
 
     @staticmethod
     def independent_source_count(signals: Iterable[TrendSignal]) -> int:
-        """Count independent source/content pairs, not copied syndication."""
+        """Count distinct verified content hashes; unknown copies are one conservative group."""
         groups = set()
         for signal in signals:
             signal.validate()
-            fingerprint = signal.content_hash or f"{signal.source.casefold()}:{signal.source_item_id}"
+            fingerprint = signal.content_hash or (
+                "unknown:" + TrendingNarrativeIntelligenceEngine.normalize_topic(signal.topic)
+                + ":" + ",".join(sorted(signal.asset_ids))
+            )
             groups.add(fingerprint)
         return len(groups)
+
+    def cluster(self, signals: Iterable[TrendSignal]) -> list[TrendCluster]:
+        groups: dict[tuple[str, tuple[str, ...]], list[TrendSignal]] = {}
+        for signal in self.normalize(signals):
+            topic_key = self.normalize_topic(signal.topic)
+            if not topic_key:
+                raise ValueError("trend topic must contain alphanumeric tokens")
+            key = (topic_key, tuple(sorted(signal.asset_ids)))
+            groups.setdefault(key, []).append(signal)
+        clusters = []
+        for (topic_key, asset_ids), items in groups.items():
+            source_refs = tuple(sorted({
+                f"{item.source}:{item.source_item_id}:{item.content_hash}" for item in items
+            }))
+            independent_content = sorted({
+                item.content_hash or (
+                    "unknown:" + topic_key + ":" + ",".join(asset_ids)
+                ) for item in items
+            })
+            fingerprint = json.dumps(
+                {"topic_key": topic_key, "asset_ids": asset_ids,
+                 "independent_content": independent_content},
+                sort_keys=True, separators=(",", ":"),
+            )
+            cluster = TrendCluster(
+                cluster_id=hashlib.sha256(fingerprint.encode("utf-8")).hexdigest(),
+                topic_key=topic_key,
+                asset_ids=asset_ids,
+                source_count=len({item.source.casefold() for item in items}),
+                independent_source_count=self.independent_source_count(items),
+                signal_count=len(items),
+                observed_at=max(items, key=lambda item: _parse_time(item.observed_at)).observed_at,
+                source_refs=source_refs,
+            )
+            cluster.validate()
+            clusters.append(cluster)
+        return sorted(clusters, key=lambda cluster: (cluster.topic_key, cluster.asset_ids))
 
 
 @dataclass(frozen=True)
@@ -1157,6 +1269,8 @@ class Candidate:
     trend_signal_ids: tuple[str, ...]
     state: str
     rejection_reasons: tuple[str, ...] = ()
+    trend_cluster_ids: tuple[str, ...] = ()
+    event_cluster_ids: tuple[str, ...] = ()
 
 
 class CandidateDiscoveryFilteringEngine:
@@ -1229,28 +1343,39 @@ class CandidateDiscoveryFilteringEngine:
         if not matching_markets and not matching_events and not matching_trends:
             reasons.append("no_source_backed_discovery_signal")
 
-        # Candidate identity is stable across repeated scans but changes when an
-        # event's content/revision or a meaningful trend item changes.
-        event_refs = sorted(
-            f"{e.source_id}:{e.content_hash}:{e.updated_at or e.published_at}"
-            for e in matching_events
-        )
-        market_refs = sorted(set(f"{m.provider}:{m.endpoint}:{m.currency}" for m in matching_markets))
+        # Event source IDs are retained as provenance, but do not define candidate
+        # identity: multiple providers may report the same asset/event.
+        event_source_refs = tuple(sorted({event.source_id for event in matching_events}))
+        event_cluster_ids = tuple(sorted({
+            event.canonical_event_id(identity.asset_id) for event in matching_events
+        }))
+        market_refs = sorted(set(m.data_hash or m.endpoint for m in matching_markets))
         trend_refs = sorted(set(
             f"{t.topic.casefold()}:{t.source.casefold()}:{t.source_item_id}:{t.content_hash}"
             for t in matching_trends
         ))
+        trend_clusters = TrendingNarrativeIntelligenceEngine().cluster(matching_trends)
+        trend_cluster_ids = tuple(sorted(cluster.cluster_id for cluster in trend_clusters))
+        # Candidate identity is asset + material event. For candidates without an
+        # event, use trend clusters; market snapshots are the final fallback.
+        # Additional corroborating providers update evidence on the same candidate.
+        if event_cluster_ids:
+            identity_basis = {"event_clusters": event_cluster_ids}
+        elif trend_cluster_ids:
+            identity_basis = {"trend_clusters": trend_cluster_ids}
+        else:
+            identity_basis = {"market_refs": market_refs}
         fingerprint = json.dumps(
-            {"asset_id": identity.asset_id, "eligible_pairs": list(eligibility.eligible_pairs),
-             "events": event_refs, "markets": market_refs, "trends": trend_refs},
+            {"asset_id": identity.asset_id, **identity_basis},
             sort_keys=True, separators=(",", ":"),
         )
-        cid = hashlib.sha256(fingerprint.encode()).hexdigest()
-        return Candidate(cid, identity.asset_id, tuple(sorted(e.source_id for e in matching_events)),
-                         eligibility, tuple(sorted(m.data_hash or m.endpoint for m in matching_markets)),
-                         tuple(sorted(f"{t.source}:{t.source_item_id or t.topic}" for t in matching_trends)),
+        cid = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+        return Candidate(cid, identity.asset_id, event_source_refs, eligibility,
+                         tuple(sorted(m.data_hash or m.endpoint for m in matching_markets)),
+                         tuple(sorted(f"{t.source}:{t.source_item_id or t.topic}:{t.content_hash}" for t in matching_trends)),
                          "READY_FOR_RESEARCH" if not reasons else "REJECTED",
-                         tuple(sorted(set(reasons))))
+                         tuple(sorted(set(reasons))), trend_cluster_ids, event_cluster_ids)
+
 
 
 @dataclass(frozen=True)
@@ -1294,6 +1419,12 @@ class Layer1Store:
         CREATE TABLE IF NOT EXISTS layer1_trend_signals (
             signal_key TEXT PRIMARY KEY, topic TEXT NOT NULL, source TEXT NOT NULL,
             observed_at TEXT NOT NULL, payload_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS layer1_trend_clusters (
+            cluster_id TEXT PRIMARY KEY, topic_key TEXT NOT NULL, asset_ids_json TEXT NOT NULL,
+            source_count INTEGER NOT NULL, independent_source_count INTEGER NOT NULL,
+            signal_count INTEGER NOT NULL, observed_at TEXT NOT NULL,
+            source_refs_json TEXT NOT NULL, confidence_limit TEXT NOT NULL, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS layer1_candidates (
             candidate_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL,
@@ -1396,11 +1527,25 @@ class Layer1Store:
         )
         self.conn.commit()
 
+    def save_trend_cluster(self, cluster: TrendCluster) -> None:
+        cluster.validate()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO layer1_trend_clusters VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (cluster.cluster_id, cluster.topic_key,
+             json.dumps(list(cluster.asset_ids), separators=(",", ":")),
+             cluster.source_count, cluster.independent_source_count, cluster.signal_count,
+             cluster.observed_at, json.dumps(list(cluster.source_refs), separators=(",", ":")),
+             cluster.confidence_limit, utc_now()),
+        )
+        self.conn.commit()
+
     def save_candidate(self, candidate: Candidate) -> None:
         evidence = {
             "events": list(candidate.event_ids),
+            "event_clusters": list(candidate.event_cluster_ids),
             "markets": list(candidate.market_observation_ids),
             "trends": list(candidate.trend_signal_ids),
+            "trend_clusters": list(candidate.trend_cluster_ids),
             "eligibility": candidate.eligibility.__dict__,
         }
         self.conn.execute(
