@@ -511,6 +511,196 @@ class Layer1FoundationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             engine.normalize([TrendSignal("BTC", "source", "not-a-time")])
 
+    def test_module5_clusters_normalized_topics_per_asset_and_counts_independent_content(self):
+        signals = [
+            TrendSignal("BTC_SURGE", "provider_a", iso(), 1, (self.identity.asset_id,), "article-a", "a" * 64),
+            TrendSignal("btc surge", "provider_b", iso(), 2, (self.identity.asset_id,), "article-b", "a" * 64),
+            TrendSignal("BTC_SURGE", "provider_c", iso(), 3, (self.identity.asset_id,), "article-c", "b" * 64),
+            TrendSignal("BTC_SURGE", "provider_a", iso(-30), 4, (self.identity.asset_id,), "article-a", "a" * 64),
+        ]
+        engine = TrendingNarrativeIntelligenceEngine()
+        normalized = engine.normalize(signals)
+        self.assertEqual(len(normalized), 3)
+        clusters = engine.cluster(normalized)
+        self.assertEqual(len(clusters), 1)
+        cluster = clusters[0]
+        self.assertEqual(cluster.topic_key, "btc surge")
+        self.assertEqual(cluster.asset_ids, (self.identity.asset_id,))
+        self.assertEqual(cluster.source_count, 3)
+        self.assertEqual(cluster.independent_source_count, 2)
+        self.assertEqual(cluster.signal_count, 3)
+        self.assertEqual(cluster.confidence_limit, "ATTENTION_ONLY_NOT_EVENT_PROOF")
+
+    def test_module5_does_not_merge_same_topic_across_different_assets(self):
+        signals = [
+            TrendSignal("BTC", "provider_a", iso(), 1, ("coingecko:bitcoin",), "item-1", "a" * 64),
+            TrendSignal("btc", "provider_a", iso(), 1, ("coingecko:wrapped-bitcoin",), "item-1", "a" * 64),
+        ]
+        engine = TrendingNarrativeIntelligenceEngine()
+        normalized = engine.normalize(signals)
+        clusters = engine.cluster(normalized)
+        self.assertEqual(len(normalized), 2)
+        self.assertEqual(len(clusters), 2)
+        self.assertEqual({cluster.asset_ids[0] for cluster in clusters},
+                         {"coingecko:bitcoin", "coingecko:wrapped-bitcoin"})
+
+    def test_module5_rejects_trend_signals_without_canonical_asset_or_provenance(self):
+        with self.assertRaisesRegex(ValueError, "canonical CoinGecko IDs"):
+            TrendSignal("BTC", "provider", iso(), 1, ("BTC",), "item-1", "a" * 64).validate()
+        with self.assertRaisesRegex(ValueError, "provider item ID or content hash"):
+            TrendSignal("BTC", "provider", iso(), 1, (self.identity.asset_id,), "", "").validate()
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            TrendSignal("BTC", "provider", iso(), 1, (self.identity.asset_id,), "item-1", "not-a-hash").validate()
+
+    def test_module5_rejects_topic_with_no_normalizable_tokens(self):
+        signal = TrendSignal("!!!", "provider", iso(), 1, (self.identity.asset_id,), "item-1", "a" * 64)
+        with self.assertRaisesRegex(ValueError, "alphanumeric tokens"):
+            TrendingNarrativeIntelligenceEngine().cluster([signal])
+
+    def test_module5_missing_content_hash_does_not_claim_independent_corroboration(self):
+        signals = [
+            TrendSignal("BTC", "provider_a", iso(), 1, (self.identity.asset_id,), "item-a", ""),
+            TrendSignal("btc", "provider_b", iso(), 2, (self.identity.asset_id,), "item-b", ""),
+        ]
+        cluster = TrendingNarrativeIntelligenceEngine().cluster(signals)[0]
+        self.assertEqual(cluster.source_count, 2)
+        self.assertEqual(cluster.independent_source_count, 1)
+
+    def test_module5_cluster_persistence_and_candidate_reference(self):
+        signals = [
+            TrendSignal("BTC", "provider_a", iso(), 1, (self.identity.asset_id,), "item-a", "a" * 64),
+            TrendSignal("BTC", "provider_b", iso(), 2, (self.identity.asset_id,), "item-b", "b" * 64),
+        ]
+        engine = TrendingNarrativeIntelligenceEngine()
+        clusters = engine.cluster(signals)
+        candidate = CandidateDiscoveryFilteringEngine().build(
+            self.identity, eligibility_for(self.identity), [], [], signals
+        )
+        self.assertEqual(candidate.state, "READY_FOR_RESEARCH")
+        self.assertEqual(candidate.trend_cluster_ids, (clusters[0].cluster_id,))
+        store = Layer1Store(self.db)
+        try:
+            store.save_trend_cluster(clusters[0])
+            store.save_candidate(candidate)
+            row = store.conn.execute(
+                "SELECT source_count, independent_source_count, signal_count, confidence_limit "
+                "FROM layer1_trend_clusters WHERE cluster_id=?", (clusters[0].cluster_id,)
+            ).fetchone()
+            self.assertEqual(row, (2, 2, 2, "ATTENTION_ONLY_NOT_EVENT_PROOF"))
+            payload = json.loads(store.conn.execute(
+                "SELECT evidence_refs_json FROM layer1_candidates WHERE candidate_id=?",
+                (candidate.candidate_id,),
+            ).fetchone()[0])
+            self.assertEqual(payload["trend_clusters"], [clusters[0].cluster_id])
+        finally:
+            store.close()
+
+    def test_module6_same_asset_event_from_multiple_sources_is_one_candidate(self):
+        eligibility = eligibility_for(self.identity)
+        market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
+        first = AnnouncementEvidence(
+            "source-article-1", "https://www.binance.com/en/support/announcement/article-1",
+            "Binance", "listing", "Binance lists BTC/USDT Spot trading", iso(-3600), iso(),
+            (self.identity.asset_id,), "a" * 64,
+        )
+        second = AnnouncementEvidence(
+            "source-article-2", "https://www.binance.com/en/support/announcement/article-2",
+            "Binance", "listing", "Binance lists BTC/USDT Spot trading", iso(-3590), iso(),
+            (self.identity.asset_id,), "b" * 64,
+        )
+        builder = CandidateDiscoveryFilteringEngine()
+        one_source = builder.build(self.identity, eligibility, [market], [first], [])
+        both_sources = builder.build(self.identity, eligibility, [market], [first, second], [])
+        self.assertEqual(one_source.candidate_id, both_sources.candidate_id)
+        self.assertEqual(len(both_sources.event_cluster_ids), 1)
+        self.assertEqual(set(both_sources.event_ids), {"source-article-1", "source-article-2"})
+        store = Layer1Store(self.db)
+        try:
+            store.save_candidate(one_source)
+            store.save_candidate(both_sources)
+            evidence = json.loads(store.conn.execute(
+                "SELECT evidence_refs_json FROM layer1_candidates WHERE candidate_id=?",
+                (both_sources.candidate_id,),
+            ).fetchone()[0])
+            self.assertEqual(evidence["event_clusters"], list(both_sources.event_cluster_ids))
+            self.assertEqual(set(evidence["events"]), {"source-article-1", "source-article-2"})
+        finally:
+            store.close()
+
+    def test_module6_candidate_identity_stays_stable_when_eligibility_state_changes(self):
+        eligible = eligibility_for(self.identity)
+        unverified = replace(eligible, status="UNVERIFIED", reason="fresh proof unavailable")
+        market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
+        event = AnnouncementEvidence(
+            "listing-1", "https://www.binance.com/en/support/announcement/listing-1",
+            "Binance", "listing", "Binance lists BTC/USDT Spot trading", iso(-3600), iso(),
+            (self.identity.asset_id,), "a" * 64,
+        )
+        builder = CandidateDiscoveryFilteringEngine()
+        accepted = builder.build(self.identity, eligible, [market], [event], [])
+        rejected = builder.build(self.identity, unverified, [market], [event], [])
+        self.assertEqual(accepted.candidate_id, rejected.candidate_id)
+        self.assertEqual(accepted.state, "READY_FOR_RESEARCH")
+        self.assertEqual(rejected.state, "REJECTED")
+        store = Layer1Store(self.db)
+        try:
+            store.save_candidate(accepted)
+            store.save_candidate(rejected)
+            row = store.conn.execute(
+                "SELECT state, evidence_refs_json FROM layer1_candidates WHERE candidate_id=?",
+                (accepted.candidate_id,),
+            ).fetchone()
+            self.assertEqual(row[0], "REJECTED")
+            evidence = json.loads(row[1])
+            self.assertEqual(evidence["eligibility"]["status"], "UNVERIFIED")
+        finally:
+            store.close()
+
+    def test_module6_new_material_event_creates_distinct_candidate_identity(self):
+        eligibility = eligibility_for(self.identity)
+        market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
+        listing = AnnouncementEvidence(
+            "listing-1", "https://www.binance.com/en/support/announcement/listing-1",
+            "Binance", "listing", "Binance lists BTC/USDT Spot trading", iso(-3600), iso(),
+            (self.identity.asset_id,), "a" * 64,
+        )
+        delisting = AnnouncementEvidence(
+            "delisting-1", "https://www.binance.com/en/support/announcement/delisting-1",
+            "Binance", "delisting", "Binance delists BTC/USDT Spot trading", iso(-3590), iso(),
+            (self.identity.asset_id,), "b" * 64,
+        )
+        builder = CandidateDiscoveryFilteringEngine()
+        first = builder.build(self.identity, eligibility, [market], [listing], [])
+        second = builder.build(self.identity, eligibility, [market], [delisting], [])
+        self.assertNotEqual(first.candidate_id, second.candidate_id)
+        self.assertNotEqual(first.event_cluster_ids, second.event_cluster_ids)
+
+    def test_module6_trend_only_candidate_is_stable_when_same_content_gets_another_source(self):
+        eligibility = eligibility_for(self.identity)
+        market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
+        first = TrendSignal("BTC_SURGE", "provider_a", iso(), 1, (self.identity.asset_id,), "item-a", "a" * 64)
+        syndicated = TrendSignal("btc surge", "provider_b", iso(), 2, (self.identity.asset_id,), "item-b", "a" * 64)
+        builder = CandidateDiscoveryFilteringEngine()
+        one = builder.build(self.identity, eligibility, [market], [], [first])
+        two_sources = builder.build(self.identity, eligibility, [market], [], [first, syndicated])
+        self.assertEqual(one.candidate_id, two_sources.candidate_id)
+        self.assertEqual(one.trend_cluster_ids, two_sources.trend_cluster_ids)
+
+    def test_module6_candidate_identity_is_stable_when_same_event_gets_more_trend_corroboration(self):
+        eligibility = eligibility_for(self.identity)
+        market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
+        event = AnnouncementEvidence(
+            "listing-1", "https://www.binance.com/en/support/announcement/listing-1",
+            "Binance", "listing", "Binance lists BTC/USDT Spot trading", iso(-3600), iso(),
+            (self.identity.asset_id,), "a" * 64,
+        )
+        trend = TrendSignal("BTC", "provider_a", iso(), 1, (self.identity.asset_id,), "item-a", "b" * 64)
+        builder = CandidateDiscoveryFilteringEngine()
+        one = builder.build(self.identity, eligibility, [market], [event], [])
+        corroborated = builder.build(self.identity, eligibility, [market], [event], [trend])
+        self.assertEqual(one.candidate_id, corroborated.candidate_id)
+        self.assertEqual(len(corroborated.trend_cluster_ids), 1)
+
     def test_module6_candidate_requires_eligibility_and_source_backed_signal(self):
         eligible = eligibility_for(self.identity)
         market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
@@ -738,15 +928,36 @@ class Layer1FoundationTests(unittest.TestCase):
         main._binance_spot_pairs_cache = {"BTC": [current_pair]}
         main._binance_spot_exchange_info_snapshot = exchange_info([current_pair])
         try:
-            trend = {
-                "topic": "BTC", "source": "coingecko_trending",
-                "source_item_id": "bitcoin", "asset_id": "coingecko:bitcoin",
-                "observed_at": iso(), "rank": 1,
-            }
+            trends = [
+                {
+                    "topic": "BTC", "source": "coingecko_trending",
+                    "source_item_id": "bitcoin", "asset_id": "coingecko:bitcoin",
+                    "observed_at": iso(), "rank": 1, "content_hash": "a" * 64,
+                },
+                {
+                    "topic": "btc", "source": "news_feed_a",
+                    "source_item_id": "article-1", "asset_id": "coingecko:bitcoin",
+                    "observed_at": iso(), "rank": 2, "content_hash": "a" * 64,
+                },
+                {
+                    "topic": "BTC", "source": "news_feed_b",
+                    "source_item_id": "article-2", "asset_id": "coingecko:bitcoin",
+                    "observed_at": iso(), "rank": 3, "content_hash": "b" * 64,
+                },
+                {
+                    "topic": "btc", "source": "coingecko_trending",
+                    "source_item_id": "bitcoin", "asset_id": "coingecko:bitcoin",
+                    "observed_at": iso(-30), "rank": 4, "content_hash": "a" * 64,
+                },
+            ]
             with patch("main._fetch_coingecko_binance_identity_proof", return_value=proof_for(self.identity)):
-                result = main._persist_layer1_market_intelligence([coin], self.db, [trend])
+                result = main._persist_layer1_market_intelligence([coin], self.db, trends)
             self.assertEqual(result["observations"], 1)
-            self.assertEqual(result["trends"], 1)
+            self.assertEqual(result["trends"], 3)
+            self.assertEqual(result["trend_clusters"], 1)
+            self.assertEqual(result["trend_source_count"], 3)
+            self.assertEqual(result["trend_independent_source_cluster_total"], 2)
+            self.assertEqual(result["trend_independent_source_counts"]["coingecko:bitcoin"]["btc"], 2)
             self.assertEqual(result["candidates"], 1)
             self.assertEqual(result["ready_asset_ids"], ["coingecko:bitcoin"])
             self.assertEqual(result["provider_health"]["binance_spot_metadata"], "AVAILABLE")
@@ -770,14 +981,21 @@ class Layer1FoundationTests(unittest.TestCase):
                 self.assertEqual(market_payload["provider_metadata"]["x-ratelimit-remaining-minute"], "29")
                 self.assertEqual(market_payload["source_timestamp"], coin.provider_published_at)
                 self.assertEqual(market_payload["observed_at"], coin.observed_at)
-                self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_trend_signals").fetchone()[0], 1)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_trend_signals").fetchone()[0], 3)
+                cluster_row = conn.execute(
+                    "SELECT source_count, independent_source_count, signal_count, confidence_limit "
+                    "FROM layer1_trend_clusters"
+                ).fetchone()
+                self.assertEqual(cluster_row, (3, 2, 3, "ATTENTION_ONLY_NOT_EVENT_PROOF"))
+                evidence_refs = json.loads(row[1])
+                self.assertEqual(len(evidence_refs["trend_clusters"]), 1)
                 score = conn.execute("SELECT score, reason FROM layer1_candidate_scores").fetchone()
                 self.assertEqual(score[0], 0.0)
                 self.assertIn("deferred", score[1])
             finally:
                 conn.close()
             with patch("main._fetch_coingecko_binance_identity_proof", side_effect=AssertionError("cache miss")) as fetch:
-                cached_result = main._persist_layer1_market_intelligence([coin], self.db, [trend])
+                cached_result = main._persist_layer1_market_intelligence([coin], self.db, trends)
             fetch.assert_not_called()
             self.assertEqual(cached_result["identity_proof_requests"], 0)
             self.assertEqual(cached_result["identity_proof_cache_hits"], 1)
@@ -1102,9 +1320,9 @@ class Layer1FoundationTests(unittest.TestCase):
 
     def test_module5_syndicated_trend_is_not_counted_as_independent_source(self):
         signals = [
-            TrendSignal("AI", "source-a", iso(), 1, (self.identity.asset_id,), "item-a", "same-story"),
-            TrendSignal("AI", "source-b", iso(), 2, (self.identity.asset_id,), "item-b", "same-story"),
-            TrendSignal("AI", "source-c", iso(), 3, (self.identity.asset_id,), "item-c", "independent-story"),
+            TrendSignal("AI", "source-a", iso(), 1, (self.identity.asset_id,), "item-a", ("a" * 64)),
+            TrendSignal("AI", "source-b", iso(), 2, (self.identity.asset_id,), "item-b", ("a" * 64)),
+            TrendSignal("AI", "source-c", iso(), 3, (self.identity.asset_id,), "item-c", ("b" * 64)),
         ]
         engine = TrendingNarrativeIntelligenceEngine()
         normalized = engine.normalize(signals)
@@ -1115,8 +1333,8 @@ class Layer1FoundationTests(unittest.TestCase):
         eligibility = eligibility_for(self.identity)
         market = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=65000)
         builder = CandidateDiscoveryFilteringEngine()
-        one = TrendSignal("AI", "source", iso(), 1, (self.identity.asset_id,), "item-1", "hash-1")
-        two = TrendSignal("AI", "source", iso(), 1, (self.identity.asset_id,), "item-2", "hash-2")
+        one = TrendSignal("AI", "source", iso(), 1, (self.identity.asset_id,), "item-1", ("c" * 64))
+        two = TrendSignal("AI", "source", iso(), 1, (self.identity.asset_id,), "item-2", ("d" * 64))
         first = builder.build(self.identity, eligibility, [market], [], [one])
         second = builder.build(self.identity, eligibility, [market], [], [two])
         self.assertNotEqual(first.candidate_id, second.candidate_id)
@@ -1206,23 +1424,43 @@ class Layer1FoundationTests(unittest.TestCase):
         finally:
             store.close()
 
-    def test_hot_search_preserves_same_topic_from_independent_sources(self):
-        engine = main.HotSearchEngine()
-        announcement = {
-            "topic": "BTC", "source": "official-announcement",
-            "source_item_id": "article-1", "rank": 1,
-        }
-        trending = {
-            "topic": "BTC", "source": "coingecko-trending",
-            "source_item_id": "bitcoin", "rank": 2,
-        }
-        with patch.object(engine, "_from_announcements", return_value=[announcement]), \
-             patch.object(engine, "_from_coingecko_trending", return_value=[trending]), \
+    def test_hot_search_deduplication_keeps_same_topic_for_distinct_canonical_assets(self):
+        engine = main.HotSearchEngine(None)
+        topics = [
+            {"topic": "BTC", "source": "provider", "source_item_id": "item-1", "asset_id": "coingecko:bitcoin", "rank": 1},
+            {"topic": "BTC", "source": "provider", "source_item_id": "item-1", "asset_id": "coingecko:wrapped-bitcoin", "rank": 1},
+        ]
+        with patch.object(engine, "_from_announcements", return_value=[]), \
+             patch.object(engine, "_from_coingecko_trending", return_value=topics), \
              patch.object(engine, "_from_market_data", return_value=[]):
+            results = engine.get_trending(force_refresh=True)
+        self.assertEqual(len(results), 2)
+        self.assertEqual({item["asset_id"] for item in results},
+                         {"coingecko:bitcoin", "coingecko:wrapped-bitcoin"})
+
+    def test_hot_search_does_not_call_legacy_announcement_bapi_provider(self):
+        engine = main.HotSearchEngine(None)
+        with patch.object(engine, "_from_announcements", side_effect=AssertionError("legacy BAPI must not be called")) as legacy, \
+             patch.object(engine, "_from_coingecko_trending", return_value=[]), \
+             patch.object(engine, "_from_market_data", return_value=[]):
+            engine.get_trending(force_refresh=True)
+        legacy.assert_not_called()
+
+    def test_hot_search_preserves_same_topic_from_independent_sources(self):
+        engine = main.HotSearchEngine(None)
+        coingecko = [{
+            "topic": "BTC", "source": "coingecko_trending", "source_item_id": "bitcoin",
+            "asset_id": "coingecko:bitcoin", "rank": 1,
+        }]
+        market = [{
+            "topic": "BTC", "source": "market_gainer", "source_item_id": "coingecko:bitcoin",
+            "asset_id": "coingecko:bitcoin", "rank": 2,
+        }]
+        with patch.object(engine, "_from_coingecko_trending", return_value=coingecko), \
+             patch.object(engine, "_from_market_data", return_value=market):
             merged = engine.get_trending(force_refresh=True)
         self.assertEqual(len(merged), 2)
-        self.assertEqual({item["source"] for item in merged},
-                         {"official-announcement", "coingecko-trending"})
+        self.assertEqual({item["source"] for item in merged}, {"coingecko_trending", "market_gainer"})
 
     def test_final_spot_revalidation_refreshes_and_checks_exact_pair(self):
         old_cache = main._binance_listed_cache

@@ -2327,17 +2327,14 @@ class BinanceAnnouncementEngine:
 
 
 class HotSearchEngine:
-    """Binance Hot Search Intelligence Engine - multi-provider architecture.
-    
-    Provider 1: CoinGecko Trending API (free, no key required)
-    Provider 2: Binance Announcements (existing data, extract trending topics)
-    Provider 3: Market-derived trending (volume/price spikes)
-    Provider 4: Synthetic narrative feed (hardcoded topic-to-coin mapping)
-    
-    Never breaks the pipeline - if all providers fail, returns empty data.
+    """Sourced attention signals from CoinGecko and validated market observations.
+
+    Official Binance CMS announcements are ingested separately by Module 4 as
+    event evidence. The undocumented legacy BAPI and synthetic narrative feeds
+    are deliberately excluded from this trend provider.
     """
-    
-    # Comprehensive topic-to-coin mapping
+
+    # Legacy display hints only; never used to assign canonical Layer 1 asset IDs.
     TOPIC_COIN_MAP = {
         # AI & AI Agents
         "AI": ["FET", "AGIX", "RNDR", "NEAR", "GRT", "OCEAN", "TAO", "AKT"],
@@ -2414,15 +2411,11 @@ class HotSearchEngine:
         
         all_topics = []
         
-        # Try Provider 1: Binance Announcements (always available)
-        try:
-            ann_topics = self._from_announcements()
-            all_topics.extend(ann_topics)
-            self._provider_status["announcements"] = len(ann_topics) > 0
-        except Exception:
-            self._provider_status["announcements"] = False
-        
-        # Try Provider 2: CoinGecko Trending
+        # Official CMS announcements are loaded by Module 4 through the
+        # read-only PostgreSQL importer; never call the undocumented legacy BAPI.
+        self._provider_status["announcements"] = False
+
+        # Provider 1: CoinGecko Trending
         try:
             cg_topics = self._from_coingecko_trending()
             all_topics.extend(cg_topics)
@@ -2430,7 +2423,7 @@ class HotSearchEngine:
         except Exception:
             self._provider_status["coingecko"] = False
         
-        # Try Provider 3: Market-derived (uses existing MarketScanner data pattern)
+        # Provider 2: Market-derived (uses existing MarketScanner data pattern)
         try:
             market_topics = self._from_market_data()
             all_topics.extend(market_topics)
@@ -2448,6 +2441,7 @@ class HotSearchEngine:
                 topic.get("topic", "").casefold().strip(),
                 topic.get("source", "").casefold().strip(),
                 topic.get("source_item_id", ""),
+                topic.get("asset_id", ""),
             )
             if key[0] and key not in seen_topics:
                 seen_topics.add(key)
@@ -2466,43 +2460,8 @@ class HotSearchEngine:
         return merged
     
     def _from_announcements(self) -> List[Dict[str, Any]]:
-        """Extract trending topics from Binance announcements."""
-        topics = []
-        try:
-            engine = BinanceAnnouncementEngine(self.config)
-            announcements = engine.get_trending_announcements()
-            
-            # Group announcements by type for topic extraction
-            topic_counts = {}
-            for ann in announcements:
-                ann_type = ann.get("type", "news")
-                title = ann.get("title", "")
-                symbols = ann.get("symbols", [])
-                
-                # Extract narrative from title
-                title_lower = title.lower()
-                for narrative in self.NARRATIVE_CATEGORIES:
-                    if narrative.lower() in title_lower:
-                        topic_counts[narrative] = topic_counts.get(narrative, 0) + 1
-                
-                # Also add individual symbols as topics if they appear
-                for sym in symbols:
-                    topic_counts[sym] = topic_counts.get(sym, 0) + 1
-            
-            for i, (topic, count) in enumerate(sorted(topic_counts.items(), key=lambda x: -x[1])):
-                affected = self._topic_to_coins(topic)
-                topics.append({
-                    "topic": topic,
-                    "rank": i + 1,
-                    "trend_strength": min(10.0, count * 2.5),
-                    "source": "announcement",
-                    "affected_coins": affected,
-                    "narrative": self._detect_narrative(topic),
-                    "hot_search_score": min(10.0, 5.0 + count * 1.5),
-                })
-        except Exception:
-            pass
-        return topics
+        """Deprecated: official CMS events are consumed by Module 4, not here."""
+        return []
     
     def _from_coingecko_trending(self) -> List[Dict[str, Any]]:
         """Fetch trending coins from CoinGecko (no API key needed)."""
@@ -2595,33 +2554,8 @@ class HotSearchEngine:
         return topics
     
     def _synthetic_topics(self) -> List[Dict[str, Any]]:
-        """Fallback synthetic topics based on known narratives (always available)."""
-        # Return a diverse set of narrative-based topics
-        base_topics = [
-            ("AI", "Artificial Intelligence", 9.0, "AI"),
-            ("MEME", "Meme Coin Season", 7.5, "MEME"),
-            ("DeFi", "DeFi Renaissance", 7.0, "DeFi"),
-            ("L1", "Layer 1 Rally", 7.5, "L1"),
-            ("RWA", "Real World Assets", 6.5, "RWA"),
-            ("GAMING", "Web3 Gaming", 6.0, "GAMING"),
-            ("DePIN", "DePIN Infrastructure", 6.0, "DePIN"),
-            ("ETF", "ETF Inflows", 8.0, "ETF"),
-            ("AIRDROP", "Airdrop Season", 7.0, "AIRDROP"),
-        ]
-        topics = []
-        for i, (topic, name, strength, narrative) in enumerate(base_topics):
-            affected = self._topic_to_coins(topic)
-            topics.append({
-                "topic": topic,
-                "name": name,
-                "rank": i + 1,
-                "trend_strength": strength,
-                "source": "synthetic",
-                "affected_coins": affected,
-                "narrative": narrative,
-                "hot_search_score": strength,
-            })
-        return topics
+        """Synthetic topics are permanently disabled for production evidence."""
+        return []
     
     def _topic_to_coins(self, topic: str) -> List[str]:
         """Map a topic to affected coin symbols."""
@@ -4351,7 +4285,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
     global _LAYER1_LAST_SUMMARY
     from layer1.foundation import (
         AssetIdentity, BinanceListingEligibilityEngine, CandidateDiscoveryFilteringEngine,
-        Layer1Store, MarketDataIntelligenceEngine, RelevanceScore, RelevanceScoringEngine, TrendSignal,
+        Layer1Store, MarketDataIntelligenceEngine, RelevanceScore, RelevanceScoringEngine,
+        TrendSignal, TrendingNarrativeIntelligenceEngine,
     )
 
     store = Layer1Store(database_path)
@@ -4361,6 +4296,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         "scores_deferred": 0, "ready_asset_ids": [],
         "identity_proof_requests": 0, "identity_proof_cache_hits": 0,
         "identity_proof_verified": 0, "identity_proof_unverified": 0,
+        "trend_clusters": 0, "trend_source_count": 0,
+        "trend_independent_source_cluster_total": 0, "trend_independent_source_counts": {},
         "announcements": 0, "announcement_hints": [],
         "announcement_rows_read": 0, "announcement_evidence_saved": 0,
         "announcement_unmatched_rows": 0, "announcement_invalid_rows": 0,
@@ -4497,6 +4434,14 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 summary["announcement_revision_warning_count"] = 0
                 summary["announcement_import_error_type"] = type(exc).__name__
                 LOGGER.warning("Official Binance CMS announcement import degraded: %s", type(exc).__name__)
+        trend_engine = TrendingNarrativeIntelligenceEngine()
+        trend_signals = trend_engine.normalize(trend_signals)
+        trend_clusters = trend_engine.cluster(trend_signals)
+        summary["trend_clusters"] = len(trend_clusters)
+        summary["trend_source_count"] = len({signal.source.casefold() for signal in trend_signals})
+        summary["trend_independent_source_cluster_total"] = sum(
+            cluster.independent_source_count for cluster in trend_clusters
+        )
         market_engine = MarketDataIntelligenceEngine(
             lambda *_: None, timeout=CONFIG.http_timeout_seconds,
             cache_ttl_seconds=CONFIG.market_data_cache_ttl_seconds,
@@ -4504,6 +4449,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         for signal in trend_signals:
             store.save_trend(signal)
             summary["trends"] += 1
+        for cluster in trend_clusters:
+            store.save_trend_cluster(cluster)
         for coin in candidates:
             asset_id = getattr(coin, "asset_id", "")
             observed_at = getattr(coin, "observed_at", "")
@@ -4606,6 +4553,11 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             store.save_market(market)
             summary["observations"] += 1
             asset_trends = [signal for signal in trend_signals if asset_id in signal.asset_ids]
+            asset_trend_clusters = [cluster for cluster in trend_clusters if asset_id in cluster.asset_ids]
+            summary["trend_independent_source_counts"][asset_id] = {
+                cluster.topic_key: cluster.independent_source_count
+                for cluster in asset_trend_clusters
+            }
             asset_announcements = [event for event in announcement_events if asset_id in event.asset_ids]
             candidate = candidate_engine.build(
                 identity, eligibility, [market], asset_announcements, asset_trends
