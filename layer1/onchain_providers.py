@@ -254,7 +254,7 @@ class AlchemyReadOnlyAdapter:
         "bitcoin-mainnet": frozenset({"getblockcount", "getblockhash", "getblockheader"}),
         "ethereum-mainnet": frozenset({"eth_chainId", "eth_getBlockByNumber", "alchemy_getAssetTransfers"}),
         "solana-mainnet": frozenset({"getGenesisHash", "getSlot", "getTransactionsForAddress"}),
-        "bnb-smart-chain-mainnet": frozenset({"eth_chainId", "eth_getFinalizedHeader", "eth_getLogs"}),
+        "bnb-smart-chain-mainnet": frozenset({"eth_chainId", "eth_getFinalizedHeader", "eth_getLogs", "eth_getBlockByNumber"}),
     }
 
     def __init__(self, api_key: str, timeout_seconds: int = 10,
@@ -464,6 +464,34 @@ class AlchemyReadOnlyAdapter:
                                 tuple(records), cursor, from_block=from_block, to_block=to_block,
                                 finalized_height=finalized_height,
                                 finality_reference="eth_getBlockByNumber:finalized")
+
+    def fetch_bnb_finalized_height(self) -> int:
+        """Return the BNB finalized height after checking the endpoint chain ID."""
+        chain_id = self._call("bnb-smart-chain-mainnet", "eth_chainId")
+        if not isinstance(chain_id, str) or chain_id.lower() != "0x38":
+            raise ProviderTransportError("NETWORK_ID_MISMATCH", "Alchemy endpoint returned the wrong BNB Smart Chain ID")
+        header = self._call("bnb-smart-chain-mainnet", "eth_getFinalizedHeader", [-3])
+        if not isinstance(header, dict):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "BNB finalized header response is invalid")
+        height = self._hex_int(header.get("number"), "BNB finalized block number")
+        if not isinstance(header.get("hash"), str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", header["hash"]) is None:
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "BNB finalized header hash is invalid")
+        return height
+
+    def fetch_bnb_block_header(self, block_number: int) -> dict:
+        """Fetch one independently addressable canonical BNB block header."""
+        if isinstance(block_number, bool) or not isinstance(block_number, int) or block_number < 0:
+            raise ValueError("block_number must be a non-negative integer")
+        header = self._call("bnb-smart-chain-mainnet", "eth_getBlockByNumber", [hex(block_number), False])
+        if not isinstance(header, dict):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "BNB block header response is invalid")
+        returned_number = self._hex_int(header.get("number"), "BNB block number")
+        timestamp = self._hex_int(header.get("timestamp"), "BNB block timestamp")
+        block_hash = header.get("hash")
+        if (returned_number != block_number or not isinstance(block_hash, str)
+                or re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash) is None):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "BNB canonical block header identity is invalid")
+        return {"number": returned_number, "hash": block_hash.lower(), "timestamp": timestamp}
 
     def fetch_bnb_erc20_transfer_logs(self, contract_address: str, from_block: int,
                                      to_block: int) -> ProviderDataPage:

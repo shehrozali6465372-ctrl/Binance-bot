@@ -80,6 +80,12 @@ class OnChainIngestionStore:
             ON layer1_onchain_transfer_events(network_id, block_number, block_hash);
         CREATE INDEX IF NOT EXISTS idx_onchain_transfer_tx
             ON layer1_onchain_transfer_events(network_id, transaction_hash);
+        CREATE TABLE IF NOT EXISTS layer1_onchain_ingestion_blocks (
+            network_id TEXT NOT NULL, provider TEXT NOT NULL, scope TEXT NOT NULL,
+            block_number INTEGER NOT NULL, block_hash TEXT NOT NULL, block_time TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(network_id, provider, scope, block_number)
+        );
         """)
 
     @staticmethod
@@ -122,13 +128,34 @@ class OnChainIngestionStore:
                 raise ValueError("event timestamps must be timezone-aware ISO-8601")
 
     def commit_page(self, cursor_key: str, next_cursor: Any,
-                    events: Iterable[NormalizedTransferEvent]) -> dict:
+                    events: Iterable[NormalizedTransferEvent], *,
+                    allow_recanonicalized: bool = False,
+                    canonical_blocks: Iterable[dict] = ()) -> dict:
         if not isinstance(cursor_key, str) or not cursor_key.strip():
             raise ValueError("cursor_key must be a non-empty string")
+        if not isinstance(allow_recanonicalized, bool):
+            raise ValueError("allow_recanonicalized must be boolean")
         cursor_json = self._canonical(next_cursor)
         batch = tuple(events)
+        blocks = tuple(canonical_blocks)
         for event in batch:
             self._validate_event(event)
+        for block in blocks:
+            if (not isinstance(block, dict)
+                    or not isinstance(block.get("network_id"), str) or not block["network_id"].strip()
+                    or not isinstance(block.get("provider"), str) or not block["provider"].strip()
+                    or not isinstance(block.get("scope"), str) or not block["scope"].strip()
+                    or isinstance(block.get("block_number"), bool)
+                    or not isinstance(block.get("block_number"), int) or block["block_number"] < 0
+                    or not isinstance(block.get("block_hash"), str) or not block["block_hash"].strip()
+                    or not isinstance(block.get("block_time"), str) or not block["block_time"].strip()):
+                raise ValueError("canonical block checkpoint is malformed")
+            try:
+                parsed = datetime.fromisoformat(block["block_time"].replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError("canonical block time must be timezone-aware ISO-8601") from None
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError("canonical block time must be timezone-aware ISO-8601")
         now = datetime.now(timezone.utc).isoformat()
         inserted = duplicates = tombstoned = 0
         self.conn.execute("BEGIN IMMEDIATE")
@@ -149,8 +176,24 @@ class OnChainIngestionStore:
                         prior_status = prior_payload.pop("canonical_status", None)
                         incoming_status = incoming_payload.pop("canonical_status", None)
                         if prior_payload != incoming_payload:
-                            raise ValueError("transfer event identity collision: refusing conflicting event payload")
-                        if prior_status == "CANONICAL" and incoming_status == "REORGED":
+                            if allow_recanonicalized and prior_status == "REORGED" and incoming_status == "CANONICAL":
+                                prior_core = dict(prior_payload)
+                                incoming_core = dict(incoming_payload)
+                                for field in ("block_number", "block_hash", "block_time", "observed_at"):
+                                    prior_core.pop(field, None)
+                                    incoming_core.pop(field, None)
+                                if prior_core != incoming_core:
+                                    raise ValueError("transfer event identity collision: re-included event payload differs")
+                                self.conn.execute(
+                                    """UPDATE layer1_onchain_transfer_events
+                                       SET block_number=?, block_hash=?, canonical_status='CANONICAL',
+                                           payload_json=?, updated_at=?
+                                       WHERE network_id=? AND provider=? AND scope=? AND event_id=?""",
+                                    (event.block_number, event.block_hash, payload_json, now, *identity),
+                                )
+                            else:
+                                raise ValueError("transfer event identity collision: refusing conflicting event payload")
+                        elif prior_status == "CANONICAL" and incoming_status == "REORGED":
                             tombstone_payload = dict(asdict(event))
                             self.conn.execute(
                                 """UPDATE layer1_onchain_transfer_events
@@ -177,6 +220,17 @@ class OnChainIngestionStore:
                 inserted += 1
                 if event.canonical_status == "REORGED":
                     tombstoned += 1
+            for block in blocks:
+                self.conn.execute(
+                    """INSERT INTO layer1_onchain_ingestion_blocks
+                       (network_id, provider, scope, block_number, block_hash, block_time, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(network_id, provider, scope, block_number) DO UPDATE SET
+                         block_hash=excluded.block_hash, block_time=excluded.block_time,
+                         updated_at=excluded.updated_at""",
+                    (block["network_id"], block["provider"], block["scope"],
+                     block["block_number"], block["block_hash"], block["block_time"], now),
+                )
             self.conn.execute(
                 """INSERT INTO layer1_onchain_ingestion_checkpoints(cursor_key, cursor_json, updated_at)
                    VALUES (?, ?, ?)
@@ -222,8 +276,18 @@ class OnChainIngestionStore:
         return [NormalizedTransferEvent(**json.loads(row[0]))
                 for row in self.conn.execute(query, params).fetchall()]
 
+    def get_block_hash(self, network_id: str, provider: str, scope: str,
+                       block_number: int) -> Optional[str]:
+        row = self.conn.execute(
+            """SELECT block_hash FROM layer1_onchain_ingestion_blocks
+               WHERE network_id=? AND provider=? AND scope=? AND block_number=?""",
+            (network_id, provider, scope, block_number),
+        ).fetchone()
+        return row[0] if row else None
+
     def reconcile_block(self, network_id: str, block_number: int,
-                        canonical_block_hash: str) -> int:
+                        canonical_block_hash: str, provider: Optional[str] = None,
+                        scope: Optional[str] = None) -> int:
         """Tombstone events whose block hash disagrees with a verified canonical header.
 
         This method must only be called with a provider-verified canonical hash
@@ -238,12 +302,18 @@ class OnChainIngestionStore:
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute("BEGIN IMMEDIATE")
         try:
+            clauses = ["network_id=?", "block_number=?", "block_hash<>?", "canonical_status='CANONICAL'"]
+            params = [network_id, block_number, canonical_block_hash]
+            if provider is not None:
+                clauses.append("provider=?")
+                params.append(provider)
+            if scope is not None:
+                clauses.append("scope=?")
+                params.append(scope)
             rows = self.conn.execute(
                 """SELECT network_id, provider, scope, event_id, payload_json
-                   FROM layer1_onchain_transfer_events
-                   WHERE network_id=? AND block_number=? AND block_hash<>?
-                     AND canonical_status='CANONICAL'""",
-                (network_id, block_number, canonical_block_hash),
+                   FROM layer1_onchain_transfer_events WHERE """ + " AND ".join(clauses),
+                params,
             ).fetchall()
             for row in rows:
                 payload = json.loads(row[4])

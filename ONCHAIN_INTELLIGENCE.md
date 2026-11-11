@@ -55,8 +55,8 @@ Transport validates JSON-RPC envelopes, normalizes HTTP 429/network errors witho
 - Bitcoin address history and Solana `getTransactionsForAddress` are address-scoped. XRPL `account_tx` is also account-scoped. These methods do not discover every whale wallet across their networks.
 - Complete network-wide whale discovery is therefore **not available** from the selected five methods alone. BTC/SOL/XRPL need an explicit monitored-wallet source or a separately evaluated indexing/discovery product before broad whale coverage can be claimed.
 - XRPL markers are opaque and may expire after 10 minutes. A worker must consume a page sequence promptly and checkpoint stable ledger bounds; the marker is not a durable cursor.
-- Provider pages are returned as typed/raw records. They are not yet durably checkpointed, persisted as normalized transfer events, or wired into candidate analysis.
-- BNB removed logs and Bitcoin orphaned transactions are surfaced, but persistent reorg tombstones, canonical re-fetch/reconciliation and transaction/log uniqueness storage remain pending.
+- BNB ERC-20 logs are now normalized and durably checkpointed by the bounded worker described below. Ethereum log extraction and BTC/SOL/XRPL transfer persistence remain pending; none of these events is wired into candidate analysis yet.
+- BNB canonical block hashes are journaled and reconciled within a configured lookback. Bitcoin orphaned transactions are surfaced by the provider adapter, but BTC persistence and chain-specific reorg recovery remain pending.
 - No transfer value threshold, whale classification, exchange attribution, bridge deduplication or buy/sell intent inference is enabled.
 
 ## Open-source reuse review — 2026-11-11
@@ -121,3 +121,26 @@ Important integration limits:
 - Addresses are pseudonymous; no real-world identity claims without reliable evidence.
 - On-chain evidence is corroborative and cannot authorize publication.
 - Never publish a real Binance Square post during tests or diagnostics.
+
+## Bounded EVM ingestion worker implemented — 2026-11-11
+
+layer1/onchain_evm_worker.py now orchestrates the existing mapping store, Alchemy read-only adapter, EVM Transfer normalizer and atomic ingestion store for **BNB Smart Chain ERC-20 contracts only**.
+
+Verified implementation behavior:
+- Reads only mappings already persisted by OnChainStore.save_verified() and returned by list_verified_mappings("bnb-smart-chain-mainnet"); mappings are revalidated and must identify an exact verified BNB token contract.
+- Requires an explicit initial block for every mapping. No guessed genesis/start height is introduced.
+- Reads the provider's finalized height and scans no more than the configured max_blocks_per_run; each Alchemy eth_getLogs request is capped at 10 blocks.
+- Filters logs to the exact mapped contract and ERC-20 Transfer topic through the existing adapter.
+- Fetches and validates every block header in each bounded scan range with eth_getBlockByNumber, derives timestamps from those headers, and commits the scoped canonical block-hash journal atomically with events and the range checkpoint.
+- Normalizes only logs carrying the provider-supplied transaction hash and log index. Event identity remains transaction_hash:log_index.
+- Commits each bounded log range and its next-block checkpoint through the existing atomic commit_page() transaction. Empty ranges also advance only after a successful provider response.
+- Resumes from durable next_block after restart; provider timeout/network/rate-limit/5xx errors receive bounded retries. Malformed data and scope mismatches fail closed.
+- Re-fetches a caller-configured bounded recent block lookback, including blocks that previously had no transfers. If canonical hashes differ, affected events are tombstoned, the checkpoint rewinds to the earliest changed height, and the finalized range is replayed.
+- A fresh worker page may re-canonicalize a previously tombstoned event identity only after its log is rechecked against the new canonical block header and its immutable transfer fields match. Ordinary store replays cannot resurrect tombstones.
+
+Scope and operational limits:
+- This is an orchestration component and a test-verified BNB EVM ingestion path, not a continuously scheduled production worker. A caller must provide the mapping database, ingestion database, explicit start-block map, bounded run size and reorg lookback.
+- Ethereum's current alchemy_getAssetTransfers summary API does not expose a log index. It is deliberately not used by this worker, and no synthetic event identity is created. A separate Ethereum eth_getLogs adapter path is still required before Ethereum ingestion is enabled.
+- No live Alchemy request or credential was used. Tests use deterministic local fixtures and do not prove live endpoint compatibility, provider plan limits beyond the already enforced 10-block BNB request bound, or operational uptime.
+- SQLite remains the local/test persistence backend. PostgreSQL migration, real concurrency/failure tests, provider credentials, scheduler/worker lifecycle, metrics/alerts and operational runbook remain pending.
+- Reorg detection is limited to the configured lookback window. A deeper reorg requires an operator-approved wider rescan/recovery procedure; do not claim arbitrary-depth automatic recovery.

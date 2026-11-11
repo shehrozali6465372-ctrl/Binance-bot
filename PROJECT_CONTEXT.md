@@ -413,3 +413,46 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 5. Migrate storage to Postgres only after choosing the actual deployment DB and validating transactions/unique constraints under concurrency. Do not provision paid resources without explicit approval.
 6. Connect validated, mapped events to candidate analysis only after decimal-aware aggregation, deduplication and explicit thresholds are implemented. Preserve Binance Spot eligibility as a hard gate; on-chain evidence is corroborative only.
 7. Keep PR #13 Draft until live read-only provider verification, full ingestion integration, database migration and candidate integration are independently reviewed. Never merge/deploy or publish a real Binance Square post without explicit approval.
+
+## Progress update — 2026-11-11 — Bounded BNB EVM ingestion worker
+
+### Verified repository state before implementation
+- Repository: https://github.com/shehrozali6465372-ctrl/Binance-bot.
+- Working directory: /tmp/binance-layer1-audit.
+- Branch: layer-1/module9-onchain-intelligence.
+- HEAD at start: ee50839065cf92bdd536d37b8b7d30f562fff237; origin/layer-1/module9-onchain-intelligence matched this exact SHA.
+- Tracked working tree was clean. Existing untracked .venv/ was present and preserved.
+- PR #13 was verified OPEN, Draft, unmerged. PR #12 was verified OPEN, non-draft, unmerged. PR #12 was not modified.
+- GitHub combined-status and workflow-run queries for ee50839 returned empty arrays; CI remains UNVERIFIED.
+
+### Implementation added
+- Added layer1/onchain_evm_worker.py, orchestrating existing verified mappings, Alchemy BNB eth_getLogs, canonical block headers, normalize_evm_transfer_log() and OnChainIngestionStore.commit_page().
+- Added OnChainStore.list_verified_mappings() to read only previously accepted/verified mapping records and revalidate their mapping data.
+- Added read-only provider methods for BNB finalized height and exact canonical block-header retrieval; the BNB allowlist now includes eth_getBlockByNumber.
+- Worker requires explicit initial block heights per mapping, a bounded run size, and explicit reorg lookback. Alchemy BNB log requests remain capped at 10 blocks.
+- Worker verifies page provider/network/scope/range/finality metadata, fetches canonical headers for every block in each scanned range, journals those hashes atomically, and derives block timestamps from those headers.
+- Each complete fixed block range commits normalized events and the next-block cursor atomically. Empty ranges are checkpointed only after a successful, validated provider response.
+- Bounded retries cover timeout, network, rate-limit and HTTP 5xx provider errors. Malformed provider data and scope mismatches fail closed.
+- Reorg lookback re-fetches canonical headers including previously empty blocks, tombstones affected events, rewinds the durable cursor to the earliest changed block and replays that finalized range.
+- commit_page() gained an opt-in allow_recanonicalized path used only by the worker after independent header verification. It permits a re-included transaction/log identity to become canonical again only when stable transfer fields match; default store replay behavior still prevents stale canonical pages from resurrecting tombstones.
+
+### Scope limitations
+- The first complete EVM path is **BNB Smart Chain ERC-20 only**. The existing Ethereum alchemy_getAssetTransfers summary omits log index, so it is not used to create stable events. Ethereum eth_getLogs support remains pending.
+- The worker is callable orchestration, not yet a scheduled/always-on worker process. No credentials, endpoints, live requests or production services were configured.
+- Reorg repair is bounded by the explicitly configured lookback; deeper reorgs require a separately controlled wider rescan.
+- SQLite remains a development/test backend. PostgreSQL migration and real concurrency tests remain pending.
+- BTC, Solana and XRPL transfer normalizers remain pending. Candidate integration, aggregation and whale thresholds remain pending; no thresholds were guessed.
+
+### Verification
+- New worker tests cover mapped-contract scope, normalized transaction/log identity, bounded range checkpointing, restart resume, timeout retry, no checkpoint advancement on provider failure, bounded reorg detection/rewind/replay and rejection of invalid worker bounds.
+- Focused Module 9 test group (worker, ingestion store, provider adapters, domain validation): **68 passed, 0 failed**.
+- Full suite: ./.venv/bin/python -m unittest discover -s tests -v — **201 passed, 0 failed**.
+- No real Binance Square publication or earning workflow was triggered. No live blockchain provider request was made.
+- Compile checks, diff checks, final repository status and commit/PR state are to be recorded after final verification.
+
+### Exact next work
+1. Finish static checks and inspect the complete diff; preserve .venv/.
+2. Run a final full suite after any code correction.
+3. Commit and push only to layer-1/module9-onchain-intelligence if the current remote/permissions remain valid.
+4. Recheck PR #13 remains Draft and remote CI status; do not merge or deploy.
+5. Next implementation after this worker: add Ethereum eth_getLogs Transfer extraction with the same stable log identity and finalized canonical-header checks, then build provider contract/live read-only verification once credentials are deliberately configured.

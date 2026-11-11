@@ -76,6 +76,30 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual([call[0] for call in calls], ["eth_chainId", "eth_getBlockByNumber"])
         self.assertEqual(calls[1][1], ["finalized", False])
 
+    def test_bnb_worker_header_methods_validate_finalized_height_and_exact_block_identity(self):
+        adapter, calls = self.adapter([
+            "0x38",
+            {"number": "0x200", "hash": "0x" + "b" * 64},
+            {"number": "0x201", "hash": "0x" + "c" * 64, "timestamp": "0x6553f100"},
+        ])
+        self.assertEqual(adapter.fetch_bnb_finalized_height(), 512)
+        header = adapter.fetch_bnb_block_header(513)
+        self.assertEqual(header["number"], 513)
+        self.assertEqual(header["hash"], "0x" + "c" * 64)
+        self.assertEqual(header["timestamp"], int("6553f100", 16))
+        self.assertEqual([call[0] for call in calls], [
+            "eth_chainId", "eth_getFinalizedHeader", "eth_getBlockByNumber",
+        ])
+        self.assertEqual(calls[-1][1], ["0x201", False])
+
+    def test_bnb_block_header_rejects_wrong_returned_height(self):
+        adapter, _ = self.adapter([
+            {"number": "0x202", "hash": "0x" + "c" * 64, "timestamp": "0x6553f100"},
+        ])
+        with self.assertRaises(ProviderTransportError) as error:
+            adapter.fetch_bnb_block_header(513)
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+
     def test_alchemy_bnb_probe_checks_chain_id_56_and_finalized_header(self):
         adapter, calls = self.adapter([
             "0x38",

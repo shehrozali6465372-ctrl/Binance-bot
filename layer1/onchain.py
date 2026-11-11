@@ -385,5 +385,21 @@ class OnChainStore:
             return None
         return OnChainObservation(**json.loads(row[0])), OnChainValidationResult(**json.loads(row[1]))
 
+    def list_verified_mappings(self, network_id: Optional[str] = None) -> list[OnChainAssetMapping]:
+        """Return only previously accepted, verified asset mappings."""
+        query = "SELECT payload_json FROM layer1_onchain_asset_mappings"
+        params = ()
+        if network_id is not None:
+            query += " WHERE network_id=?"
+            params = (network_id,)
+        query += " ORDER BY mapping_id"
+        mappings = []
+        for (payload,) in self.conn.execute(query, params).fetchall():
+            mapping = OnChainAssetMapping(**json.loads(payload))
+            if mapping.mapping_status != "VERIFIED" or self.engine._validate_mapping(mapping) is not None:
+                continue
+            mappings.append(mapping)
+        return mappings
+
     def close(self) -> None:
         self.conn.close()
