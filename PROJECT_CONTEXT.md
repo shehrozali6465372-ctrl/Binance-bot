@@ -140,7 +140,7 @@ Do not oversimplify Render pricing:
 | Module 6 — Candidate Discovery & Filtering | Implemented with event/trend cluster deduplication on PR #11; CI run `43018392595` passed |
 | Module 7 — Relevance & Scoring | Deterministic versioned scorer exists (`layer1-relevance-v1`), but runtime scoring is explicitly deferred because calibrated evidence inputs are not all available. Do not activate guessed weights/values. |
 | Module 8 — Market Analysis | Implemented on the Module 8 branch; PR #12 remains open, non-draft and unmerged. The verified base SHA for Module 9 PR #13 is `f7e6fc511e146b6bfb6f25afb0009c369d8afd4a`. Earlier CI successes apply only to the exact older SHAs listed below; do not assume they validate later heads. |
-| Module 9 — On-chain Intelligence | Domain validation, five read-only scoped provider adapters, durable SQLite event/checkpoint store, EVM Transfer-log normalizer and reorg tombstones implemented on PR #13. Latest head `93f868d8bf9624b96e3d30ab66f7bbab26b0d92d`; local full suite 192 passed. Remote CI status is unverified (GitHub workflow/status queries returned empty arrays). Live provider access, production persistence and candidate integration remain incomplete. |
+| Module 9 — On-chain Intelligence | Domain validation, five read-only scoped provider adapters, durable SQLite event/checkpoint store, EVM Transfer-log normalizer and bounded BNB ERC-20 ingestion worker implemented on PR #13. Worker implementation commit: `5afd3f7c864c8959290d00fb89efe657e15cab73`; local full suite 201 passed. Remote CI remains unverified. Live provider access, Ethereum log ingestion, production persistence and candidate integration remain incomplete. |
 | CMS worker PR #2 | Open/draft/unmerged; CI and prior worker tests do not prove live stream operation |
 | CMS integration PR #3 | Open/draft/unmerged; no live deployment verified |
 | CMS startup-race PR #6 | Open/draft/unmerged |
@@ -448,7 +448,11 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - Focused Module 9 test group (worker, ingestion store, provider adapters, domain validation): **68 passed, 0 failed**.
 - Full suite: ./.venv/bin/python -m unittest discover -s tests -v — **201 passed, 0 failed**.
 - No real Binance Square publication or earning workflow was triggered. No live blockchain provider request was made.
-- Compile checks, diff checks, final repository status and commit/PR state are to be recorded after final verification.
+- `./.venv/bin/python -m compileall -q main.py image_engine.py layer1 tests` — passed.
+- `git diff --check` — passed.
+- Implementation commit: `5afd3f7c864c8959290d00fb89efe657e15cab73` (`feat(layer1): add bounded BNB EVM transfer ingestion worker`).
+- Only the eight intended project/source/test files were staged and committed. The existing untracked `.venv/` was not staged, modified or deleted.
+- The branch was committed locally and then pushed to the existing Module 9 feature branch; final remote PR/CI verification is recorded in the session handoff.
 
 ### Exact next work
 1. Finish static checks and inspect the complete diff; preserve .venv/.
