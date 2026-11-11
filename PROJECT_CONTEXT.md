@@ -139,7 +139,7 @@ Do not oversimplify Render pricing:
 | Module 5 — Trending/Narrative Intelligence | Implemented on PR #11; CI run `43018392595` passed |
 | Module 6 — Candidate Discovery & Filtering | Implemented with event/trend cluster deduplication on PR #11; CI run `43018392595` passed |
 | Module 7 — Relevance & Scoring | Deterministic versioned scorer exists (`layer1-relevance-v1`), but runtime scoring is explicitly deferred because calibrated evidence inputs are not all available. Do not activate guessed weights/values. |
-| Module 8 — Market Analysis | Implemented on commit `820a755e4a233b3fe7c812f795a9d6aba6e0a29b`; 133-test full local suite passed, including eight market-analysis tests plus runtime persistence checks. PR #12 CI run `43020470472` passed for PR head `eb1919f5655d888cce28a61683846107d67bb40c`. |
+| Module 8 — Market Analysis | Implemented on commit `820a755e4a233b3fe7c812f795a9d6aba6e0a29b`; 133-test full local suite passed, including eight market-analysis tests plus runtime persistence checks. PR #12 CI runs `43020470472` and `43020622048` passed for heads `eb1919f5655d888cce28a61683846107d67bb40c` and `7ce44bdac0cf75f2525faacd07a33755df9f72bf`, respectively. |
 | CMS worker PR #2 | Open/draft/unmerged; CI and prior worker tests do not prove live stream operation |
 | CMS integration PR #3 | Open/draft/unmerged; no live deployment verified |
 | CMS startup-race PR #6 | Open/draft/unmerged |
@@ -159,7 +159,7 @@ Do not oversimplify Render pricing:
 | #9 | `layer-1/module3-binance-eligibility-hardening` | `4c34aeadcfc5ec1716630c8209a72f1fd7765f60` | `43014523334` — success | Open, non-draft, unmerged |
 | #10 | `layer-1/module4-announcement-intelligence` | `35a181f1f99058d276ad7e58606c2fd01f681ba9` | `43016772576` — success | Open, non-draft, unmerged |
 | #11 | `layer-1/module5-6-candidate-intelligence` | `8b46af4bbe0afb73d5650a1bb64a761024e53dec` | `43018392595` — success | Open, non-draft, unmerged |
-| #12 | `layer-1/module8-market-analysis` | `eb1919f5655d888cce28a61683846107d67bb40c` (contains implementation commit `820a755`) | `43020470472` — success | Open, non-draft, unmerged; https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/12 |
+| #12 | `layer-1/module8-market-analysis` | `eb1919f5655d888cce28a61683846107d67bb40c` (contains implementation commit `820a755`) | `43020470472`, `43020622048` — success | Open, non-draft, unmerged; https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/12 |
 
 Local full-suite command on the Module 8 branch: `./.venv/bin/python -m unittest discover -s tests -v` — **133 tests passed, 0 failed**. `compileall` and `git diff --check` passed. Unit/integration fixtures are not evidence of live provider connectivity.
 
@@ -291,4 +291,4 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - Head branch: `layer-1/module8-market-analysis`.
 - PR state at verification: OPEN, non-draft, unmerged.
 - GitHub Actions run `43020470472` completed SUCCESS for head `eb1919f5655d888cce28a61683846107d67bb40c`.
-- This context update is a follow-up documentation-only commit; it does not alter Module 8 code or its 133-test local result. Verify CI on the resulting branch head after pushing this documentation update.
+- This context update was a documentation-only follow-up; CI run `43020622048` completed SUCCESS for resulting head `7ce44bdac0cf75f2525faacd07a33755df9f72bf`. It did not alter Module 8 code or its 133-test local result.
