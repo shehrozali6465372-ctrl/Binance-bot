@@ -292,3 +292,49 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - PR state at verification: OPEN, non-draft, unmerged.
 - GitHub Actions run `43020470472` completed SUCCESS for head `eb1919f5655d888cce28a61683846107d67bb40c`.
 - This context update was a documentation-only follow-up; CI run `43020622048` completed SUCCESS for resulting head `7ce44bdac0cf75f2525faacd07a33755df9f72bf`. It did not alter Module 8 code or its 133-test local result.
+
+## Progress update — 2026-11-11 — Module 9 provider decision and validation foundation
+
+### User-approved provider scope
+- User selected **Alchemy Free as primary** for Bitcoin mainnet, Ethereum mainnet, Solana mainnet, and BNB Smart Chain mainnet.
+- User requested a separate free XRP Ledger provider; **Chainstack Developer Free** is the selected initial XRP candidate.
+- Official plan pages checked: Alchemy Free publishes 30M CU/month and 25 requests/second; Chainstack XRPL Developer Free is listed at 3M request units/month, 25 requests/second, one node and WebSockets, with no credit card required. These are published plan limits, not an uptime/SLA guarantee.
+- Chainstack's Oct 1, 2026 Extended Nodes documentation says XRPL Global Nodes retain roughly 750,000–1,500,000 ledgers (about 33–66 days), not a complete archive. An earlier Sep 16, 2026 setup guide says under six days; provider pages conflict. Runtime `complete_ledgers` from `server_info` is authoritative; adapter records it rather than assuming a fixed duration. Full-history retention needs separately configured infrastructure.
+- Alchemy official docs show Bitcoin RPC/indexed UTXO APIs, Ethereum, Solana and BNB Smart Chain endpoints. BNB Smart Chain chain ID is 56.
+- No Alchemy/Chainstack API keys were configured, no live provider request was made, and no external account/paid plan/secret/deployment was changed. Alchemy connector team lookup returned no team membership; `list_apps` then returned HTTP 401 (invalid/expired auth token), so no app or API key could be read or selected.
+- Detailed provider choice and limitations: `ONCHAIN_INTELLIGENCE.md`.
+
+### Initial Module 9 code
+- Added `layer1/onchain.py` with a five-network provider allowlist, exact network family/chain-ID checks, canonical asset mapping validation, Binance Spot eligibility gate that requires the verified upstream identity proof and exact eligible pairs, provider/provenance checks, network-specific hash validation, chain-specific finality handling, configurable freshness thresholds and additive SQLite persistence.
+- Added `layer1/onchain_providers.py` with read-only Alchemy chain-head probes for BTC/ETH/SOL/BNB and a Chainstack XRPL validated-ledger/history-window probe. BNB uses Alchemy `eth_getFinalizedHeader` with `verifiedValidatorNum=-3` (all validators). Transport validates JSON-RPC envelopes, surfaces rate limits/network errors without exposing endpoint keys, and restricts the Alchemy adapter to read-only methods.
+- Bitcoin is deliberately not labeled as deterministic `FINALIZED`: the engine requires `CONFIRMED` plus an explicitly configured minimum confirmation count. Ethereum/BNB finalized headers, Solana finalized commitment, and XRPL validated-ledger semantics are checked separately.
+- The engine fails closed when freshness policy is missing; no arbitrary production freshness values are assumed.
+- Persistence revalidates eligibility and mapping before insert, deduplicates identical observation IDs and rejects conflicting payload reuse.
+- Added `tests/test_onchain_intelligence.py` covering eligibility, same-ticker identity mismatch, wrong network/chain ID, unsupported networks, provider allowlist, native/token mapping constraints (including XRPL issuer/currency identity), Bitcoin confirmation policy, Solana commitment semantics, pending finality, stale data, missing freshness policy and persistence idempotency.
+- Added `tests/test_onchain_providers.py` for all five provider probes, chain-ID/genesis checks, read-only method restrictions, JSON-RPC envelope validation, rate-limit normalization and endpoint credential redaction. All provider tests use deterministic in-process transport doubles; they do not call the internet.
+
+### Verification
+- Test-first RED confirmed: focused test import failed because `layer1.onchain` did not yet exist.
+- Focused Module 9 domain tests: **25 passed, 0 failed**.
+- Focused Module 9 provider-adapter tests: **10 passed, 0 failed**.
+- Final full suite: `./.venv/bin/python -m unittest discover -s tests -v` — **168 passed, 0 failed**.
+- `./.venv/bin/python -m compileall -q main.py image_engine.py layer1 tests` — passed.
+- `git diff --check` — passed.
+- No real blockchain provider calls were made. Unit tests do not prove provider connectivity or live chain data correctness.
+
+### Current branch / PR
+- Working branch: `layer-1/module9-onchain-intelligence`, created from Module 8 head `f7e6fc511e146b6bfb6f25afb0009c369d8afd4a` to keep PR #12 unchanged.
+- Module 9 implementation is committed and pushed to the new branch.
+- Draft PR #13: https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/13
+- PR #13 base: `layer-1/module8-market-analysis`; head: `layer-1/module9-onchain-intelligence`.
+- PR #13 is OPEN, draft, unmerged; it is intentionally not production-ready.
+- Existing untracked `.venv/` is preserved and must not be deleted or staged.
+- PR #12 was not modified, merged, or deployed during this continuation.
+
+### Remaining Module 9 work
+1. Verify exact provider method coverage for required transaction, token-transfer, pagination, block/finality and historical-data use cases; do not assume a generic RPC endpoint supplies indexed whale history.
+2. Add real read-only provider integration checks only after API credentials/endpoints are deliberately configured; redact endpoint keys and never log credentials.
+3. Populate and independently verify native/token mappings from official sources; do not infer contracts from tickers.
+4. Calibrate network/provider freshness and finality policy using observed data before enabling candidate evidence.
+5. Integrate validated on-chain evidence into the existing candidate-analysis flow without bypassing Binance Spot eligibility.
+6. Keep Module 7 scoring deferred and preserve all publication safety boundaries.
