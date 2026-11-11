@@ -15,7 +15,7 @@ from layer1.foundation import (
     AgentConfig, AnnouncementEvidence, AnnouncementIntelligenceEngine,
     AssetIdentity, BinanceListingEligibilityEngine, CandidateDiscoveryFilteringEngine,
     ConfigurationOrchestrator, Layer1Store, MarketDataIntelligenceEngine, MarketObservation,
-    RelevanceScoringEngine, RunLease, TrendSignal,
+    RelevanceScoringEngine, RunLease, TrendSignal, ProviderResponse, ProviderRequestError,
     TrendingNarrativeIntelligenceEngine,
 )
 
@@ -114,14 +114,224 @@ class Layer1FoundationTests(unittest.TestCase):
             return {"symbol": "BTCUSDT", "lastPrice": "65000", "priceChangePercent": "1.5",
                     "quoteVolume": "1200000", "closeTime": int(time.time() * 1000)}
         engine = MarketDataIntelligenceEngine(fetch)
-        result = engine.fetch_binance_24h("BTCUSDT", self.identity.asset_id)
+        result = engine.fetch_binance_24h(self.identity, "BTCUSDT")
         self.assertEqual(result.price, 65000)
         self.assertEqual(result.asset_id, self.identity.asset_id)
         self.assertEqual(len(calls), 1)
         with self.assertRaises(ValueError):
             MarketDataIntelligenceEngine(lambda *_: {"symbol": "ETHUSDT"}).fetch_binance_24h(
-                "BTCUSDT", self.identity.asset_id
+                self.identity, "BTCUSDT"
             )
+
+    def test_module2_market_observation_rejects_conflicting_field_availability(self):
+        observation = MarketObservation(
+            self.identity.asset_id, "provider", "/market", iso(), price=65000,
+            field_availability={"price": "UNAVAILABLE"},
+        )
+        with self.assertRaisesRegex(ValueError, "availability conflicts"):
+            observation.validate()
+
+    def test_module2_freshness_thresholds_must_be_positive_integers(self):
+        with self.assertRaisesRegex(ValueError, "positive integer seconds"):
+            MarketDataIntelligenceEngine(lambda *_: {}, freshness_limits_seconds={"provider": {"price": 0}})
+
+    def test_module2_cache_ttl_configuration_rejects_negative_values(self):
+        with self.assertRaisesRegex(ValueError, "MARKET_DATA_CACHE_TTL_SECONDS"):
+            replace(main.CONFIG, market_data_cache_ttl_seconds=-1).validate()
+        replace(main.CONFIG, market_data_cache_ttl_seconds=0).validate()
+
+    def test_module2_coingecko_universe_rejects_missing_required_metrics_instead_of_zero_filling(self):
+        payload = [{
+            "id": "bitcoin", "symbol": "btc", "name": "Bitcoin",
+            "current_price": 65000, "price_change_percentage_24h": 1.5,
+            "total_volume": None, "market_cap": 900000000,
+            "last_updated": iso(), "sparkline_in_7d": {"price": [64000, 65000]},
+        }]
+        scanner = main.MarketScanner(AgentConfigShim())
+        with patch("main._get_binance_listed", return_value={"BTC"}), \
+             patch("main.market_data_http_get", return_value=ProviderResponse(payload)):
+            self.assertEqual(scanner._coingecko_universe(), [])
+
+    def test_module2_scanner_cache_uses_configured_ttl_without_refreshing_observation_time(self):
+        scanner = main.MarketScanner(replace(main.CONFIG, live_market_data=True,
+                                             market_data_cache_ttl_seconds=60))
+        coin = main.Coin("BTC", "Bitcoin", 65000, 1, 100000, 1, 1000000, [])
+        coin.observed_at = iso()
+        original_cache = (main.MarketScanner._universe_cache, main.MarketScanner._cache_timestamp,
+                          main.MarketScanner._cache_config_key)
+        try:
+            main.MarketScanner._universe_cache = None
+            main.MarketScanner._cache_timestamp = 0
+            main.MarketScanner._cache_config_key = None
+            with patch.object(scanner, "_coingecko_universe", return_value=[coin]) as fetch, \
+                 patch("main.time.time", side_effect=[1000, 1020, 1070]):
+                first = scanner._universe()
+                second = scanner._universe()
+                third = scanner._universe()
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(first[0].observed_at, second[0].observed_at)
+            self.assertEqual(second[0].observed_at, third[0].observed_at)
+        finally:
+            (main.MarketScanner._universe_cache, main.MarketScanner._cache_timestamp,
+             main.MarketScanner._cache_config_key) = original_cache
+
+    def test_module2_provider_http_error_is_normalized_without_exposing_body(self):
+        error = main.urllib.error.HTTPError(
+            "https://data-api.binance.vision/api/v3/ticker/24hr", 429,
+            "rate limited", {"Retry-After": "9"}, None,
+        )
+        engine = MarketDataIntelligenceEngine(lambda *_: (_ for _ in ()).throw(error))
+        with self.assertRaises(ProviderRequestError) as raised:
+            engine.fetch_binance_24h(self.identity, "BTCUSDT")
+        self.assertEqual(raised.exception.status_code, 429)
+        self.assertEqual(raised.exception.retry_after_seconds, 9)
+
+    def test_module2_binance_adapter_requires_exact_canonical_asset_pair(self):
+        engine = MarketDataIntelligenceEngine(lambda *_: {})
+        with self.assertRaisesRegex(ValueError, "canonical base/quote"):
+            engine.fetch_binance_24h(self.identity, "WBTCUSDT")
+
+    def test_module2_binance_observation_separates_source_and_retrieval_time(self):
+        now = iso()
+        source_time = iso(-10)
+        source_ms = int(datetime.fromisoformat(source_time).timestamp() * 1000)
+        engine = MarketDataIntelligenceEngine(
+            lambda *_: ProviderResponse({
+                "symbol": "BTCUSDT", "lastPrice": "65000", "priceChangePercent": "1.5",
+                "quoteVolume": "1200000", "closeTime": source_ms,
+            }, headers={"X-MBX-USED-WEIGHT-1M": "12"}),
+            clock=lambda: now,
+        )
+        observation = engine.fetch_binance_24h(self.identity, "BTCUSDT")
+        self.assertEqual(observation.observed_at, now)
+        self.assertIsNotNone(observation.source_timestamp)
+        self.assertNotEqual(observation.observed_at, observation.source_timestamp)
+        self.assertEqual(observation.field_availability["price"], "AVAILABLE")
+        self.assertEqual(observation.field_provenance["price"], "binance_spot")
+        self.assertEqual(observation.provider_metadata["used_weight_1m"], 12)
+        self.assertRegex(observation.data_hash, r"^[0-9a-f]{64}$")
+
+    def test_module2_coingecko_normalizer_uses_exact_coin_id_and_field_provenance(self):
+        engine = MarketDataIntelligenceEngine(lambda *_: {})
+        item = {
+            "id": "bitcoin", "symbol": "btc", "current_price": 65000,
+            "price_change_percentage_24h": 1.5, "total_volume": 1200000,
+            "market_cap": 900000000, "last_updated": iso(-5),
+            "sparkline_in_7d": {"price": [64000, 64500, 65000]},
+        }
+        observation = engine.normalize_coingecko_market(self.identity, item, observed_at=iso())
+        self.assertEqual(observation.asset_id, self.identity.asset_id)
+        self.assertEqual(observation.provider, "coingecko_markets")
+        self.assertEqual(observation.field_availability["price"], "AVAILABLE")
+        self.assertEqual(observation.field_provenance["price"], "coingecko_markets")
+        self.assertEqual(len(observation.history), 3)
+        with self.assertRaisesRegex(ValueError, "coin ID"):
+            engine.normalize_coingecko_market(self.identity, {**item, "id": "wrapped-bitcoin"})
+        with self.assertRaisesRegex(ValueError, "symbol"):
+            engine.normalize_coingecko_market(self.identity, {**item, "symbol": "wbtc"})
+
+    def test_module2_provider_429_exposes_retry_after_without_retrying(self):
+        calls = []
+        def fetch(*_):
+            calls.append(1)
+            return ProviderResponse(None, status_code=429, headers={"Retry-After": "12"})
+        engine = MarketDataIntelligenceEngine(fetch)
+        with self.assertRaises(ProviderRequestError) as raised:
+            engine.fetch_binance_24h(self.identity, "BTCUSDT")
+        self.assertEqual(raised.exception.status_code, 429)
+        self.assertEqual(raised.exception.retry_after_seconds, 12)
+        self.assertEqual(len(calls), 1)
+
+    def test_module2_cache_preserves_original_observation_timestamp(self):
+        clock = [iso()]
+        source_ms = int(datetime.fromisoformat(clock[0]).timestamp() * 1000)
+        calls = []
+        def fetch(*_):
+            calls.append(1)
+            return {"symbol": "BTCUSDT", "lastPrice": "65000", "priceChangePercent": "1.5",
+                    "quoteVolume": "1200000", "closeTime": source_ms}
+        engine = MarketDataIntelligenceEngine(fetch, cache_ttl_seconds=60, clock=lambda: clock[0])
+        first = engine.fetch_binance_24h(self.identity, "BTCUSDT")
+        original_observed_at = first.observed_at
+        clock[0] = iso(10)
+        second = engine.fetch_binance_24h(self.identity, "BTCUSDT")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(second.observed_at, original_observed_at)
+        self.assertTrue(second.cache_hit)
+
+    def test_module2_provider_disagreement_is_retained_not_averaged(self):
+        first = MarketObservation(self.identity.asset_id, "binance_spot", "/ticker", iso(), price=100, currency="USDT")
+        second = MarketObservation(self.identity.asset_id, "coingecko_markets", "/markets", iso(), price=110, currency="USDT", published_at=iso())
+        discrepancies = MarketDataIntelligenceEngine.compare_observations([first, second], threshold_fraction=0.05)
+        self.assertEqual(len(discrepancies), 1)
+        self.assertEqual(discrepancies[0].asset_id, self.identity.asset_id)
+        self.assertEqual(discrepancies[0].providers, ("binance_spot", "coingecko_markets"))
+        self.assertEqual((first.price, second.price), (100, 110))
+        normalized = MarketDataIntelligenceEngine(lambda *_: {}).normalize_coingecko_market(
+            self.identity,
+            {"id": "bitcoin", "symbol": "btc", "current_price": 101,
+             "last_updated": iso(), "total_volume": 1, "market_cap": 1},
+            currency="USDT",
+        )
+        self.assertEqual(normalized.currency, "USDT")
+
+    def test_module2_unknown_provider_timestamp_is_not_current_candidate_evidence(self):
+        market = MarketObservation(
+            self.identity.asset_id, "provider", "/market", iso(), price=65000,
+            freshness_by_field={"price": "UNKNOWN"},
+        )
+        eligibility = BinanceListingEligibilityEngine().evaluate(
+            self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
+             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]},
+            verified_at=iso(),
+        )
+        candidate = CandidateDiscoveryFilteringEngine().build(self.identity, eligibility, [market], [], [])
+        self.assertEqual(candidate.state, "REJECTED")
+        self.assertIn("no_source_backed_discovery_signal", candidate.rejection_reasons)
+
+    def test_module2_stale_price_is_not_candidate_evidence_even_if_retrieved_recently(self):
+        engine = MarketDataIntelligenceEngine(lambda *_: {})
+        item = {
+            "id": "bitcoin", "symbol": "btc", "current_price": 65000,
+            "price_change_percentage_24h": 1.5, "total_volume": 1200000,
+            "market_cap": 900000000, "last_updated": iso(-3600),
+            "sparkline_in_7d": {"price": [64000, 64500, 65000]},
+        }
+        market = engine.normalize_coingecko_market(self.identity, item, observed_at=iso())
+        eligibility = BinanceListingEligibilityEngine().evaluate(
+            self.identity, {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC",
+             "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True}]},
+            verified_at=iso(),
+        )
+        candidate = CandidateDiscoveryFilteringEngine().build(self.identity, eligibility, [market], [], [])
+        self.assertEqual(market.freshness_by_field["price"], "STALE")
+        self.assertEqual(candidate.state, "REJECTED")
+        self.assertIn("market_observation_stale", candidate.rejection_reasons)
+
+    def test_market_data_http_adapter_surfaces_429_retry_after_without_retrying(self):
+        error = main.urllib.error.HTTPError(
+            "https://api.coingecko.com/api/v3/coins/markets", 429, "rate limited",
+            {"Retry-After": "17"}, None,
+        )
+        with patch("main.urllib.request.urlopen", side_effect=error) as urlopen:
+            response = main.market_data_http_get("https://api.coingecko.com/api/v3/coins/markets", 5)
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "17")
+        urlopen.assert_called_once()
+
+    def test_module2_coingecko_sparkline_freshness_is_unknown_without_its_own_timestamp(self):
+        engine = MarketDataIntelligenceEngine(lambda *_: {})
+        item = {
+            "id": "bitcoin", "symbol": "btc", "current_price": 65000,
+            "price_change_percentage_24h": 1.5, "total_volume": 1200000,
+            "market_cap": 900000000, "last_updated": iso(-7 * 3600),
+            "sparkline_in_7d": {"price": [64000, 64500, 65000]},
+        }
+        observation = engine.normalize_coingecko_market(self.identity, item, observed_at=iso())
+        self.assertEqual(observation.freshness_by_field["price"], "STALE")
+        self.assertEqual(observation.freshness_by_field["history"], "UNKNOWN")
+        self.assertEqual(observation.provider_metadata["history_refresh_interval_seconds"], 21600)
+        self.assertFalse(observation.provider_metadata["history_source_timestamp_available"])
 
     def test_market_and_trend_evidence_rejects_future_timestamps(self):
         future = iso(3600)
@@ -204,7 +414,7 @@ class Layer1FoundationTests(unittest.TestCase):
         scanner = main.MarketScanner(AgentConfigShim())
         self.assertEqual(scanner._build_universe(), [])
         self.assertEqual(scanner._synthetic_history(100, 10), [])
-        with patch("main._get_binance_listed", return_value={"BTC"}), patch("main.http_get_json", side_effect=RuntimeError("provider unavailable")):
+        with patch("main._get_binance_listed", return_value={"BTC"}), patch("main.market_data_http_get", side_effect=RuntimeError("provider unavailable")):
             self.assertEqual(scanner._coingecko_universe(), [])
 
     def test_legacy_listing_check_fails_closed_without_static_allowlist(self):
@@ -398,6 +608,13 @@ class Layer1FoundationTests(unittest.TestCase):
         coin.market_data_source = "coingecko_markets"
         coin.provider_published_at = iso()
         coin.market_data_hash = "sha256:market-fixture"
+        coin.market_data_provider_metadata = {"x-ratelimit-remaining-minute": "29"}
+        coin.market_data_payload = {
+            "id": "bitcoin", "symbol": "btc", "current_price": 65000,
+            "price_change_percentage_24h": 1.2, "total_volume": 1_000_000,
+            "market_cap": 1_200_000_000_000, "last_updated": coin.provider_published_at,
+            "sparkline_in_7d": {"price": [64000, 65000]},
+        }
         old_pairs = main._binance_spot_pairs_cache
         old_snapshot = main._binance_spot_snapshot_observed_at
         main._binance_spot_snapshot_observed_at = iso()
@@ -429,6 +646,14 @@ class Layer1FoundationTests(unittest.TestCase):
                 self.assertEqual(row[0], "READY_FOR_RESEARCH")
                 self.assertIn("BTCUSDT", row[1])
                 self.assertIn("coingecko:bitcoin", row[1])
+                market_payload = json.loads(conn.execute(
+                    "SELECT payload_json FROM layer1_market_observations"
+                ).fetchone()[0])
+                self.assertEqual(market_payload["field_availability"]["price"], "AVAILABLE")
+                self.assertEqual(market_payload["field_provenance"]["price"], "coingecko_markets")
+                self.assertEqual(market_payload["provider_metadata"]["x-ratelimit-remaining-minute"], "29")
+                self.assertEqual(market_payload["source_timestamp"], coin.provider_published_at)
+                self.assertEqual(market_payload["observed_at"], coin.observed_at)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_trend_signals").fetchone()[0], 1)
                 score = conn.execute("SELECT score, reason FROM layer1_candidate_scores").fetchone()
                 self.assertEqual(score[0], 0.0)
@@ -563,7 +788,7 @@ class Layer1FoundationTests(unittest.TestCase):
                         "priceChangePercent": "1.5", "quoteVolume": "1200000"}
         )
         with self.assertRaisesRegex(ValueError, "closeTime"):
-            engine.fetch_binance_24h("BTCUSDT", self.identity.asset_id)
+            engine.fetch_binance_24h(self.identity, "BTCUSDT")
 
     def test_module3_requires_fresh_snapshot_and_exact_quote_pair(self):
         engine = BinanceListingEligibilityEngine(("USDT",), max_snapshot_age_seconds=30)
