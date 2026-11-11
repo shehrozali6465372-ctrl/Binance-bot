@@ -516,3 +516,15 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 2. Commit and push only to layer-1/module9-onchain-intelligence if the remote head is unchanged and permissions permit.
 3. Recheck PR #13 remains Draft and PR #12 remains unchanged; remote CI may remain unverified.
 4. Next implementation after Ethereum: assess and implement Bitcoin address-history normalization only where stable txid/output identity, amount and address evidence are actually available. Do not invent output indexes or treat transaction summaries as individual transfers.
+
+## Post-push verification — Ethereum EVM ingestion — 2026-11-11
+
+- Implementation commit: efcb0e7252ea697f3192902be757c0bf2887e01c (feat(layer1): add Ethereum ERC20 log ingestion).
+- The remote feature branch was checked before push and still pointed to 8b1ccf6c871f1cfce53ad3c1fcba56032cd920d1. A normal fast-forward push succeeded; the remote branch then matched efcb0e7252ea697f3192902be757c0bf2887e01c.
+- PR #13 remains OPEN, Draft, unmerged; head efcb0e7252ea697f3192902be757c0bf2887e01c, base layer-1/module8-market-analysis at f7e6fc511e146b6bfb6f25afb0009c369d8afd4a.
+- PR #12 remains OPEN, non-draft, unmerged; head f7e6fc511e146b6bfb6f25afb0009c369d8afd4a and base 8b46af4bbe0afb73d5650a1bb64a761024e53dec. No changes made to PR #12.
+- GitHub combined status returned an empty statuses array and workflow-run query returned an empty workflow_runs array for efcb0e7. CI remains UNVERIFIED.
+- Final full local suite: 208 passed, 0 failed. Focused EVM worker/provider tests: 41 passed, 0 failed. compileall and git diff --check passed.
+- Tracked working tree clean after commit. Existing untracked .venv/ remains present, not staged, not modified and not deleted.
+- No live Alchemy request, credentials, production database, paid resource, production deployment, PR merge, Binance Square publication or earning workflow was used/performed.
+- Next task: assess Bitcoin address-history response data and stable txid/output identity before writing a normalizer. Do not fabricate output indexes or treat tx summaries as individual transfer events.
