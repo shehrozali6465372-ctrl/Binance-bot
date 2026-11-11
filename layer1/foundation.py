@@ -12,7 +12,7 @@ import os
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
@@ -321,6 +321,33 @@ class BinanceListingEligibilityEngine:
 
 
 @dataclass(frozen=True)
+class ProviderResponse:
+    """Transport result from an approved HTTP adapter; never stores raw headers by default."""
+    payload: Any
+    status_code: int = 200
+    headers: Mapping[str, str] = field(default_factory=dict)
+
+
+class ProviderRequestError(RuntimeError):
+    def __init__(self, provider: str, status_code: int, retry_after_seconds: Optional[int] = None):
+        self.provider = provider
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+        suffix = f"; retry_after_seconds={retry_after_seconds}" if retry_after_seconds is not None else ""
+        super().__init__(f"{provider} request failed with HTTP {status_code}{suffix}")
+
+
+@dataclass(frozen=True)
+class MarketDataDiscrepancy:
+    asset_id: str
+    currency: str
+    providers: tuple[str, ...]
+    prices: tuple[float, ...]
+    relative_deviation: float
+    status: str = "REVIEW_REQUIRED"
+
+
+@dataclass(frozen=True)
 class MarketObservation:
     asset_id: str
     provider: str
@@ -334,6 +361,12 @@ class MarketObservation:
     history: tuple[float, ...] = ()
     published_at: Optional[str] = None
     data_hash: str = ""
+    source_timestamp: Optional[str] = None
+    field_availability: Mapping[str, str] = field(default_factory=dict)
+    field_provenance: Mapping[str, str] = field(default_factory=dict)
+    freshness_by_field: Mapping[str, str] = field(default_factory=dict)
+    provider_metadata: Mapping[str, Any] = field(default_factory=dict)
+    cache_hit: bool = False
 
     def validate(self) -> None:
         if not all(isinstance(value, str) and value.strip() for value in
@@ -341,12 +374,21 @@ class MarketObservation:
             raise ValueError("market observation identity/provenance/currency missing")
         if not self.currency.isalnum() or self.currency != self.currency.upper():
             raise ValueError("market observation currency must be an uppercase asset/currency code")
+        if not all(isinstance(value, Mapping) for value in (
+            self.field_availability, self.field_provenance, self.freshness_by_field, self.provider_metadata
+        )):
+            raise ValueError("market observation metadata fields must be mappings")
+        if not isinstance(self.data_hash, str) or not isinstance(self.cache_hit, bool):
+            raise ValueError("market observation hash/cache metadata is invalid")
         _parse_time(self.observed_at)
-        if self.published_at:
-            _parse_time(self.published_at)
-        if self.provider == "coingecko_markets" and not self.published_at:
+        for timestamp_name in ("published_at", "source_timestamp"):
+            timestamp = getattr(self, timestamp_name)
+            if timestamp:
+                _parse_time(timestamp)
+        if self.provider == "coingecko_markets" and not (self.published_at or self.source_timestamp):
             raise ValueError("CoinGecko market observation is missing provider last_updated time")
-        for name in ("price", "change_24h", "volume_24h", "market_cap"):
+        numeric_fields = ("price", "change_24h", "volume_24h", "market_cap")
+        for name in numeric_fields:
             value = getattr(self, name)
             if value is not None and (
                 isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
@@ -366,40 +408,289 @@ class MarketObservation:
             for point in self.history
         ):
             raise ValueError("history must contain finite positive provider observations")
+        allowed_fields = set(numeric_fields) | {"history"}
+        for field_name, availability in self.field_availability.items():
+            if field_name not in allowed_fields or availability not in {"AVAILABLE", "UNAVAILABLE"}:
+                raise ValueError("market field availability metadata is invalid")
+            value = self.history if field_name == "history" else getattr(self, field_name)
+            if (availability == "AVAILABLE") != (value is not None and (field_name != "history" or bool(value))):
+                raise ValueError(f"market field availability conflicts with {field_name} value")
+        for field_name, source in self.field_provenance.items():
+            if field_name not in allowed_fields or not isinstance(source, str) or not source.strip():
+                raise ValueError("market field provenance metadata is invalid")
+        for field_name, source in self.field_provenance.items():
+            if self.field_availability.get(field_name) == "AVAILABLE" and not source.strip():
+                raise ValueError("available market field is missing provenance")
+        for field_name, freshness in self.freshness_by_field.items():
+            if field_name not in allowed_fields or freshness not in {"FRESH", "STALE", "UNKNOWN", "UNAVAILABLE"}:
+                raise ValueError("market field freshness metadata is invalid")
+            if freshness == "UNAVAILABLE" and self.field_availability.get(field_name) == "AVAILABLE":
+                raise ValueError("market field freshness conflicts with available field data")
+        try:
+            json.dumps(dict(self.provider_metadata), sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError):
+            raise ValueError("market provider metadata must be JSON-safe") from None
 
 
 class MarketDataIntelligenceEngine:
-    """Normalizes provider payloads; caller supplies an approved documented adapter."""
-    def __init__(self, fetch_json: Callable[[str, int], Any], timeout: int = 15):
+    """Approved-provider market normalizer with provenance, freshness and bounded caching."""
+    DEFAULT_FRESHNESS_SECONDS = {
+        "binance_spot": {"price": 300, "change_24h": 300, "volume_24h": 300},
+        "coingecko_markets": {
+            "price": 900, "change_24h": 900, "volume_24h": 900,
+            "market_cap": 900,
+        },
+    }
+    BINANCE_MARKET_DATA_BASE = "https://data-api.binance.vision"
+    COINGECKO_MARKETS_ENDPOINT = "https://api.coingecko.com/api/v3/coins/markets"
+
+    def __init__(self, fetch_json: Callable[[str, int], Any], timeout: int = 15,
+                 cache_ttl_seconds: int = 0, clock: Callable[[], str] = utc_now,
+                 monotonic: Callable[[], float] = time.monotonic,
+                 freshness_limits_seconds: Optional[Mapping[str, Mapping[str, int]]] = None):
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+            raise ValueError("market data timeout must be a positive integer")
+        if isinstance(cache_ttl_seconds, bool) or not isinstance(cache_ttl_seconds, int) or cache_ttl_seconds < 0:
+            raise ValueError("market data cache TTL must be a non-negative integer")
         self.fetch_json = fetch_json
         self.timeout = timeout
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.clock = clock
+        self.monotonic = monotonic
+        self.freshness_limits_seconds = {
+            provider: dict(fields) for provider, fields in self.DEFAULT_FRESHNESS_SECONDS.items()
+        }
+        if freshness_limits_seconds:
+            for provider, fields in freshness_limits_seconds.items():
+                normalized_fields = dict(fields)
+                for field_name, seconds in normalized_fields.items():
+                    if (not isinstance(field_name, str) or not field_name
+                            or isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0):
+                        raise ValueError("field freshness limits must be positive integer seconds")
+                self.freshness_limits_seconds.setdefault(provider, {}).update(normalized_fields)
+        self._observation_cache: dict[str, tuple[float, MarketObservation]] = {}
+        self.last_provider_metadata: dict[str, Mapping[str, Any]] = {}
 
-    def fetch_binance_24h(self, symbol: str, asset_id: str, quote_asset: str = "USDT") -> MarketObservation:
-        if not isinstance(symbol, str) or not symbol.isalnum() or not symbol.isupper() or not asset_id:
-            raise ValueError("exact uppercase Binance symbol and canonical asset_id are required")
-        if not isinstance(quote_asset, str) or not quote_asset.isalnum() or not quote_asset.isupper():
-            raise ValueError("quote_asset must be an uppercase alphanumeric code")
-        if not symbol.endswith(quote_asset):
-            raise ValueError("Binance symbol does not end with the requested quote asset")
-        url = f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={symbol}"
-        payload = self.fetch_json(url, self.timeout)
-        if not isinstance(payload, dict) or payload.get("symbol") != symbol:
+    @staticmethod
+    def _header(headers: Mapping[str, str], name: str) -> Optional[str]:
+        target = name.casefold()
+        for key, value in headers.items():
+            if str(key).casefold() == target:
+                return str(value)
+        return None
+
+    @staticmethod
+    def _number(payload: Mapping[str, Any], name: str, required: bool = False) -> Optional[float]:
+        value = payload.get(name)
+        if value is None and not required:
+            return None
+        if isinstance(value, bool) or value is None:
+            raise ValueError(f"provider field {name} is missing or invalid")
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"provider field {name} is missing or invalid") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"provider field {name} is non-finite")
+        return number
+
+    def _fetch(self, provider: str, url: str) -> tuple[Any, Mapping[str, Any]]:
+        try:
+            raw = self.fetch_json(url, self.timeout)
+        except Exception as exc:
+            status_code = getattr(exc, "code", getattr(exc, "status_code", None))
+            headers = getattr(exc, "headers", {}) or {}
+            if isinstance(status_code, int):
+                retry_after_raw = self._header(headers, "Retry-After") if isinstance(headers, Mapping) else None
+                try:
+                    retry_after = max(0, int(float(retry_after_raw))) if retry_after_raw is not None else None
+                except (TypeError, ValueError, OverflowError):
+                    retry_after = None
+                raise ProviderRequestError(provider, status_code, retry_after) from None
+            raise
+        response = raw if isinstance(raw, ProviderResponse) else ProviderResponse(raw)
+        retry_after_raw = self._header(response.headers, "Retry-After")
+        try:
+            retry_after = max(0, int(float(retry_after_raw))) if retry_after_raw is not None else None
+        except (TypeError, ValueError, OverflowError):
+            retry_after = None
+        if response.status_code != 200:
+            raise ProviderRequestError(provider, response.status_code, retry_after)
+        metadata: dict[str, Any] = {"http_status": response.status_code}
+        used_weight = self._header(response.headers, "X-MBX-USED-WEIGHT-1M")
+        if used_weight is not None:
+            try:
+                metadata["used_weight_1m"] = int(used_weight)
+            except ValueError:
+                metadata["used_weight_1m"] = "UNPARSEABLE"
+        if retry_after is not None:
+            metadata["retry_after_seconds"] = retry_after
+        self.last_provider_metadata[provider] = dict(metadata)
+        return response.payload, metadata
+
+    def _freshness(self, provider: str, fields: Sequence[str], source_timestamp: Optional[str],
+                   availability: Mapping[str, str], now: str) -> dict[str, str]:
+        if not source_timestamp:
+            return {name: ("UNAVAILABLE" if availability.get(name) == "UNAVAILABLE" else "UNKNOWN")
+                    for name in fields}
+        source_time = _parse_time(source_timestamp)
+        now_time = _parse_time(now)
+        age = max(0.0, (now_time - source_time).total_seconds())
+        limits = self.freshness_limits_seconds.get(provider, {})
+        result = {}
+        for name in fields:
+            if availability.get(name) == "UNAVAILABLE":
+                result[name] = "UNAVAILABLE"
+                continue
+            # CoinGecko documents a 6-hour sparkline refresh cadence but does not
+            # return a per-sparkline timestamp. Never borrow last_updated for it.
+            if provider == "coingecko_markets" and name == "history":
+                result[name] = "UNKNOWN"
+                continue
+            limit = limits.get(name)
+            result[name] = "UNKNOWN" if limit is None else ("FRESH" if age <= limit else "STALE")
+        return result
+
+    def fetch_binance_24h(self, identity: AssetIdentity, symbol: str) -> MarketObservation:
+        if (not isinstance(identity, AssetIdentity) or not identity.asset_id
+                or not identity.base_asset or not identity.quote_asset):
+            raise ValueError("a complete canonical AssetIdentity is required")
+        if (not isinstance(symbol, str) or not symbol.isalnum() or symbol != symbol.upper()
+                or symbol != identity.base_asset + identity.quote_asset):
+            raise ValueError("symbol must match the canonical base/quote identity exactly")
+        cache_key = f"binance_spot:{identity.asset_id}:{symbol}"
+        cached = self._observation_cache.get(cache_key)
+        now_monotonic = self.monotonic()
+        if cached and cached[0] > now_monotonic:
+            return replace(cached[1], cache_hit=True)
+        url = f"{self.BINANCE_MARKET_DATA_BASE}/api/v3/ticker/24hr?symbol={symbol}"
+        payload, provider_metadata = self._fetch("binance_spot", url)
+        if not isinstance(payload, Mapping) or payload.get("symbol") != symbol:
             raise ValueError("Binance ticker response schema/symbol mismatch")
         close_time = payload.get("closeTime")
         if isinstance(close_time, bool) or not isinstance(close_time, (int, float)) or close_time <= 0:
             raise ValueError("Binance ticker response missing a valid provider closeTime")
         try:
-            observed_at = datetime.fromtimestamp(float(close_time) / 1000, timezone.utc).isoformat()
-            observation = MarketObservation(
-                asset_id=asset_id, provider="binance_spot", endpoint=url, observed_at=observed_at,
-                price=float(payload["lastPrice"]), currency=quote_asset,
-                change_24h=float(payload["priceChangePercent"]),
-                volume_24h=float(payload["quoteVolume"]),
-            )
+            source_timestamp = datetime.fromtimestamp(float(close_time) / 1000, timezone.utc).isoformat()
+            observed_at = self.clock()
+            values = {
+                "price": self._number(payload, "lastPrice", required=True),
+                "change_24h": self._number(payload, "priceChangePercent", required=True),
+                "volume_24h": self._number(payload, "quoteVolume", required=True),
+            }
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
             raise ValueError("Binance ticker response contains missing or invalid required fields") from exc
+        availability = {name: ("AVAILABLE" if value is not None else "UNAVAILABLE")
+                        for name, value in values.items()}
+        availability.update({"market_cap": "UNAVAILABLE", "history": "UNAVAILABLE"})
+        provenance = {name: "binance_spot" for name in availability}
+        freshness = self._freshness("binance_spot", tuple(availability), source_timestamp, availability, observed_at)
+        data_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                              allow_nan=False).encode()).hexdigest()
+        observation = MarketObservation(
+            asset_id=identity.asset_id, provider="binance_spot", endpoint=url,
+            observed_at=observed_at, price=values["price"], currency=identity.quote_asset,
+            change_24h=values["change_24h"], volume_24h=values["volume_24h"],
+            data_hash=data_hash, source_timestamp=source_timestamp,
+            field_availability=availability, field_provenance=provenance,
+            freshness_by_field=freshness, provider_metadata=provider_metadata,
+        )
+        observation.validate()
+        if self.cache_ttl_seconds:
+            self._observation_cache[cache_key] = (now_monotonic + self.cache_ttl_seconds, observation)
+        return observation
+
+    def normalize_coingecko_market(self, identity: AssetIdentity, item: Mapping[str, Any],
+                                   observed_at: Optional[str] = None, currency: str = "USD",
+                                   provider_metadata: Optional[Mapping[str, Any]] = None) -> MarketObservation:
+        if not isinstance(identity, AssetIdentity) or not identity.asset_id.startswith("coingecko:"):
+            raise ValueError("a CoinGecko canonical asset identity is required")
+        if not isinstance(item, Mapping) or item.get("id") != identity.asset_id.split(":", 1)[1]:
+            raise ValueError("CoinGecko coin ID does not match canonical asset identity")
+        symbol = item.get("symbol")
+        if not isinstance(symbol, str) or symbol.upper() != identity.base_asset:
+            raise ValueError("CoinGecko symbol does not match canonical base asset")
+        source_timestamp = item.get("last_updated")
+        if not isinstance(source_timestamp, str) or not source_timestamp.strip():
+            raise ValueError("CoinGecko market item is missing last_updated")
+        if not isinstance(currency, str) or not currency.isalnum() or currency != currency.upper():
+            raise ValueError("CoinGecko target currency must be uppercase alphanumeric")
+        retrieval_time = observed_at or self.clock()
+        _parse_time(retrieval_time)
+        _parse_time(source_timestamp)
+        values = {
+            "price": self._number(item, "current_price"),
+            "change_24h": self._number(item, "price_change_percentage_24h"),
+            "volume_24h": self._number(item, "total_volume"),
+            "market_cap": self._number(item, "market_cap"),
+        }
+        sparkline = item.get("sparkline_in_7d")
+        raw_history = sparkline.get("price", []) if isinstance(sparkline, Mapping) else []
+        if raw_history is None:
+            raw_history = []
+        if not isinstance(raw_history, list):
+            raise ValueError("CoinGecko sparkline price data must be a list")
+        history = tuple(self._number({"value": value}, "value", required=True) for value in raw_history)
+        if any(point <= 0 for point in history):
+            raise ValueError("CoinGecko sparkline values must be positive")
+        availability = {name: ("AVAILABLE" if value is not None else "UNAVAILABLE")
+                        for name, value in values.items()}
+        availability["history"] = "AVAILABLE" if history else "UNAVAILABLE"
+        provenance = {name: "coingecko_markets" for name in availability}
+        freshness = self._freshness("coingecko_markets", tuple(availability), source_timestamp,
+                                    availability, retrieval_time)
+        data_hash = hashlib.sha256(json.dumps(item, sort_keys=True, separators=(",", ":"),
+                                              allow_nan=False).encode()).hexdigest()
+        observation = MarketObservation(
+            asset_id=identity.asset_id, provider="coingecko_markets",
+            endpoint=self.COINGECKO_MARKETS_ENDPOINT, observed_at=retrieval_time,
+            price=values["price"], currency=currency, change_24h=values["change_24h"],
+            volume_24h=values["volume_24h"], market_cap=values["market_cap"],
+            history=history, published_at=source_timestamp, source_timestamp=source_timestamp,
+            data_hash=data_hash, field_availability=availability,
+            field_provenance=provenance, freshness_by_field=freshness,
+            provider_metadata={
+                **dict(provider_metadata or {}),
+                "history_refresh_interval_seconds": 21600,
+                "history_source_timestamp_available": False,
+            },
+        )
         observation.validate()
         return observation
+
+    @staticmethod
+    def compare_observations(observations: Sequence[MarketObservation],
+                             threshold_fraction: float = 0.03) -> list[MarketDataDiscrepancy]:
+        if (isinstance(threshold_fraction, bool) or not isinstance(threshold_fraction, (int, float))
+                or not math.isfinite(threshold_fraction) or threshold_fraction < 0):
+            raise ValueError("discrepancy threshold must be a finite non-negative fraction")
+        grouped: dict[tuple[str, str], list[MarketObservation]] = {}
+        now = datetime.now(timezone.utc)
+        for item in observations:
+            item.validate()
+            freshness = item.freshness_by_field.get("price")
+            if item.price is None or freshness in {"STALE", "UNKNOWN", "UNAVAILABLE"}:
+                continue
+            if freshness is None:
+                source_time = _parse_time(item.source_timestamp or item.published_at or item.observed_at)
+                if (now - source_time).total_seconds() > 300:
+                    continue
+            grouped.setdefault((item.asset_id, item.currency), []).append(item)
+        discrepancies = []
+        for (asset_id, currency), items in grouped.items():
+            if len(items) < 2:
+                continue
+            low = min(float(item.price) for item in items)
+            high = max(float(item.price) for item in items)
+            midpoint = (low + high) / 2
+            deviation = (high - low) / midpoint if midpoint else 0.0
+            if deviation > threshold_fraction:
+                ordered = sorted(items, key=lambda item: item.provider)
+                discrepancies.append(MarketDataDiscrepancy(
+                    asset_id, currency, tuple(item.provider for item in ordered),
+                    tuple(float(item.price) for item in ordered), deviation,
+                ))
+        return discrepancies
 
 
 @dataclass(frozen=True)
@@ -581,7 +872,9 @@ class CandidateDiscoveryFilteringEngine:
         now = datetime.now(timezone.utc)
         fresh_markets = [
             m for m in valid_markets
-            if (now - _parse_time(m.published_at or m.observed_at)).total_seconds()
+            if m.price is not None
+            and m.freshness_by_field.get("price") not in {"STALE", "UNKNOWN", "UNAVAILABLE"}
+            and (now - _parse_time(m.source_timestamp or m.published_at or m.observed_at)).total_seconds()
             <= self.max_market_age_seconds
         ]
         fresh_events = [

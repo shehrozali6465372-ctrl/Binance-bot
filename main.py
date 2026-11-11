@@ -60,6 +60,7 @@ class Config:
     save_research_packages: bool
     max_daily_posts: int
     min_cap_for_safety: int
+    market_data_cache_ttl_seconds: int = 60
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -88,6 +89,7 @@ class Config:
             save_research_packages=_parse_env_bool("SAVE_RESEARCH_PACKAGES", os.getenv("SAVE_RESEARCH_PACKAGES"), True),
             max_daily_posts=int(os.getenv("MAX_DAILY_POSTS", "8")),
             min_cap_for_safety=int(os.getenv("MIN_CAP_FOR_SAFETY", "500000")),
+            market_data_cache_ttl_seconds=int(os.getenv("MARKET_DATA_CACHE_TTL_SECONDS", "60")),
         )
 
     def validate(self) -> None:
@@ -107,6 +109,7 @@ class Config:
             "repetition_soft_hours": (1, None),
             "max_daily_posts": (1, None),
             "min_cap_for_safety": (1, None),
+            "market_data_cache_ttl_seconds": (0, None),
         }
         for name, (minimum, maximum) in integer_limits.items():
             value = getattr(self, name)
@@ -163,6 +166,30 @@ def ensure_parent(path: str) -> None:
 
 def http_get_json(url: str, timeout: int) -> Any:
     return _http_json_with_retry("GET", url, timeout)
+
+
+def market_data_http_get(url: str, timeout: int):
+    """Read-only market transport; surface rate-limit metadata without retry storms."""
+    from layer1.foundation import ProviderResponse
+    request = urllib.request.Request(url, headers={"User-Agent": "binance-square-w2e-market-data/1.0"}, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            headers = {
+                key: value for key, value in response.headers.items()
+                if key.lower() in {
+                    "retry-after", "x-mbx-used-weight-1m", "x-ratelimit-limit-minute",
+                    "x-ratelimit-remaining-minute", "x-ratelimit-reset",
+                }
+            }
+            return ProviderResponse(json.loads(response.read().decode("utf-8")), response.status, headers)
+    except urllib.error.HTTPError as exc:
+        if exc.code in {418, 429} or 500 <= exc.code <= 599:
+            headers = {
+                key: value for key, value in (exc.headers.items() if exc.headers else [])
+                if key.lower() in {"retry-after", "x-ratelimit-remaining-minute", "x-ratelimit-reset"}
+            }
+            return ProviderResponse(None, exc.code, headers)
+        raise
 
 
 def http_post_json(
@@ -1000,6 +1027,7 @@ class Coin:
     market_cap: float
     history: List[float]
     liquidity: float = 0.0
+    market_data_payload: Optional[Dict[str, Any]] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -1905,6 +1933,16 @@ class SkillsHubEngine:
 
 
 
+def _retry_after_from_provider_headers(headers) -> Optional[int]:
+    for key, value in (headers or {}).items():
+        if str(key).lower() == "retry-after":
+            try:
+                return max(0, int(float(value)))
+            except (TypeError, ValueError, OverflowError):
+                return None
+    return None
+
+
 class MarketScanner:
     def __init__(self, config: Config = CONFIG):
         self.config = config
@@ -1929,17 +1967,36 @@ class MarketScanner:
         # Eligibility is derived from the live official Binance Spot exchangeInfo snapshot.
         binance_listed = _get_binance_listed()
         if not binance_listed:
+            MarketScanner._last_provider_status = "UNAVAILABLE_BINANCE_ELIGIBILITY"
+            MarketScanner._last_provider_metadata = {}
             return []
         url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=50&sparkline=true&price_change_percentage=24h"
         try:
-            payload = http_get_json(url, timeout=self.config.http_timeout_seconds)
+            from layer1.foundation import ProviderRequestError
+            response = market_data_http_get(url, timeout=self.config.http_timeout_seconds)
+            if response.status_code != 200:
+                raise ProviderRequestError("coingecko_markets", response.status_code,
+                                           _retry_after_from_provider_headers(response.headers))
+            payload = response.payload
+            MarketScanner._last_provider_metadata = {
+                key: value for key, value in response.headers.items()
+            }
         except Exception as exc:
-            LOGGER.warning("CoinGecko market data unavailable; no synthetic fallback: %s", exc)
+            MarketScanner._last_provider_status = (
+                f"RATE_LIMITED_HTTP_{exc.status_code}" if isinstance(exc, ProviderRequestError)
+                and exc.status_code in {418, 429} else f"UNAVAILABLE_{type(exc).__name__}"
+            )
+            MarketScanner._last_provider_metadata = {
+                "retry_after_seconds": getattr(exc, "retry_after_seconds", None)
+            }
+            LOGGER.warning("CoinGecko market data unavailable; no synthetic fallback (%s)", type(exc).__name__)
             return []
 
         if not isinstance(payload, list):
+            MarketScanner._last_provider_status = "INVALID_RESPONSE_SCHEMA"
             LOGGER.warning("CoinGecko market response schema invalid")
             return []
+        MarketScanner._last_provider_status = "AVAILABLE"
         symbol_counts = {}
         for entry in payload:
             symbol = str(entry.get("symbol", "")).upper() if isinstance(entry, dict) else ""
@@ -1949,56 +2006,109 @@ class MarketScanner:
         coins: List[Coin] = []
         provider_observed_at = datetime.now(timezone.utc).isoformat()
         for item in payload:
+            if not isinstance(item, dict):
+                continue
             try:
-                symbol = (item.get("symbol") or "").upper()
+                symbol_value = item.get("symbol")
+                symbol = symbol_value.upper() if isinstance(symbol_value, str) else ""
                 if symbol not in binance_listed or symbol_counts.get(symbol) != 1:
                     continue
                 coin_id = item.get("id")
-                if not isinstance(coin_id, str) or not coin_id:
+                if not isinstance(coin_id, str) or not coin_id.strip():
                     continue
-                name = item.get("name") or symbol
-                price = float(item.get("current_price") or 0)
-                change_24h = float(item.get("price_change_percentage_24h") or 0)
-                volume_24h = float(item.get("total_volume") or 0)
-                market_cap = float(item.get("market_cap") or 0)
-                if price <= 0 or market_cap < 1_000_000:
+                last_updated = item.get("last_updated")
+                if not isinstance(last_updated, str) or not last_updated.strip():
+                    continue
+
+                def required_metric(name: str) -> float:
+                    raw_value = item.get(name)
+                    if isinstance(raw_value, bool) or raw_value is None:
+                        raise ValueError(f"required market field {name} is unavailable")
+                    value = float(raw_value)
+                    if not math.isfinite(value):
+                        raise ValueError(f"required market field {name} is non-finite")
+                    return value
+
+                name_value = item.get("name")
+                name = name_value.strip() if isinstance(name_value, str) and name_value.strip() else symbol
+                price = required_metric("current_price")
+                change_24h = required_metric("price_change_percentage_24h")
+                volume_24h = required_metric("total_volume")
+                market_cap = required_metric("market_cap")
+                if price <= 0 or volume_24h < 0 or market_cap < 1_000_000:
                     continue
                 if abs(change_24h) > 100:
                     continue
                 volume_ratio = min(max(0.3, volume_24h / max(market_cap, 1) * 100), 10.0)
-                sparkline = item.get("sparkline_in_7d", {}).get("price", [])
-                history = [float(p) for p in sparkline[-10:] if float(p) > 0] if sparkline else []
-            except (TypeError, ValueError, KeyError):
+                sparkline = item.get("sparkline_in_7d")
+                if sparkline is None:
+                    raw_history = []
+                elif isinstance(sparkline, dict):
+                    raw_history = sparkline.get("price", [])
+                else:
+                    raise ValueError("sparkline response schema invalid")
+                if raw_history is None:
+                    raw_history = []
+                if not isinstance(raw_history, list):
+                    raise ValueError("sparkline price data must be a list")
+                history = []
+                for raw_point in raw_history[-10:]:
+                    if isinstance(raw_point, bool):
+                        raise ValueError("sparkline contains invalid numeric value")
+                    point = float(raw_point)
+                    if not math.isfinite(point) or point <= 0:
+                        raise ValueError("sparkline contains invalid numeric value")
+                    history.append(point)
+                data_hash = hashlib.sha256(
+                    json.dumps(item, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+                ).hexdigest()
+            except (AttributeError, TypeError, ValueError, KeyError, OverflowError):
                 continue
             coin = Coin(symbol, name, price, change_24h, volume_24h, volume_ratio, market_cap, history)
             coin.asset_id = "coingecko:" + coin_id
             coin.observed_at = provider_observed_at
-            coin.provider_published_at = item.get("last_updated")
+            coin.provider_published_at = last_updated
             coin.market_data_source = "coingecko_markets"
-            coin.market_data_hash = hashlib.sha256(
-                json.dumps(item, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest()
+            coin.market_data_hash = data_hash
+            coin.market_data_payload = dict(item)
+            coin.market_data_provider_metadata = dict(MarketScanner._last_provider_metadata)
             coins.append(coin)
 
         return coins
 
     _universe_cache = None
     _cache_timestamp = 0
+    _cache_config_key = None
+    _last_provider_status = "NOT_REQUESTED"
+    _last_provider_metadata = {}
 
     def _universe(self) -> List[Coin]:
-        # Cache for 5 minutes to avoid hitting rate limits
+        # TTL is explicit/configurable; cached Coin timestamps and payload hashes remain unchanged.
         now = time.time()
-        if MarketScanner._universe_cache is not None and (now - MarketScanner._cache_timestamp) < 300:
+        ttl = self.config.market_data_cache_ttl_seconds
+        config_key = (self.config.live_market_data, self.config.http_timeout_seconds, ttl)
+        if (MarketScanner._universe_cache is not None
+                and MarketScanner._cache_config_key == config_key
+                and (now - MarketScanner._cache_timestamp) < ttl):
             return MarketScanner._universe_cache
         if self.config.live_market_data:
-            with suppress(Exception):
+            try:
                 coins = self._coingecko_universe()
-                MarketScanner._universe_cache = coins
-                MarketScanner._cache_timestamp = now
-                return coins
+            except Exception as exc:
+                MarketScanner._last_provider_status = f"UNAVAILABLE_{type(exc).__name__}"
+                MarketScanner._last_provider_metadata = {}
+                LOGGER.warning("Market data acquisition failed; no synthetic fallback (%s)", type(exc).__name__)
+                coins = []
+            MarketScanner._universe_cache = coins
+            MarketScanner._cache_timestamp = now
+            MarketScanner._cache_config_key = config_key
+            return coins
         LOGGER.warning("LIVE_MARKET_DATA is disabled; refusing to use synthetic sample market data")
+        MarketScanner._last_provider_status = "DISABLED"
+        MarketScanner._last_provider_metadata = {}
         MarketScanner._universe_cache = []
         MarketScanner._cache_timestamp = now
+        MarketScanner._cache_config_key = config_key
         return []
 
     def top_gainers(self, limit: int = 3) -> List[Dict[str, Any]]:
@@ -4186,7 +4296,7 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
     global _LAYER1_LAST_SUMMARY
     from layer1.foundation import (
         AssetIdentity, BinanceListingEligibilityEngine, CandidateDiscoveryFilteringEngine,
-        Layer1Store, MarketObservation, RelevanceScore, RelevanceScoringEngine, TrendSignal,
+        Layer1Store, MarketDataIntelligenceEngine, RelevanceScore, RelevanceScoringEngine, TrendSignal,
     )
 
     store = Layer1Store(database_path)
@@ -4227,6 +4337,10 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         eligibility_engine = BinanceListingEligibilityEngine(tuple(sorted(allowed_quotes)))
         candidate_engine = CandidateDiscoveryFilteringEngine()
         scoring_engine = RelevanceScoringEngine()
+        market_engine = MarketDataIntelligenceEngine(
+            lambda *_: None, timeout=CONFIG.http_timeout_seconds,
+            cache_ttl_seconds=CONFIG.market_data_cache_ttl_seconds,
+        )
         for signal in trend_signals:
             store.save_trend(signal)
             summary["trends"] += 1
@@ -4267,19 +4381,12 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 identity, {"symbols": pairs}, verified_at=snapshot_observed_at
             )
             try:
-                market = MarketObservation(
-                    asset_id=asset_id,
-                    provider=source,
-                    endpoint="https://api.coingecko.com/api/v3/coins/markets",
-                    observed_at=observed_at,
-                    price=float(coin.price),
-                    currency="USD",
-                    change_24h=float(coin.change_24h),
-                    volume_24h=float(coin.volume_24h),
-                    market_cap=float(coin.market_cap),
-                    history=tuple(float(value) for value in (coin.history or [])),
-                    published_at=getattr(coin, "provider_published_at", None),
-                    data_hash=getattr(coin, "market_data_hash", ""),
+                provider_payload = getattr(coin, "market_data_payload", None)
+                if not isinstance(provider_payload, dict):
+                    raise ValueError("original CoinGecko provider payload is unavailable")
+                market = market_engine.normalize_coingecko_market(
+                    identity, provider_payload, observed_at=observed_at,
+                    provider_metadata=getattr(coin, "market_data_provider_metadata", {}),
                 )
                 market.validate()
             except (AttributeError, TypeError, ValueError, OverflowError) as exc:
@@ -4318,8 +4425,9 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 "AVAILABLE" if snapshot_observed_at and _binance_spot_pairs_cache else "UNAVAILABLE"
             ),
             "coingecko_market_data": (
-                "AVAILABLE" if summary["observations"] else "UNAVAILABLE"
+                "AVAILABLE" if summary["observations"] else MarketScanner._last_provider_status
             ),
+            "coingecko_market_data_metadata": dict(MarketScanner._last_provider_metadata),
             "coingecko_trending": (
                 "AVAILABLE" if any(signal.source == "coingecko_trending" for signal in trend_signals)
                 else "UNAVAILABLE"
