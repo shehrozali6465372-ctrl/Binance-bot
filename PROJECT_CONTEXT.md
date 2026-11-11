@@ -556,3 +556,15 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 
 ### Exact next task
 Build the bounded Bitcoin address-history ingestion worker on the existing ingestion store. It must process fixed block windows, resume page-by-page safely, fetch each tx detail by txid, normalize all addressable outputs, verify canonical headers and commit each page plus checkpoint atomically. Require explicit address seeds and a caller-supplied minimum-confirmation threshold. Do not claim network-wide discovery.
+
+## Post-push verification — Bitcoin UTXO output normalizer — 2026-11-11
+
+- Implementation commit: 7918fa3457d968342116c94c0ef6b495b93634b5 (feat(layer1): normalize Bitcoin UTXO transaction outputs).
+- Remote feature branch was checked before push and still pointed to e491242845c0c5863cb7f67baa4a2c0795cbb782. Normal fast-forward push succeeded; remote branch then matched 7918fa3457d968342116c94c0ef6b495b93634b5.
+- PR #13 remains OPEN, Draft and unmerged; head 7918fa3457d968342116c94c0ef6b495b93634b5, base layer-1/module8-market-analysis at f7e6fc511e146b6bfb6f25afb0009c369d8afd4a.
+- PR #12 remains OPEN, non-draft and unmerged; head f7e6fc511e146b6bfb6f25afb0009c369d8afd4a and base 8b46af4bbe0afb73d5650a1bb64a761024e53dec. No changes were made to PR #12.
+- GitHub combined status returned an empty statuses array and workflow-run query returned an empty workflow_runs array for 7918fa3. CI remains UNVERIFIED.
+- Final local full suite: 219 passed, 0 failed. Focused ingestion/provider tests: 50 passed, 0 failed. compileall and git diff --check passed.
+- Tracked working tree clean after commit. Existing untracked .venv/ remains present, not staged, not modified and not deleted.
+- No live Alchemy request, credentials, production database, paid resource, deployment, PR merge, real Binance Square post or earning workflow was used/performed.
+- Next exact task: implement the bounded Bitcoin address-history ingestion worker using explicit monitored address seeds, fixed block-height windows, caller-supplied minimum confirmations, independently fetched canonical headers, page-level atomic checkpointing and bounded reorg recovery. Do not guess a confirmation threshold or claim global whale coverage.
