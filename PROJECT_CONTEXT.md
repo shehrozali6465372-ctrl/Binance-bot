@@ -10,6 +10,7 @@ This is the canonical working context for continuing the Binance Square Write-to
 - Repository: `https://github.com/shehrozali6465372-ctrl/Binance-bot`
 - Current implementation branch: `layer-1/module8-market-analysis`
 - Module 8 implementation commit: `820a755e4a233b3fe7c812f795a9d6aba6e0a29b`
+- Context update commit that introduced this file to the Layer 1 stack: `eb1919f5655d888cce28a61683846107d67bb40c` (the current context follow-up is a separate commit).
 - Stacked Layer 1 PR chain: #7 → #8 → #9 → #10 → #11 → #12 (PR #12 will be created from the current branch after context update).
 - Current branch is based on `layer-1/module5-6-candidate-intelligence` (PR #11).
 - PR #2 (CMS worker) remains open/draft and unmerged; PR #3 and #6 also remain open/draft.
@@ -138,7 +139,7 @@ Do not oversimplify Render pricing:
 | Module 5 — Trending/Narrative Intelligence | Implemented on PR #11; CI run `43018392595` passed |
 | Module 6 — Candidate Discovery & Filtering | Implemented with event/trend cluster deduplication on PR #11; CI run `43018392595` passed |
 | Module 7 — Relevance & Scoring | Deterministic versioned scorer exists (`layer1-relevance-v1`), but runtime scoring is explicitly deferred because calibrated evidence inputs are not all available. Do not activate guessed weights/values. |
-| Module 8 — Market Analysis | Implemented on current branch commit `820a755e4a233b3fe7c812f795a9d6aba6e0a29b`; 133-test full local suite passed, including eight market-analysis tests plus runtime persistence checks. CI for the new branch is pending. |
+| Module 8 — Market Analysis | Implemented on commit `820a755e4a233b3fe7c812f795a9d6aba6e0a29b`; 133-test full local suite passed, including eight market-analysis tests plus runtime persistence checks. PR #12 CI run `43020470472` passed for PR head `eb1919f5655d888cce28a61683846107d67bb40c`. |
 | CMS worker PR #2 | Open/draft/unmerged; CI and prior worker tests do not prove live stream operation |
 | CMS integration PR #3 | Open/draft/unmerged; no live deployment verified |
 | CMS startup-race PR #6 | Open/draft/unmerged |
@@ -158,7 +159,7 @@ Do not oversimplify Render pricing:
 | #9 | `layer-1/module3-binance-eligibility-hardening` | `4c34aeadcfc5ec1716630c8209a72f1fd7765f60` | `43014523334` — success | Open, non-draft, unmerged |
 | #10 | `layer-1/module4-announcement-intelligence` | `35a181f1f99058d276ad7e58606c2fd01f681ba9` | `43016772576` — success | Open, non-draft, unmerged |
 | #11 | `layer-1/module5-6-candidate-intelligence` | `8b46af4bbe0afb73d5650a1bb64a761024e53dec` | `43018392595` — success | Open, non-draft, unmerged |
-| #12 | `layer-1/module8-market-analysis` | `820a755e4a233b3fe7c812f795a9d6aba6e0a29b` | Pending branch push/PR creation | Not yet created at time of this context update |
+| #12 | `layer-1/module8-market-analysis` | `eb1919f5655d888cce28a61683846107d67bb40c` (contains implementation commit `820a755`) | `43020470472` — success | Open, non-draft, unmerged; https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/12 |
 
 Local full-suite command on the Module 8 branch: `./.venv/bin/python -m unittest discover -s tests -v` — **133 tests passed, 0 failed**. `compileall` and `git diff --check` passed. Unit/integration fixtures are not evidence of live provider connectivity.
 
@@ -271,8 +272,9 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 ### Branch / commit
 - Branch: `layer-1/module8-market-analysis`
 - Module 8 implementation commit: `820a755e4a233b3fe7c812f795a9d6aba6e0a29b`
+- Context update commit that introduced this file to the Layer 1 stack: `eb1919f5655d888cce28a61683846107d67bb40c` (the current context follow-up is a separate commit).
 - Parent branch: `layer-1/module5-6-candidate-intelligence` (PR #11)
-- PR #12 and CI are pending until the branch is pushed and PR created.
+- PR #12: https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/12 — open, non-draft, unmerged. CI run `43020470472` passed for head `eb1919f5655d888cce28a61683846107d67bb40c`.
 
 ### Module 8 limitations
 - Current runtime usually receives only the current CoinGecko markets observation per asset per cycle. Real 1h/24h calculations become available only after timestamped observations accumulate across cycles.
@@ -280,3 +282,13 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - Benchmark comparison is opportunistic; it requires a sufficiently recent stored BTC observation from the same provider and currency.
 - Outlier and history-gap flags require analyst review; they do not alter or delete raw observations.
 - Module 8 analysis is research context only. It does not alter Binance Spot eligibility, candidate hard gates, Module 7 deferred scoring, or publication authorization.
+
+
+## Progress update — PR #12 created
+
+- PR #12: https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/12
+- Base: `layer-1/module5-6-candidate-intelligence` (PR #11).
+- Head branch: `layer-1/module8-market-analysis`.
+- PR state at verification: OPEN, non-draft, unmerged.
+- GitHub Actions run `43020470472` completed SUCCESS for head `eb1919f5655d888cce28a61683846107d67bb40c`.
+- This context update is a follow-up documentation-only commit; it does not alter Module 8 code or its 133-test local result. Verify CI on the resulting branch head after pushing this documentation update.
