@@ -343,3 +343,32 @@ Official references:
 Verification: focused XRPL normalizer/worker/provider/mapping suite: 89 passed, 0 failed; full repository suite: 286 passed, 0 failed; compileall and git diff --check passed. All tests use deterministic local fixtures.
 
 Official XRPL references: [currency formats](https://xrpl.org/docs/references/protocol/data-types/currency-formats), [transaction metadata](https://xrpl.org/docs/references/protocol/transactions/metadata), [`account_tx`](https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/account-methods/account_tx), and [markers and pagination](https://xrpl.org/docs/references/http-websocket-apis/api-conventions/markers-and-pagination).
+
+## Cross-network transfer aggregation and deduplication — 2026-11-11
+
+### Implemented API
+- Added `layer1/onchain_aggregation.py` with `OnChainTransferAggregator`, `TransferAggregationResult`, `AssetTransferRollup` and `NetworkTransferSummary`.
+- `OnChainTransferAggregator` requires the existing verified `OnChainStore`, an explicit positive decimal `minimum_amount_by_mapping` entry for **every** verified mapping, and explicit freshness limits. It rejects missing/unknown threshold IDs; there is no default whale threshold.
+- Call `aggregate_store(ingestion_store, eligibility_by_asset, now=...)` to read canonical events from all supported networks. In-memory aggregation is also possible only after binding the canonical ingestion store; each event must already exist as the exact persisted canonical record and match the persisted `(network, provider, scope, block_number) -> block_hash` journal.
+- The current `EligibilityDecision` must be supplied by canonical asset ID. The aggregator checks the exact Binance `exchangeInfo?permissions=SPOT` source, canonical CoinGecko identity proof, exact symbol/pair evidence, decision/proof freshness, and re-validates the mapping against the latest persisted ACCEPTED on-chain observation. Missing, stale, forged-shape, ineligible or unproven decisions produce no qualifying summary.
+
+### Identity and amount rules
+- Deduplication key is `(network_id, mapping_id, event_id)`. This collapses XRPL's same issued-currency Payment found from multiple monitored accounts (its event ID is the transaction hash) and collapses repeated discoveries of the same Bitcoin output, EVM log or Solana instruction. It does **not** collapse two different EVM logs or Solana instructions from one transaction.
+- Duplicate rows across account scopes are accepted only when all economic and canonical fields agree. A conflict fails closed. `scope` and `observed_at` may differ between observations; amount, sender/destination evidence, transaction, block, event index and block time may not.
+- The event's transaction hash, block hash and stable event ID are checked against network-specific formats. EVM/Bitcoin event-index suffixes must match `event_index`; Solana signature + outer/inner trace coordinates are retained in `event_id`; XRPL Payment event ID must equal its transaction hash.
+- The event must match a verified mapping's exact asset ID, network and decimals; its provider must be approved for that network; its block must be recent under the configured network freshness policy; and its block hash must equal the canonical block journal for the exact account/contract scope. Missing or mismatched journal evidence is rejected.
+- Amounts are integer base-unit strings converted with exact Decimal scaling using the mapping's decimals. No floating-point arithmetic, rounding, price conversion or cross-network quantity summation occurs.
+- Output is segmented by `(asset_id, network_id, mapping_id)`, with a per-mapping explicit minimum amount and `threshold_met` flag. `qualifying_network_summaries`/`qualifying_assets` expose only summaries that meet the configured threshold. Asset rollups count observations and networks but intentionally expose no combined cross-network token amount or USD amount: wrapped/bridged supply and bridge legs can double-count economic movements.
+- Source/destination counts are generic address counts, not inferred whale wallet counts. Incomplete Bitcoin input attribution contributes no source-address count. The layer does not infer buy/sell direction, trader intent, exchange deposits, net accumulation or whale status.
+
+### Deterministic verification
+- Added `tests/test_onchain_aggregation.py`: cross-network asset rollup with differing decimals (BTC 8 vs ERC-20 wrapped BTC 18), per-mapping thresholds, XRPL account-scope dedupe, preservation of distinct EVM logs and Solana instructions in the same transaction, exact network event identity/index, canonical block-journal matching, Binance Spot eligibility/freshness gate, stale/future/noncanonical rejection, incomplete Bitcoin source attribution, conflicting duplicates and missing/invalid threshold configuration.
+- Focused aggregation suite: 16 passed, 0 failed. Full repository suite: 302 passed, 0 failed. `compileall` and `git diff --check` passed.
+- Each event supplied to in-memory aggregation must exactly match its persisted event row and canonical block journal entry. `aggregate_store()` reads only persisted canonical rows. This module is a deterministic aggregation API, not yet wired into Layer 1 candidate scoring or publication. No real Binance Square post is triggered by this module.
+- The module does not apply Binance order filters (PRICE_FILTER, LOT_SIZE, MIN_NOTIONAL/NOTIONAL); those are execution constraints, not on-chain event thresholds. See [official Binance Spot filters](https://github.com/binance/binance-spot-api-docs/blob/master/filters.md).
+
+### Remaining work
+- Candidate-analysis integration with an explicit no-buy/sell/no-publication boundary and feature provenance.
+- PostgreSQL schema/migration and real PostgreSQL transaction/concurrency tests; SQLite remains local/test storage.
+- Scheduler/worker lifecycle, leases, metrics, alerting, retention and operational runbook.
+- Live provider verification, RPC cost/latency measurements, address checksum validation for XRPL and independent chain-specific coverage review.

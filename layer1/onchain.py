@@ -383,6 +383,28 @@ class OnChainStore:
             self.conn.rollback()
             raise
 
+    def get_latest_accepted_observation(self, mapping_id: str) -> Optional[OnChainObservation]:
+        """Return the newest persisted observation accepted with full Spot proof."""
+        if not isinstance(mapping_id, str) or not mapping_id.strip():
+            raise ValueError("mapping_id must be a non-empty string")
+        rows = self.conn.execute(
+            """SELECT payload_json, validation_json FROM layer1_onchain_observations
+               WHERE mapping_id=?""",
+            (mapping_id,),
+        ).fetchall()
+        accepted = []
+        for payload_json, validation_json in rows:
+            validation = json.loads(validation_json)
+            if validation.get("status") != "ACCEPTED":
+                continue
+            observation = OnChainObservation(**json.loads(payload_json))
+            try:
+                observed_at = _parse_timestamp(observation.observed_at)
+            except ValueError:
+                continue
+            accepted.append((observed_at, observation))
+        return max(accepted, key=lambda item: item[0])[1] if accepted else None
+
     def get_observation(self, observation_id: str) -> Optional[tuple[OnChainObservation, OnChainValidationResult]]:
         row = self.conn.execute(
             "SELECT payload_json, validation_json FROM layer1_onchain_observations WHERE observation_id=?",

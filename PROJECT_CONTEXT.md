@@ -689,4 +689,51 @@ Assess XRPL payment/issued-currency extraction and transaction history paginatio
 - No real Binance Square post/earning workflow, deployment, PR merge, production DB mutation, secret change or paid infrastructure action occurred.
 
 ### Exact next task
-Implement a deterministic cross-network transfer aggregation/deduplication layer before candidate integration. Deduplicate account-scoped XRPL events by `(mapping_id, transaction_hash)` and define explicit per-network asset-unit conversion/threshold contracts; never infer buy/sell intent or use arbitrary whale thresholds. Keep Binance Spot eligibility as a hard gate. After that, plan Postgres migration/concurrency verification and scheduled worker operations. PR #13 remains Draft until production-readiness evidence is complete.
+Implement candidate-analysis integration for the completed cross-network aggregation API. Treat qualified on-chain summaries as corroborative features only; preserve canonical Binance Spot eligibility, explicit provenance/freshness, no buy/sell inference and no publishing authority. Then proceed to PostgreSQL migration/concurrency validation and scheduled worker operations. PR #13 remains Draft until production-readiness evidence is complete.
+
+
+## Progress update — 2026-11-11 — cross-network transfer aggregation
+
+### Starting state verified
+- Repo `shehrozali6465372-ctrl/Binance-bot`, branch `layer-1/module9-onchain-intelligence`.
+- Before implementation, local and remote HEAD both matched `386d54f3ff2e54414e2597e9dd6b252455aae228`; tracked tree clean. Existing untracked `.venv/` preserved.
+- PR #13 remained open, Draft, unmerged; PR #12 remained open and unchanged.
+
+### Implementation
+- Added `layer1/onchain_aggregation.py`:
+  - `OnChainTransferAggregator` requires verified `OnChainStore` mappings, exact threshold configuration for every verified mapping and a current `EligibilityDecision` per canonical asset ID.
+  - Uses the mapping store's most recent persisted ACCEPTED observation and existing `OnChainIntelligenceEngine.validate()` to re-check mapping/Spot eligibility evidence. Binance `exchangeInfo?permissions=SPOT`, exact symbol, CoinGecko identity proof and freshness are mandatory.
+  - Requires the canonical ingestion store's block journal and verifies each event's block hash against exact `(network, provider, scope, height)` evidence. Missing/mismatched journal entries are rejected.
+  - Checks network-specific transaction hash, block hash and stable event ID formats; verifies EVM/Bitcoin event-index suffix equals event_index; Solana signature+outer/inner trace coordinate stays in event_id and event_index remains null; XRPL Payment event_id equals transaction hash.
+  - Deduplication key `(network_id, mapping_id, event_id)` collapses XRPL same Payment across account scopes, Bitcoin same vout, EVM same log and Solana same instruction across scopes. Different EVM logs or Solana instructions in one tx remain distinct. Duplicate economic/canonical payload conflict raises rather than selecting one.
+  - Converts raw integer amount strings with exact Decimal scaling by mapping decimals. No float arithmetic, rounding, USD conversion or cross-network quantity summation.
+  - Groups output by `(asset_id, network_id, mapping_id)` and applies explicit positive threshold per mapping. `qualifying_network_summaries`/`qualifying_assets` surface only threshold-qualified summaries. Asset rollup counts observations/networks but does not add quantities across chains, because wrapped/bridged representations can double-count flows.
+  - Source/destination metrics are generic address counts, not wallet/whale claims. Incomplete Bitcoin input attribution does not become a fabricated single sender. No buy/sell intent or publication action.
+- Added `OnChainStore.get_latest_accepted_observation()` and `OnChainIngestionStore.list_all_events()`.
+- No automatic arbitrary threshold, price oracle, buy/sell inference, or candidate scoring change was added. This remains a callable deterministic aggregation API until candidate integration is separately tested and reviewed.
+
+### Tests
+- Added `tests/test_onchain_aggregation.py` covering cross-network BTC (8 decimals) vs wrapped ERC-20 BTC (18 decimals), explicit per-mapping thresholds, XRPL account-scope dedupe, preservation of separate EVM logs and Solana instructions in one transaction, stable event/index validation, block journal enforcement, Binance Spot eligibility and freshness, stale/future/noncanonical events, Bitcoin incomplete input attribution, conflicting duplicates, and missing/invalid threshold config.
+- Focused aggregation tests: 16 passed, 0 failed.
+- Final full repository suite after all aggregation refinements: 302 passed, 0 failed.
+- `compileall` and `git diff --check` passed after final edits.
+
+### Remaining Module 9 work
+1. Push this aggregation commit using a remote-SHA guard and update PR #13 body without changing Draft status.
+2. Candidate-analysis integration: define explicit feature contracts and prove the on-chain signal cannot publish or infer trading direction; retain Binance Spot eligibility hard gate.
+3. PostgreSQL schema/migration and real PostgreSQL concurrency/atomicity tests. SQLite remains local/test storage.
+4. Scheduler/worker lifecycle, leases, retry budgets, metrics/alerts, retention and runbook.
+5. Live provider verification, quota/latency measurement, XRPL address checksum validation and chain-specific data coverage review.
+
+### Non-negotiables
+- Never publish real Binance Square posts or invoke earning workflow in tests.
+- Do not deploy, merge PR #13/#12, change secrets, mutate production DB or provision paid infrastructure without explicit approval.
+- Preserve `.venv/` untracked and all previous module work.
+
+
+### Final aggregation verification addendum
+- Focused aggregation suite: 16 passed, 0 failed.
+- Full repository suite: 302 passed, 0 failed.
+- `compileall` and `git diff --check` passed.
+- Aggregator refuses arbitrary in-memory injection: each supplied event must exactly match the persisted event record and its canonical block journal entry. `aggregate_store()` reads only canonical persisted rows.
+- The test suite emitted only its existing dry-run publisher log (`Would publish ... no network POST attempted`); no real Binance Square request was performed.

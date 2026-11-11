@@ -339,6 +339,15 @@ class OnChainIngestionStore:
         return [NormalizedTransferEvent(**json.loads(row[0]))
                 for row in self.conn.execute(query, params).fetchall()]
 
+    def list_all_events(self, canonical_only: bool = False) -> list[NormalizedTransferEvent]:
+        """Return persisted events across configured networks in stable order."""
+        query = "SELECT payload_json FROM layer1_onchain_transfer_events"
+        if canonical_only:
+            query += " WHERE canonical_status='CANONICAL'"
+        query += " ORDER BY network_id, block_number, transaction_hash, event_id, scope"
+        return [NormalizedTransferEvent(**json.loads(row[0]))
+                for row in self.conn.execute(query).fetchall()]
+
     def get_block_hash(self, network_id: str, provider: str, scope: str,
                        block_number: int) -> Optional[str]:
         row = self.conn.execute(
