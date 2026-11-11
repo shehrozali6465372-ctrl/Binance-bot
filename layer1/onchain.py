@@ -167,11 +167,18 @@ class OnChainIntelligenceEngine:
                     or mapping.issuer_address is not None or mapping.issued_currency is not None):
                 return OnChainValidationResult("UNVERIFIED", "NATIVE_ASSET_CONTRACT_CONFLICT", "native assets must not declare a token contract, issuer or token standard")
         elif mapping.network_id == "xrpl-mainnet":
+            currency = mapping.issued_currency
+            valid_standard_currency = (
+                isinstance(currency, str) and len(currency) == 3
+                and all(0x21 <= ord(char) <= 0x7E for char in currency)
+                and currency != "XRP"
+            )
+            valid_hex_currency = isinstance(currency, str) and re.fullmatch(r"[0-9a-fA-F]{40}", currency) is not None
             if (mapping.contract_address is not None
                     or mapping.token_standard != "XRPL_ISSUED_CURRENCY"
                     or not isinstance(mapping.issuer_address, str) or not mapping.issuer_address.strip()
-                    or not isinstance(mapping.issued_currency, str) or not mapping.issued_currency.strip()):
-                return OnChainValidationResult("UNVERIFIED", "XRPL_ISSUER_CURRENCY_MAPPING_REQUIRED", "non-native XRPL assets require the exact issuer and issued-currency code")
+                    or not (valid_standard_currency or valid_hex_currency)):
+                return OnChainValidationResult("UNVERIFIED", "XRPL_ISSUER_CURRENCY_MAPPING_REQUIRED", "non-native XRPL assets require the exact issuer and a valid non-XRP 3-character or 160-bit hex currency code")
         elif (not isinstance(mapping.contract_address, str) or not mapping.contract_address.strip()
               or not isinstance(mapping.token_standard, str) or not mapping.token_standard.strip()
               or mapping.issuer_address is not None or mapping.issued_currency is not None):

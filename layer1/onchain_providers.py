@@ -933,6 +933,36 @@ class ChainstackXrplReadOnlyAdapter:
                                 from_block=ledger_index_min, to_block=ledger_index_max,
                                 finality_reference="validated=true")
 
+    def fetch_ledger_header(self, ledger_index: int) -> dict:
+        """Fetch one exact validated ledger header for canonical hash/time proof."""
+        if isinstance(ledger_index, bool) or not isinstance(ledger_index, int) or ledger_index <= 0:
+            raise ValueError("XRPL ledger index must be a positive integer")
+        transport = self._transport_factory(self._endpoint, self._timeout_seconds)
+        result = transport.call("ledger", [{
+            "ledger_index": ledger_index, "transactions": False, "expand": False,
+        }])
+        if not isinstance(result, dict) or result.get("validated") is not True:
+            raise ProviderTransportError("UNVALIDATED_XRPL_LEDGER", "XRPL ledger header is not validated")
+        ledger = result.get("ledger")
+        if not isinstance(ledger, dict):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL ledger response is missing its ledger object")
+        returned_index = result.get("ledger_index", ledger.get("ledger_index"))
+        ledger_hash = result.get("ledger_hash", ledger.get("ledger_hash"))
+        close_time = ledger.get("close_time")
+        if (isinstance(returned_index, bool) or not isinstance(returned_index, int)
+                or returned_index != ledger_index
+                or not isinstance(ledger_hash, str)
+                or re.fullmatch(r"[0-9a-fA-F]{64}", ledger_hash) is None
+                or isinstance(close_time, bool) or not isinstance(close_time, int)
+                or close_time < 0):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL validated ledger header identity or close time is malformed")
+        # XRPL close_time is seconds since 2000-01-01T00:00:00Z.
+        timestamp = close_time + 946684800
+        return {
+            "number": ledger_index, "hash": ledger_hash.lower(), "timestamp": timestamp,
+            "finality_reference": "validated=true",
+        }
+
     def probe(self) -> ProviderHealthResult:
         transport = self._transport_factory(self._endpoint, self._timeout_seconds)
         response = transport.call("server_info", [{}])

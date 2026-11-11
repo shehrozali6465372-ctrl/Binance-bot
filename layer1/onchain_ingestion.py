@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from decimal import Decimal, InvalidOperation, localcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -413,6 +414,126 @@ class OnChainIngestionStore:
 
     def close(self) -> None:
         self.conn.close()
+
+
+
+
+def normalize_xrpl_payment(
+    record,
+    *,
+    monitored_account: str,
+    asset_id: str,
+    mapping_id: str,
+    issuer_address: str,
+    issued_currency: str,
+    decimals: int,
+    canonical_ledger_hash: str,
+    block_time: str,
+    observed_at: str,
+    scope: str,
+) -> Optional[NormalizedTransferEvent]:
+    """Normalize one validated XRPL issued-currency Payment.
+
+    Only the metadata's delivered_amount is evidence of the amount received.
+    The requested transaction Amount and RippleState balance deltas are never
+    substituted for a missing delivered amount. The configured decimal scale
+    must represent the delivered value exactly or normalization fails closed.
+    """
+    from .onchain_providers import XrplAccountTransaction
+
+    if not isinstance(record, XrplAccountTransaction):
+        raise ValueError("record must be a validated XRPL account transaction")
+    if not isinstance(record.raw, dict) or record.raw.get("validated") is not True:
+        raise ValueError("XRPL transaction must have validated-ledger proof")
+    if (not isinstance(record.transaction_hash, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", record.transaction_hash) is None
+            or isinstance(record.ledger_index, bool) or not isinstance(record.ledger_index, int)
+            or record.ledger_index <= 0
+            or record.raw.get("hash") != record.transaction_hash
+            or record.raw.get("ledger_index") != record.ledger_index):
+        raise ValueError("XRPL transaction hash and validated ledger index do not match provider record identity")
+    if not isinstance(record.transaction, dict) or not isinstance(record.metadata, dict):
+        raise ValueError("XRPL transaction and metadata must be objects")
+    if record.transaction.get("TransactionType") != "Payment":
+        return None
+    if record.metadata.get("TransactionResult") != "tesSUCCESS":
+        return None
+    if (not isinstance(monitored_account, str) or not monitored_account.startswith("r")
+            or not isinstance(asset_id, str) or not asset_id.strip()
+            or not isinstance(mapping_id, str) or not mapping_id.strip()
+            or not isinstance(issuer_address, str) or not issuer_address.startswith("r")
+            or not isinstance(issued_currency, str) or not issued_currency.strip()
+            or not ((len(issued_currency) == 3 and all(0x21 <= ord(char) <= 0x7E for char in issued_currency)
+                     and issued_currency != "XRP")
+                    or re.fullmatch(r"[0-9a-fA-F]{40}", issued_currency) is not None)
+            or isinstance(decimals, bool) or not isinstance(decimals, int) or not 0 <= decimals <= 36):
+        raise ValueError("XRPL mapping and monitored account scope are invalid")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", canonical_ledger_hash or ""):
+        raise ValueError("canonical XRPL ledger hash must be 32-byte hex")
+    source = record.transaction.get("Account")
+    destination = record.transaction.get("Destination")
+    if (not isinstance(source, str) or not source.startswith("r")
+            or not isinstance(destination, str) or not destination.startswith("r")):
+        raise ValueError("XRPL Payment source and destination accounts are required")
+    if monitored_account not in {source, destination}:
+        raise ValueError("monitored account is not the payment source or destination")
+    delivered = record.metadata.get("delivered_amount")
+    if delivered == "unavailable" or not isinstance(delivered, dict):
+        raise ValueError("XRPL Payment lacks an exact delivered_amount object")
+    if (delivered.get("currency") != issued_currency
+            or delivered.get("issuer") != issuer_address):
+        return None
+    value = delivered.get("value")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("XRPL delivered_amount value must be a decimal string")
+    try:
+        amount = Decimal(value)
+    except InvalidOperation:
+        raise ValueError("XRPL delivered_amount value is not a valid decimal") from None
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("XRPL delivered_amount must be a positive finite decimal")
+    amount_tuple = amount.as_tuple()
+    significant = list(amount_tuple.digits)
+    exponent = amount_tuple.exponent
+    while len(significant) > 1 and significant[-1] == 0:
+        significant.pop()
+        exponent += 1
+    significant_digits = len(significant)
+    adjusted_exponent = significant_digits + exponent - 1
+    # XRPL normalizes the 16-digit mantissa to [10^15, 10^16-1] and
+    # stores its exponent in [-96, 80]. The corresponding decimal adjusted
+    # exponent is therefore [-81, 95].
+    if significant_digits > 16 or not -81 <= adjusted_exponent <= 95:
+        raise ValueError("XRPL delivered_amount is outside the issued-currency precision/range")
+    with localcontext() as context:
+        context.prec = max(80, significant_digits + decimals + 8)
+        scaled = amount * (Decimal(10) ** decimals)
+    if scaled != scaled.to_integral_value():
+        raise ValueError("XRPL delivered_amount cannot be represented at the configured decimal scale")
+    for timestamp in (block_time, observed_at):
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            raise ValueError("XRPL event timestamps must be timezone-aware ISO-8601") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("XRPL event timestamps must be timezone-aware ISO-8601")
+    transaction_index = record.metadata.get("TransactionIndex")
+    if transaction_index is not None and (
+        isinstance(transaction_index, bool) or not isinstance(transaction_index, int)
+        or transaction_index < 0
+    ):
+        raise ValueError("XRPL TransactionIndex must be a non-negative integer")
+    return NormalizedTransferEvent(
+        event_id=record.transaction_hash.lower(), network_id="xrpl-mainnet",
+        provider="chainstack", scope=scope, asset_id=asset_id, mapping_id=mapping_id,
+        transaction_hash=record.transaction_hash.lower(), block_number=record.ledger_index,
+        block_hash=canonical_ledger_hash.lower(), event_index=transaction_index,
+        from_address=source, to_address=destination,
+        amount_raw=str(int(scaled)), decimals=decimals,
+        block_time=datetime.fromisoformat(block_time.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat(),
+        observed_at=datetime.fromisoformat(observed_at.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat(),
+        canonical_status="CANONICAL", provenance="xrpl:validated:Payment:delivered_amount",
+    )
 
 
 

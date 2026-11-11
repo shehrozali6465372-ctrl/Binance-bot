@@ -577,6 +577,38 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual(params["marker"], {"ledger": 149, "seq": 4})
         self.assertTrue(page.complete is False)
 
+    def test_xrpl_fetches_exact_validated_ledger_header_and_converts_ripple_close_time(self):
+        calls = []
+        def factory(endpoint, timeout):
+            return FakeTransport([{
+                "validated": True, "ledger_index": 500, "ledger_hash": "B" * 64,
+                "ledger": {"ledger_index": 500, "ledger_hash": "B" * 64, "close_time": 800000000},
+            }], calls)
+        adapter = ChainstackXrplReadOnlyAdapter(
+            "https://xrpl-mainnet.core.chainstack.com/redacted-key", transport_factory=factory,
+        )
+        header = adapter.fetch_ledger_header(500)
+        self.assertEqual(header["number"], 500)
+        self.assertEqual(header["hash"], "b" * 64)
+        self.assertEqual(header["timestamp"], 1746684800)
+        self.assertEqual(header["finality_reference"], "validated=true")
+        self.assertEqual(calls[0][0], "ledger")
+        self.assertEqual(calls[0][1][0], {"ledger_index": 500, "transactions": False, "expand": False})
+
+    def test_xrpl_ledger_header_rejects_unvalidated_or_wrong_ledger(self):
+        for result in (
+            {"validated": False, "ledger_index": 500, "ledger_hash": "B" * 64,
+             "ledger": {"close_time": 800000000}},
+            {"validated": True, "ledger_index": 501, "ledger_hash": "B" * 64,
+             "ledger": {"close_time": 800000000}},
+        ):
+            adapter = ChainstackXrplReadOnlyAdapter(
+                "https://xrpl-mainnet.core.chainstack.com/redacted-key",
+                transport_factory=lambda endpoint, timeout, value=result: FakeTransport([value], []),
+            )
+            with self.assertRaises(ProviderTransportError):
+                adapter.fetch_ledger_header(500)
+
     def test_xrpl_rejects_unvalidated_transaction_pages(self):
         def factory(endpoint, timeout):
             return FakeTransport([{

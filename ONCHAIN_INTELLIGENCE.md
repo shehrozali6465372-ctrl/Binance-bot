@@ -10,7 +10,7 @@ Status: **User-selected providers; implementation remains draft. Live connectivi
 | Ethereum mainnet | Alchemy | Free | eth_getLogs for mapped ERC-20 Transfer events; alchemy_getAssetTransfers remains a scoped summary API | Free-tier eth_getLogs range is at most 10 blocks per request; worker verifies finalized head and canonical headers |
 | Solana mainnet | Alchemy | Free | `getTransactionsForAddress` | Address/token-account scoped; full transaction pages up to 100 |
 | BNB Smart Chain mainnet | Alchemy | Free | `eth_getLogs` + BNB JSON-RPC | Free-tier `eth_getLogs` range is at most 10 blocks per request |
-| XRP Ledger mainnet | Chainstack | Developer Free | XRPL JSON-RPC `account_tx` | Account-scoped; history limited by provider's currently available ledger range |
+| XRP Ledger mainnet | Chainstack | Developer Free | XRPL JSON-RPC `account_tx` + exact `ledger` header reads | Account-scoped; fixed validated-ledger ranges; history limited by provider's currently available ledger range |
 
 Official provider facts checked on 2026-11-11:
 
@@ -44,7 +44,7 @@ Official provider facts checked on 2026-11-11:
 | Ethereum | Alchemy eth_getLogs for durable ingestion; alchemy_getAssetTransfers for scoped summaries | Exact mapped contract and ERC-20 Transfer topic; chain ID 1 checked; inclusive block range <= 10; range must not exceed the Ethereum finalized tag. Decodes provider-supplied transaction hash/log index, from/to and raw uint256. Canonical block headers are fetched independently by the worker. The summary API is not used to invent log indices. |
 | BNB Smart Chain | Alchemy eth_getLogs | Exact token contract and ERC-20 Transfer topic; chain ID 56 checked; inclusive block range <= 10; range must not exceed eth_getFinalizedHeader with all validators (verifiedValidatorNum=-3). Decodes provider-supplied transaction hash/log index, from/to and raw uint256; preserves removed reorg flag. |
 | Solana | Alchemy `getTransactionsForAddress` | Address/token-account scope; full transaction page <= 100; finalized commitment; requests successful transactions and balance-changing token-account activity; validates signature, slot and full transaction metadata; preserves `paginationToken`. |
-| XRP Ledger | Chainstack `account_tx` | Account scope; explicit fixed ledger range (no moving `-1` bounds); opaque marker pagination; response and each transaction must be validated; returned ledger bounds are checked. |
+| XRP Ledger | Chainstack `account_tx` + `ledger` | Account scope; explicit fixed ledger range (no moving `-1` bounds); opaque marker pagination; response and each transaction must be validated; exact validated ledger headers supply canonical hash and close time. |
 
 Transport validates JSON-RPC envelopes, normalizes HTTP 429/network errors without exposing endpoint credentials, and exposes no transaction-submission method. REST and JSON-RPC calls are read-only in these adapters.
 
@@ -55,8 +55,8 @@ Transport validates JSON-RPC envelopes, normalizes HTTP 429/network errors witho
 - Bitcoin address history and Solana `getTransactionsForAddress` are address-scoped. XRPL `account_tx` is also account-scoped. These methods do not discover every whale wallet across their networks.
 - Complete network-wide whale discovery is therefore **not available** from the selected five methods alone. BTC/SOL/XRPL need an explicit monitored-wallet source or a separately evaluated indexing/discovery product before broad whale coverage can be claimed.
 - XRPL markers are opaque and may expire after 10 minutes. A worker must consume a page sequence promptly and checkpoint stable ledger bounds; the marker is not a durable cursor.
-- Ethereum and BNB ERC-20 logs are normalized and durably checkpointed by the shared bounded EVM worker described below. Bitcoin output normalization is implemented, but its bounded worker and durable event ingestion remain pending. Solana/XRPL transfer persistence remains pending; none of these events is wired into candidate analysis yet.
-- Ethereum and BNB canonical block hashes are journaled and reconciled within a configured lookback. Bitcoin output normalization is implemented, but its bounded worker, canonical block journal, checkpoint recovery and reorg reconciliation remain pending.
+- Ethereum/BNB ERC-20 logs, address-seeded Bitcoin UTXO outputs, address-seeded Solana base SPL Token transfers and address-seeded XRPL issued-currency Payments now have callable bounded workers and durable page checkpoints. None of these events is wired into candidate analysis yet.
+- Ethereum/BNB canonical block hashes, Bitcoin block hashes, Solana produced/skipped slots and XRPL ledger hashes are journaled and reconciled within configured lookback windows. Reorg recovery is bounded; no arbitrary-depth recovery is claimed.
 - No transfer value threshold, whale classification, exchange attribution, bridge deduplication or buy/sell intent inference is enabled.
 
 ## Open-source reuse review — 2026-11-11
@@ -305,3 +305,41 @@ Official references:
 - Implementation commit: `ca567bc7ea64f278bf2564191333a3f460918cd1` — `feat(layer1): add bounded Solana SPL token ingestion`.
 - Commit was pushed to `origin/layer-1/module9-onchain-intelligence` after confirming the remote head was the expected prior commit `f1198983757f1c5cc1fa4125afedaec9ae07c84b`.
 - Local tracked tree is clean; only the pre-existing untracked `.venv/` remains.
+
+
+## XRPL issued-currency Payment ingestion implemented — 2026-11-11
+
+### Provider and canonical ledger evidence
+- Existing `ChainstackXrplReadOnlyAdapter.fetch_account_transactions()` remains account-scoped and requires an explicit fixed inclusive ledger range. It rejects unvalidated pages/transactions, mismatched account scope, malformed transaction hashes/ledger indexes/metadata and provider responses that do not cover the requested range.
+- Added `fetch_ledger_header(ledger_index)`: requests that exact ledger with `transactions=false`, requires `validated=true`, exact returned ledger index, a 32-byte ledger hash and integer close time. XRPL close time is converted from the Ripple epoch (2000-01-01 UTC) to Unix time.
+- The worker obtains the current validated head via the existing `server_info` probe and never queries moving `-1` ledger bounds for page pagination.
+
+### Payment normalizer
+- Added `normalize_xrpl_payment()` for `TransactionType=Payment` and `TransactionResult=tesSUCCESS` only.
+- Requires provider record `validated=true`, exact raw transaction hash and ledger index matching the typed record, transaction Account and Destination, and monitored account matching one of those two sides.
+- Requires metadata `delivered_amount` to be a positive finite issued-currency object whose exact currency and issuer match the verified mapping. Missing, `unavailable`, malformed, zero, negative or non-finite delivered amounts fail closed. It never substitutes transaction `Amount` or infers a transfer from RippleState balance changes.
+- Uses the transaction hash as the stable one-payment event identity; ledger index/hash and TransactionIndex are retained. The ledger hash is independently fetched from the exact validated ledger header before normalization.
+- XRPL IOU amounts are decimal strings, not integer base units. The worker scales them using the mapping's explicitly configured `decimals` and accepts only an exact integer representation. Decimal arithmetic uses sufficient precision; XRPL normalized 16-digit mantissa and exponent range (-96..80; decimal adjusted exponent -81..95) are checked. Values not exactly representable at the configured scale are rejected rather than rounded.
+- Non-Payment transactions, failed Payments and Payments of other issuer/currency mappings do not create events. Native XRP, CheckCash, AccountDelete, AMM-specific balance effects and trustline balance-delta inference are not implemented. XRPL classic-address checksum validation is not yet implemented; account seeds are shape-checked only, so production configuration must be validated with `xrpl-py` addresscodec or an equivalent checksum verifier before use.
+
+### Bounded worker and recovery
+- Added `layer1/onchain_xrpl_worker.py`, requiring verified XRPL issued-currency mappings, explicit monitored account seeds, explicit initial ledger per mapping, bounded ledger windows, page size/page count and reorg lookback.
+- Each account query persists a fixed ledger range plus the provider's opaque marker. Event page, canonical ledger hashes and checkpoint are committed through the existing atomic `commit_page()` transaction.
+- Marker contents are treated as opaque. Repeated/looping markers are rejected. If a persisted marker produces an RPC error, the worker resets the marker and replays the same fixed range from page one; replay is idempotent.
+- The worker fetches exact validated headers for every ledger in the bounded range, including ledgers with no account transactions, so a changed ledger hash can be detected even when the old ledger had no transfer event.
+- Completed-range lookback and active partial ranges are rechecked. Changed ledger hashes tombstone affected events and rewind/restart the relevant range before replay. Recovery is limited to the configured lookback plus the active range.
+- Events are scoped per monitored account and mapping. The same Payment can therefore appear in multiple account scopes if both sender and recipient are monitored; downstream aggregation MUST deduplicate by `(mapping_id, transaction_hash)` before counting transfer volume.
+
+### Open-source review
+- Reviewed [`xrpl-py`](https://github.com/XRPLF/xrpl-py): maintained Python XRPL SDK, Python 3.10+ support, ISC license, native RPC models/client and address codecs. It is suitable if future address checksum validation, model-based RPC or XRPL serialization/signing is required.
+- It was not added as a runtime dependency for this read-only extraction slice: the existing transport already handles the bounded JSON-RPC calls, and the normalizer consumes the validated JSON metadata directly. No SDK source was copied or vendored. Transaction signing is outside this project's read-only scope.
+
+### Verification and limits
+- New XRPL normalizer, worker and provider tests cover delivered-vs-requested partial payment amounts, missing/unavailable/malformed delivered amounts, exact issuer/currency, account-side proof, validated status, transaction hash/ledger identity, decimal exactness/precision, fixed-range marker resume, timeout recovery, expired-marker replay, marker loops, active-range reorg and completed-range ledger rewind.
+- No live Chainstack request or credential was used. Provider JSON-RPC compatibility, actual history coverage/retention and real endpoint pagination remain unverified.
+- Worker fetches each ledger header in its bounded range; this is intentionally conservative but can be RPC-intensive per monitored account. Keep windows and account seeds conservative until live quota/cost measurements are available.
+- Account-scoped history is not network-wide whale discovery. Native XRP is not yet extracted. SQLite remains local/test storage; Postgres migration/concurrency, scheduler lifecycle, metrics/alerts, runbook, live provider verification, aggregation and candidate-analysis wiring remain pending.
+
+Verification: focused XRPL normalizer/worker/provider/mapping suite: 89 passed, 0 failed; full repository suite: 286 passed, 0 failed; compileall and git diff --check passed. All tests use deterministic local fixtures.
+
+Official XRPL references: [currency formats](https://xrpl.org/docs/references/protocol/data-types/currency-formats), [transaction metadata](https://xrpl.org/docs/references/protocol/transactions/metadata), [`account_tx`](https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/account-methods/account_tx), and [markers and pagination](https://xrpl.org/docs/references/http-websocket-apis/api-conventions/markers-and-pagination).

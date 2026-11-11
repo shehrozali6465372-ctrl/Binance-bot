@@ -221,6 +221,19 @@ class OnChainIntelligenceTests(unittest.TestCase):
         result = self.engine._validate_mapping(xrpl_mapping)
         self.assertIsNone(result)
 
+    def test_xrpl_issued_token_rejects_reserved_xrp_or_malformed_currency_codes(self):
+        for currency in ("XRP", "US", "USD ", "G" * 40):
+            mapping = OnChainAssetMapping(**{
+                **self.mapping.__dict__, "mapping_id": "xrpl-invalid-currency-v1",
+                "asset_id": "coingecko:usd-coin", "binance_symbol": "USDC",
+                "network_id": "xrpl-mainnet", "network_family": "XRPL",
+                "chain_id": "xrpl-mainnet", "representation": "TOKEN",
+                "token_standard": "XRPL_ISSUED_CURRENCY",
+                "issuer_address": "rIssuerAddressExample", "issued_currency": currency,
+            })
+            result = self.engine._validate_mapping(mapping)
+            self.assertEqual(result.reason_code, "XRPL_ISSUER_CURRENCY_MAPPING_REQUIRED")
+
     def test_xrpl_issued_token_without_issuer_currency_is_rejected(self):
         xrpl_mapping = OnChainAssetMapping(**{
             **self.mapping.__dict__, "mapping_id": "xrpl-issued-token-v1",

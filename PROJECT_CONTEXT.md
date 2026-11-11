@@ -636,3 +636,57 @@ Assess XRPL payment/issued-currency extraction and transaction history paginatio
 - Successfully pushed to `origin/layer-1/module9-onchain-intelligence` after remote SHA guard. Branch local/remote head verified at this commit before this context-only update.
 - Full suite 260 passed, focused Solana/provider suite 65 passed, compileall and git diff --check passed.
 - Tracked tree clean; existing untracked `.venv/` preserved.
+
+
+## Progress update — 2026-11-11 — XRPL issued-currency ingestion
+
+### Verified starting point
+- Repository: `shehrozali6465372-ctrl/Binance-bot`; workdir `/tmp/binance-layer1-audit`.
+- Branch `layer-1/module9-onchain-intelligence`; local HEAD and fetched remote branch both matched `e72c594b6e6524ceb71997ac1f9b8a960bd54832` before edits.
+- Tracked working tree was clean. Existing untracked `.venv/` was preserved and remains untracked.
+- PR #13 was OPEN, Draft, unmerged, head `e72c594b6e6524ceb71997ac1f9b8a960bd54832`, base `layer-1/module8-market-analysis` at `f7e6fc511e146b6bfb6f25afb0009c369d8afd4a`.
+- PR #12 was OPEN, non-draft, unmerged and unchanged, head `f7e6fc511e146b6bfb6f25afb0009c369d8afd4a`, base `layer-1/module5-6-candidate-intelligence` at `8b46af4bbe0afb73d5650a1bb64a761024e53dec`.
+- GitHub head status initially had no commit statuses; workflow run query showed `Phase 1 Safety Tests` run `43053159016` completed successfully. This single workflow does not prove full release readiness.
+
+### Reuse assessment
+- Reviewed `xrpl-py` (`XRPLF/xrpl-py`): native Python XRPL SDK, Python >=3.10, ISC license, provides RPC clients/models and address codecs. Not added because this narrow read-only path uses the existing JSON-RPC transport and direct validated JSON metadata; signing/serialization APIs are unnecessary. No external source copied or vendored.
+- Official XRPL docs confirm `delivered_amount` is the field to use for actual Payment delivery, including partial payments; metadata changes are final only in validated ledgers. `account_tx` is account-scoped and supports opaque marker pagination. General marker docs warn that markers are undefined and may expire after about 10 minutes; fixed ledger bounds are therefore the durable recovery boundary.
+
+### Implementation
+- Added `normalize_xrpl_payment()` in `layer1/onchain_ingestion.py`.
+  - Accepts only validated successful `Payment` transactions.
+  - Checks the provider record's exact transaction hash and ledger index against the raw record, requires transaction Account/Destination and monitored account side evidence.
+  - Requires exact `delivered_amount` currency and issuer matching the verified mapping; missing, unavailable, malformed, zero, negative or non-finite values fail closed.
+  - Never substitutes requested `Amount` and never converts RippleState/account balance changes into synthetic transfers.
+  - Stable event ID is transaction hash; event includes validated ledger index/hash and TransactionIndex where supplied.
+  - Converts issued IOU decimal strings to integer raw amount using the mapping's configured decimal scale only when exact. XRPL normalized mantissa/exponent protocol bounds are enforced; no rounding.
+- Added `ChainstackXrplReadOnlyAdapter.fetch_ledger_header()` in `layer1/onchain_providers.py`. It requests one exact ledger, requires `validated=true`, matching ledger index, exact 32-byte ledger hash and integer close time, then converts Ripple-epoch close time to Unix time.
+- Added `layer1/onchain_xrpl_worker.py`.
+  - Requires verified issued-currency mappings, explicit monitored accounts, explicit start ledgers, bounded ledger range/page count/page size and bounded reorg lookback.
+  - Reads the current validated head and uses fixed ledger bounds for all `account_tx` pages.
+  - Stores opaque marker as checkpoint only; detects marker loops. On an RPC error with a persisted marker, resets and replays the same fixed range from page one.
+  - Fetches validated ledger headers for every ledger in the bounded range (including empty ledgers), commits ledger-hash journal, normalized events and page checkpoint atomically.
+  - Rechecks completed lookback and active partial range; changed ledger hash tombstones affected events and rewinds/restarts the range.
+  - Events are account-scoped. If both sender and destination accounts are monitored, the same Payment can exist in both scopes; downstream aggregation must deduplicate by `(mapping_id, transaction_hash)`.
+- Native XRP, CheckCash, AccountDelete, AMM/trustline balance-delta extraction and network-wide account discovery remain unsupported. XRPL classic-address checksum validation is not yet implemented; current seed checks validate Base58 shape/length only, not checksum. Only mapped issued-currency Payments are normalized.
+
+### Tests added
+- `tests/test_xrpl_normalization.py` — Payment/partial Payment, actual delivered amount, missing/unavailable/malformed amount, exact issuer/currency, account-side evidence, transaction/ledger identity, exact decimal scaling and precision/range.
+- `tests/test_onchain_xrpl_worker.py` — fixed ledger range, page marker resume after timeout, expired marker replay, repeated marker rejection, validated-record requirement, active/completed range reorg rewind and no checkpoint advancement on malformed records.
+- `tests/test_onchain_providers.py` — exact validated XRPL ledger header, Ripple close-time conversion, unvalidated/wrong-index rejection.
+
+### Verification
+- Focused XRPL normalizer/worker/provider/mapping suite: 89 passed, 0 failed.
+- Full repository suite: 286 passed, 0 failed.
+- `compileall` and `git diff --check` passed.
+- Deterministic local fixtures only; no live Chainstack calls.
+
+### Operational limitations
+- No live Chainstack request or credential was used; provider JSON-RPC compatibility, actual history coverage/retention and real endpoint pagination remain unverified.
+- Worker fetches each ledger header in its bounded range; this can be RPC-intensive per monitored account. Keep range sizes and seeds conservative pending measured live quotas/cost.
+- Account history is not network-wide whale discovery. Multiple account scopes can surface the same transaction; aggregation dedupe is mandatory.
+- SQLite remains local/test storage. Postgres migration/concurrency validation, scheduler lifecycle, metrics/alerts, runbook, live provider verification, decimal-aware aggregation and candidate-analysis wiring remain outstanding.
+- No real Binance Square post/earning workflow, deployment, PR merge, production DB mutation, secret change or paid infrastructure action occurred.
+
+### Exact next task
+Implement a deterministic cross-network transfer aggregation/deduplication layer before candidate integration. Deduplicate account-scoped XRPL events by `(mapping_id, transaction_hash)` and define explicit per-network asset-unit conversion/threshold contracts; never infer buy/sell intent or use arbitrary whale thresholds. Keep Binance Spot eligibility as a hard gate. After that, plan Postgres migration/concurrency verification and scheduled worker operations. PR #13 remains Draft until production-readiness evidence is complete.
