@@ -772,3 +772,9 @@ Implement PostgreSQL schema/migration and real PostgreSQL transaction/concurrenc
 - Full repository suite: 313 passed, 0 failed. Focused aggregation + candidate integration: 27 passed. `compileall` and `git diff --check` passed.
 - Tracked working tree clean after push; `.venv/` remains untracked and untouched.
 - No production deployment, PR merge, live on-chain RPC, secrets change, production database mutation, paid infrastructure, or real Binance Square post was performed.
+
+### Branch-head correction after documentation handoff
+- Latest branch HEAD after the documentation-only handoff commit: `88ebe86394dfac109170515866ee50154cc81eb8`.
+- PR #13 head is therefore `88ebe86394dfac109170515866ee50154cc81eb8` (not the immediately preceding implementation commit `cb1a118887da08efdfe9d436dd550ddd35b5c8e0`).
+- The implementation commit's Phase 1 Safety Tests run `43070205665` passed; the documentation-only handoff commit's run `43070324062` also passed (`mocked-safety-tests`).
+- PR #12 remains unchanged/open/unmerged.
