@@ -299,6 +299,29 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", f"provider {field} is negative")
         return number
 
+    def fetch_bitcoin_tip_height(self) -> int:
+        """Return the Bitcoin mainnet tip height from the read-only RPC endpoint."""
+        height = self._call("bitcoin-mainnet", "getblockcount")
+        if isinstance(height, bool) or not isinstance(height, int) or height <= 0:
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin tip height is invalid")
+        return height
+
+    def fetch_bitcoin_block_header(self, height: int) -> dict:
+        """Resolve a height independently through getblockhash + getblockheader."""
+        if isinstance(height, bool) or not isinstance(height, int) or height < 0:
+            raise ValueError("Bitcoin block height must be a non-negative integer")
+        block_hash = self._call("bitcoin-mainnet", "getblockhash", [height])
+        if not isinstance(block_hash, str) or re.fullmatch(r"[0-9a-fA-F]{64}", block_hash) is None:
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin getblockhash returned an invalid hash")
+        header = self._call("bitcoin-mainnet", "getblockheader", [block_hash, True])
+        if (not isinstance(header, dict) or header.get("height") != height
+                or not isinstance(header.get("hash"), str)
+                or header["hash"].lower() != block_hash.lower()
+                or isinstance(header.get("time"), bool)
+                or not isinstance(header.get("time"), int) or header["time"] <= 0):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin canonical block header is malformed or mismatched")
+        return {"number": height, "hash": block_hash.lower(), "timestamp": header["time"]}
+
     def fetch_bitcoin_transaction(self, txid: str) -> dict:
         """Fetch full UTXO input/output details for one exact transaction ID."""
         if not isinstance(txid, str) or re.fullmatch(r"[0-9a-fA-F]{64}", txid) is None:

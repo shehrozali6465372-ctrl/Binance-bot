@@ -568,3 +568,27 @@ Build the bounded Bitcoin address-history ingestion worker on the existing inges
 - Tracked working tree clean after commit. Existing untracked .venv/ remains present, not staged, not modified and not deleted.
 - No live Alchemy request, credentials, production database, paid resource, deployment, PR merge, real Binance Square post or earning workflow was used/performed.
 - Next exact task: implement the bounded Bitcoin address-history ingestion worker using explicit monitored address seeds, fixed block-height windows, caller-supplied minimum confirmations, independently fetched canonical headers, page-level atomic checkpointing and bounded reorg recovery. Do not guess a confirmation threshold or claim global whale coverage.
+
+## Progress update — 2026-11-11 — Bounded Bitcoin address-history worker
+
+### Implementation
+- Added `layer1/onchain_bitcoin_worker.py` to orchestrate verified native BTC mapping lookup, explicit monitored address seeds, fixed block-height windows, page-based address history, exact txid detail fetch, Bitcoin output normalization and atomic SQLite page/checkpoint commits.
+- Added read-only Alchemy provider helpers for Bitcoin tip height and independently resolved canonical block headers via getblockcount → getblockhash → getblockheader.
+- Caller must provide `minimum_confirmations`, explicit per-mapping monitored addresses, explicit start blocks, bounded max blocks/page size and reorg lookback. The worker computes its safe scan ceiling from the configured confirmation threshold; no confirmation policy is guessed.
+- Checkpoint cursor preserves fixed from/to range and next page; events, canonical block hashes (including empty blocks) and page cursor commit in one existing `commit_page` transaction. A completed page range clears active range fields and advances next_block.
+- Re-fetches canonical headers in the bounded lookback and in any partially paginated active range. A changed header tombstones affected events and restarts the range from page 1. Changed provider totalPages metadata also forces a page-1 replay instead of continuing a stale page offset.
+- Provider errors are retried only for bounded retryable categories (timeouts, network errors, rate limits and HTTP 5xx); invalid data/scope mismatches/insufficient confirmations fail closed.
+- Address-history summaries are not transfer events. Full transaction details are fetched by exact txid and only output records with stable provider-supplied vout indexes and one decoded destination address become events. No arbitrary sender attribution is added.
+
+### Verification
+- New worker tests: 7 passed. Bitcoin worker/provider/normalizer focused suite: 58 passed, 0 failed.
+- Full repository suite: 228 passed, 0 failed.
+- `compileall`: passed. `git diff --check`: passed.
+- Deterministic local fixtures only; no live Alchemy request/credential used.
+- No real Binance Square post or earning workflow; no deployment, merge, paid infrastructure or production DB mutation.
+
+### Limitations and next task
+- Bitcoin worker is explicitly address-scoped, not network-wide discovery. Operator-supplied seeds are mandatory.
+- Confirmation threshold, start height, block-window size and reorg lookback are caller policy. Reorg recovery is bounded by configured lookback plus active page range.
+- SQLite remains local/test persistence; Postgres migration/concurrency validation, live provider verification, scheduling, metrics/alerts and operational runbook remain outstanding.
+- Next continue with Solana transaction/event extraction assessment, only normalize records where stable transaction/signature and instruction identity, mint, raw amount, source/destination and canonical slot evidence are all present. Do not invent instruction indexes or use aggregate account history summaries as transfer events. Assess reusable open-source code before implementing; preserve current architecture and never publish a real Binance Square post.

@@ -182,3 +182,31 @@ Important remaining limits:
 Official Alchemy references:
 - Address history and fixed from/to block filters: https://www.alchemy.com/docs/chains/bitcoin/utxo-api-endpoints/utxo-api-endpoints/get-address
 - Full transaction details and vin/vout schema: https://www.alchemy.com/docs/chains/bitcoin/utxo-api-endpoints/utxo-api-endpoints/get-transaction
+
+## Bounded Bitcoin address-history ingestion worker implemented — 2026-11-11
+
+`layer1/onchain_bitcoin_worker.py` now wires the Alchemy Bitcoin address-history and full-transaction detail methods to the existing Bitcoin output normalizer and atomic ingestion store.
+
+- Reads only mappings returned by `OnChainStore.list_verified_mappings("bitcoin-mainnet")` that pass the worker's native BTC / UTXO / 8-decimal mapping checks.
+- Requires explicit monitored-address seeds and an explicit start block for every mapping. Each address has an independent cursor and event scope; this is not a network-wide scan or global whale feed.
+- Requires a caller-supplied positive `minimum_confirmations`; there is no implicit production confirmation policy. The worker calculates the safe scan ceiling as `tip_height - minimum_confirmations + 1`.
+- Scans a bounded fixed block-height range per address and uses the provider's page number/page count with the same fixed from/to heights on every page. Each successful page commits its normalized outputs, canonical block journal and next-page/next-range checkpoint atomically.
+- Fetches full transaction details by the exact txid for every address-history record. It never treats address-history summaries as transfer events and never fabricates output indexes.
+- Independently resolves canonical block hashes and timestamps for every height in the range (including blocks with no address activity) using `getblockcount`, `getblockhash` and `getblockheader`.
+- On restart, resumes the saved page for the same fixed range. If provider pagination metadata changes, it restarts the range at page 1 rather than continuing from a potentially stale offset.
+- Reconciles a bounded caller-configured lookback against independently fetched canonical headers. It also checks already-journaled headers inside a partially paginated active range; a changed hash tombstones affected events and restarts that range at page 1.
+- Retries provider timeouts, network errors, rate limits and HTTP 5xx responses a bounded number of times. Malformed pages, scope mismatch, transaction/block identity mismatch, insufficient confirmations and other non-retryable provider errors fail closed without advancing the affected page checkpoint.
+- Uses `txid:vout` identity and integer satoshis through the existing normalizer. Multi-input source addresses remain a set; no single sender is invented.
+
+Verification:
+- Seven dedicated worker tests cover explicit address scope, page-level restart after a transaction-detail failure, empty pages, empty-block reorg recovery, reorg within a partially paginated range, confirmation gating and provider scope mismatch.
+- Two provider tests cover independent Bitcoin tip/header retrieval and canonical header hash mismatch rejection.
+- Focused Bitcoin worker/provider/normalizer suite: 58 passed, 0 failed. Full repository suite: 228 passed, 0 failed. `compileall` and `git diff --check` passed.
+- All tests use deterministic local fixtures. No live Alchemy request or credential was used; no live provider compatibility, throughput, or billing behavior is claimed.
+
+Remaining operational limits:
+- Bitcoin address discovery is intentionally out of scope; an operator must provide monitored address seeds.
+- Confirmation threshold, initial scan height, per-run range size and reorg lookback remain explicit caller policy.
+- Reorg recovery is limited to the configured lookback and the active persisted range; deeper reorganizations require an operator-approved wider rescan.
+- SQLite remains the local/test store. PostgreSQL migration, real concurrency/load testing, live provider verification, scheduler/worker lifecycle, metrics/alerts and runbook are still pending.
+- Address checksum verification remains outside the normalizer; address decoding currently relies on provider-supplied address metadata.

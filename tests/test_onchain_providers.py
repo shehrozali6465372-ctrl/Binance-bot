@@ -65,6 +65,27 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual(result.finality_reference, "confirmations=1")
         self.assertEqual([call[0] for call in calls], ["getblockcount", "getblockhash", "getblockheader"])
 
+    def test_bitcoin_worker_tip_and_canonical_header_are_independently_resolved(self):
+        block_hash = "a" * 64
+        adapter, calls = self.adapter([900000, block_hash, {
+            "height": 900000, "hash": block_hash, "time": 1794398340,
+        }])
+        self.assertEqual(adapter.fetch_bitcoin_tip_height(), 900000)
+        header = adapter.fetch_bitcoin_block_header(900000)
+        self.assertEqual(header, {
+            "number": 900000, "hash": block_hash, "timestamp": 1794398340,
+        })
+        self.assertEqual([call[0] for call in calls], [
+            "getblockcount", "getblockhash", "getblockheader",
+        ])
+
+    def test_bitcoin_worker_rejects_canonical_header_hash_mismatch(self):
+        adapter, _ = self.adapter([
+            "a" * 64, {"height": 900000, "hash": "b" * 64, "time": 1794398340},
+        ])
+        with self.assertRaises(ProviderTransportError):
+            adapter.fetch_bitcoin_block_header(900000)
+
     def test_alchemy_ethereum_probe_verifies_chain_id_and_finalized_block(self):
         adapter, calls = self.adapter([
             "0x1",
