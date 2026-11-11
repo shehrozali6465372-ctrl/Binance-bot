@@ -1,6 +1,6 @@
 # Binance Square Write-to-Earn Agent — Canonical Project Context
 
-Last updated: 2026-11-11 (UTC)
+Last updated: 2026-11-11 (UTC) — Module 9 durable ingestion update
 
 This is the canonical working context for continuing the Binance Square Write-to-Earn Agent project. Keep this file in this GitHub repository and update it as work progresses. Do not use ChatGPT Library or create a parallel Library copy.
 
@@ -8,10 +8,10 @@ This is the canonical working context for continuing the Binance Square Write-to
 
 - Repository: https://github.com/shehrozali6465372-ctrl/Binance-bot
 - Repository: `https://github.com/shehrozali6465372-ctrl/Binance-bot`
-- Current implementation branch: `layer-1/module8-market-analysis`
+- Current implementation branch: `layer-1/module9-onchain-intelligence` (Module 9 stacked Draft PR #13)
 - Module 8 implementation commit: `820a755e4a233b3fe7c812f795a9d6aba6e0a29b`
 - Context update commit that introduced this file to the Layer 1 stack: `eb1919f5655d888cce28a61683846107d67bb40c` (the current context follow-up is a separate commit).
-- Stacked Layer 1 PR chain: #7 → #8 → #9 → #10 → #11 → #12 (PR #12 will be created from the current branch after context update).
+- Stacked Layer 1 PR chain: #7 → #8 → #9 → #10 → #11 → #12 → #13. PR #12 is the Module 8 base for Module 9 PR #13.
 - Current branch is based on `layer-1/module5-6-candidate-intelligence` (PR #11).
 - PR #2 (CMS worker) remains open/draft and unmerged; PR #3 and #6 also remain open/draft.
 - PRs #7–#11 are open, non-draft and unmerged; do not merge any PR or deploy without separate explicit approval.
@@ -139,7 +139,8 @@ Do not oversimplify Render pricing:
 | Module 5 — Trending/Narrative Intelligence | Implemented on PR #11; CI run `43018392595` passed |
 | Module 6 — Candidate Discovery & Filtering | Implemented with event/trend cluster deduplication on PR #11; CI run `43018392595` passed |
 | Module 7 — Relevance & Scoring | Deterministic versioned scorer exists (`layer1-relevance-v1`), but runtime scoring is explicitly deferred because calibrated evidence inputs are not all available. Do not activate guessed weights/values. |
-| Module 8 — Market Analysis | Implemented on commit `820a755e4a233b3fe7c812f795a9d6aba6e0a29b`; 133-test full local suite passed, including eight market-analysis tests plus runtime persistence checks. PR #12 CI runs `43020470472` and `43020622048` passed for heads `eb1919f5655d888cce28a61683846107d67bb40c` and `7ce44bdac0cf75f2525faacd07a33755df9f72bf`, respectively. |
+| Module 8 — Market Analysis | Implemented on the Module 8 branch; PR #12 remains open, non-draft and unmerged. The verified base SHA for Module 9 PR #13 is `f7e6fc511e146b6bfb6f25afb0009c369d8afd4a`. Earlier CI successes apply only to the exact older SHAs listed below; do not assume they validate later heads. |
+| Module 9 — On-chain Intelligence | Domain validation, five read-only scoped provider adapters, durable SQLite event/checkpoint store, EVM Transfer-log normalizer and reorg tombstones implemented on PR #13. Latest head `93f868d8bf9624b96e3d30ab66f7bbab26b0d92d`; local full suite 192 passed. Remote CI status is unverified (GitHub workflow/status queries returned empty arrays). Live provider access, production persistence and candidate integration remain incomplete. |
 | CMS worker PR #2 | Open/draft/unmerged; CI and prior worker tests do not prove live stream operation |
 | CMS integration PR #3 | Open/draft/unmerged; no live deployment verified |
 | CMS startup-race PR #6 | Open/draft/unmerged |
@@ -159,7 +160,8 @@ Do not oversimplify Render pricing:
 | #9 | `layer-1/module3-binance-eligibility-hardening` | `4c34aeadcfc5ec1716630c8209a72f1fd7765f60` | `43014523334` — success | Open, non-draft, unmerged |
 | #10 | `layer-1/module4-announcement-intelligence` | `35a181f1f99058d276ad7e58606c2fd01f681ba9` | `43016772576` — success | Open, non-draft, unmerged |
 | #11 | `layer-1/module5-6-candidate-intelligence` | `8b46af4bbe0afb73d5650a1bb64a761024e53dec` | `43018392595` — success | Open, non-draft, unmerged |
-| #12 | `layer-1/module8-market-analysis` | `eb1919f5655d888cce28a61683846107d67bb40c` (contains implementation commit `820a755`) | `43020470472`, `43020622048` — success | Open, non-draft, unmerged; https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/12 |
+| #12 | `layer-1/module8-market-analysis` | Earlier verified heads: `eb1919f5655d888cce28a61683846107d67bb40c`, `7ce44bdac0cf75f2525faacd07a33755df9f72bf` | `43020470472`, `43020622048` — success for those exact heads | Open, non-draft, unmerged; https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/12 |
+| #13 | `layer-1/module9-onchain-intelligence` | `93f868d8bf9624b96e3d30ab66f7bbab26b0d92d` | No workflow runs/statuses returned; unverified | Open, Draft, unmerged; base `layer-1/module8-market-analysis`; https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/13 |
 
 Local full-suite command on the Module 8 branch: `./.venv/bin/python -m unittest discover -s tests -v` — **133 tests passed, 0 failed**. `compileall` and `git diff --check` passed. Unit/integration fixtures are not evidence of live provider connectivity.
 
@@ -196,8 +198,10 @@ Current Cloudflare decision:
 
 ## Required next steps (in order)
 
-1. Push `layer-1/module8-market-analysis`, create stacked PR #12 targeting `layer-1/module5-6-candidate-intelligence`, then verify the exact head SHA's CI. Keep all PRs unmerged until explicitly approved.
-2. Continue Module 9 only after an evidence-based provider evaluation: exact network/token coverage, official docs, open-source license/maintenance, security, rate limits, data freshness/finality, cost, and operational burden. Do not add a paid provider or infrastructure without approval.
+1. Continue Module 9 on `layer-1/module9-onchain-intelligence` and PR #13. Do not recreate completed domain/provider adapters or the durable ingestion foundation.
+2. Wire provider-specific transfer extraction into the durable store, starting with EVM canonical block-header verification and then implementing BTC/SOL/XRPL chain-correct event identities and restart boundaries. Do not fabricate event IDs or global whale coverage.
+3. Keep the open-source evaluation evidence-based. Reuse maintained, license-compatible components only when they fit the existing Python architecture; do not introduce a parallel Go/Rust indexing stack without a demonstrated need.
+4. Verify remote CI for the exact current head before treating it as passed. Current GitHub workflow/status lookup returned no runs/statuses.
 3. Keep Module 7 runtime scoring deferred until all dimensions have documented definitions, calibrated evidence, representative historical backtesting, and reviewed thresholds. Module 8 outputs do not automatically authorize scoring or publication.
 4. Resolve CMS ingestion separately: add the distinct least-privilege read-only `ANNOUNCEMENT_DATABASE_URL` secret, verify the worker's own DB role/connection, then perform a controlled read-only staging/live smoke only with explicit authorization. Do not reuse `BINANCE_ANNOUNCEMENT_DATABASE_URL` for the importer.
 5. Preserve the existing publisher workflow and daily quota. Never dispatch a publishing workflow or publish a real Square post during tests/diagnostics.
@@ -358,3 +362,54 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - Integration is intentionally incomplete: no background worker yet connects all five provider page methods to normalization and checkpoint commit. Current concrete normalizer covers EVM Transfer logs only. Ethereum transfer summaries lack log index; no synthetic event identity is invented. BTC/SOL/XRPL extractors remain pending.
 - XRPL durable restart should use fixed ledger bounds; opaque markers can expire. Canonical block reconciliation only accepts a caller-supplied independently verified hash and does not choose reorg depth.
 - No live provider calls, credential reads, production DB changes, real Binance Square posts, PR merges or deployments occurred.
+
+
+## Progress update — 2026-11-11 — Module 9 durable ingestion and open-source review
+
+### Verified working state
+- Repository: https://github.com/shehrozali6465372-ctrl/Binance-bot.
+- Working directory on authorized remote device: /tmp/binance-layer1-audit.
+- Branch: layer-1/module9-onchain-intelligence.
+- Latest implementation commit pushed to origin: 93f868d8bf9624b96e3d30ab66f7bbab26b0d92d (feat(layer1): persist on-chain transfer ingestion checkpoints).
+- Worktree after push: clean for tracked files; pre-existing untracked .venv/ remains and must not be staged/deleted.
+- PR #13: OPEN, Draft, unmerged, mergeable reported true; head SHA matches 93f868d8bf9624b96e3d30ab66f7bbab26b0d92d; base is layer-1/module8-market-analysis at f7e6fc511e146b6bfb6f25afb0009c369d8afd4a. PR body updated to describe current work and limits.
+- PR #12: OPEN, non-draft, unmerged; head layer-1/module8-market-analysis, SHA f7e6fc511e146b6bfb6f25afb0009c369d8afd4a. It was not changed or merged in this continuation.
+- GitHub workflow-run and combined-status queries for current Module 9 head returned empty arrays. Remote CI is UNVERIFIED, not passed.
+
+### Open-source reuse review
+- Fystack Multi-Chain Indexer: public Go project, MIT license, not archived at review time. Its README lists Ethereum, BNB, Bitcoin, Solana and XRP; Solana and XRP are marked Beta. Useful patterns include restart-safe progress, catch-up/rescan, retry and reorg rollback. Its separate Go/KV/Redis/NATS/Postgres stack and known-address monitoring use case make it unsuitable as a drop-in runtime for this Python agent.
+- Chaindexing: public Rust project, Apache-2.0, not archived at review time, EVM-focused. Useful patterns include canonical event identity, block-hash tracking, durable Postgres checkpoints, atomic cursor writes and reorg repair. It does not replace BTC/SOL/XRPL adapters and would add a separate Rust runtime.
+- thirdweb Insight: GitHub metadata marks the repository archived; rejected as a production runtime dependency.
+- No upstream code was copied or vendored. The new implementation adapts general persistence/recovery patterns inside the existing Python project. Upstream license references do not imply copied code.
+
+### New implementation
+- Added layer1/onchain_ingestion.py.
+- Added tests/test_onchain_ingestion.py.
+- Added NormalizedTransferEvent with network/provider/scope identity, transaction/block references, event index, sender/recipient, raw integer base-unit amount, decimals, timestamps, mapping identity, provenance and canonical status.
+- Added durable SQLite per-scope cursor checkpoints.
+- commit_page() inserts a complete normalized page and advances its cursor in one BEGIN IMMEDIATE transaction. A conflict/error rolls back event writes and checkpoint advancement together.
+- Identical replay is idempotent. Conflicting payload reuse of the same scoped event identity is rejected. Identity uniqueness is composite across network, provider, scope and event ID.
+- Reorg tombstones are retained as REORGED, excluded from canonical-only reads, and a stale canonical replay cannot resurrect a tombstoned event.
+- reconcile_block() tombstones stored events at a block height when their block hash differs from a separately provider-verified canonical hash. It does not itself query providers, determine reorg depth or prove finality.
+- normalize_evm_transfer_log() uses transaction_hash:log_index, requires exact mapped contract/scope and a separately verified canonical block hash. Provider removed=true or a block-hash mismatch is normalized as REORGED.
+- This is a persistence primitive, not a running ingestion worker. Provider page fetching, normalization, commit and restart orchestration are not yet connected end-to-end.
+- Concrete transfer normalization currently covers EVM ERC-20 Transfer logs. Ethereum alchemy_getAssetTransfers summaries do not supply a log index; do not invent one. BTC/SOL/XRPL chain-specific transfer extractors remain pending.
+- XRPL markers may expire; fixed ledger bounds, not opaque markers, must be the durable restart boundary.
+- SQLite is a development/test foundation. A production Postgres migration and concurrency/load validation remain required before production workers.
+
+### Verification for commit 93f868d
+- ./.venv/bin/python -m unittest tests.test_onchain_ingestion -v — 9 passed, 0 failed.
+- ./.venv/bin/python -m unittest discover -s tests -v — 192 passed, 0 failed.
+- ./.venv/bin/python -m compileall -q main.py image_engine.py layer1 tests — passed.
+- git diff --check — passed.
+- Tests use deterministic local SQLite and fake provider records. No live Alchemy/Chainstack request was made; provider credentials/endpoints remain unconfigured.
+- No production database, API credentials, infrastructure, publishing workflow, PR merge or deployment was modified. No real Binance Square post was published.
+
+### Next work — continue from this exact state
+1. Re-read current code/docs and inspect current Git state before editing; preserve .venv/ and do not repeat completed work.
+2. Build an end-to-end bounded EVM ingestion worker: fetch exact mapped contract logs in finalized block windows, fetch canonical block headers/timestamps, verify every log's block hash, normalize and atomically persist page plus checkpoint, then resume safely after restart.
+3. Define a bounded reorg reconciliation policy (explicit depth/finality rules and canonical header re-fetch); do not rely solely on a provider's removed flag.
+4. Add BTC, Solana and XRPL event normalizers only after proving chain-correct stable event identity and pagination/restart semantics. XRPL must use fixed ledger ranges and recover expired markers by replaying a bounded range.
+5. Migrate storage to Postgres only after choosing the actual deployment DB and validating transactions/unique constraints under concurrency. Do not provision paid resources without explicit approval.
+6. Connect validated, mapped events to candidate analysis only after decimal-aware aggregation, deduplication and explicit thresholds are implemented. Preserve Binance Spot eligibility as a hard gate; on-chain evidence is corroborative only.
+7. Keep PR #13 Draft until live read-only provider verification, full ingestion integration, database migration and candidate integration are independently reviewed. Never merge/deploy or publish a real Binance Square post without explicit approval.
