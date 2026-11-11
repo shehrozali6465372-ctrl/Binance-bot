@@ -346,3 +346,15 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 6. Add decimal-aware transfer aggregation and explicit system whale thresholds, with no buy/sell intent claims.
 7. Integrate validated on-chain evidence into the existing candidate-analysis flow without bypassing Binance Spot eligibility.
 8. Keep Module 7 scoring deferred and preserve all publication safety boundaries.
+
+
+### Module 9 continuation — open-source review and durable ingestion foundation (2026-11-11)
+
+- Re-verified current branch/HEAD before editing: `layer-1/module9-onchain-intelligence`, `ba93850668da6ad9c898549c8775dff8f5d4b90c`; working tree was clean except the existing untracked `.venv/`, which remains preserved.
+- Reviewed Fystack Multi-Chain Indexer (MIT, Go, multi-chain; Solana/XRP listed Beta) and Chaindexing (Apache-2.0, Rust, EVM-only, Postgres atomic checkpoints/reorg handling). Their complete runtimes are not drop-in fits for this Python service. No third-party source was copied or vendored; architecture patterns were adapted. thirdweb Insight was rejected because GitHub marks it archived.
+- Added `layer1/onchain_ingestion.py`: normalized transfer event persistence, unique scoped event identities, atomic event+cursor commit, idempotent replay, conflict rejection, reorg tombstones and canonical block-hash reconciliation.
+- Added `normalize_evm_transfer_log`, using `transaction_hash:log_index` as the stable event key, requiring exact verified contract scope and a separately verified canonical block hash, and preserving provider `removed=true` or block-hash mismatch as `REORGED`.
+- Added `tests/test_onchain_ingestion.py`; RED import failure was observed before implementation, then focused tests passed (7 tests before the latest full-suite run).
+- Integration is intentionally incomplete: no background worker yet connects all five provider page methods to normalization and checkpoint commit. Current concrete normalizer covers EVM Transfer logs only. Ethereum transfer summaries lack log index; no synthetic event identity is invented. BTC/SOL/XRPL extractors remain pending.
+- XRPL durable restart should use fixed ledger bounds; opaque markers can expire. Canonical block reconciliation only accepts a caller-supplied independently verified hash and does not choose reorg depth.
+- No live provider calls, credential reads, production DB changes, real Binance Square posts, PR merges or deployments occurred.
