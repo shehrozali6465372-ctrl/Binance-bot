@@ -362,6 +362,7 @@ Official XRPL references: [currency formats](https://xrpl.org/docs/references/pr
 - Source/destination counts are generic address counts, not inferred whale wallet counts. Incomplete Bitcoin input attribution contributes no source-address count. The layer does not infer buy/sell direction, trader intent, exchange deposits, net accumulation or whale status.
 
 ### Deterministic verification
+- Focused aggregation suite: 17 passed, 0 failed. Full repository suite after candidate integration: 313 passed, 0 failed. `compileall` and `git diff --check` passed.
 - Added `tests/test_onchain_aggregation.py`: cross-network asset rollup with differing decimals (BTC 8 vs ERC-20 wrapped BTC 18), per-mapping thresholds, XRPL account-scope dedupe, preservation of distinct EVM logs and Solana instructions in the same transaction, exact network event identity/index, canonical block-journal matching, Binance Spot eligibility/freshness gate, stale/future/noncanonical rejection, incomplete Bitcoin source attribution, conflicting duplicates and missing/invalid threshold configuration.
 - Focused aggregation suite: 16 passed, 0 failed. Full repository suite: 302 passed, 0 failed. `compileall` and `git diff --check` passed.
 - Each event supplied to in-memory aggregation must exactly match its persisted event row and canonical block journal entry. `aggregate_store()` reads only persisted canonical rows. This module is a deterministic aggregation API, not yet wired into Layer 1 candidate scoring or publication. No real Binance Square post is triggered by this module.
@@ -372,3 +373,11 @@ Official XRPL references: [currency formats](https://xrpl.org/docs/references/pr
 - PostgreSQL schema/migration and real PostgreSQL transaction/concurrency tests; SQLite remains local/test storage.
 - Scheduler/worker lifecycle, leases, metrics, alerting, retention and operational runbook.
 - Live provider verification, RPC cost/latency measurements, address checksum validation for XRPL and independent chain-specific coverage review.
+
+### Candidate-analysis corroboration integration
+- `NetworkTransferSummary.summary_id` is a deterministic SHA-256 fingerprint of the exact mapping/network/event IDs, canonical block hashes, amount, threshold and time bounds. `TransferAggregationResult.generated_at` records when current Binance Spot/mapping validation was performed.
+- `CandidateDiscoveryFilteringEngine.build(..., onchain_aggregation=result)` accepts an optional `TransferAggregationResult`. It rechecks result age, current Binance Spot eligibility source, canonical CoinGecko identity proof and proof freshness, summary asset/symbol, threshold arithmetic, and summary event freshness before attaching summary IDs.
+- Qualified on-chain summary IDs are persisted by `Layer1Store.save_candidate()` under `evidence_refs_json.onchain_transfer_summaries`.
+- On-chain evidence is corroborative only: it does not change candidate identity, discovery state, relevance score weights or publication authority. On-chain-only evidence cannot create a discovery candidate. Ineligible/stale/unverified candidates receive no on-chain refs.
+- `main.run_once(..., onchain_aggregation_by_asset=...)` and `_persist_layer1_market_intelligence(..., onchain_aggregation_by_asset=...)` expose an explicit optional injection boundary keyed by canonical asset ID. Default is `None`/`NOT_PROVIDED`; the main cycle does not start on-chain workers or fetch providers automatically. An external, separately supervised worker/orchestrator must supply already validated `TransferAggregationResult` objects. The main pipeline persists only corroboration summary IDs and counts; it does not publish based on them.
+- Candidate integration tests cover real aggregator-to-candidate flow, candidate identity stability, no on-chain-only discovery, Spot/proof/freshness hard gates, summary persistence and unchanged relevance scores.

@@ -16,6 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
@@ -1478,18 +1479,29 @@ class Candidate:
     rejection_reasons: tuple[str, ...] = ()
     trend_cluster_ids: tuple[str, ...] = ()
     event_cluster_ids: tuple[str, ...] = ()
+    onchain_transfer_summary_ids: tuple[str, ...] = ()
 
 
 class CandidateDiscoveryFilteringEngine:
     def __init__(self, max_market_age_seconds: int = 1800, max_event_age_seconds: int = 604800,
-                 max_trend_age_seconds: int = 3600):
+                 max_trend_age_seconds: int = 3600, max_onchain_age_seconds: int = 86400,
+                 max_onchain_aggregation_age_seconds: int = 300):
+        for name, value in (("max_market_age_seconds", max_market_age_seconds),
+                            ("max_event_age_seconds", max_event_age_seconds),
+                            ("max_trend_age_seconds", max_trend_age_seconds),
+                            ("max_onchain_age_seconds", max_onchain_age_seconds),
+                            ("max_onchain_aggregation_age_seconds", max_onchain_aggregation_age_seconds)):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
         self.max_market_age_seconds = max_market_age_seconds
         self.max_event_age_seconds = max_event_age_seconds
         self.max_trend_age_seconds = max_trend_age_seconds
+        self.max_onchain_age_seconds = max_onchain_age_seconds
+        self.max_onchain_aggregation_age_seconds = max_onchain_aggregation_age_seconds
 
     def build(self, identity: AssetIdentity, eligibility: EligibilityDecision,
               markets: Sequence[MarketObservation], events: Sequence[AnnouncementEvidence],
-              trends: Sequence[TrendSignal]) -> Candidate:
+              trends: Sequence[TrendSignal], *, onchain_aggregation: Optional[Any] = None) -> Candidate:
         reasons = []
         if eligibility.asset_id != identity.asset_id:
             reasons.append("canonical_asset_identity_mismatch")
@@ -1563,6 +1575,83 @@ class CandidateDiscoveryFilteringEngine:
         ))
         trend_clusters = TrendingNarrativeIntelligenceEngine().cluster(matching_trends)
         trend_cluster_ids = tuple(sorted(cluster.cluster_id for cluster in trend_clusters))
+
+        # On-chain summaries are optional corroboration only. They cannot create a
+        # discovery candidate, change candidate identity, alter score weights or
+        # bypass Binance Spot eligibility. Their originating aggregation result
+        # has already enforced canonical event/block journals and exact mapping.
+        onchain_summary_ids: tuple[str, ...] = ()
+        if onchain_aggregation is not None:
+            from .onchain import NETWORK_PROVIDERS
+            from .onchain_aggregation import TransferAggregationResult
+            if not isinstance(onchain_aggregation, TransferAggregationResult):
+                raise ValueError("onchain_aggregation must be a validated TransferAggregationResult")
+            discovery_exists = bool(matching_markets or matching_events or matching_trends)
+            eligibility_gate = (
+                eligibility.asset_id == identity.asset_id
+                and eligibility.status == "ELIGIBLE"
+                and eligibility.symbol == identity.base_asset
+                and eligibility.source == BinanceListingEligibilityEngine.SOURCE
+                and eligibility.identity_proof_status == "VERIFIED"
+                and eligibility.identity_proof_source == "coingecko_coin_tickers"
+                and isinstance(eligibility.identity_proof_data_hash, str)
+                and re.fullmatch(r"[0-9a-fA-F]{64}", eligibility.identity_proof_data_hash) is not None
+                and bool(eligibility.eligible_pairs)
+            )
+            try:
+                eligibility_time = _parse_time(eligibility.verified_at, allow_future=True)
+                identity_proof_time = _parse_time(eligibility.identity_proof_verified_at, allow_future=True)
+                identity_source_time = _parse_time(eligibility.identity_proof_source_timestamp, allow_future=True)
+                aggregation_time = _parse_time(onchain_aggregation.generated_at, allow_future=True)
+            except (TypeError, ValueError):
+                eligibility_gate = False
+                aggregation_time = None
+            if eligibility_gate:
+                for timestamp, limit in ((eligibility_time, 300),
+                                         (identity_proof_time, 900),
+                                         (identity_source_time, 900),
+                                         (aggregation_time, self.max_onchain_aggregation_age_seconds)):
+                    age = (now - timestamp).total_seconds()
+                    if age < -300 or age > limit:
+                        eligibility_gate = False
+                        break
+            accepted_summary_ids = set()
+            if discovery_exists and eligibility_gate:
+                for summary in onchain_aggregation.qualifying_network_summaries:
+                    if summary.asset_id != identity.asset_id:
+                        continue
+                    if (not isinstance(summary.summary_id, str)
+                            or re.fullmatch(r"[0-9a-f]{64}", summary.summary_id) is None
+                            or summary.binance_symbol != identity.base_asset
+                            or summary.network_id not in NETWORK_PROVIDERS
+                            or not isinstance(summary.mapping_id, str) or not summary.mapping_id.strip()
+                            or summary.representation not in {"NATIVE", "TOKEN", "WRAPPED"}
+                            or isinstance(summary.decimals, bool) or not isinstance(summary.decimals, int)
+                            or not 0 <= summary.decimals <= 36
+                            or isinstance(summary.transfer_count, bool)
+                            or not isinstance(summary.transfer_count, int) or summary.transfer_count <= 0
+                            or summary.threshold_met is not True):
+                        raise ValueError("on-chain corroboration summary identity or threshold evidence is invalid")
+                    try:
+                        amount = Decimal(str(summary.total_amount))
+                        threshold = Decimal(str(summary.minimum_amount))
+                        first_block_time = _parse_time(summary.first_block_time, allow_future=True)
+                        last_block_time = _parse_time(summary.last_block_time, allow_future=True)
+                    except (InvalidOperation, TypeError, ValueError):
+                        raise ValueError("on-chain corroboration summary amount or timestamps are invalid") from None
+                    if (not amount.is_finite() or amount <= 0
+                            or not threshold.is_finite() or threshold <= 0 or amount < threshold
+                            or first_block_time > last_block_time):
+                        raise ValueError("on-chain corroboration summary does not satisfy its explicit threshold")
+                    first_age = (now - first_block_time).total_seconds()
+                    last_age = (now - last_block_time).total_seconds()
+                    if (first_age < -300 or last_age < -300
+                            or first_age > self.max_onchain_age_seconds
+                            or last_age > self.max_onchain_age_seconds):
+                        continue
+                    accepted_summary_ids.add(summary.summary_id)
+            onchain_summary_ids = tuple(sorted(accepted_summary_ids))
+
         # Candidate identity is asset + material event. For candidates without an
         # event, use trend clusters; market snapshots are the final fallback.
         # Additional corroborating providers update evidence on the same candidate.
@@ -1581,7 +1670,8 @@ class CandidateDiscoveryFilteringEngine:
                          tuple(sorted(m.data_hash or m.endpoint for m in matching_markets)),
                          tuple(sorted(f"{t.source}:{t.source_item_id or t.topic}:{t.content_hash}" for t in matching_trends)),
                          "READY_FOR_RESEARCH" if not reasons else "REJECTED",
-                         tuple(sorted(set(reasons))), trend_cluster_ids, event_cluster_ids)
+                         tuple(sorted(set(reasons))), trend_cluster_ids, event_cluster_ids,
+                         onchain_summary_ids)
 
 
 
@@ -1792,6 +1882,7 @@ class Layer1Store:
             "markets": list(candidate.market_observation_ids),
             "trends": list(candidate.trend_signal_ids),
             "trend_clusters": list(candidate.trend_cluster_ids),
+            "onchain_transfer_summaries": list(candidate.onchain_transfer_summary_ids),
             "eligibility": candidate.eligibility.__dict__,
         }
         self.conn.execute(

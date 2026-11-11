@@ -4,7 +4,9 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from layer1.foundation import EligibilityDecision
+from layer1.foundation import (
+    AssetIdentity, CandidateDiscoveryFilteringEngine, EligibilityDecision, MarketObservation,
+)
 from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine, OnChainObservation, OnChainStore
 from layer1.onchain_ingestion import NormalizedTransferEvent, OnChainIngestionStore
 from layer1.onchain_aggregation import OnChainTransferAggregator
@@ -154,6 +156,7 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
         self.assertEqual(len(result.qualifying_network_summaries), 1)
         self.assertEqual(len(result.qualifying_assets), 1)
         self.assertEqual(result.assets[0].observation_count, 2)
+        self.assertRegex(result.network_summaries[0].summary_id, r"^[0-9a-f]{64}$")
 
     def test_deduplicates_same_xrpl_payment_across_account_scopes_but_not_distinct_evm_logs(self):
         xrpl = OnChainAssetMapping(
@@ -306,6 +309,23 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
         result = self.aggregator.aggregate([stale, future], {ASSET: self.decision}, now=NOW)
         self.assertEqual(result.network_summaries, ())
         self.assertEqual(result.rejected_events, 2)
+
+    def test_real_aggregator_result_flows_into_candidate_as_non_scoring_corroboration(self):
+        row = event(self.btc, event_id="end-to-end-btc", amount_raw="100000000")
+        self.bind_events([row])
+        current = datetime.now(timezone.utc)
+        current_eligibility = eligibility(current.isoformat())
+        result = self.aggregator.aggregate_store(
+            self.ingestion_store, {ASSET: current_eligibility}, now=current)
+        identity = AssetIdentity(ASSET, "Bitcoin", "BTC", "USDT")
+        market = MarketObservation(ASSET, "binance_spot", "/ticker", current.isoformat(), price=65000)
+        builder = CandidateDiscoveryFilteringEngine()
+        base = builder.build(identity, current_eligibility, [market], [], [])
+        corroborated = builder.build(
+            identity, current_eligibility, [market], [], [], onchain_aggregation=result)
+        self.assertEqual(base.candidate_id, corroborated.candidate_id)
+        self.assertEqual(corroborated.state, "READY_FOR_RESEARCH")
+        self.assertEqual(len(corroborated.onchain_transfer_summary_ids), 1)
 
     def test_aggregate_store_reads_only_canonical_events(self):
         good = event(self.btc, event_id="btc-out:0", amount_raw="100000000")

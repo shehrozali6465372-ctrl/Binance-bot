@@ -689,7 +689,7 @@ Assess XRPL payment/issued-currency extraction and transaction history paginatio
 - No real Binance Square post/earning workflow, deployment, PR merge, production DB mutation, secret change or paid infrastructure action occurred.
 
 ### Exact next task
-Implement candidate-analysis integration for the completed cross-network aggregation API. Treat qualified on-chain summaries as corroborative features only; preserve canonical Binance Spot eligibility, explicit provenance/freshness, no buy/sell inference and no publishing authority. Then proceed to PostgreSQL migration/concurrency validation and scheduled worker operations. PR #13 remains Draft until production-readiness evidence is complete.
+Implement PostgreSQL schema/migration and real PostgreSQL transaction/concurrency verification for the verified mapping store and ingestion/checkpoint/block journals. Preserve SQLite local/test support. Then implement supervised worker scheduling/leases, retries, metrics/alerts, retention and runbook. PR #13 remains Draft until live provider, PostgreSQL and operational readiness evidence is complete.
 
 
 ## Progress update — 2026-11-11 — cross-network transfer aggregation
@@ -720,10 +720,9 @@ Implement candidate-analysis integration for the completed cross-network aggrega
 
 ### Remaining Module 9 work
 1. Push this aggregation commit using a remote-SHA guard and update PR #13 body without changing Draft status.
-2. Candidate-analysis integration: define explicit feature contracts and prove the on-chain signal cannot publish or infer trading direction; retain Binance Spot eligibility hard gate.
-3. PostgreSQL schema/migration and real PostgreSQL concurrency/atomicity tests. SQLite remains local/test storage.
-4. Scheduler/worker lifecycle, leases, retry budgets, metrics/alerts, retention and runbook.
-5. Live provider verification, quota/latency measurement, XRPL address checksum validation and chain-specific data coverage review.
+2. PostgreSQL schema/migration and real PostgreSQL concurrency/atomicity tests. SQLite remains local/test storage.
+3. Scheduler/worker lifecycle, leases, retry budgets, metrics/alerts, retention and runbook.
+4. Live provider verification, quota/latency measurement, XRPL address checksum validation and chain-specific data coverage review.
 
 ### Non-negotiables
 - Never publish real Binance Square posts or invoke earning workflow in tests.
@@ -737,3 +736,30 @@ Implement candidate-analysis integration for the completed cross-network aggrega
 - `compileall` and `git diff --check` passed.
 - Aggregator refuses arbitrary in-memory injection: each supplied event must exactly match the persisted event record and its canonical block journal entry. `aggregate_store()` reads only canonical persisted rows.
 - The test suite emitted only its existing dry-run publisher log (`Would publish ... no network POST attempted`); no real Binance Square request was performed.
+
+
+## Progress update — 2026-11-11 — candidate-analysis corroboration integration
+
+### Implementation
+- Added deterministic `NetworkTransferSummary.summary_id` SHA-256 based on mapping/network, exact event IDs, canonical block hashes, amount, threshold and time bounds. `TransferAggregationResult` now carries `generated_at`.
+- Extended `Candidate` with `onchain_transfer_summary_ids`; `CandidateDiscoveryFilteringEngine.build()` accepts optional `onchain_aggregation=TransferAggregationResult`.
+- Candidate builder rechecks result age, current Binance Spot eligibility source, canonical CoinGecko identity proof, proof freshness, summary asset/symbol, explicit threshold arithmetic and event time bounds before attaching summary IDs.
+- On-chain evidence is corroborative only. It does not change candidate ID, candidate discovery state, relevance score weights or publication authority. On-chain-only data cannot create a candidate. Ineligible/stale/unverified candidate eligibility does not receive on-chain refs.
+- `Layer1Store.save_candidate()` persists summary IDs under `evidence_refs_json.onchain_transfer_summaries`.
+- Added optional `onchain_aggregation_by_asset` injection to `_run_once_impl`, `run_once` and `_persist_layer1_market_intelligence`. Default is `None` and summary status is `NOT_PROVIDED`; no on-chain provider worker is auto-started. An external orchestrator must supply already validated result objects. Main only attaches summary refs; it does not grant trading/publishing authority.
+
+### Tests
+- Added `tests/test_onchain_candidate_integration.py`: candidate identity stability, on-chain-only non-discovery, ineligible/stale proof rejection, nonmatching asset/threshold filtering, malformed aggregation result rejection, evidence persistence, unchanged relevance score and optional main-pipeline injection validation.
+- Added real aggregator-to-candidate end-to-end test in `tests/test_onchain_aggregation.py`.
+- Focused candidate integration: 10 tests passed. Focused aggregation: 17 tests passed. Combined focused: 27 passed.
+- Final full repository suite after candidate integration: 313 passed, 0 failed. `compileall` and `git diff --check` passed.
+
+### Remaining Module 9 work
+1. Final full suite/static verification, then guarded commit/push and PR #13 body update while preserving Draft.
+2. PostgreSQL schema/migration and real PostgreSQL transaction/concurrency/atomicity tests for mappings, events, block journals and checkpoints. SQLite remains local/test.
+3. Supervised worker scheduling/lifecycle, leases, retry budgets, metrics/alerts, retention and runbook.
+4. Live provider verification, quotas/latency measurements, XRPL classic-address checksum validation and independent chain-specific coverage review.
+
+### Runtime boundary
+- Normal `run_once()` continues with `onchain_aggregation_by_asset=None`; no automatic on-chain worker startup or live RPC occurs. On-chain candidate corroboration only activates when an external orchestrator passes current validated aggregation results keyed by canonical CoinGecko asset ID.
+- No buy/sell inference, order placement, candidate-only discovery or Binance Square publishing authority was added.

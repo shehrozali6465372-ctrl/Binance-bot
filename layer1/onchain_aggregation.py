@@ -7,6 +7,8 @@ movement and no price/oracle proof is available in this layer.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,6 +22,7 @@ from .onchain_ingestion import NormalizedTransferEvent, OnChainIngestionStore
 
 @dataclass(frozen=True)
 class NetworkTransferSummary:
+    summary_id: str
     asset_id: str
     binance_symbol: str
     network_id: str
@@ -47,6 +50,7 @@ class AssetTransferRollup:
 
 @dataclass(frozen=True)
 class TransferAggregationResult:
+    generated_at: str
     assets: tuple[AssetTransferRollup, ...]
     network_summaries: tuple[NetworkTransferSummary, ...]
     deduplicated_events: int
@@ -346,8 +350,26 @@ class OnChainTransferAggregator:
                         senders.add(row.from_address)
             receivers = {row.to_address for row in rows if row.to_address.strip()}
             times = sorted(_parse_timestamp(row.block_time) for row in rows)
+            summary_fingerprint = json.dumps({
+                "asset_id": asset_id, "network_id": network_id, "mapping_id": mapping_id,
+                "decimals": mapping.decimals,
+                "events": sorted(({
+                    "event_id": row.event_id, "transaction_hash": row.transaction_hash,
+                    "block_number": row.block_number, "block_hash": row.block_hash,
+                    "event_index": row.event_index, "from_address": row.from_address,
+                    "from_addresses": list(row.from_addresses),
+                    "from_addresses_complete": row.from_addresses_complete,
+                    "to_address": row.to_address, "amount_raw": row.amount_raw,
+                    "decimals": row.decimals, "block_time": row.block_time,
+                } for row in rows), key=lambda item: item["event_id"]),
+                "block_hashes": sorted({row.block_hash for row in rows}),
+                "transfer_count": len(rows), "total_amount": format(total.normalize(), "f"),
+                "minimum_amount": format(threshold.normalize(), "f"),
+                "first_block_time": times[0].isoformat(), "last_block_time": times[-1].isoformat(),
+            }, sort_keys=True, separators=(",", ":"))
+            summary_id = hashlib.sha256(summary_fingerprint.encode("utf-8")).hexdigest()
             summaries.append(NetworkTransferSummary(
-                asset_id=asset_id, binance_symbol=mapping.binance_symbol,
+                summary_id=summary_id, asset_id=asset_id, binance_symbol=mapping.binance_symbol,
                 network_id=network_id, mapping_id=mapping_id,
                 representation=mapping.representation, decimals=mapping.decimals,
                 transfer_count=len(rows), total_amount=format(total.normalize(), "f"),
@@ -369,7 +391,7 @@ class OnChainTransferAggregator:
             for asset_id, rows in sorted(by_asset.items())
         )
         return TransferAggregationResult(
-            assets=assets, network_summaries=tuple(summaries),
+            generated_at=current.isoformat(), assets=assets, network_summaries=tuple(summaries),
             deduplicated_events=deduplicated, rejected_events=sum(rejected.values()),
             rejection_counts=tuple(sorted(rejected.items())),
             cross_network_total_amount=None,
