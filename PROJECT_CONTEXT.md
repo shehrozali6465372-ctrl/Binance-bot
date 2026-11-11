@@ -460,3 +460,15 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 3. Commit and push only to layer-1/module9-onchain-intelligence if the current remote/permissions remain valid.
 4. Recheck PR #13 remains Draft and remote CI status; do not merge or deploy.
 5. Next implementation after this worker: add Ethereum eth_getLogs Transfer extraction with the same stable log identity and finalized canonical-header checks, then build provider contract/live read-only verification once credentials are deliberately configured.
+
+## Post-push verification — 2026-11-11
+
+- Module 9 worker implementation commit: 5afd3f7c864c8959290d00fb89efe657e15cab73.
+- Context/PR follow-up commit already pushed before this note: f19d03f50220273fa2febda57e6335a63be6bba1.
+- Confirmed origin/layer-1/module9-onchain-intelligence points to f19d03f50220273fa2febda57e6335a63be6bba1 before this context-only follow-up.
+- PR #13: OPEN, Draft, unmerged; head branch layer-1/module9-onchain-intelligence at f19d03f50220273fa2febda57e6335a63be6bba1; base layer-1/module8-market-analysis at f7e6fc511e146b6bfb6f25afb0009c369d8afd4a.
+- PR #12: OPEN, non-draft, unmerged; head remains f7e6fc511e146b6bfb6f25afb0009c369d8afd4a; base remains layer-1/module5-6-candidate-intelligence at 8b46af4bbe0afb73d5650a1bb64a761024e53dec. No PR #12 changes were made.
+- Latest Module 9 combined commit-status query returned an empty statuses array and the workflow-run query returned an empty workflow_runs array. Remote CI is still UNVERIFIED; do not report it as passed.
+- Final local full test suite: 201 passed, 0 failed. compileall and git diff --check passed.
+- The tracked worktree is clean. Existing untracked .venv/ remains present and was never staged or modified.
+- No live blockchain provider calls, secrets, infrastructure, real Binance Square posts, merge or production deployment were used/performed.
