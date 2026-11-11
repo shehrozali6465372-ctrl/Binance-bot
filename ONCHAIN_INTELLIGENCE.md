@@ -210,3 +210,35 @@ Remaining operational limits:
 - Reorg recovery is limited to the configured lookback and the active persisted range; deeper reorganizations require an operator-approved wider rescan.
 - SQLite remains the local/test store. PostgreSQL migration, real concurrency/load testing, live provider verification, scheduler/worker lifecycle, metrics/alerts and runbook are still pending.
 - Address checksum verification remains outside the normalizer; address decoding currently relies on provider-supplied address metadata.
+
+## Solana transfer extraction assessment — 2026-11-11
+
+Assessment only; no Solana transfer normalizer or worker was added in this step.
+
+Verified from current official references:
+- Alchemy `getTransactionsForAddress` returns address-scoped transaction history with full transaction and metadata when `transactionDetails: "full"`, including slot, transaction index, signature/transaction data and an opaque pagination token. The documented request limit is up to 100 full transactions per request; the endpoint is documented at 100 CUs per request.
+- Solana transaction metadata can include `innerInstructions`, `preTokenBalances`, `postTokenBalances` and `loadedAddresses`. Versioned transactions require address lookup-table resolution before compiled instruction account indexes can be interpreted.
+- Solana's official `@solana/transaction-introspection` package resolves static and lookup-table account indexes, walks outer and inner CPI instructions in execution order, and provides stable trace coordinates (`outerIndex` / `innerIndex`). Its companion generated token clients can identify and parse Token Program instructions.
+- Alchemy `getBlock` can independently return a finalized slot's block identity with `transactionDetails: "none"`; its documented cost is 40 CUs. This can supply the blockhash/time journal needed for canonical slot checks.
+
+Engineering decision:
+- Do not treat token balance deltas as individual transfer events. A delta may aggregate multiple instruction effects and cannot by itself prove one source/destination transfer.
+- Do not use the transaction signature alone as an event identity: a transaction can contain multiple outer and inner token transfers. Candidate identity must include the signature and the exact outer/inner instruction trace coordinate; do not fabricate either index.
+- Correct extraction must resolve account indexes across static keys and loaded writable/readonly addresses, decode both outer and CPI instructions, validate exact Token / Token-2022 program IDs and verified mint mapping, and preserve integer base-unit amounts plus mint decimals.
+- SOL native transfers require separate System Program instruction decoding and must not be inferred from net lamport balance changes alone (fees, rent, account creation/closure and other instructions can affect balances).
+- The existing Python service has no drop-in Python equivalent of the official TypeScript transaction-introspection + generated token-program clients. Introducing a separate Node runtime solely for decoding would add operational complexity; no package has been added without a verified integration decision.
+- The currently documented Alchemy endpoint describes slot filters but the exact fixed-range filter shape and its pagination stability were not established in this review. Do not build a resumable worker on assumed slot filter semantics.
+
+Next Solana task:
+1. Verify the exact slot-filter schema and pagination behavior from provider examples/schema or a controlled read-only test.
+2. Decide whether to use a narrow Python decoder or a bounded Node interoperability boundary; compare maintained open-source options and license/runtime costs.
+3. Build tests first for legacy + v0 lookup-table account resolution, outer + inner Transfer/TransferChecked, Token-2022, duplicate same-transaction transfers, failed transactions, unsupported extensions and missing metadata.
+4. Only then add a normalizer whose event identity is signature + exact instruction trace coordinate and whose blockhash is independently verified at finalized commitment.
+5. Keep the extractor address-scoped; no network-wide Solana whale coverage is implied.
+
+Official references:
+- Alchemy getTransactionsForAddress: https://www.alchemy.com/docs/chains/solana/solana-api-endpoints/get-transactions-for-address
+- Alchemy getBlock: https://www.alchemy.com/docs/chains/solana/solana-api-endpoints/get-block
+- Solana transaction introspection and account lookup resolution: https://solana.com/docs/core/transactions/transaction-introspection
+- Solana RPC JSON structures (inner instructions, token balances, loaded addresses): https://solana.com/docs/rpc/json-structures
+- SPL token transfer instructions: https://solana.com/docs/tokens/basics/transfer-tokens
