@@ -1,8 +1,7 @@
-"""Bounded, restart-safe ingestion of mapped BNB ERC-20 Transfer logs.
+"""Bounded, restart-safe ingestion of mapped Ethereum and BNB ERC-20 logs.
 
-The worker intentionally handles the one EVM provider path that exposes a
-stable transaction/log index today. Ethereum's Alchemy transfer summaries are
-not accepted because they do not expose a log index.
+Both networks use eth_getLogs and the stable transaction_hash:log_index
+identity. Alchemy Ethereum transfer summaries are intentionally not used.
 """
 from __future__ import annotations
 
@@ -16,13 +15,16 @@ from .onchain_ingestion import OnChainIngestionStore, normalize_evm_transfer_log
 from .onchain_providers import EvmTokenTransferLog, ProviderTransportError
 
 
-NETWORK_ID = "bnb-smart-chain-mainnet"
+EVM_NETWORKS = {
+    "ethereum-mainnet": {"chain_id": "1", "provider_prefix": "ethereum"},
+    "bnb-smart-chain-mainnet": {"chain_id": "56", "provider_prefix": "bnb"},
+}
 MAX_PROVIDER_BLOCK_SPAN = 10
 _RETRYABLE = {"TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"}
 
 
 class EvmTransferIngestionWorker:
-    """Ingest bounded finalized BNB token ranges into the existing atomic store."""
+    """Ingest bounded finalized Ethereum/BNB token ranges into the existing atomic store."""
 
     def __init__(
         self,
@@ -82,16 +84,22 @@ class EvmTransferIngestionWorker:
 
     @staticmethod
     def _validate_mapping(mapping: OnChainAssetMapping) -> None:
-        if (mapping.network_id != NETWORK_ID or mapping.network_family != "EVM"
-                or mapping.chain_id != "56" or mapping.mapping_status != "VERIFIED"
+        network = EVM_NETWORKS.get(mapping.network_id)
+        if (network is None or mapping.network_family != "EVM"
+                or mapping.chain_id != network["chain_id"] or mapping.mapping_status != "VERIFIED"
                 or mapping.representation not in {"TOKEN", "WRAPPED", "BRIDGED", "DERIVATIVE"}
                 or not isinstance(mapping.contract_address, str)
                 or re.fullmatch(r"0x[0-9a-fA-F]{40}", mapping.contract_address) is None):
-            raise ValueError("worker encountered a mapping outside the verified BNB token scope")
+            raise ValueError("worker encountered a mapping outside the verified Ethereum/BNB token scope")
 
-    def _header(self, height: int) -> dict:
-        header = self._retry(lambda: self.provider.fetch_bnb_block_header(height))
-        if (not isinstance(header, dict) or header.get("number") != height
+    def _header(self, mapping: OnChainAssetMapping, height: int) -> dict:
+        prefix = EVM_NETWORKS[mapping.network_id]["provider_prefix"]
+        method = getattr(self.provider, f"fetch_{prefix}_block_header")
+        header = self._retry(lambda: method(height))
+        if (not isinstance(header, dict)
+                or isinstance(header.get("number"), bool)
+                or not isinstance(header.get("number"), int)
+                or header.get("number") != height
                 or not isinstance(header.get("hash"), str)
                 or re.fullmatch(r"0x[0-9a-fA-F]{64}", header["hash"]) is None
                 or isinstance(header.get("timestamp"), bool)
@@ -113,7 +121,7 @@ class EvmTransferIngestionWorker:
             )
             if stored_hash is None:
                 continue
-            header = self._header(height)
+            header = self._header(mapping, height)
             if stored_hash.lower() != header["hash"].lower():
                 detected_blocks += 1
                 count = self.ingestion_store.reconcile_block(
@@ -126,7 +134,11 @@ class EvmTransferIngestionWorker:
         return changed, earliest_changed, detected_blocks
 
     def run_once(self) -> dict:
-        mappings = self.mapping_store.list_verified_mappings(NETWORK_ID)
+        mappings = [
+            mapping
+            for network_id in EVM_NETWORKS
+            for mapping in self.mapping_store.list_verified_mappings(network_id)
+        ]
         summary = {
             "mappings": 0, "blocks_scanned": 0, "events_inserted": 0,
             "duplicates": 0, "tombstoned": 0, "reorg_blocks_detected": 0,
@@ -154,11 +166,14 @@ class EvmTransferIngestionWorker:
                 # A crash here is safe: the next run repeats this bounded reconciliation.
                 next_block = rewind_to
                 self.ingestion_store.commit_page(cursor_key, {
-                    "mapping_id": mapping.mapping_id, "network_id": NETWORK_ID,
+                    "mapping_id": mapping.mapping_id, "network_id": mapping.network_id,
                     "scope": f"contract:{mapping.contract_address.lower()}",
                     "next_block": rewind_to, "reorg_rewind": True,
                 }, ())
-            finalized_height = self._retry(self.provider.fetch_bnb_finalized_height)
+            prefix = EVM_NETWORKS[mapping.network_id]["provider_prefix"]
+            finalized_method = getattr(self.provider, f"fetch_{prefix}_finalized_height")
+            logs_method = getattr(self.provider, f"fetch_{prefix}_erc20_transfer_logs")
+            finalized_height = self._retry(finalized_method)
             if isinstance(finalized_height, bool) or not isinstance(finalized_height, int) or finalized_height < 0:
                 raise ProviderTransportError("INVALID_PROVIDER_DATA", "provider finalized height is invalid")
             bounded_end = min(finalized_height, next_block + self.max_blocks_per_run - 1)
@@ -167,22 +182,28 @@ class EvmTransferIngestionWorker:
             scope = f"contract:{mapping.contract_address.lower()}"
             for range_start in range(next_block, bounded_end + 1, MAX_PROVIDER_BLOCK_SPAN):
                 range_end = min(bounded_end, range_start + MAX_PROVIDER_BLOCK_SPAN - 1)
-                page = self._retry(lambda: self.provider.fetch_bnb_erc20_transfer_logs(
+                page = self._retry(lambda: logs_method(
                     mapping.contract_address, range_start, range_end
                 ))
                 records = getattr(page, "records", None)
+                expected_finality = (
+                    "eth_getBlockByNumber:finalized"
+                    if mapping.network_id == "ethereum-mainnet"
+                    else "eth_getFinalizedHeader:verifiedValidatorNum=-3"
+                )
                 if (not isinstance(records, tuple)
                         or getattr(page, "provider", None) != "alchemy"
-                        or getattr(page, "network_id", None) != NETWORK_ID
+                        or getattr(page, "network_id", None) != mapping.network_id
                         or str(getattr(page, "scope", "")).lower() != mapping.contract_address.lower()
                         or getattr(page, "from_block", None) != range_start
                         or getattr(page, "to_block", None) != range_end
                         or isinstance(getattr(page, "finalized_height", None), bool)
                         or not isinstance(getattr(page, "finalized_height", None), int)
-                        or page.finalized_height < range_end):
+                        or page.finalized_height < range_end
+                        or getattr(page, "finality_reference", None) != expected_finality):
                     raise ProviderTransportError("INVALID_PROVIDER_DATA", "provider log page is malformed or not finalized for the requested scope/range")
                 headers = {
-                    height: self._header(height)
+                    height: self._header(mapping, height)
                     for height in range(range_start, range_end + 1)
                 }
                 normalized = []
@@ -193,7 +214,7 @@ class EvmTransferIngestionWorker:
                 for record in records:
                     if not isinstance(record, EvmTokenTransferLog):
                         raise ProviderTransportError("INVALID_PROVIDER_DATA", "provider log page contains a malformed record")
-                    if (record.network_id != NETWORK_ID
+                    if (record.network_id != mapping.network_id
                             or record.contract_address.lower() != mapping.contract_address.lower()
                             or not range_start <= record.block_number <= range_end):
                         raise ProviderTransportError("PROVIDER_SCOPE_MISMATCH", "provider log is outside the requested mapping/range")
@@ -207,7 +228,7 @@ class EvmTransferIngestionWorker:
                     ))
                 next_cursor = {
                     "mapping_id": mapping.mapping_id,
-                    "network_id": NETWORK_ID,
+                    "network_id": mapping.network_id,
                     "scope": scope,
                     "from_block": range_start,
                     "to_block": range_end,
@@ -217,7 +238,7 @@ class EvmTransferIngestionWorker:
                 committed = self.ingestion_store.commit_page(
                     cursor_key, next_cursor, normalized, allow_recanonicalized=True,
                     canonical_blocks=tuple({
-                        "network_id": NETWORK_ID, "provider": "alchemy", "scope": scope,
+                        "network_id": mapping.network_id, "provider": "alchemy", "scope": scope,
                         "block_number": height, "block_hash": header["hash"].lower(),
                         "block_time": datetime.fromtimestamp(header["timestamp"], timezone.utc).isoformat(),
                     } for height, header in headers.items()),

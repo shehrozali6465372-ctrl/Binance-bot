@@ -76,6 +76,54 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual([call[0] for call in calls], ["eth_chainId", "eth_getBlockByNumber"])
         self.assertEqual(calls[1][1], ["finalized", False])
 
+    def test_ethereum_eth_getlogs_decodes_exact_transfer_log_and_checks_finality(self):
+        contract = "0x" + "3" * 40
+        sender = "0x" + "1" * 40
+        recipient = "0x" + "2" * 40
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        log = {
+            "address": contract, "blockNumber": "0x100", "blockHash": "0x" + "a" * 64,
+            "transactionHash": "0x" + "b" * 64, "logIndex": "0x7", "removed": False,
+            "topics": [transfer_topic, "0x" + "0" * 24 + sender[2:], "0x" + "0" * 24 + recipient[2:]],
+            "data": "0x" + format(123456, "064x"),
+        }
+        adapter, calls = self.adapter([
+            "0x1", {"number": "0x200", "hash": "0x" + "c" * 64},
+            {"number": "0x100", "hash": "0x" + "c" * 64, "timestamp": "0x6553f100"},
+            "0x1", {"number": "0x200", "hash": "0x" + "c" * 64},
+            [log],
+        ])
+        self.assertEqual(adapter.fetch_ethereum_finalized_height(), 512)
+        header = adapter.fetch_ethereum_block_header(256)
+        self.assertEqual(header["hash"], "0x" + "c" * 64)
+        page = adapter.fetch_ethereum_erc20_transfer_logs(contract, 256, 265)
+        self.assertEqual(page.network_id, "ethereum-mainnet")
+        self.assertEqual(page.finalized_height, 512)
+        self.assertEqual(page.records[0].log_index, 7)
+        self.assertEqual(page.records[0].amount_raw, "123456")
+        self.assertEqual(page.records[0].from_address, sender)
+        self.assertEqual(calls[-1][0], "eth_getLogs")
+        self.assertEqual(calls[-1][1][0]["fromBlock"], "0x100")
+        self.assertEqual(calls[-1][1][0]["toBlock"], "0x109")
+        with self.assertRaisesRegex(ValueError, "10 blocks"):
+            adapter.fetch_ethereum_erc20_transfer_logs(contract, 256, 266)
+
+    def test_ethereum_eth_getlogs_rejects_range_beyond_finalized_head(self):
+        adapter, _ = self.adapter([
+            "0x1", {"number": "0x100", "hash": "0x" + "c" * 64},
+        ])
+        with self.assertRaises(ProviderTransportError) as error:
+            adapter.fetch_ethereum_erc20_transfer_logs("0x" + "3" * 40, 257, 257)
+        self.assertEqual(error.exception.reason_code, "BLOCK_RANGE_NOT_FINALIZED")
+
+    def test_ethereum_block_header_rejects_wrong_height(self):
+        adapter, _ = self.adapter([
+            {"number": "0x101", "hash": "0x" + "c" * 64, "timestamp": "0x6553f100"},
+        ])
+        with self.assertRaises(ProviderTransportError) as error:
+            adapter.fetch_ethereum_block_header(256)
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+
     def test_bnb_worker_header_methods_validate_finalized_height_and_exact_block_identity(self):
         adapter, calls = self.adapter([
             "0x38",

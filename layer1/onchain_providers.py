@@ -252,7 +252,7 @@ class AlchemyReadOnlyAdapter:
 
     _READ_METHODS = {
         "bitcoin-mainnet": frozenset({"getblockcount", "getblockhash", "getblockheader"}),
-        "ethereum-mainnet": frozenset({"eth_chainId", "eth_getBlockByNumber", "alchemy_getAssetTransfers"}),
+        "ethereum-mainnet": frozenset({"eth_chainId", "eth_getBlockByNumber", "alchemy_getAssetTransfers", "eth_getLogs"}),
         "solana-mainnet": frozenset({"getGenesisHash", "getSlot", "getTransactionsForAddress"}),
         "bnb-smart-chain-mainnet": frozenset({"eth_chainId", "eth_getFinalizedHeader", "eth_getLogs", "eth_getBlockByNumber"}),
     }
@@ -465,6 +465,73 @@ class AlchemyReadOnlyAdapter:
                                 finalized_height=finalized_height,
                                 finality_reference="eth_getBlockByNumber:finalized")
 
+    def fetch_ethereum_finalized_height(self) -> int:
+        """Return Ethereum mainnet's execution-layer finalized block height."""
+        chain_id = self._call("ethereum-mainnet", "eth_chainId")
+        if not isinstance(chain_id, str) or chain_id.lower() != "0x1":
+            raise ProviderTransportError("NETWORK_ID_MISMATCH", "Alchemy endpoint returned the wrong Ethereum mainnet chain ID")
+        header = self._call("ethereum-mainnet", "eth_getBlockByNumber", ["finalized", False])
+        if not isinstance(header, dict):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum finalized block response is invalid")
+        height = self._hex_int(header.get("number"), "Ethereum finalized block number")
+        if not isinstance(header.get("hash"), str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", header["hash"]) is None:
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum finalized block hash is invalid")
+        return height
+
+    def fetch_ethereum_block_header(self, block_number: int) -> dict:
+        """Fetch one exact Ethereum execution-layer block header by height."""
+        if isinstance(block_number, bool) or not isinstance(block_number, int) or block_number < 0:
+            raise ValueError("block_number must be a non-negative integer")
+        header = self._call("ethereum-mainnet", "eth_getBlockByNumber", [hex(block_number), False])
+        if not isinstance(header, dict):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum block header response is invalid")
+        returned_number = self._hex_int(header.get("number"), "Ethereum block number")
+        timestamp = self._hex_int(header.get("timestamp"), "Ethereum block timestamp")
+        block_hash = header.get("hash")
+        if (returned_number != block_number or not isinstance(block_hash, str)
+                or re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash) is None):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum canonical block header identity is invalid")
+        return {"number": returned_number, "hash": block_hash.lower(), "timestamp": timestamp}
+
+    def fetch_ethereum_erc20_transfer_logs(self, contract_address: str,
+                                           from_block: int, to_block: int) -> ProviderDataPage:
+        """Fetch a bounded mapped-contract ERC-20 Transfer log range on Ethereum."""
+        if not _is_evm_address(contract_address):
+            raise ValueError("Ethereum token contract must be an exact EVM address")
+        if (isinstance(from_block, bool) or not isinstance(from_block, int) or from_block < 0
+                or isinstance(to_block, bool) or not isinstance(to_block, int) or to_block < from_block):
+            raise ValueError("Ethereum log query requires a fixed non-negative block range")
+        # Keep requests conservatively bounded to ten blocks, matching the
+        # existing free-tier BNB path; do not infer a larger plan entitlement.
+        if to_block - from_block + 1 > 10:
+            raise ValueError("Ethereum eth_getLogs request is limited to at most 10 blocks")
+        chain_id = self._call("ethereum-mainnet", "eth_chainId")
+        if not isinstance(chain_id, str) or chain_id.lower() != "0x1":
+            raise ProviderTransportError("NETWORK_ID_MISMATCH", "Alchemy endpoint returned the wrong Ethereum mainnet chain ID")
+        finalized_header = self._call("ethereum-mainnet", "eth_getBlockByNumber", ["finalized", False])
+        if not isinstance(finalized_header, dict) or not isinstance(finalized_header.get("hash"), str):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum finalized header response is invalid")
+        finalized_height = self._hex_int(finalized_header.get("number"), "Ethereum finalized block number")
+        if re.fullmatch(r"0x[0-9a-fA-F]{64}", finalized_header["hash"]) is None:
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum finalized header hash is invalid")
+        if to_block > finalized_height:
+            raise ProviderTransportError("BLOCK_RANGE_NOT_FINALIZED", "Ethereum log query extends beyond the finalized block")
+        logs = self._call("ethereum-mainnet", "eth_getLogs", [{
+            "fromBlock": hex(from_block), "toBlock": hex(to_block),
+            "address": contract_address, "topics": [TRANSFER_EVENT_TOPIC],
+        }])
+        if not isinstance(logs, list):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Alchemy Ethereum eth_getLogs response must be an array")
+        records = tuple(self._decode_evm_transfer_log(
+            "ethereum-mainnet", contract_address, item, from_block, to_block
+        ) for item in logs)
+        return ProviderDataPage(
+            "alchemy", "ethereum-mainnet", contract_address, records,
+            from_block=from_block, to_block=to_block,
+            finalized_height=finalized_height,
+            finality_reference="eth_getBlockByNumber:finalized",
+        )
+
     def fetch_bnb_finalized_height(self) -> int:
         """Return the BNB finalized height after checking the endpoint chain ID."""
         chain_id = self._call("bnb-smart-chain-mainnet", "eth_chainId")
@@ -526,30 +593,38 @@ class AlchemyReadOnlyAdapter:
     @staticmethod
     def _decode_bnb_transfer_log(contract_address: str, log: dict,
                                  from_block: int, to_block: int) -> EvmTokenTransferLog:
+        return AlchemyReadOnlyAdapter._decode_evm_transfer_log(
+            "bnb-smart-chain-mainnet", contract_address, log, from_block, to_block
+        )
+
+    @staticmethod
+    def _decode_evm_transfer_log(network_id: str, contract_address: str, log: dict,
+                                 from_block: int, to_block: int) -> EvmTokenTransferLog:
+        label = "Ethereum" if network_id == "ethereum-mainnet" else "BNB"
         log_address = log.get("address") if isinstance(log, dict) else None
         if not isinstance(log_address, str) or log_address.lower() != contract_address.lower():
-            raise ProviderTransportError("CONTRACT_SCOPE_MISMATCH", "BNB log does not belong to the requested token contract")
+            raise ProviderTransportError("CONTRACT_SCOPE_MISMATCH", f"{label} log does not belong to the requested token contract")
         topics = log.get("topics")
         if (not isinstance(topics, list) or len(topics) != 3
                 or any(not isinstance(topic, str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", topic) is None for topic in topics)
                 or topics[0].lower() != TRANSFER_EVENT_TOPIC
                 or topics[1][2:26] != "0" * 24 or topics[2][2:26] != "0" * 24):
-            raise ProviderTransportError("INVALID_TRANSFER_LOG", "BNB log is not a standard ERC-20 Transfer event")
+            raise ProviderTransportError("INVALID_TRANSFER_LOG", f"{label} log is not a standard ERC-20 Transfer event")
         data = log.get("data")
         if not isinstance(data, str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", data) is None:
-            raise ProviderTransportError("INVALID_TRANSFER_LOG", "BNB Transfer event amount must be one uint256 word")
+            raise ProviderTransportError("INVALID_TRANSFER_LOG", f"{label} Transfer event amount must be one uint256 word")
         block_number = _parse_hex_quantity(log.get("blockNumber"), "log block number")
         log_index = _parse_hex_quantity(log.get("logIndex"), "log index")
         block_hash, tx_hash = log.get("blockHash"), log.get("transactionHash")
         if (not isinstance(block_hash, str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash) is None
                 or not isinstance(tx_hash, str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash) is None
                 or not from_block <= block_number <= to_block):
-            raise ProviderTransportError("INVALID_TRANSFER_LOG", "BNB Transfer event block/transaction references are invalid")
+            raise ProviderTransportError("INVALID_TRANSFER_LOG", f"{label} Transfer event block/transaction references are invalid")
         removed = log.get("removed", False)
         if not isinstance(removed, bool):
-            raise ProviderTransportError("INVALID_TRANSFER_LOG", "BNB log removed flag must be boolean")
+            raise ProviderTransportError("INVALID_TRANSFER_LOG", f"{label} log removed flag must be boolean")
         return EvmTokenTransferLog(
-            "bnb-smart-chain-mainnet", contract_address,
+            network_id, contract_address,
             "0x" + topics[1][-40:], "0x" + topics[2][-40:],
             str(int(data, 16)), block_number, block_hash, tx_hash, log_index, removed,
         )

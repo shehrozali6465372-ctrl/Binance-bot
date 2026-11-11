@@ -140,7 +140,7 @@ Do not oversimplify Render pricing:
 | Module 6 — Candidate Discovery & Filtering | Implemented with event/trend cluster deduplication on PR #11; CI run `43018392595` passed |
 | Module 7 — Relevance & Scoring | Deterministic versioned scorer exists (`layer1-relevance-v1`), but runtime scoring is explicitly deferred because calibrated evidence inputs are not all available. Do not activate guessed weights/values. |
 | Module 8 — Market Analysis | Implemented on the Module 8 branch; PR #12 remains open, non-draft and unmerged. The verified base SHA for Module 9 PR #13 is `f7e6fc511e146b6bfb6f25afb0009c369d8afd4a`. Earlier CI successes apply only to the exact older SHAs listed below; do not assume they validate later heads. |
-| Module 9 — On-chain Intelligence | Domain validation, five read-only scoped provider adapters, durable SQLite event/checkpoint store, EVM Transfer-log normalizer and bounded BNB ERC-20 ingestion worker implemented on PR #13. Worker implementation commit: `5afd3f7c864c8959290d00fb89efe657e15cab73`; local full suite 201 passed. Remote CI remains unverified. Live provider access, Ethereum log ingestion, production persistence and candidate integration remain incomplete. |
+| Module 9 — On-chain Intelligence | Domain validation, five read-only scoped provider adapters, durable SQLite event/checkpoint store, EVM Transfer-log normalizer and shared bounded Ethereum/BNB ERC-20 ingestion worker implemented on PR #13. Ethereum and BNB log paths are test-verified locally; no live provider calls have been made. Remote CI remains unverified. Production persistence and candidate integration remain incomplete. |
 | CMS worker PR #2 | Open/draft/unmerged; CI and prior worker tests do not prove live stream operation |
 | CMS integration PR #3 | Open/draft/unmerged; no live deployment verified |
 | CMS startup-race PR #6 | Open/draft/unmerged |
@@ -359,7 +359,7 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - Added `layer1/onchain_ingestion.py`: normalized transfer event persistence, unique scoped event identities, atomic event+cursor commit, idempotent replay, conflict rejection, reorg tombstones and canonical block-hash reconciliation.
 - Added `normalize_evm_transfer_log`, using `transaction_hash:log_index` as the stable event key, requiring exact verified contract scope and a separately verified canonical block hash, and preserving provider `removed=true` or block-hash mismatch as `REORGED`.
 - Added `tests/test_onchain_ingestion.py`; RED import failure was observed before implementation, then focused tests passed (7 tests before the latest full-suite run).
-- Integration is intentionally incomplete: no background worker yet connects all five provider page methods to normalization and checkpoint commit. Current concrete normalizer covers EVM Transfer logs only. Ethereum transfer summaries lack log index; no synthetic event identity is invented. BTC/SOL/XRPL extractors remain pending.
+- Integration remains intentionally incomplete: the shared bounded worker now connects Ethereum and BNB ERC-20 log extraction to normalization and atomic checkpoint commit. BTC/SOL/XRPL transfer extractors remain pending. Ethereum transfer summaries lack log index; no synthetic event identity is invented.
 - XRPL durable restart should use fixed ledger bounds; opaque markers can expire. Canonical block reconciliation only accepts a caller-supplied independently verified hash and does not choose reorg depth.
 - No live provider calls, credential reads, production DB changes, real Binance Square posts, PR merges or deployments occurred.
 
@@ -437,7 +437,7 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - commit_page() gained an opt-in allow_recanonicalized path used only by the worker after independent header verification. It permits a re-included transaction/log identity to become canonical again only when stable transfer fields match; default store replay behavior still prevents stale canonical pages from resurrecting tombstones.
 
 ### Scope limitations
-- The first complete EVM path is **BNB Smart Chain ERC-20 only**. The existing Ethereum alchemy_getAssetTransfers summary omits log index, so it is not used to create stable events. Ethereum eth_getLogs support remains pending.
+- The complete EVM paths now cover **Ethereum and BNB Smart Chain ERC-20** through eth_getLogs. Ethereum alchemy_getAssetTransfers summaries still omit log index and are not used to create stable event identities. BTC/SOL/XRPL transfer normalization remains pending.
 - The worker is callable orchestration, not yet a scheduled/always-on worker process. No credentials, endpoints, live requests or production services were configured.
 - Reorg repair is bounded by the explicitly configured lookback; deeper reorgs require a separately controlled wider rescan.
 - SQLite remains a development/test backend. PostgreSQL migration and real concurrency tests remain pending.
@@ -472,3 +472,47 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - Final local full test suite: 201 passed, 0 failed. compileall and git diff --check passed.
 - The tracked worktree is clean. Existing untracked .venv/ remains present and was never staged or modified.
 - No live blockchain provider calls, secrets, infrastructure, real Binance Square posts, merge or production deployment were used/performed.
+
+
+## Progress update — 2026-11-11 — Ethereum EVM ingestion
+
+### Verified starting point
+- Repository: https://github.com/shehrozali6465372-ctrl/Binance-bot.
+- Working directory: /tmp/binance-layer1-audit.
+- Branch: layer-1/module9-onchain-intelligence.
+- Starting HEAD: 8b1ccf6c871f1cfce53ad3c1fcba56032cd920d1; tracked working tree clean.
+- Existing untracked .venv/ preserved.
+- PR #13 remained OPEN, Draft and unmerged. PR #12 remained OPEN, non-draft and unmerged. Remote CI queries returned empty arrays; CI remains unverified.
+
+### Implementation added
+- Added Ethereum eth_getLogs to the Alchemy read-only method allowlist.
+- Added fetch_ethereum_finalized_height() with chain ID 1 verification and the execution-layer finalized block tag.
+- Added fetch_ethereum_block_header() with exact returned-height/hash and timestamp validation.
+- Added fetch_ethereum_erc20_transfer_logs() scoped to one exact mapped contract and the canonical ERC-20 Transfer event topic. It verifies chain ID, finalized height, block range and every decoded log's block/transaction/log-index identity.
+- Refactored EVM log decoding into a shared network-aware decoder; BNB behavior remains covered by its existing tests.
+- Extended the existing EvmTransferIngestionWorker to discover verified mappings on Ethereum and BNB, dispatch to each network's existing provider methods, enforce network-specific finality references, and reuse the same atomic event/block-hash/checkpoint storage.
+- Both networks use the same stable event identity: transaction_hash:log_index. Ethereum alchemy_getAssetTransfers summaries are not used to manufacture missing log indices.
+- Ethereum request windows are capped at 10 blocks. This is confirmed by Alchemy's current official Ethereum eth_getLogs docs, which list 10 blocks for Free tier; no paid-plan capability is assumed.
+- Canonical block hashes and timestamps are fetched independently and journaled atomically with events and the durable checkpoint. Bounded reorg detection, rewind and replay are shared across both EVM networks.
+
+### Verification
+- Provider adapter tests: 30 passed after Ethereum provider methods were added.
+- Combined EVM worker/provider tests: 41 passed after the additional wrong-finality checkpoint-protection test.
+- Full suite: 208 passed, 0 failed.
+- compileall and git diff --check passed.
+- Ethereum worker tests cover exact mapped contract, finalized-range log ingestion, stable event identity, restart resume, empty-block reorg detection/replay, and fail-closed rejection of a page carrying the wrong finality semantics.
+- Full suite, compile checks and diff checks were rerun after code review: 208 tests passed, compileall passed and git diff --check passed.
+- No live Alchemy requests or credentials were used. No real Binance Square post or earning workflow was triggered.
+
+### Remaining limits
+- Ethereum/BNB EVM worker is still callable orchestration, not a scheduled/always-on production service.
+- Provider contract tests use deterministic fake JSON-RPC responses; live endpoint compatibility, quota behavior and operational reliability remain unverified.
+- SQLite remains a development/test backend; PostgreSQL migration and real concurrency tests remain pending.
+- Bitcoin, Solana and XRPL transfer normalizers remain pending.
+- Candidate integration, decimal-aware cross-provider aggregation, deduplication and calibrated whale thresholds remain pending. No threshold was invented.
+
+### Exact next task after this update
+1. Complete final full-suite/static verification, inspect the full diff and preserve .venv/.
+2. Commit and push only to layer-1/module9-onchain-intelligence if the remote head is unchanged and permissions permit.
+3. Recheck PR #13 remains Draft and PR #12 remains unchanged; remote CI may remain unverified.
+4. Next implementation after Ethereum: assess and implement Bitcoin address-history normalization only where stable txid/output identity, amount and address evidence are actually available. Do not invent output indexes or treat transaction summaries as individual transfers.

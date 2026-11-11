@@ -16,10 +16,11 @@ BLOCK_HASH = "0x" + "b" * 64
 TX_HASH = "0x" + "a" * 64
 
 
-def mapping(mapping_id="asset-bnb-v1", contract=CONTRACT, status="VERIFIED"):
+def mapping(mapping_id="asset-bnb-v1", contract=CONTRACT, status="VERIFIED",
+            network_id="bnb-smart-chain-mainnet", chain_id="56"):
     return OnChainAssetMapping(
         mapping_id=mapping_id, asset_id="coingecko:example", binance_symbol="EXAMPLE",
-        network_id="bnb-smart-chain-mainnet", network_family="EVM", chain_id="56",
+        network_id=network_id, network_family="EVM", chain_id=chain_id,
         representation="TOKEN", contract_address=contract, token_standard="ERC-20",
         decimals=18, mapping_status=status, source_type="OFFICIAL_PROJECT",
         source_url="https://example.org/token", verified_at="2026-11-11T12:00:00+00:00",
@@ -208,6 +209,148 @@ class EvmTransferIngestionWorkerTests(unittest.TestCase):
                 max_blocks_per_run=1001, reorg_lookback_blocks=2,
             )
 
+
+
+class FakeEthereumProvider:
+    def __init__(self):
+        self.finalized_height = 265
+        self.logs = [EvmTokenTransferLog(
+            network_id="ethereum-mainnet", contract_address=CONTRACT,
+            from_address="0x" + "2" * 40, to_address="0x" + "3" * 40,
+            amount_raw="987654321", block_number=260, block_hash=BLOCK_HASH,
+            transaction_hash="0x" + "d" * 64, log_index=9, removed=False,
+        )]
+        self.headers = {}
+        self.log_calls = []
+
+    def fetch_ethereum_finalized_height(self):
+        return self.finalized_height
+
+    def fetch_ethereum_block_header(self, block_number):
+        return self.headers.get(block_number, {
+            "number": block_number, "hash": BLOCK_HASH,
+            "timestamp": 1794398400 + block_number,
+        })
+
+    def fetch_ethereum_erc20_transfer_logs(self, contract_address, from_block, to_block):
+        self.log_calls.append((contract_address, from_block, to_block))
+        return ProviderDataPage(
+            "alchemy", "ethereum-mainnet", contract_address,
+            tuple(item for item in self.logs
+                  if from_block <= item.block_number <= to_block
+                  and item.contract_address.lower() == contract_address.lower()),
+            from_block=from_block, to_block=to_block,
+            finalized_height=self.finalized_height,
+            finality_reference="eth_getBlockByNumber:finalized",
+        )
+
+
+class EthereumTransferIngestionWorkerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(self.tmp.name, "ethereum.sqlite3")
+        self.mapping_store = OnChainStore(
+            path, OnChainIntelligenceEngine({"ethereum-mainnet": 86400})
+        )
+        self.ingestion_store = OnChainIngestionStore(path)
+        now = datetime.now(timezone.utc)
+        timestamp = now.isoformat()
+        self.asset_mapping = mapping(
+            "asset-eth-v1", network_id="ethereum-mainnet", chain_id="1"
+        )
+        eligibility = EligibilityDecision(
+            status="ELIGIBLE", asset_id="coingecko:example", symbol="EXAMPLE",
+            eligible_pairs=("EXAMPLEUSDT",), verified_at=timestamp,
+            identity_proof_status="VERIFIED", identity_proof_source="coingecko_coin_tickers",
+            identity_proof_verified_at=timestamp, identity_proof_source_timestamp=timestamp,
+            identity_proof_data_hash="a" * 64,
+        )
+        observation = OnChainObservation(
+            observation_id="ethereum-map-verification", mapping_id=self.asset_mapping.mapping_id,
+            asset_id=self.asset_mapping.asset_id, network_id=self.asset_mapping.network_id,
+            chain_id="1", provider="alchemy", endpoint_id="ethereum-mainnet-rpc",
+            observation_type="TRANSFER", block_height=250, block_hash=BLOCK_HASH,
+            transaction_hash=TX_HASH, block_time=timestamp, observed_at=timestamp,
+            finality="FINALIZED", finality_reference="eth_getBlockByNumber:finalized",
+        )
+        self.mapping_store.save_verified(eligibility, self.asset_mapping, observation)
+        self.provider = FakeEthereumProvider()
+        self.worker = EvmTransferIngestionWorker(
+            self.provider, self.mapping_store, self.ingestion_store,
+            start_blocks={self.asset_mapping.mapping_id: 256},
+            max_blocks_per_run=10, reorg_lookback_blocks=2,
+            retry_attempts=2, sleep=lambda _: None,
+            clock=lambda: datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc),
+        )
+
+    def tearDown(self):
+        self.ingestion_store.close()
+        self.mapping_store.close()
+        self.tmp.cleanup()
+
+    def test_ethereum_ingests_only_mapped_finalized_logs_with_stable_log_identity(self):
+        result = self.worker.run_once()
+        self.assertEqual(result["events_inserted"], 1)
+        saved = self.ingestion_store.list_events("ethereum-mainnet", canonical_only=True)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].event_id, "0x" + "d" * 64 + ":9")
+        self.assertEqual(saved[0].block_number, 260)
+        self.assertEqual(saved[0].amount_raw, "987654321")
+        self.assertEqual(self.provider.log_calls, [(CONTRACT, 256, 265)])
+        self.assertEqual(self.ingestion_store.get_checkpoint(
+            "alchemy:ethereum-mainnet:contract:" + CONTRACT
+        )["next_block"], 266)
+
+    def test_ethereum_rejects_page_with_wrong_finality_semantics_without_advancing_cursor(self):
+        original = self.provider.fetch_ethereum_erc20_transfer_logs
+        def wrong_finality(contract_address, from_block, to_block):
+            page = original(contract_address, from_block, to_block)
+            return ProviderDataPage(
+                page.provider, page.network_id, page.scope, page.records,
+                from_block=page.from_block, to_block=page.to_block,
+                finalized_height=page.finalized_height,
+                finality_reference="latest",
+            )
+        self.provider.fetch_ethereum_erc20_transfer_logs = wrong_finality
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:ethereum-mainnet:contract:" + CONTRACT
+        ))
+
+    def test_ethereum_restart_resumes_from_durable_checkpoint(self):
+        self.worker.run_once()
+        self.provider.finalized_height = 275
+        self.provider.logs = []
+        self.worker.run_once()
+        self.assertEqual(self.provider.log_calls[-1], (CONTRACT, 266, 275))
+        self.assertEqual(self.ingestion_store.get_checkpoint(
+            "alchemy:ethereum-mainnet:contract:" + CONTRACT
+        )["next_block"], 276)
+
+    def test_ethereum_reorg_in_empty_block_rewinds_and_replays(self):
+        self.provider.logs = []
+        self.worker.run_once()
+        self.provider.finalized_height = 275
+        self.provider.headers[264] = {
+            "number": 264, "hash": "0x" + "c" * 64, "timestamp": 1794398664,
+        }
+        self.provider.logs = [EvmTokenTransferLog(
+            network_id="ethereum-mainnet", contract_address=CONTRACT,
+            from_address="0x" + "2" * 40, to_address="0x" + "3" * 40,
+            amount_raw="44", block_number=264, block_hash="0x" + "c" * 64,
+            transaction_hash="0x" + "e" * 64, log_index=2, removed=False,
+        )]
+        result = self.worker.run_once()
+        self.assertEqual(result["reorg_blocks_detected"], 1)
+        self.assertEqual(result["events_inserted"], 1)
+        saved = self.ingestion_store.get_event(
+            "0x" + "e" * 64 + ":2", "ethereum-mainnet", "alchemy",
+            "contract:" + CONTRACT,
+        )
+        self.assertEqual(saved.canonical_status, "CANONICAL")
+        self.assertEqual(saved.block_hash, "0x" + "c" * 64)
 
 if __name__ == "__main__":
     unittest.main()

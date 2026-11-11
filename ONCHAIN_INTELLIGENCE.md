@@ -7,7 +7,7 @@ Status: **User-selected providers; implementation remains draft. Live connectivi
 | Network | Provider | Selected plan | Main documented interface | Important limit |
 |---|---|---|---|---|
 | Bitcoin mainnet | Alchemy | Free | UTXO REST address history + Bitcoin JSON-RPC | Address-scoped; not a global wallet-discovery feed |
-| Ethereum mainnet | Alchemy | Free | `alchemy_getAssetTransfers` + Ethereum JSON-RPC | Transfer API requires an exact contract or monitored address scope |
+| Ethereum mainnet | Alchemy | Free | eth_getLogs for mapped ERC-20 Transfer events; alchemy_getAssetTransfers remains a scoped summary API | Free-tier eth_getLogs range is at most 10 blocks per request; worker verifies finalized head and canonical headers |
 | Solana mainnet | Alchemy | Free | `getTransactionsForAddress` | Address/token-account scoped; full transaction pages up to 100 |
 | BNB Smart Chain mainnet | Alchemy | Free | `eth_getLogs` + BNB JSON-RPC | Free-tier `eth_getLogs` range is at most 10 blocks per request |
 | XRP Ledger mainnet | Chainstack | Developer Free | XRPL JSON-RPC `account_tx` | Account-scoped; history limited by provider's currently available ledger range |
@@ -15,8 +15,8 @@ Status: **User-selected providers; implementation remains draft. Live connectivi
 Official provider facts checked on 2026-11-11:
 
 - Alchemy Free plan publishes 30M compute units/month and 25 requests/second. Exact per-method availability and quota must still be verified with a working project API key.
-- Documented Alchemy request costs: Ethereum `alchemy_getAssetTransfers` 120 CUs; BNB `eth_getLogs` 60 CUs; Solana `getTransactionsForAddress` 100 CUs.
-- Alchemy's `eth_getLogs` documentation lists a 10-block maximum per request on the Free tier for BNB and several other chains.
+- Documented Alchemy request costs: eth_getLogs 60 CUs; Ethereum alchemy_getAssetTransfers 120 CUs; Solana getTransactionsForAddress 100 CUs.
+- Alchemy's current Ethereum eth_getLogs documentation lists a 10-block maximum per request on the Free tier. The implementation uses the same conservative 10-block bound on Ethereum and BNB; it does not infer paid-plan entitlements.
 - Chainstack XRPL Developer Free is listed at $0/month, 3M request units/month, 25 requests/second, one node and WebSockets.
 - Chainstack's Oct 1, 2026 Extended Nodes article reports roughly 750,000–1,500,000 XRPL ledgers (about 33–66 days) for Global Nodes. An earlier Sep 16, 2026 setup guide says under six days. Those provider pages conflict; the adapter reads `complete_ledgers` at runtime and does not assume either duration. Full-history retention requires separately configured infrastructure.
 
@@ -41,8 +41,8 @@ Official provider facts checked on 2026-11-11:
 | Network | Method | Returned data and safeguards |
 |---|---|---|
 | Bitcoin | Alchemy UTXO `GET /api/v2/address/{address}` | Address history, `details=txs`, page size <= 1,000. Confirmations are classified as `CONFIRMED`, `PENDING` or `ORPHANED`; confirmed records require block height/hash/time. Raw satoshi values are not converted to floats. |
-| Ethereum | Alchemy `alchemy_getAssetTransfers` | Exact contract or monitored-address scope; fixed block range checked against finalized head; `pageKey` pagination; `maxCount` <= 1,000. Raw amount and decimals are normalized to integer base units; no floating-point value is used for amount. |
-| BNB Smart Chain | Alchemy `eth_getLogs` | Exact token contract and ERC-20 Transfer topic; chain ID 56 checked; inclusive block range <= 10 on Free tier; range must not exceed `eth_getFinalizedHeader` with all validators (`verifiedValidatorNum=-3`). Decodes from/to and raw uint256; preserves `removed` reorg flag. |
+| Ethereum | Alchemy eth_getLogs for durable ingestion; alchemy_getAssetTransfers for scoped summaries | Exact mapped contract and ERC-20 Transfer topic; chain ID 1 checked; inclusive block range <= 10; range must not exceed the Ethereum finalized tag. Decodes provider-supplied transaction hash/log index, from/to and raw uint256. Canonical block headers are fetched independently by the worker. The summary API is not used to invent log indices. |
+| BNB Smart Chain | Alchemy eth_getLogs | Exact token contract and ERC-20 Transfer topic; chain ID 56 checked; inclusive block range <= 10; range must not exceed eth_getFinalizedHeader with all validators (verifiedValidatorNum=-3). Decodes provider-supplied transaction hash/log index, from/to and raw uint256; preserves removed reorg flag. |
 | Solana | Alchemy `getTransactionsForAddress` | Address/token-account scope; full transaction page <= 100; finalized commitment; requests successful transactions and balance-changing token-account activity; validates signature, slot and full transaction metadata; preserves `paginationToken`. |
 | XRP Ledger | Chainstack `account_tx` | Account scope; explicit fixed ledger range (no moving `-1` bounds); opaque marker pagination; response and each transaction must be validated; returned ledger bounds are checked. |
 
@@ -55,8 +55,8 @@ Transport validates JSON-RPC envelopes, normalizes HTTP 429/network errors witho
 - Bitcoin address history and Solana `getTransactionsForAddress` are address-scoped. XRPL `account_tx` is also account-scoped. These methods do not discover every whale wallet across their networks.
 - Complete network-wide whale discovery is therefore **not available** from the selected five methods alone. BTC/SOL/XRPL need an explicit monitored-wallet source or a separately evaluated indexing/discovery product before broad whale coverage can be claimed.
 - XRPL markers are opaque and may expire after 10 minutes. A worker must consume a page sequence promptly and checkpoint stable ledger bounds; the marker is not a durable cursor.
-- BNB ERC-20 logs are now normalized and durably checkpointed by the bounded worker described below. Ethereum log extraction and BTC/SOL/XRPL transfer persistence remain pending; none of these events is wired into candidate analysis yet.
-- BNB canonical block hashes are journaled and reconciled within a configured lookback. Bitcoin orphaned transactions are surfaced by the provider adapter, but BTC persistence and chain-specific reorg recovery remain pending.
+- Ethereum and BNB ERC-20 logs are normalized and durably checkpointed by the shared bounded EVM worker described below. BTC/SOL/XRPL transfer persistence remains pending; none of these events is wired into candidate analysis yet.
+- Ethereum and BNB canonical block hashes are journaled and reconciled within a configured lookback. Bitcoin orphaned transactions are surfaced by the provider adapter, but BTC persistence and chain-specific reorg recovery remain pending.
 - No transfer value threshold, whale classification, exchange attribution, bridge deduplication or buy/sell intent inference is enabled.
 
 ## Open-source reuse review — 2026-11-11
@@ -124,23 +124,32 @@ Important integration limits:
 
 ## Bounded EVM ingestion worker implemented — 2026-11-11
 
-layer1/onchain_evm_worker.py now orchestrates the existing mapping store, Alchemy read-only adapter, EVM Transfer normalizer and atomic ingestion store for **BNB Smart Chain ERC-20 contracts only**.
+layer1/onchain_evm_worker.py now orchestrates the existing mapping store, Alchemy read-only adapter, EVM Transfer normalizer and atomic ingestion store for **Ethereum mainnet and BNB Smart Chain ERC-20 contracts**.
 
 Verified implementation behavior:
-- Reads only mappings already persisted by OnChainStore.save_verified() and returned by list_verified_mappings("bnb-smart-chain-mainnet"); mappings are revalidated and must identify an exact verified BNB token contract.
+- Reads only mappings already persisted by OnChainStore.save_verified() and returned by list_verified_mappings() for the supported EVM network; mappings are revalidated against the configured chain ID and exact contract identity.
 - Requires an explicit initial block for every mapping. No guessed genesis/start height is introduced.
-- Reads the provider's finalized height and scans no more than the configured max_blocks_per_run; each Alchemy eth_getLogs request is capped at 10 blocks.
-- Filters logs to the exact mapped contract and ERC-20 Transfer topic through the existing adapter.
+- Reads the network-specific finalized height: Ethereum eth_getBlockByNumber("finalized"); BNB eth_getFinalizedHeader with all validators. Provider adapters check chain IDs 1 and 56 respectively.
+- Scans no more than configured max_blocks_per_run; every eth_getLogs request is capped at 10 blocks, matching the current Alchemy Free-tier documented limit for Ethereum and BNB.
+- Filters logs to the exact mapped contract and ERC-20 Transfer topic. The Ethereum transfer-summary API is not used for event persistence because it omits log index.
 - Fetches and validates every block header in each bounded scan range with eth_getBlockByNumber, derives timestamps from those headers, and commits the scoped canonical block-hash journal atomically with events and the range checkpoint.
-- Normalizes only logs carrying the provider-supplied transaction hash and log index. Event identity remains transaction_hash:log_index.
+- Normalizes only logs carrying provider-supplied transaction hash and log index. Event identity remains transaction_hash:log_index.
 - Commits each bounded log range and its next-block checkpoint through the existing atomic commit_page() transaction. Empty ranges also advance only after a successful provider response.
-- Resumes from durable next_block after restart; provider timeout/network/rate-limit/5xx errors receive bounded retries. Malformed data and scope mismatches fail closed.
+- Resumes from durable next_block after restart; provider timeout/network/rate-limit/5xx errors receive bounded retries. Malformed data, wrong finality semantics and scope mismatches fail closed.
 - Re-fetches a caller-configured bounded recent block lookback, including blocks that previously had no transfers. If canonical hashes differ, affected events are tombstoned, the checkpoint rewinds to the earliest changed height, and the finalized range is replayed.
 - A fresh worker page may re-canonicalize a previously tombstoned event identity only after its log is rechecked against the new canonical block header and its immutable transfer fields match. Ordinary store replays cannot resurrect tombstones.
 
 Scope and operational limits:
-- This is an orchestration component and a test-verified BNB EVM ingestion path, not a continuously scheduled production worker. A caller must provide the mapping database, ingestion database, explicit start-block map, bounded run size and reorg lookback.
-- Ethereum's current alchemy_getAssetTransfers summary API does not expose a log index. It is deliberately not used by this worker, and no synthetic event identity is created. A separate Ethereum eth_getLogs adapter path is still required before Ethereum ingestion is enabled.
-- No live Alchemy request or credential was used. Tests use deterministic local fixtures and do not prove live endpoint compatibility, provider plan limits beyond the already enforced 10-block BNB request bound, or operational uptime.
+- This is a callable orchestration component and test-verified Ethereum/BNB ingestion path, not a continuously scheduled production worker. A caller must provide mapping and ingestion stores, explicit start-block map, bounded run size and reorg lookback.
+- No live Alchemy request or credential was used. Tests use deterministic local fixtures and do not prove live endpoint compatibility, actual account quota, provider uptime or plan-specific throttling behavior.
 - SQLite remains the local/test persistence backend. PostgreSQL migration, real concurrency/failure tests, provider credentials, scheduler/worker lifecycle, metrics/alerts and operational runbook remain pending.
 - Reorg detection is limited to the configured lookback window. A deeper reorg requires an operator-approved wider rescan/recovery procedure; do not claim arbitrary-depth automatic recovery.
+
+
+## Ethereum provider documentation checked — 2026-11-11
+
+- Alchemy Ethereum eth_getLogs reference documents the JSON-RPC log filter/response and a 10-block Free-tier range limit: https://www.alchemy.com/docs/chains/ethereum/ethereum-api-endpoints/eth-get-logs
+- Alchemy support article updated 2026-08-25 describes Free-tier range restrictions: https://support.alchemy.com/articles/1883074130-why-do-i-see-a-free-tier-error-when-calling-eth-getlogs-with-a-large-block-range
+- Alchemy explains removed logs and canonical reorg behavior: https://www.alchemy.com/docs/reference/logs
+
+The worker uses fixed numeric block bounds and the provider's finalized tag, not latest. It does not rely on WebSocket subscriptions or the removed flag alone for reorg recovery. Local verification on 2026-11-11: 41 focused EVM worker/provider tests passed; full repository suite: 208 passed, 0 failed; compileall and git diff --check passed. No live provider request was made.
