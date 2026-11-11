@@ -3756,17 +3756,11 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
     # 1. COLLECT DATA
     # ──────────────────────────────────────────────
     
-    # Fetch Binance announcements
+    # Official CMS evidence is imported after the market universe is known.
+    # The legacy undocumented Binance BAPI is intentionally never called.
     announcements = []
-    try:
-        announcements = announcement_engine.get_trending_announcements()
-        for a in announcements[:5]:
-            LOGGER.info("Announcement: [%s] %s - symbols: %s", a["type"], a["title"][:60], a["symbols"])
-    except Exception as e:
-        LOGGER.warning("Could not fetch announcements: %s", e)
-    
-    # Get posted hours for repetition check
-    # Primary source: JSONL file (persists via git across GHA runs)
+
+    # Get posted hours for repetition check.
     posted_hours_data = {}
     try:
         posted_hours_data = _load_post_history()
@@ -3774,8 +3768,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                     len(posted_hours_data), _POST_HISTORY_FILE,
                     str(list(posted_hours_data.items())[:5]) if posted_hours_data else "none")
     except Exception as e:
-        LOGGER.debug("Could not load post history: %s", e)
-    # Secondary source: SQLite (current run data)
+        LOGGER.debug("Could not load post history: %s", type(e).__name__)
     try:
         db_hours = publisher.db.get_posted_hours_dict(hours=72)
         for sym, hrs in db_hours.items():
@@ -3783,98 +3776,65 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                 posted_hours_data[sym] = hrs
     except Exception:
         pass
-    
-    # ──────────────────────────────────────────────
-    # 2. APPLY OBJECTIVE FILTERS (in code, deterministic)
-    # ──────────────────────────────────────────────
-    
-    # ─── SKILLS HUB ENGINE (primary source) ───
-    # Use Binance Skills Hub Market Rank API for trending/top-search/alpha data
-    candidates = []
+
+    # Skills Hub BAPI is undocumented and remains disabled. Use the existing
+    # CoinGecko market scanner as the candidate universe; do not invent data.
     skills_used = False
     skills_candidates = []
+    raw_candidates = []
     try:
-        raise RuntimeError("Undocumented Binance Skills Hub BAPI is disabled until an official documented interface is verified")
-        skills = SkillsHubEngine()
-        skills_candidates = skills.get_scored_candidates()
-        if skills_candidates:
-            LOGGER.info("SkillsHub: %d candidates loaded", len(skills_candidates))
-            # Show top 5
-            for c in skills_candidates[:5]:
-                LOGGER.info("  SkillsHub: $%s score=%.0f search=%d sources=%s SM=%.1f%%",
-                           c.symbol, getattr(c, '_skills_score', 0),
-                           getattr(c, '_skills_search', 0),
-                           getattr(c, '_skills_sources', []),
-                           getattr(c, '_skills_smart_money', 0))
-            skills_used = True
-            # Apply objective filters (more lenient for SkillsHub data)
-            for coin in skills_candidates:
-                try:
-                    if _passes_objective_filters(
-                        symbol=coin.symbol,
-                        price=coin.price,
-                        change_24h=coin.change_24h,
-                        volume_ratio=getattr(coin, 'volume_ratio', 1.0),
-                        market_cap=coin.market_cap,
-                        announcements=announcements,
-                        posted_hours_data=posted_hours_data,
-                        from_skills_hub=True,
-                        liquidity=getattr(coin, 'liquidity', 0),
-                        risk_level=getattr(coin, '_skills_risk', 0),
-                        asset_id=getattr(coin, 'asset_id', ''),
-                    ):
-                        candidates.append(coin)
-                except Exception as e:
-                    LOGGER.debug("SkillsHub filter error for %s: %s", coin.symbol, e)
-                    continue
+        raw_candidates = list(scanner._universe())
     except Exception as e:
-        LOGGER.warning("SkillsHubEngine failed: %s — falling back to MarketScanner", e)
-    
-    # ─── MARKET SCANNER (fallback) ───
-    # Use CoinGecko-based scanner if SkillsHub returned nothing
-    if not candidates:
-        raw_candidates = []
-        try:
-            universe = scanner._universe()
-            raw_candidates = [c for c in universe]
-        except Exception as e:
-            LOGGER.error("Failed to get market data: %s", e)
-            return False
-        
-        for coin in raw_candidates:
+        LOGGER.error("Failed to get market data: %s", type(e).__name__)
+        return False
+    discovered_candidate_count = len(raw_candidates)
+    if not raw_candidates:
+        LOGGER.info("Market scanner returned no candidates; no announcement-only synthetic candidates are created")
+        return False
+
+    # Module 1–4 ingestion/eligibility runs before editorial filters so verified
+    # official announcements can act as catalysts for otherwise quiet assets.
+    try:
+        trend_records = hot_search_engine.get_trending(force_refresh=True) if hot_search_engine else []
+        layer1_summary = _persist_layer1_market_intelligence(
+            raw_candidates, config.database_path, trend_records
+        )
+        ready_asset_ids = set(layer1_summary.get("ready_asset_ids", []))
+        layer1_candidates = [
+            coin for coin in raw_candidates
+            if getattr(coin, "asset_id", "") in ready_asset_ids
+        ]
+        announcements = layer1_summary.get("announcement_hints", [])
+        for announcement in announcements[:5]:
+            LOGGER.info("Official CMS announcement: [%s] %s — symbols: %s",
+                        announcement.get("type", "other"),
+                        announcement.get("title", "")[:60],
+                        announcement.get("symbols", []))
+        candidates = []
+        for coin in layer1_candidates:
             try:
                 if _passes_objective_filters(
                     symbol=coin.symbol,
                     price=coin.price,
                     change_24h=coin.change_24h,
-                    volume_ratio=coin.volume_ratio,
+                    volume_ratio=getattr(coin, "volume_ratio", 1.0),
                     market_cap=coin.market_cap,
                     announcements=announcements,
                     posted_hours_data=posted_hours_data,
-                    asset_id=getattr(coin, 'asset_id', ''),
+                    from_skills_hub=False,
+                    liquidity=getattr(coin, "liquidity", 0),
+                    risk_level=getattr(coin, "risk_level", 0),
+                    asset_id=getattr(coin, "asset_id", ""),
                 ):
                     candidates.append(coin)
             except Exception as e:
-                LOGGER.debug("Filter error for %s: %s", coin.symbol, e)
-                continue
-    
-    try:
-        trend_records = hot_search_engine.get_trending(force_refresh=True) if hot_search_engine else []
-        layer1_summary = _persist_layer1_market_intelligence(
-            candidates, config.database_path, trend_records
-        )
-        discovered_candidate_count = len(candidates)
-        ready_asset_ids = set(layer1_summary.get("ready_asset_ids", []))
-        candidates = [
-            coin for coin in candidates
-            if getattr(coin, "asset_id", "") in ready_asset_ids
-        ]
+                LOGGER.debug("Objective filter error for %s: %s", getattr(coin, "symbol", "UNKNOWN"), type(e).__name__)
         LOGGER.info(
-            "Layer 1 discovery gate: %d/%d candidates remain research-eligible",
-            len(candidates), discovered_candidate_count,
+            "Layer 1 discovery gate: %d/%d candidates research-eligible; %d passed objective filters",
+            len(layer1_candidates), discovered_candidate_count, len(candidates),
         )
     except Exception as exc:
-        LOGGER.error("Layer 1 evidence persistence failed; stopping cycle: %s", exc)
+        LOGGER.error("Layer 1 evidence persistence failed; stopping cycle: %s", type(exc).__name__)
         return False
 
     if len(candidates) < CONFIG.min_candidates:
@@ -4374,7 +4334,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
         "coin": best_coin.get("symbol", ""),
         "catalyst": catalyst_info,
         "gemini_rank": rankings[0].get("rank", 1) if rankings else 0,
-        "candidates_discovered": len(skills_candidates) if skills_candidates else 0,
+        "candidates_discovered": discovered_candidate_count,
         "candidates_validated": len(candidates) if candidates else 0,
         "announcements_found": len(announcements) if announcements else 0,
         "daily_post_count": today_count + 1,
@@ -4400,7 +4360,15 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         "ready": 0, "rejected": 0, "rejected_inputs": 0,
         "scores_deferred": 0, "ready_asset_ids": [],
         "identity_proof_requests": 0, "identity_proof_cache_hits": 0,
-        "identity_proof_verified": 0, "identity_proof_unverified": 0, "provider_health": {},
+        "identity_proof_verified": 0, "identity_proof_unverified": 0,
+        "announcements": 0, "announcement_hints": [],
+        "announcement_rows_read": 0, "announcement_evidence_saved": 0,
+        "announcement_unmatched_rows": 0, "announcement_invalid_rows": 0,
+        "announcement_ambiguous_symbols": 0, "announcement_revision_warning_count": 0,
+        "announcement_revision_correlation_status": "NOT_REQUESTED",
+        "announcement_coverage": "NOT_CONFIGURED",
+        "announcement_status": "UNAVAILABLE_MISSING_ANNOUNCEMENT_DATABASE_URL",
+        "provider_health": {},
     }
     trend_signals = []
     for record in (trend_records or []):
@@ -4446,6 +4414,89 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         # subsequent runs advance through the candidate set without retry storms.
         identity_proof_budget = max(1, min(10, CONFIG.max_daily_posts * 2))
         scoring_engine = RelevanceScoringEngine()
+        announcement_events = []
+        announcement_database_url = os.getenv("ANNOUNCEMENT_DATABASE_URL", "").strip()
+        if announcement_database_url:
+            try:
+                from layer1.announcement_importer import import_recent_binance_announcements
+                from layer1.foundation import AnnouncementIntelligenceEngine
+                import_result = import_recent_binance_announcements(
+                    announcement_database_url, candidates, store
+                )
+                summary["announcement_rows_read"] = int(import_result.get("rows_read", 0))
+                summary["announcement_evidence_saved"] = int(import_result.get("evidence_saved", 0))
+                summary["announcement_unmatched_rows"] = int(import_result.get("unmatched_rows", 0))
+                summary["announcement_invalid_rows"] = int(import_result.get("invalid_rows", 0))
+                summary["announcement_ambiguous_symbols"] = len(
+                    import_result.get("ambiguous_symbols", [])
+                )
+                unique_events = {}
+                for asset_events in import_result.get("by_asset_id", {}).values():
+                    for event in asset_events:
+                        unique_events[(event.source_id, event.content_hash)] = event
+                announcement_engine = AnnouncementIntelligenceEngine(
+                    lambda: list(unique_events.values())
+                )
+                announcement_events, validation_status = announcement_engine.fetch()
+                for event in announcement_events:
+                    # The importer writes every accepted source row. This second
+                    # idempotent write makes the validated current revision the
+                    # authoritative Layer 1 projection.
+                    store.save_announcement(event)
+                summary["announcements"] = len(announcement_events)
+                summary["announcement_revision_correlation_status"] = (
+                    announcement_engine.revision_correlation_status
+                    if announcement_engine.revision_warnings
+                    else "UNRESOLVED_NO_STABLE_PROVIDER_ID"
+                )
+                summary["announcement_revision_warning_count"] = len(
+                    announcement_engine.revision_warnings
+                )
+                summary["announcement_revision_warnings"] = announcement_engine.revision_warnings
+                summary["announcement_coverage"] = "OBSERVED_ONLY_NO_HISTORICAL_REPLAY"
+                if announcement_events:
+                    summary["announcement_status"] = "PARTIAL_COVERAGE_NO_REPLAY"
+                elif summary["announcement_rows_read"]:
+                    summary["announcement_status"] = "PARTIAL_COVERAGE_NO_MATCHED_ASSETS_NO_REPLAY"
+                else:
+                    summary["announcement_status"] = "AVAILABLE_EMPTY_NO_REPLAY"
+                hints = []
+                impact_by_type = {
+                    "listing": "high", "delisting": "high", "suspension": "high",
+                    "security_incident": "high", "launch": "medium", "upgrade": "medium",
+                    "integration": "medium", "maintenance": "medium",
+                }
+                for event in announcement_events:
+                    symbols = sorted({
+                        str(getattr(coin, "symbol", "")).upper()
+                        for coin in candidates if getattr(coin, "asset_id", "") in event.asset_ids
+                    } - {""})
+                    if not symbols:
+                        continue
+                    hint_type = "new_listing" if event.event_type == "listing" else event.event_type
+                    hints.append({
+                        "type": hint_type, "title": event.title, "symbols": symbols,
+                        "timestamp": datetime.fromisoformat(
+                            event.published_at.replace("Z", "+00:00")
+                        ).timestamp(),
+                        "impact": impact_by_type.get(event.event_type, "low"),
+                        "source_id": event.source_id, "source_url": event.source_url,
+                        "content_hash": event.content_hash, "asset_ids": list(event.asset_ids),
+                        "publisher": event.publisher,
+                        "revision_correlation_status": event.revision_correlation_status,
+                        "revision_match_reason": event.revision_match_reason,
+                    })
+                summary["announcement_hints"] = hints
+            except Exception as exc:
+                announcement_events = []
+                summary["announcements"] = 0
+                summary["announcement_hints"] = []
+                summary["announcement_status"] = "DEGRADED_IMPORT_FAILED"
+                summary["announcement_coverage"] = "UNAVAILABLE"
+                summary["announcement_revision_correlation_status"] = "UNAVAILABLE"
+                summary["announcement_revision_warning_count"] = 0
+                summary["announcement_import_error_type"] = type(exc).__name__
+                LOGGER.warning("Official Binance CMS announcement import degraded: %s", type(exc).__name__)
         market_engine = MarketDataIntelligenceEngine(
             lambda *_: None, timeout=CONFIG.http_timeout_seconds,
             cache_ttl_seconds=CONFIG.market_data_cache_ttl_seconds,
@@ -4555,7 +4606,10 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             store.save_market(market)
             summary["observations"] += 1
             asset_trends = [signal for signal in trend_signals if asset_id in signal.asset_ids]
-            candidate = candidate_engine.build(identity, eligibility, [market], [], asset_trends)
+            asset_announcements = [event for event in announcement_events if asset_id in event.asset_ids]
+            candidate = candidate_engine.build(
+                identity, eligibility, [market], asset_announcements, asset_trends
+            )
             store.save_candidate(candidate)
             summary["candidates"] += 1
             summary["ready" if candidate.state == "READY_FOR_RESEARCH" else "rejected"] += 1
@@ -4574,6 +4628,7 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             if score.score == 0 and "deferred" in score.reason:
                 summary["scores_deferred"] += 1
         summary["provider_health"] = {
+            "binance_announcements": summary["announcement_status"],
             "binance_spot_metadata": (
                 "AVAILABLE" if snapshot_usable
                 else ("STALE_OR_CLOCK_SKEWED" if exchange_info_snapshot else _binance_spot_provider_status)
@@ -4598,10 +4653,13 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 "AVAILABLE" if any(signal.source.startswith("market_") for signal in trend_signals)
                 else "UNAVAILABLE"
             ),
-            "binance_announcements": "UNAVAILABLE_NO_VERIFIED_DOCUMENTED_ADAPTER",
         }
         _LAYER1_LAST_SUMMARY = dict(summary)
-        LOGGER.info("Layer 1 evidence persisted: %s", json.dumps(summary, sort_keys=True))
+        log_summary = dict(summary)
+        log_summary.pop("announcement_hints", None)
+        log_summary.pop("announcement_revision_warnings", None)
+        log_summary["announcement_hint_count"] = len(summary.get("announcement_hints", []))
+        LOGGER.info("Layer 1 evidence persisted: %s", json.dumps(log_summary, sort_keys=True))
         return summary
     finally:
         store.close()
