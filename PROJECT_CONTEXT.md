@@ -306,18 +306,24 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 
 ### Initial Module 9 code
 - Added `layer1/onchain.py` with a five-network provider allowlist, exact network family/chain-ID checks, canonical asset mapping validation, Binance Spot eligibility gate that requires the verified upstream identity proof and exact eligible pairs, provider/provenance checks, network-specific hash validation, chain-specific finality handling, configurable freshness thresholds and additive SQLite persistence.
-- Added `layer1/onchain_providers.py` with read-only Alchemy chain-head probes for BTC/ETH/SOL/BNB and a Chainstack XRPL validated-ledger/history-window probe. BNB uses Alchemy `eth_getFinalizedHeader` with `verifiedValidatorNum=-3` (all validators). Transport validates JSON-RPC envelopes, surfaces rate limits/network errors without exposing endpoint keys, and restricts the Alchemy adapter to read-only methods.
+- Added `layer1/onchain_providers.py` with read-only Alchemy chain-head probes and scoped transaction/transfer pages: Bitcoin address UTXO transaction pages; Ethereum `alchemy_getAssetTransfers` pages; BNB contract-scoped ERC-20 `eth_getLogs` pages; Solana finalized `getTransactionsForAddress` pages; and Chainstack XRPL validated `account_tx` pages.
+- Ethereum/BNB transfer ranges are checked against the chain's finalized head. BNB Free tier `eth_getLogs` range is enforced at 10 inclusive blocks. Solana queries require finalized commitment and successful transactions. XRPL queries require fixed ledger bounds and validated pages. Bitcoin transaction confirmations are separated into CONFIRMED/PENDING/ORPHANED.
+- Transfer amounts remain raw base units with explicit decimals; ERC-20 logs decode `from`, `to`, raw uint256 and preserve the reorg `removed` flag. XRPL marker is kept opaque and returned ledger range is validated.
+- Important: all current methods are scoped (contract/address/account), not a complete global chain-wide whale feed. Pages are not yet checkpointed or persisted as normalized transfer events and are not wired into candidate analysis.
 - Bitcoin is deliberately not labeled as deterministic `FINALIZED`: the engine requires `CONFIRMED` plus an explicitly configured minimum confirmation count. Ethereum/BNB finalized headers, Solana finalized commitment, and XRPL validated-ledger semantics are checked separately.
 - The engine fails closed when freshness policy is missing; no arbitrary production freshness values are assumed.
 - Persistence revalidates eligibility and mapping before insert, deduplicates identical observation IDs and rejects conflicting payload reuse.
 - Added `tests/test_onchain_intelligence.py` covering eligibility, same-ticker identity mismatch, wrong network/chain ID, unsupported networks, provider allowlist, native/token mapping constraints (including XRPL issuer/currency identity), Bitcoin confirmation policy, Solana commitment semantics, pending finality, stale data, missing freshness policy and persistence idempotency.
-- Added `tests/test_onchain_providers.py` for all five provider probes, chain-ID/genesis checks, read-only method restrictions, JSON-RPC envelope validation, rate-limit normalization and endpoint credential redaction. All provider tests use deterministic in-process transport doubles; they do not call the internet.
+- Added `tests/test_onchain_providers.py` for all five provider probes and scoped transfer/page methods, including EVM finality windows, BNB 10-block free-tier limit, Transfer log decoding, raw amount/decimals preservation, Bitcoin pending/orphan states, Solana finalized commitment, XRPL validated marker pagination, read-only method restrictions, JSON-RPC/REST transport validation, rate-limit normalization and endpoint credential redaction. All provider tests use deterministic in-process transport doubles; they do not call the internet.
 
 ### Verification
 - Test-first RED confirmed: focused test import failed because `layer1.onchain` did not yet exist.
 - Focused Module 9 domain tests: **25 passed, 0 failed**.
-- Focused Module 9 provider-adapter tests: **10 passed, 0 failed**.
-- Final full suite: `./.venv/bin/python -m unittest discover -s tests -v` — **168 passed, 0 failed**.
+- Focused Module 9 provider-adapter tests: **25 passed, 0 failed**.
+- Focused Module 9 domain tests: **25 passed, 0 failed**.
+- Final full suite: `./.venv/bin/python -m unittest discover -s tests -v` — **183 passed, 0 failed**.
+- `./.venv/bin/python -m compileall -q main.py image_engine.py layer1 tests` — passed.
+- `git diff --check` — passed.
 - `./.venv/bin/python -m compileall -q main.py image_engine.py layer1 tests` — passed.
 - `git diff --check` — passed.
 - No real blockchain provider calls were made. Unit tests do not prove provider connectivity or live chain data correctness.
@@ -332,9 +338,11 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - PR #12 was not modified, merged, or deployed during this continuation.
 
 ### Remaining Module 9 work
-1. Verify exact provider method coverage for required transaction, token-transfer, pagination, block/finality and historical-data use cases; do not assume a generic RPC endpoint supplies indexed whale history.
-2. Add real read-only provider integration checks only after API credentials/endpoints are deliberately configured; redact endpoint keys and never log credentials.
+1. Add durable per-provider cursor checkpoints and normalized transfer-event persistence with unique transaction/log keys; handle reorg tombstones and canonical re-fetch/reconciliation.
+2. Add read-only provider integration checks only after API credentials/endpoints are deliberately configured; redact endpoint keys and never log credentials.
 3. Populate and independently verify native/token mappings from official sources; do not infer contracts from tickers.
 4. Calibrate network/provider freshness and finality policy using observed data before enabling candidate evidence.
-5. Integrate validated on-chain evidence into the existing candidate-analysis flow without bypassing Binance Spot eligibility.
-6. Keep Module 7 scoring deferred and preserve all publication safety boundaries.
+5. Evaluate the missing wallet-discovery coverage for BTC/SOL/XRPL; current methods only query known addresses/accounts.
+6. Add decimal-aware transfer aggregation and explicit system whale thresholds, with no buy/sell intent claims.
+7. Integrate validated on-chain evidence into the existing candidate-analysis flow without bypassing Binance Spot eligibility.
+8. Keep Module 7 scoring deferred and preserve all publication safety boundaries.
