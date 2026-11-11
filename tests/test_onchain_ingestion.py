@@ -3,8 +3,11 @@ import os
 import tempfile
 import unittest
 
-from layer1.onchain_ingestion import (NormalizedTransferEvent, OnChainIngestionStore, normalize_evm_transfer_log)
-from layer1.onchain_providers import EvmTokenTransferLog
+from layer1.onchain_ingestion import (
+    NormalizedTransferEvent, OnChainIngestionStore, normalize_evm_transfer_log,
+    normalize_bitcoin_transaction_outputs,
+)
+from layer1.onchain_providers import BitcoinAddressTransaction, EvmTokenTransferLog
 
 
 class OnChainIngestionStoreTests(unittest.TestCase):
@@ -132,6 +135,121 @@ class OnChainIngestionStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.commit_page("cursor", {"next": None}, [invalid])
 
+
+
+class BitcoinOutputNormalizationTests(unittest.TestCase):
+    def setUp(self):
+        self.txid = "a" * 64
+        self.monitored = "bc1qexampleaddress0000000000000000000000000"
+        self.source_one = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+        self.source_two = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+        self.destination_one = self.monitored
+        self.destination_two = "1BitcoinEaterAddressDontSendf59kuE"
+
+    def history(self, confirmations=8, block_hash="b" * 64):
+        return BitcoinAddressTransaction(
+            self.txid, confirmations, 900000, block_hash, 1794398340,
+            "CONFIRMED", {"txid": self.txid},
+        )
+
+    def transaction(self):
+        return {
+            "txid": self.txid, "blockHeight": 900000, "blockHash": "b" * 64,
+            "blockTime": 1794398340, "confirmations": 8,
+            "vin": [
+                {"txid": "c" * 64, "vout": 1, "addresses": [self.source_one],
+                 "isAddress": True, "value": "100000"},
+                {"txid": "d" * 64, "vout": 0, "addresses": [self.source_two],
+                 "isAddress": True, "value": "50000"},
+            ],
+            "vout": [
+                {"n": 0, "value": "120000", "addresses": [self.destination_one], "isAddress": True},
+                {"n": 1, "value": "29000", "addresses": [self.destination_two], "isAddress": True},
+                {"n": 2, "value": "1000", "addresses": [], "isAddress": False},
+            ],
+        }
+
+    def normalize(self, history=None, transaction=None, canonical_hash="b" * 64):
+        return normalize_bitcoin_transaction_outputs(
+            history or self.history(), transaction or self.transaction(),
+            asset_id="coingecko:bitcoin", mapping_id="bitcoin-native-v1",
+            monitored_address=self.monitored, canonical_block_hash=canonical_hash,
+            block_time="2026-11-11T12:00:00+00:00",
+            observed_at="2026-11-11T12:00:01+00:00",
+            minimum_confirmations=6,
+        )
+
+    def test_creates_one_stable_event_per_addressable_output_with_satoshi_amounts(self):
+        events = self.normalize()
+        self.assertEqual([event.event_id for event in events], [self.txid + ":0", self.txid + ":1"])
+        self.assertEqual([event.amount_raw for event in events], ["120000", "29000"])
+        self.assertEqual([event.to_address for event in events], [self.destination_one, self.destination_two])
+        self.assertEqual(events[0].event_index, 0)
+        self.assertEqual(events[0].decimals, 8)
+        self.assertEqual(events[0].from_address, None)
+        self.assertEqual(events[0].from_addresses, (self.source_one, self.source_two))
+        self.assertTrue(events[0].from_addresses_complete)
+        self.assertEqual(events[0].scope, "address:" + self.monitored)
+
+    def test_bitcoin_output_events_round_trip_source_address_set_through_atomic_store(self):
+        events = self.normalize()
+        tmp = tempfile.TemporaryDirectory()
+        store = OnChainIngestionStore(os.path.join(tmp.name, "bitcoin.sqlite3"))
+        try:
+            store.commit_page("alchemy:bitcoin-mainnet:address:" + self.monitored,
+                              {"next_block": 900001}, events)
+            saved = store.get_event(
+                events[0].event_id, "bitcoin-mainnet", "alchemy",
+                "address:" + self.monitored,
+            )
+            self.assertEqual(saved.from_addresses, (self.source_one, self.source_two))
+            self.assertTrue(saved.from_addresses_complete)
+            self.assertIsNone(saved.from_address)
+        finally:
+            store.close()
+            tmp.cleanup()
+
+    def test_coinbase_output_has_no_fabricated_sender_address(self):
+        details = self.transaction()
+        details["vin"] = [{"coinbase": "03abcd"}]
+        events = self.normalize(transaction=details)
+        self.assertIsNone(events[0].from_address)
+        self.assertEqual(events[0].from_addresses, ())
+        self.assertTrue(events[0].from_addresses_complete)
+
+    def test_rejects_details_that_do_not_contain_the_monitored_address(self):
+        details = self.transaction()
+        details["vout"][0]["addresses"] = ["bc1qother000000000000000000000000000000"]
+        with self.assertRaisesRegex(ValueError, "does not contain the monitored address"):
+            self.normalize(transaction=details)
+
+    def test_marks_event_reorged_when_independently_fetched_canonical_hash_differs(self):
+        events = self.normalize(canonical_hash="e" * 64)
+        self.assertTrue(all(event.canonical_status == "REORGED" for event in events))
+
+    def test_requires_explicit_minimum_confirmation_threshold(self):
+        with self.assertRaisesRegex(ValueError, "confirmation threshold"):
+            self.normalize(history=self.history(confirmations=5))
+
+    def test_rejects_transaction_identity_or_block_reference_mismatch(self):
+        details = self.transaction()
+        details["txid"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "transaction identity"):
+            self.normalize(transaction=details)
+
+    def test_rejects_duplicate_output_indexes(self):
+        details = self.transaction()
+        details["vout"][1]["n"] = 0
+        with self.assertRaisesRegex(ValueError, "output index"):
+            self.normalize(transaction=details)
+
+    def test_marks_input_address_set_incomplete_when_provider_cannot_decode_an_input(self):
+        details = self.transaction()
+        details["vin"][1] = {"txid": "d" * 64, "vout": 0, "addresses": [], "isAddress": False, "value": "50000"}
+        events = self.normalize(transaction=details)
+        self.assertFalse(events[0].from_addresses_complete)
+        self.assertIsNone(events[0].from_address)
+        self.assertEqual(events[0].from_addresses, (self.source_one,))
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from .onchain_providers import EvmTokenTransferLog
+from .onchain_providers import BitcoinAddressTransaction, EvmTokenTransferLog
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,12 @@ class NormalizedTransferEvent:
     observed_at: str
     canonical_status: str
     provenance: str
+    from_addresses: tuple[str, ...] = ()
+    from_addresses_complete: bool = True
+
+    def __post_init__(self):
+        if isinstance(self.from_addresses, list):
+            object.__setattr__(self, "from_addresses", tuple(self.from_addresses))
 
 
 class OnChainIngestionStore:
@@ -99,11 +105,28 @@ class OnChainIngestionStore:
         text_fields = (
             event.event_id, event.network_id, event.provider, event.scope,
             event.asset_id, event.mapping_id, event.transaction_hash,
-            event.block_hash, event.from_address, event.to_address,
-            event.amount_raw, event.block_time, event.observed_at, event.provenance,
+            event.block_hash, event.to_address, event.amount_raw,
+            event.block_time, event.observed_at, event.provenance,
         )
         if any(not isinstance(value, str) or not value.strip() for value in text_fields):
             raise ValueError("normalized transfer event identity and provenance fields are required")
+        if event.from_address is not None and (
+            not isinstance(event.from_address, str) or not event.from_address.strip()
+        ):
+            raise ValueError("from_address must be null or a non-empty address")
+        if (not isinstance(event.from_addresses, (tuple, list))
+                or any(not isinstance(address, str) or not address.strip()
+                       for address in event.from_addresses)
+                or len(set(event.from_addresses)) != len(event.from_addresses)):
+            raise ValueError("from_addresses must contain unique non-empty source addresses")
+        if not isinstance(event.from_addresses_complete, bool):
+            raise ValueError("from_addresses_complete must be boolean")
+        if (event.from_address is None and not event.from_addresses
+                and event.network_id != "bitcoin-mainnet"):
+            raise ValueError("non-Bitcoin transfer events require a source address")
+        if (event.from_address is not None and event.from_addresses
+                and (len(event.from_addresses) != 1 or event.from_address != event.from_addresses[0])):
+            raise ValueError("from_address must match the single decoded from_addresses entry")
         if not re.fullmatch(r"[0-9]+", event.amount_raw):
             raise ValueError("amount_raw must be a non-negative integer base-unit string")
         if (isinstance(event.block_number, bool) or not isinstance(event.block_number, int)
@@ -172,7 +195,7 @@ class OnChainIngestionStore:
                 if existing:
                     if existing[0] != payload_json:
                         prior_payload = json.loads(existing[0])
-                        incoming_payload = asdict(event)
+                        incoming_payload = json.loads(payload_json)
                         prior_status = prior_payload.pop("canonical_status", None)
                         incoming_status = incoming_payload.pop("canonical_status", None)
                         if prior_payload != incoming_payload:
@@ -375,3 +398,148 @@ def normalize_evm_transfer_log(event: EvmTokenTransferLog, *, asset_id: str,
                           else "CANONICAL"),
         provenance="eth_getLogs:ERC20.Transfer",
     )
+
+
+def normalize_bitcoin_transaction_outputs(
+    history: BitcoinAddressTransaction,
+    transaction: dict,
+    *,
+    asset_id: str,
+    mapping_id: str,
+    monitored_address: str,
+    canonical_block_hash: str,
+    block_time: str,
+    observed_at: str,
+    minimum_confirmations: int,
+) -> tuple[NormalizedTransferEvent, ...]:
+    """Normalize address-bearing Bitcoin outputs with stable txid:vout identity.
+
+    Bitcoin transactions can consume many inputs and create many outputs. The
+    source side is therefore represented as a set of input addresses, not an
+    invented one-to-one sender. Outputs without exactly one decoded address
+    are skipped rather than assigned a fabricated destination.
+    """
+    if not isinstance(history, BitcoinAddressTransaction):
+        raise ValueError("history must be a validated Bitcoin address transaction")
+    if not isinstance(transaction, dict):
+        raise ValueError("Bitcoin transaction details must be an object")
+    if not isinstance(asset_id, str) or not asset_id.strip() or not isinstance(mapping_id, str) or not mapping_id.strip():
+        raise ValueError("Bitcoin asset and mapping identity are required")
+    if not isinstance(monitored_address, str) or not monitored_address.strip() or any(ch.isspace() for ch in monitored_address):
+        raise ValueError("monitored_address must be a non-empty Bitcoin address")
+    if (isinstance(minimum_confirmations, bool) or not isinstance(minimum_confirmations, int)
+            or minimum_confirmations < 1):
+        raise ValueError("minimum_confirmations must be a positive integer")
+    if (isinstance(history.confirmations, bool) or not isinstance(history.confirmations, int)
+            or history.finality != "CONFIRMED" or history.confirmations < minimum_confirmations):
+        raise ValueError("Bitcoin transaction has not reached the configured confirmation threshold")
+    if (not isinstance(history.txid, str) or re.fullmatch(r"[0-9a-fA-F]{64}", history.txid) is None
+            or isinstance(history.block_height, bool) or not isinstance(history.block_height, int)
+            or history.block_height <= 0
+            or not isinstance(history.block_hash, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", history.block_hash) is None
+            or isinstance(history.block_time, bool) or not isinstance(history.block_time, int)
+            or history.block_time <= 0):
+        raise ValueError("confirmed Bitcoin history lacks a valid transaction/block identity")
+    if (not isinstance(transaction.get("txid"), str)
+            or transaction["txid"].lower() != history.txid.lower()
+            or transaction.get("blockHeight") != history.block_height
+            or not isinstance(transaction.get("blockHash"), str)
+            or transaction["blockHash"].lower() != history.block_hash.lower()
+            or transaction.get("blockTime") != history.block_time):
+        raise ValueError("Bitcoin transaction identity or block reference does not match address history")
+    if (not isinstance(canonical_block_hash, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", canonical_block_hash) is None):
+        raise ValueError("canonical Bitcoin block hash must be 32-byte hex")
+    for field in (block_time, observed_at):
+        try:
+            parsed = datetime.fromisoformat(field.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("Bitcoin event timestamps must be timezone-aware ISO-8601") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("Bitcoin event timestamps must be timezone-aware ISO-8601")
+
+    inputs = transaction.get("vin")
+    outputs = transaction.get("vout")
+    if (not isinstance(inputs, list) or not inputs or any(not isinstance(item, dict) for item in inputs)
+            or not isinstance(outputs, list) or any(not isinstance(item, dict) for item in outputs)):
+        raise ValueError("Bitcoin transaction requires non-empty vin and vout arrays")
+
+    coinbase = bool(inputs) and all("coinbase" in item for item in inputs)
+    input_addresses = set()
+    input_addresses_complete = True
+    for item in inputs:
+        if "coinbase" in item:
+            if not coinbase:
+                raise ValueError("Bitcoin transaction mixes coinbase and ordinary inputs")
+            continue
+        addresses = item.get("addresses", [])
+        is_address = item.get("isAddress", bool(addresses))
+        if not isinstance(is_address, bool) or not isinstance(addresses, list):
+            raise ValueError("Bitcoin input address metadata is malformed")
+        if not is_address or not addresses:
+            if addresses:
+                raise ValueError("Bitcoin input address list conflicts with isAddress=false")
+            if is_address:
+                raise ValueError("Bitcoin input isAddress=true but no decoded address was supplied")
+            input_addresses_complete = False
+            continue
+        if any(not isinstance(address, str) or not address.strip() or any(ch.isspace() for ch in address)
+               for address in addresses):
+            raise ValueError("Bitcoin input contains an invalid decoded address")
+        input_addresses.update(addresses)
+
+    output_indexes = set()
+    events = []
+    for output in outputs:
+        index = output.get("n")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise ValueError("Bitcoin output index must be a non-negative integer")
+        if index in output_indexes:
+            raise ValueError("Bitcoin transaction contains a duplicate output index")
+        output_indexes.add(index)
+        value = output.get("value")
+        if not isinstance(value, str) or re.fullmatch(r"[0-9]+", value) is None:
+            raise ValueError("Bitcoin output value must be an integer satoshi string")
+        addresses = output.get("addresses", [])
+        is_address = output.get("isAddress", bool(addresses))
+        if not isinstance(is_address, bool) or not isinstance(addresses, list):
+            raise ValueError("Bitcoin output address metadata is malformed")
+        if not is_address:
+            if addresses:
+                raise ValueError("Bitcoin output address list conflicts with isAddress=false")
+            continue
+        if not addresses:
+            raise ValueError("Bitcoin output isAddress=true but no decoded address was supplied")
+        if len(addresses) != 1:
+            continue
+        destination = addresses[0]
+        if not isinstance(destination, str) or not destination.strip() or any(ch.isspace() for ch in destination):
+            raise ValueError("Bitcoin output destination address is invalid")
+        source_addresses = tuple(sorted(input_addresses))
+        source_address = source_addresses[0] if input_addresses_complete and len(source_addresses) == 1 else None
+        events.append(NormalizedTransferEvent(
+            event_id=f"{history.txid.lower()}:{index}",
+            network_id="bitcoin-mainnet", provider="alchemy",
+            scope=f"address:{monitored_address}",
+            asset_id=asset_id, mapping_id=mapping_id,
+            transaction_hash=history.txid.lower(),
+            block_number=history.block_height,
+            block_hash=history.block_hash.lower(),
+            event_index=index, from_address=source_address,
+            to_address=destination, amount_raw=value, decimals=8,
+            block_time=block_time, observed_at=observed_at,
+            canonical_status=("CANONICAL" if history.block_hash.lower() == canonical_block_hash.lower()
+                              else "REORGED"),
+            provenance="alchemy_utxo:transaction:vout",
+            from_addresses=source_addresses,
+            from_addresses_complete=input_addresses_complete,
+        ))
+    involved_addresses = input_addresses | {
+        address for output in outputs
+        for address in output.get("addresses", [])
+        if isinstance(address, str)
+    }
+    if monitored_address not in involved_addresses:
+        raise ValueError("Bitcoin transaction does not contain the monitored address")
+    return tuple(events)

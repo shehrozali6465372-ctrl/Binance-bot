@@ -40,7 +40,7 @@ Official provider facts checked on 2026-11-11:
 
 | Network | Method | Returned data and safeguards |
 |---|---|---|
-| Bitcoin | Alchemy UTXO `GET /api/v2/address/{address}` | Address history, `details=txs`, page size <= 1,000. Confirmations are classified as `CONFIRMED`, `PENDING` or `ORPHANED`; confirmed records require block height/hash/time. Raw satoshi values are not converted to floats. |
+| Bitcoin | Alchemy UTXO GET /api/v2/address/{address} plus GET /api/v2/tx/{txid} | Address-scoped history with fixed block filters and pages <= 1,000; full transaction details expose vin/vout, txid, output index, decoded addresses and integer satoshi values. The output normalizer uses txid:vout identity; bounded worker and confirmation/reorg checkpointing remain pending. |
 | Ethereum | Alchemy eth_getLogs for durable ingestion; alchemy_getAssetTransfers for scoped summaries | Exact mapped contract and ERC-20 Transfer topic; chain ID 1 checked; inclusive block range <= 10; range must not exceed the Ethereum finalized tag. Decodes provider-supplied transaction hash/log index, from/to and raw uint256. Canonical block headers are fetched independently by the worker. The summary API is not used to invent log indices. |
 | BNB Smart Chain | Alchemy eth_getLogs | Exact token contract and ERC-20 Transfer topic; chain ID 56 checked; inclusive block range <= 10; range must not exceed eth_getFinalizedHeader with all validators (verifiedValidatorNum=-3). Decodes provider-supplied transaction hash/log index, from/to and raw uint256; preserves removed reorg flag. |
 | Solana | Alchemy `getTransactionsForAddress` | Address/token-account scope; full transaction page <= 100; finalized commitment; requests successful transactions and balance-changing token-account activity; validates signature, slot and full transaction metadata; preserves `paginationToken`. |
@@ -55,8 +55,8 @@ Transport validates JSON-RPC envelopes, normalizes HTTP 429/network errors witho
 - Bitcoin address history and Solana `getTransactionsForAddress` are address-scoped. XRPL `account_tx` is also account-scoped. These methods do not discover every whale wallet across their networks.
 - Complete network-wide whale discovery is therefore **not available** from the selected five methods alone. BTC/SOL/XRPL need an explicit monitored-wallet source or a separately evaluated indexing/discovery product before broad whale coverage can be claimed.
 - XRPL markers are opaque and may expire after 10 minutes. A worker must consume a page sequence promptly and checkpoint stable ledger bounds; the marker is not a durable cursor.
-- Ethereum and BNB ERC-20 logs are normalized and durably checkpointed by the shared bounded EVM worker described below. BTC/SOL/XRPL transfer persistence remains pending; none of these events is wired into candidate analysis yet.
-- Ethereum and BNB canonical block hashes are journaled and reconciled within a configured lookback. Bitcoin orphaned transactions are surfaced by the provider adapter, but BTC persistence and chain-specific reorg recovery remain pending.
+- Ethereum and BNB ERC-20 logs are normalized and durably checkpointed by the shared bounded EVM worker described below. Bitcoin output normalization is implemented, but its bounded worker and durable event ingestion remain pending. Solana/XRPL transfer persistence remains pending; none of these events is wired into candidate analysis yet.
+- Ethereum and BNB canonical block hashes are journaled and reconciled within a configured lookback. Bitcoin output normalization is implemented, but its bounded worker, canonical block journal, checkpoint recovery and reorg reconciliation remain pending.
 - No transfer value threshold, whale classification, exchange attribution, bridge deduplication or buy/sell intent inference is enabled.
 
 ## Open-source reuse review — 2026-11-11
@@ -153,3 +153,32 @@ Scope and operational limits:
 - Alchemy explains removed logs and canonical reorg behavior: https://www.alchemy.com/docs/reference/logs
 
 The worker uses fixed numeric block bounds and the provider's finalized tag, not latest. It does not rely on WebSocket subscriptions or the removed flag alone for reorg recovery. Local verification on 2026-11-11: 41 focused EVM worker/provider tests passed; full repository suite: 208 passed, 0 failed; compileall and git diff --check passed. No live provider request was made.
+
+
+## Bitcoin UTXO output normalization implemented — 2026-11-11
+
+The Alchemy read-only adapter now exposes fetch_bitcoin_transaction(txid), using the documented GET /api/v2/tx/{txid} endpoint to retrieve full vin/vout data and verify that the response matches the requested txid.
+
+normalize_bitcoin_transaction_outputs() now:
+- Requires an address-history record classified CONFIRMED and an explicit positive minimum-confirmation threshold supplied by the caller. No confirmation threshold is hardcoded or inferred as approved policy.
+- Requires the full transaction's txid, block height, block hash and block time to match the address-history record.
+- Requires the caller to provide an independently fetched canonical block hash and timezone-aware canonical block timestamp.
+- Emits one event for each output with exactly one decoded address; event identity is txid:vout index.
+- Preserves raw satoshi integer strings and uses 8 decimals; no floating-point BTC conversion is used.
+- Represents the input side as a set of source addresses. A single source address is populated only when the input-address set is complete and contains exactly one address. Multiple input addresses are retained in from_addresses; no arbitrary sender is selected.
+- Marks source-address completeness explicitly. Coinbase outputs have no fabricated sender; inputs without decoded address evidence make the source set incomplete.
+- Skips outputs without one unambiguous decoded destination address (for example, OP_RETURN or multi-address scripts); it does not invent an output destination.
+- Marks an event REORGED when the independently fetched canonical block hash differs from the transaction's referenced block hash.
+- Requires the monitored address to appear in the transaction's decoded inputs or outputs and namespaces events under that address scope.
+
+Important remaining limits:
+- This is a provider detail fetch and pure output normalizer, not yet a Bitcoin ingestion worker. No Bitcoin event/checkpoint pages are being committed by a bounded Bitcoin worker yet.
+- The next worker must use explicit monitored-address seeds, fixed block-height windows, independently fetched canonical block hashes, an explicitly configured confirmation threshold and durable restart semantics. Do not advance a window until every page and transaction detail has been safely normalized and committed.
+- The normalizer relies on the provider's decoded address metadata (including isAddress); it does not implement independent Base58Check/Bech32 checksum verification.
+- Multi-address output scripts are skipped because the current generic event model requires one destination address. Input addresses are represented as a set because Bitcoin transactions do not define a one-to-one sender/recipient mapping.
+- Focused ingestion/provider tests: 50 passed, 0 failed. Full repository suite: 219 passed, 0 failed. compileall and git diff --check passed.
+- No live Alchemy request or credential was used.
+
+Official Alchemy references:
+- Address history and fixed from/to block filters: https://www.alchemy.com/docs/chains/bitcoin/utxo-api-endpoints/utxo-api-endpoints/get-address
+- Full transaction details and vin/vout schema: https://www.alchemy.com/docs/chains/bitcoin/utxo-api-endpoints/utxo-api-endpoints/get-transaction

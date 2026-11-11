@@ -429,6 +429,36 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual(calls[1][1][1]["filters"], {"status": "succeeded", "tokenAccounts": "balanceChanged"})
         self.assertEqual(calls[1][1][1]["paginationToken"], "prev")
 
+    def test_bitcoin_transaction_details_fetches_vin_vout_by_exact_txid(self):
+        txid = "a" * 64
+        calls = []
+        class FakeRestTransport(FakeTransport):
+            def get_json(self, path, query=None):
+                calls.append((path, query))
+                return {
+                    "txid": txid, "vin": [{"addresses": ["1BoatSLRHtKNngkdXEeobR76b53LETtpyT"]}],
+                    "vout": [{"n": 0, "value": "1000", "addresses": ["bc1qexample"]}],
+                }
+        def factory(endpoint, timeout):
+            return FakeRestTransport([], [])
+        adapter = AlchemyReadOnlyAdapter("test-key", transport_factory=factory)
+        result = adapter.fetch_bitcoin_transaction(txid)
+        self.assertEqual(result["txid"], txid)
+        self.assertEqual(len(result["vout"]), 1)
+        self.assertEqual(calls[0][0], "api/v2/tx/" + txid)
+        self.assertEqual(calls[0][1], {"spending": "false"})
+
+    def test_bitcoin_transaction_details_rejects_mismatched_txid(self):
+        def factory(endpoint, timeout):
+            class Transport:
+                def get_json(self, path, query=None):
+                    return {"txid": "b" * 64, "vin": [], "vout": []}
+            return Transport()
+        adapter = AlchemyReadOnlyAdapter("test-key", transport_factory=factory)
+        with self.assertRaises(ProviderTransportError) as error:
+            adapter.fetch_bitcoin_transaction("a" * 64)
+        self.assertEqual(error.exception.reason_code, "TRANSACTION_ID_MISMATCH")
+
     def test_bitcoin_address_history_uses_bounded_rest_pagination(self):
         calls = []
         class FakeRestTransport(FakeTransport):

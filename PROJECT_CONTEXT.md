@@ -140,7 +140,7 @@ Do not oversimplify Render pricing:
 | Module 6 — Candidate Discovery & Filtering | Implemented with event/trend cluster deduplication on PR #11; CI run `43018392595` passed |
 | Module 7 — Relevance & Scoring | Deterministic versioned scorer exists (`layer1-relevance-v1`), but runtime scoring is explicitly deferred because calibrated evidence inputs are not all available. Do not activate guessed weights/values. |
 | Module 8 — Market Analysis | Implemented on the Module 8 branch; PR #12 remains open, non-draft and unmerged. The verified base SHA for Module 9 PR #13 is `f7e6fc511e146b6bfb6f25afb0009c369d8afd4a`. Earlier CI successes apply only to the exact older SHAs listed below; do not assume they validate later heads. |
-| Module 9 — On-chain Intelligence | Domain validation, five read-only scoped provider adapters, durable SQLite event/checkpoint store, EVM Transfer-log normalizer and shared bounded Ethereum/BNB ERC-20 ingestion worker implemented on PR #13. Ethereum and BNB log paths are test-verified locally; no live provider calls have been made. Remote CI remains unverified. Production persistence and candidate integration remain incomplete. |
+| Module 9 — On-chain Intelligence | Domain validation, five read-only scoped provider adapters, durable SQLite event/checkpoint store, shared bounded Ethereum/BNB ERC-20 ingestion worker, and Bitcoin txid:vout output normalizer implemented on PR #13. Ethereum/BNB worker paths and Bitcoin output normalization are test-verified locally; no live provider calls have been made. Bitcoin worker, production persistence and candidate integration remain incomplete. Remote CI remains unverified. |
 | CMS worker PR #2 | Open/draft/unmerged; CI and prior worker tests do not prove live stream operation |
 | CMS integration PR #3 | Open/draft/unmerged; no live deployment verified |
 | CMS startup-race PR #6 | Open/draft/unmerged |
@@ -392,8 +392,8 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - Reorg tombstones are retained as REORGED, excluded from canonical-only reads, and a stale canonical replay cannot resurrect a tombstoned event.
 - reconcile_block() tombstones stored events at a block height when their block hash differs from a separately provider-verified canonical hash. It does not itself query providers, determine reorg depth or prove finality.
 - normalize_evm_transfer_log() uses transaction_hash:log_index, requires exact mapped contract/scope and a separately verified canonical block hash. Provider removed=true or a block-hash mismatch is normalized as REORGED.
-- This is a persistence primitive, not a running ingestion worker. Provider page fetching, normalization, commit and restart orchestration are not yet connected end-to-end.
-- Concrete transfer normalization currently covers EVM ERC-20 Transfer logs. Ethereum alchemy_getAssetTransfers summaries do not supply a log index; do not invent one. BTC/SOL/XRPL chain-specific transfer extractors remain pending.
+- The EVM persistence primitive is now connected end-to-end for Ethereum and BNB by the bounded worker recorded below. Bitcoin has a provider detail fetch and pure output normalizer, but no Bitcoin page/checkpoint worker yet; Solana and XRPL transfer extraction remain pending.
+- Concrete transfer normalization covers EVM ERC-20 Transfer logs and Bitcoin UTXO outputs. Ethereum alchemy_getAssetTransfers summaries do not supply a log index; do not invent one. Bitcoin uses txid:vout identity and a source-address set; its bounded worker is pending. Solana/XRPL chain-specific transfer extractors remain pending.
 - XRPL markers may expire; fixed ledger bounds, not opaque markers, must be the durable restart boundary.
 - SQLite is a development/test foundation. A production Postgres migration and concurrency/load validation remain required before production workers.
 
@@ -437,7 +437,7 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - commit_page() gained an opt-in allow_recanonicalized path used only by the worker after independent header verification. It permits a re-included transaction/log identity to become canonical again only when stable transfer fields match; default store replay behavior still prevents stale canonical pages from resurrecting tombstones.
 
 ### Scope limitations
-- The complete EVM paths now cover **Ethereum and BNB Smart Chain ERC-20** through eth_getLogs. Ethereum alchemy_getAssetTransfers summaries still omit log index and are not used to create stable event identities. BTC/SOL/XRPL transfer normalization remains pending.
+- The complete EVM paths now cover **Ethereum and BNB Smart Chain ERC-20** through eth_getLogs. Ethereum alchemy_getAssetTransfers summaries still omit log index and are not used to create stable event identities. Bitcoin output normalization now uses txid:vout; the bounded Bitcoin worker is pending. Solana/XRPL transfer normalization remains pending.
 - The worker is callable orchestration, not yet a scheduled/always-on worker process. No credentials, endpoints, live requests or production services were configured.
 - Reorg repair is bounded by the explicitly configured lookback; deeper reorgs require a separately controlled wider rescan.
 - SQLite remains a development/test backend. PostgreSQL migration and real concurrency tests remain pending.
@@ -527,4 +527,32 @@ Whenever implementation, tests, CI, infrastructure, or architecture decisions ch
 - Final full local suite: 208 passed, 0 failed. Focused EVM worker/provider tests: 41 passed, 0 failed. compileall and git diff --check passed.
 - Tracked working tree clean after commit. Existing untracked .venv/ remains present, not staged, not modified and not deleted.
 - No live Alchemy request, credentials, production database, paid resource, production deployment, PR merge, Binance Square publication or earning workflow was used/performed.
-- Next task: assess Bitcoin address-history response data and stable txid/output identity before writing a normalizer. Do not fabricate output indexes or treat tx summaries as individual transfer events.
+- The Bitcoin address-history/transaction-detail assessment is complete and a txid:vout output normalizer is implemented in the progress entry below. Next task is the bounded Bitcoin page/checkpoint worker; do not fabricate output indexes or sender attribution.
+
+
+## Progress update — 2026-11-11 — Bitcoin UTXO output normalization
+
+### Evidence and implementation boundary
+- Alchemy's Bitcoin address-history endpoint supports fixed from/to block-height filters and page-based retrieval, with details=txs.
+- The documented GET /api/v2/tx/{txid} response exposes vin and vout arrays. Output records include output index n, satoshi value strings and decoded addresses; inputs expose prior outpoint references and decoded source addresses.
+- The address-history summary alone is not treated as a transfer event. The adapter now retrieves full transaction details by exact txid and rejects a mismatched returned txid.
+- Added from_addresses and from_addresses_complete to the generic normalized event model while preserving backward-compatible defaults for existing EVM events and old JSON payloads.
+- Added normalize_bitcoin_transaction_outputs(): one event per addressable vout, stable event ID txid:vout, raw satoshis, 8 decimals, exact block reference checks, explicit minimum-confirmation threshold, canonical block-hash comparison, and monitored-address scope validation.
+- Multi-input transactions retain the full decoded input-address set. A single from_address is only populated when that set is complete and contains exactly one address. Coinbase events have no fabricated sender.
+- Outputs with no address or multiple destination addresses are skipped instead of assigned a guessed destination.
+
+### Verification
+- Bitcoin normalizer tests cover txid:vout identity, satoshi amounts, multiple input addresses, source completeness, coinbase sender absence, duplicate output index rejection, monitored-address membership, block mismatch reorg tombstones, explicit confirmation threshold and storage round-trip.
+- Provider tests cover full transaction detail retrieval and txid mismatch rejection.
+- Focused ingestion/provider tests: 50 passed, 0 failed. Full suite: 219 passed, 0 failed. compileall and git diff --check passed.
+- No live Alchemy request or credential was used.
+
+### Remaining Bitcoin work
+- No bounded Bitcoin ingestion worker has been implemented yet. The worker must be seeded with explicitly monitored addresses and verified Bitcoin asset mapping; this provider is not a global whale feed.
+- Use fixed block-height windows, page checkpoints, explicit minimum confirmations, independently fetched canonical block headers and atomic event/block-hash/checkpoint commits.
+- Reconcile reorgs by re-fetching canonical block hashes; a provider's orphaned flag alone is not enough.
+- Do not guess the confirmation threshold. The worker constructor must require it explicitly.
+- Independent Bitcoin address checksum validation is not yet implemented; normalized addresses are sourced from Alchemy's isAddress/address metadata.
+
+### Exact next task
+Build the bounded Bitcoin address-history ingestion worker on the existing ingestion store. It must process fixed block windows, resume page-by-page safely, fetch each tx detail by txid, normalize all addressable outputs, verify canonical headers and commit each page plus checkpoint atomically. Require explicit address seeds and a caller-supplied minimum-confirmation threshold. Do not claim network-wide discovery.

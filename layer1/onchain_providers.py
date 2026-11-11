@@ -299,6 +299,27 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", f"provider {field} is negative")
         return number
 
+    def fetch_bitcoin_transaction(self, txid: str) -> dict:
+        """Fetch full UTXO input/output details for one exact transaction ID."""
+        if not isinstance(txid, str) or re.fullmatch(r"[0-9a-fA-F]{64}", txid) is None:
+            raise ValueError("Bitcoin transaction ID must be exactly 32-byte hex")
+        endpoint = ALCHEMY_ENDPOINTS["bitcoin-mainnet"].format(api_key=self._api_key)
+        transport = self._transport_factory(endpoint, self._timeout_seconds)
+        result = transport.get_json(
+            f"api/v2/tx/{quote(txid, safe='')}", {"spending": "false"},
+        )
+        returned_txid = result.get("txid") if isinstance(result, dict) else None
+        if (not isinstance(returned_txid, str)
+                or re.fullmatch(r"[0-9a-fA-F]{64}", returned_txid) is None
+                or returned_txid.lower() != txid.lower()):
+            raise ProviderTransportError("TRANSACTION_ID_MISMATCH", "Bitcoin transaction details do not match the requested txid")
+        if (not isinstance(result.get("vin"), list)
+                or any(not isinstance(item, dict) for item in result["vin"])
+                or not isinstance(result.get("vout"), list)
+                or any(not isinstance(item, dict) for item in result["vout"])):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin transaction details require vin and vout arrays")
+        return result
+
     def fetch_bitcoin_address_transactions(self, address: str, page: int = 1,
                                            page_size: int = 1000,
                                            from_height: Optional[int] = None,
