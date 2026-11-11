@@ -255,29 +255,49 @@ _binance_listed_cache = None
 _binance_listed_cache_time = 0
 _binance_spot_pairs_cache = {}
 _binance_spot_snapshot_observed_at = None
+_binance_spot_exchange_info_snapshot = None
+_binance_spot_provider_metadata = {}
+_binance_spot_provider_status = "NOT_REQUESTED"
 _LAYER1_LAST_SUMMARY = {}
 
 def _get_binance_listed(force_refresh: bool = False) -> set:
-    """Return active Binance Spot base assets and retain the provider's exact snapshot time."""
+    """Fetch and validate a complete official Binance Spot exchangeInfo snapshot."""
     global _binance_listed_cache, _binance_listed_cache_time
     global _binance_spot_pairs_cache, _binance_spot_snapshot_observed_at
+    global _binance_spot_exchange_info_snapshot, _binance_spot_provider_metadata
+    global _binance_spot_provider_status
     now = time.time()
     if force_refresh:
         _binance_listed_cache = None
         _binance_listed_cache_time = 0
         _binance_spot_pairs_cache = {}
         _binance_spot_snapshot_observed_at = None
+        _binance_spot_exchange_info_snapshot = None
+        _binance_spot_provider_metadata = {}
+        _binance_spot_provider_status = "NOT_REQUESTED"
     if _binance_listed_cache is not None and (now - _binance_listed_cache_time) < 300:
         return _binance_listed_cache
     try:
-        url = "https://data-api.binance.vision/api/v3/exchangeInfo"
-        req = urllib.request.Request(url, headers={"User-Agent": "binance-square-agent/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        url = "https://api.binance.com/api/v3/exchangeInfo?permissions=SPOT"
+        response = market_data_http_get(url, timeout=max(20, CONFIG.http_timeout_seconds))
+        _binance_spot_provider_metadata = dict(response.headers or {})
+        if response.status_code != 200:
+            retry_after = _retry_after_from_provider_headers(response.headers)
+            if retry_after is not None:
+                _binance_spot_provider_metadata["retry_after_seconds"] = retry_after
+            _binance_spot_provider_status = (
+                f"RATE_LIMITED_HTTP_{response.status_code}" if response.status_code in {418, 429}
+                else f"UNAVAILABLE_HTTP_{response.status_code}"
+            )
+            raise RuntimeError(f"Binance exchangeInfo HTTP {response.status_code}; retry_after={retry_after}")
+        _binance_spot_provider_status = "AVAILABLE"
+        data = response.payload
         symbols = data.get("symbols") if isinstance(data, dict) else None
         server_time = data.get("serverTime") if isinstance(data, dict) else None
-        if not isinstance(symbols, list) or not symbols or not isinstance(server_time, (int, float)):
-            raise ValueError("exchangeInfo response missing symbols or serverTime")
+        if (not isinstance(symbols, list) or not symbols
+                or isinstance(server_time, bool) or not isinstance(server_time, (int, float))
+                or server_time <= 0):
+            raise ValueError("exchangeInfo response missing symbols or valid serverTime")
         if abs((now * 1000) - float(server_time)) > 900000:
             raise ValueError("exchangeInfo serverTime is stale or clock-skewed")
         allowed_quotes = {
@@ -289,72 +309,147 @@ def _get_binance_listed(force_refresh: bool = False) -> set:
             raise ValueError("BINANCE_ALLOWED_QUOTE_ASSETS is empty")
         eligible = set()
         verified_pairs = {}
+        normalized_symbols = []
+        seen_pairs = set()
+        known_statuses = {"TRADING", "HALT", "BREAK", "CANCEL_ONLY"}
         for item in symbols:
             if not isinstance(item, dict):
-                continue
-            base = item.get("baseAsset")
-            quote = item.get("quoteAsset")
-            pair = item.get("symbol")
-            if (isinstance(base, str) and base and quote in allowed_quotes
-                    and isinstance(pair, str) and pair
-                    and item.get("status") == "TRADING"
-                    and item.get("isSpotTradingAllowed") is True):
+                raise ValueError("exchangeInfo contains a non-object symbol record")
+            base, quote, pair = item.get("baseAsset"), item.get("quoteAsset"), item.get("symbol")
+            status = item.get("status")
+            spot_allowed = item.get("isSpotTradingAllowed")
+            permission_sets = item.get("permissionSets")
+            if (not isinstance(base, str) or not base.isalnum() or base != base.upper()
+                    or not isinstance(quote, str) or not quote.isalnum() or quote != quote.upper()
+                    or not isinstance(pair, str) or not pair.isalnum() or pair != pair.upper()
+                    or pair != base + quote or status not in known_statuses
+                    or not isinstance(spot_allowed, bool) or not isinstance(permission_sets, list)):
+                raise ValueError("exchangeInfo symbol schema/semantics incomplete")
+            if pair in seen_pairs:
+                raise ValueError("exchangeInfo contains duplicate symbol records")
+            seen_pairs.add(pair)
+            for group in permission_sets:
+                if (not isinstance(group, list) or not group
+                        or any(not isinstance(permission, str) or not permission for permission in group)):
+                    raise ValueError("exchangeInfo permissionSets schema invalid")
+            normalized = {
+                "symbol": pair, "baseAsset": base, "quoteAsset": quote,
+                "status": status, "isSpotTradingAllowed": spot_allowed,
+                "permissionSets": permission_sets,
+            }
+            normalized_symbols.append(normalized)
+            has_spot_permission = any("SPOT" in group for group in permission_sets)
+            if (quote in allowed_quotes and status == "TRADING"
+                    and spot_allowed is True and has_spot_permission):
                 eligible.add(base)
-                verified_pairs.setdefault(base, []).append({
-                    "symbol": pair, "baseAsset": base, "quoteAsset": quote,
-                    "status": "TRADING", "isSpotTradingAllowed": True,
-                })
+                verified_pairs.setdefault(base, []).append(normalized)
         if not eligible:
-            raise ValueError("exchangeInfo produced no verified active Spot assets")
+            raise ValueError("exchangeInfo produced no verified active Spot assets for configured quote assets")
         _binance_listed_cache = eligible
         _binance_spot_pairs_cache = verified_pairs
         _binance_listed_cache_time = now
         _binance_spot_snapshot_observed_at = datetime.fromtimestamp(
             float(server_time) / 1000.0, timezone.utc
         ).isoformat()
-        LOGGER.info("Binance Spot eligibility snapshot loaded: %d base assets", len(eligible))
+        _binance_spot_exchange_info_snapshot = {
+            "serverTime": server_time,
+            "symbols": normalized_symbols,
+        }
+        LOGGER.info("Binance Spot eligibility snapshot loaded: %d base assets / %d symbols",
+                    len(eligible), len(normalized_symbols))
         return eligible
     except Exception as exc:
-        LOGGER.error("Binance Spot eligibility unavailable; failing closed: %s", exc)
+        LOGGER.error("Binance Spot eligibility unavailable; failing closed: %s", type(exc).__name__)
         _binance_listed_cache = None
         _binance_listed_cache_time = 0
         _binance_spot_pairs_cache = {}
         _binance_spot_snapshot_observed_at = None
+        _binance_spot_exchange_info_snapshot = None
+        if _binance_spot_provider_status == "NOT_REQUESTED":
+            _binance_spot_provider_status = f"UNAVAILABLE_{type(exc).__name__}"
         return set()
 
 
+def _fetch_coingecko_binance_identity_proof(identity, timeout: int = 15):
+    """Fetch one canonical CoinGecko coin's Binance tickers and resolve exact identity."""
+    from layer1.foundation import AssetIdentityProof, CoinGeckoBinanceIdentityResolver
+    asset_id = getattr(identity, "asset_id", "")
+    base_asset = getattr(identity, "base_asset", "")
+    quote_asset = getattr(identity, "quote_asset", "")
+    if not isinstance(asset_id, str) or not asset_id.startswith("coingecko:"):
+        return AssetIdentityProof(
+            "UNVERIFIED", str(asset_id or "unknown"), str(base_asset or "UNKNOWN"),
+            str(quote_asset or "UNKNOWN"), reason="unsupported canonical asset ID",
+            verified_at=datetime.now(timezone.utc).isoformat(),
+        )
+    coin_id = asset_id.split(":", 1)[1]
+    if not coin_id or not all(ch.isalnum() or ch == "-" for ch in coin_id):
+        return AssetIdentityProof(
+            "UNVERIFIED", asset_id, base_asset, quote_asset,
+            reason="canonical CoinGecko ID has invalid path characters",
+            verified_at=datetime.now(timezone.utc).isoformat(),
+        )
+    url = ("https://api.coingecko.com/api/v3/coins/" + urllib.parse.quote(coin_id, safe="")
+           + "/tickers?exchange_ids=binance&order=trust_score_desc&page=1")
+    try:
+        response = market_data_http_get(url, timeout)
+        metadata = dict(response.headers or {})
+        if response.status_code != 200:
+            retry_after = _retry_after_from_provider_headers(metadata)
+            if retry_after is not None:
+                metadata["retry_after_seconds"] = retry_after
+            return AssetIdentityProof(
+                "UNVERIFIED", asset_id, base_asset, quote_asset,
+                reason=f"CoinGecko ticker provider unavailable with HTTP {response.status_code}",
+                verified_at=datetime.now(timezone.utc).isoformat(), provider_metadata=metadata,
+            )
+        return CoinGeckoBinanceIdentityResolver().resolve(
+            asset_id, base_asset, quote_asset, response.payload,
+            verified_at=datetime.now(timezone.utc).isoformat(),
+            max_age_seconds=900, provider_metadata=metadata,
+        )
+    except Exception as exc:
+        return AssetIdentityProof(
+            "UNVERIFIED", asset_id, base_asset, quote_asset,
+            reason=f"CoinGecko ticker provider unavailable ({type(exc).__name__})",
+            verified_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+
 def _revalidate_binance_spot_asset(symbol: str, asset_id: str) -> bool:
-    """Refresh official metadata and re-check the exact canonical asset/pair before authorization."""
+    """Refresh both official listing metadata and canonical ticker proof before POST authorization."""
     from layer1.foundation import AssetIdentity, BinanceListingEligibilityEngine
 
     normalized_symbol = symbol.strip().upper() if isinstance(symbol, str) else ""
     if not normalized_symbol or not isinstance(asset_id, str) or not asset_id.startswith("coingecko:"):
         return False
     current_listed = _get_binance_listed(force_refresh=True)
+    snapshot = _binance_spot_exchange_info_snapshot
     allowed_quotes = {
         value.strip().upper()
         for value in os.getenv("BINANCE_ALLOWED_QUOTE_ASSETS", "USDT").split(",")
         if value.strip()
     }
-    if normalized_symbol not in current_listed or not allowed_quotes:
+    if normalized_symbol not in current_listed or not allowed_quotes or not isinstance(snapshot, dict):
         return False
     matching_pairs = sorted(
-        [
-            item for item in _binance_spot_pairs_cache.get(normalized_symbol, [])
-            if item.get("quoteAsset") in allowed_quotes
-            and item.get("baseAsset") == normalized_symbol
-            and item.get("status") == "TRADING"
-            and item.get("isSpotTradingAllowed") is True
-        ],
+        [item for item in snapshot.get("symbols", [])
+         if item.get("baseAsset") == normalized_symbol and item.get("quoteAsset") in allowed_quotes
+         and item.get("status") == "TRADING" and item.get("isSpotTradingAllowed") is True
+         and any("SPOT" in group for group in item.get("permissionSets", []))],
         key=lambda item: (item.get("quoteAsset", ""), item.get("symbol", "")),
     )
     if not matching_pairs:
         return False
     quote_asset = matching_pairs[0]["quoteAsset"]
     identity = AssetIdentity(asset_id, asset_id, normalized_symbol, quote_asset)
+    proof = _fetch_coingecko_binance_identity_proof(identity, timeout=CONFIG.http_timeout_seconds)
     decision = BinanceListingEligibilityEngine(tuple(sorted(allowed_quotes))).evaluate(
-        identity, {"symbols": matching_pairs}, verified_at=_binance_spot_snapshot_observed_at
+        identity, snapshot, verified_at=_binance_spot_snapshot_observed_at,
+        identity_proof=proof,
     )
+    if decision.status != "ELIGIBLE":
+        LOGGER.warning("Final eligibility recheck failed for %s: %s", normalized_symbol, decision.reason)
     return decision.status == "ELIGIBLE" and bool(decision.eligible_pairs)
 
 
@@ -4304,7 +4399,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         "observations": 0, "trends": 0, "candidates": 0,
         "ready": 0, "rejected": 0, "rejected_inputs": 0,
         "scores_deferred": 0, "ready_asset_ids": [],
-        "provider_health": {},
+        "identity_proof_requests": 0, "identity_proof_cache_hits": 0,
+        "identity_proof_verified": 0, "identity_proof_unverified": 0, "provider_health": {},
     }
     trend_signals = []
     for record in (trend_records or []):
@@ -4334,8 +4430,21 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         if not allowed_quotes:
             raise RuntimeError("BINANCE_ALLOWED_QUOTE_ASSETS is empty; Layer 1 cannot verify Spot eligibility")
         snapshot_observed_at = _binance_spot_snapshot_observed_at
+        exchange_info_snapshot = _binance_spot_exchange_info_snapshot
+        snapshot_usable = False
+        if isinstance(exchange_info_snapshot, dict) and isinstance(snapshot_observed_at, str):
+            try:
+                snapshot_age = (datetime.now(timezone.utc) - datetime.fromisoformat(
+                    snapshot_observed_at.replace("Z", "+00:00")
+                )).total_seconds()
+                snapshot_usable = -300 <= snapshot_age <= 300
+            except (TypeError, ValueError, OverflowError):
+                snapshot_usable = False
         eligibility_engine = BinanceListingEligibilityEngine(tuple(sorted(allowed_quotes)))
         candidate_engine = CandidateDiscoveryFilteringEngine()
+        # Bound public CoinGecko ticker calls per run; SQLite-cached proofs let
+        # subsequent runs advance through the candidate set without retry storms.
+        identity_proof_budget = max(1, min(10, CONFIG.max_daily_posts * 2))
         scoring_engine = RelevanceScoringEngine()
         market_engine = MarketDataIntelligenceEngine(
             lambda *_: None, timeout=CONFIG.http_timeout_seconds,
@@ -4366,19 +4475,23 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 summary["rejected_inputs"] += 1
                 continue
             base = symbol.upper()
+            snapshot_symbols = (exchange_info_snapshot or {}).get("symbols", [])
+            active_spot_pairs = [
+                pair for pair in snapshot_symbols
+                if pair.get("baseAsset") == base and pair.get("quoteAsset") in allowed_quotes
+                and pair.get("status") == "TRADING" and pair.get("isSpotTradingAllowed") is True
+                and any("SPOT" in group for group in pair.get("permissionSets", []))
+            ]
             pairs = sorted(
-                [
-                    pair for pair in _binance_spot_pairs_cache.get(base, [])
-                    if pair.get("quoteAsset") in allowed_quotes
+                active_spot_pairs or [
+                    pair for pair in snapshot_symbols
+                    if pair.get("baseAsset") == base and pair.get("quoteAsset") in allowed_quotes
                 ],
                 key=lambda pair: (pair.get("quoteAsset", ""), pair.get("symbol", "")),
             )
             identity = AssetIdentity(
                 asset_id, coin.name, base,
                 pairs[0]["quoteAsset"] if pairs else sorted(allowed_quotes)[0]
-            )
-            eligibility = eligibility_engine.evaluate(
-                identity, {"symbols": pairs}, verified_at=snapshot_observed_at
             )
             try:
                 provider_payload = getattr(coin, "market_data_payload", None)
@@ -4397,6 +4510,46 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 summary["rejected_inputs"] += 1
                 LOGGER.warning("Layer 1 rejected invalid market observation for %s: %s", symbol, type(exc).__name__)
                 continue
+
+            from layer1.foundation import AssetIdentityProof
+            if not snapshot_usable:
+                identity_proof = AssetIdentityProof(
+                    "UNVERIFIED", identity.asset_id, identity.base_asset, identity.quote_asset,
+                    reason="fresh official Binance exchangeInfo snapshot unavailable",
+                    verified_at=datetime.now(timezone.utc).isoformat(),
+                )
+            else:
+                identity_proof = store.get_identity_proof(identity)
+                if identity_proof is not None and identity_proof.status == "VERIFIED" \
+                        and not identity_proof.is_fresh(900):
+                    identity_proof = None
+                if identity_proof is not None:
+                    summary["identity_proof_cache_hits"] += 1
+                elif summary["identity_proof_requests"] < identity_proof_budget:
+                    identity_proof = _fetch_coingecko_binance_identity_proof(
+                        identity, timeout=CONFIG.http_timeout_seconds
+                    )
+                    summary["identity_proof_requests"] += 1
+                    cache_ttl = 600 if identity_proof.status == "VERIFIED" else 300
+                    retry_after = identity_proof.provider_metadata.get("retry_after_seconds")
+                    if isinstance(retry_after, int) and not isinstance(retry_after, bool):
+                        cache_ttl = max(30, min(86400, retry_after))
+                    store.save_identity_proof(identity_proof, cache_ttl)
+                else:
+                    identity_proof = AssetIdentityProof(
+                        "UNVERIFIED", identity.asset_id, identity.base_asset, identity.quote_asset,
+                        reason="per-run canonical identity proof request budget exhausted",
+                        verified_at=datetime.now(timezone.utc).isoformat(),
+                    )
+            if identity_proof.status != "VERIFIED" or not identity_proof.is_fresh(900):
+                summary["identity_proof_unverified"] += 1
+            else:
+                summary["identity_proof_verified"] += 1
+
+            eligibility = eligibility_engine.evaluate(
+                identity, exchange_info_snapshot or {}, verified_at=snapshot_observed_at,
+                identity_proof=identity_proof,
+            )
             # Database errors are deliberately not swallowed: required evidence
             # persistence failure stops the complete cycle.
             store.save_market(market)
@@ -4422,7 +4575,16 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 summary["scores_deferred"] += 1
         summary["provider_health"] = {
             "binance_spot_metadata": (
-                "AVAILABLE" if snapshot_observed_at and _binance_spot_pairs_cache else "UNAVAILABLE"
+                "AVAILABLE" if snapshot_usable
+                else ("STALE_OR_CLOCK_SKEWED" if exchange_info_snapshot else _binance_spot_provider_status)
+            ),
+            "binance_spot_metadata_headers": dict(_binance_spot_provider_metadata),
+            "coingecko_identity_tickers": (
+                "NOT_REQUESTED_BINANCE_SNAPSHOT" if not snapshot_usable
+                else "AVAILABLE" if summary["identity_proof_verified"] and not summary["identity_proof_unverified"]
+                else "PARTIAL" if summary["identity_proof_verified"]
+                else "UNAVAILABLE" if summary["identity_proof_requests"]
+                else "NOT_REQUESTED"
             ),
             "coingecko_market_data": (
                 "AVAILABLE" if summary["observations"] else MarketScanner._last_provider_status

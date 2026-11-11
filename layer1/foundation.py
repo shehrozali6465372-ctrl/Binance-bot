@@ -13,7 +13,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
@@ -243,6 +243,172 @@ class AssetIdentity:
 
 
 @dataclass(frozen=True)
+class AssetIdentityProof:
+    status: str
+    asset_id: str
+    base_asset: str
+    quote_asset: str
+    exchange_id: str = "binance"
+    market_pair: str = ""
+    reason: str = ""
+    source: str = "coingecko_coin_tickers"
+    verified_at: str = ""
+    source_timestamp: str = ""
+    ticker_timestamp: str = ""
+    data_hash: str = ""
+    provider_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def validate(self) -> None:
+        if self.status not in {"VERIFIED", "UNVERIFIED"}:
+            raise ValueError("asset identity proof status is invalid")
+        if not all(isinstance(value, str) and value.strip() for value in (
+            self.asset_id, self.base_asset, self.quote_asset, self.exchange_id, self.source, self.reason
+        )):
+            raise ValueError("asset identity proof provenance is incomplete")
+        if self.status == "VERIFIED":
+            if self.source != "coingecko_coin_tickers":
+                raise ValueError("verified asset identity proof source is not approved")
+            if (not self.asset_id.startswith("coingecko:") or not self.base_asset.isalnum()
+                    or self.base_asset != self.base_asset.upper() or not self.quote_asset.isalnum()
+                    or self.quote_asset != self.quote_asset.upper() or self.exchange_id != "binance"):
+                raise ValueError("verified asset identity proof canonical fields are invalid")
+            if self.market_pair != f"{self.base_asset}/{self.quote_asset}" or not self.source_timestamp or not self.verified_at:
+                raise ValueError("verified asset identity proof is missing exact pair/timestamps")
+            if len(self.data_hash) != 64 or any(ch not in "0123456789abcdef" for ch in self.data_hash):
+                raise ValueError("verified asset identity proof requires a SHA-256 payload hash")
+            _parse_time(self.verified_at)
+            _parse_time(self.source_timestamp)
+        if not isinstance(self.provider_metadata, Mapping):
+            raise ValueError("asset identity proof provider metadata must be a mapping")
+        json.dumps(dict(self.provider_metadata), sort_keys=True, allow_nan=False)
+
+    def is_fresh(self, max_age_seconds: int = 900, now: Optional[str] = None) -> bool:
+        if self.status != "VERIFIED" or not self.source_timestamp:
+            return False
+        if isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, int) or max_age_seconds <= 0:
+            return False
+        try:
+            age = (_parse_time(now or utc_now()) - _parse_time(self.source_timestamp)).total_seconds()
+            return -300 <= age <= max_age_seconds
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+
+class CoinGeckoBinanceIdentityResolver:
+    """Prove a canonical CoinGecko ID maps to an exact, fresh Binance ticker."""
+    def __init__(self, exchange_id: str = "binance"):
+        if not isinstance(exchange_id, str) or not exchange_id.strip():
+            raise ValueError("exchange_id must be non-empty")
+        self.exchange_id = exchange_id.strip().lower()
+
+    def _unverified(self, asset_id: str, base_asset: str, quote_asset: str,
+                    reason: str, verified_at: str, source_timestamp: str = "",
+                    data_hash: str = "", provider_metadata: Optional[Mapping[str, Any]] = None) -> AssetIdentityProof:
+        return AssetIdentityProof(
+            "UNVERIFIED", asset_id, base_asset, quote_asset, self.exchange_id,
+            f"{base_asset}/{quote_asset}" if base_asset and quote_asset else "",
+            reason, "coingecko_coin_tickers", verified_at, source_timestamp, "", data_hash,
+            dict(provider_metadata or {}),
+        )
+
+    def resolve(self, asset_id: str, base_asset: str, quote_asset: str,
+                tickers_payload: Mapping[str, Any], verified_at: Optional[str] = None,
+                max_age_seconds: int = 900,
+                provider_metadata: Optional[Mapping[str, Any]] = None) -> AssetIdentityProof:
+        observed_at = verified_at or utc_now()
+        try:
+            _parse_time(observed_at)
+        except (TypeError, ValueError, OverflowError):
+            observed_at = utc_now()
+        prefix = "coingecko:"
+        if not isinstance(asset_id, str) or not asset_id.startswith(prefix) or not asset_id[len(prefix):]:
+            return self._unverified(str(asset_id or "unknown"), str(base_asset or ""),
+                                    str(quote_asset or ""), "unsupported or missing CoinGecko asset ID", observed_at)
+        if (not isinstance(base_asset, str) or not base_asset.isalnum() or base_asset != base_asset.upper()
+                or not isinstance(quote_asset, str) or not quote_asset.isalnum() or quote_asset != quote_asset.upper()):
+            return self._unverified(asset_id, str(base_asset or ""), str(quote_asset or ""),
+                                    "base/quote identity is invalid", observed_at)
+        if isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, int) or max_age_seconds <= 0:
+            return self._unverified(asset_id, base_asset, quote_asset,
+                                    "identity proof freshness limit is invalid", observed_at)
+        if not isinstance(tickers_payload, Mapping) or not isinstance(tickers_payload.get("tickers"), list):
+            return self._unverified(asset_id, base_asset, quote_asset,
+                                    "CoinGecko tickers response schema invalid", observed_at)
+        try:
+            data_hash = hashlib.sha256(json.dumps(
+                tickers_payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")).hexdigest()
+        except (TypeError, ValueError):
+            return self._unverified(asset_id, base_asset, quote_asset,
+                                    "CoinGecko tickers response is not canonical JSON", observed_at)
+        coin_id = asset_id[len(prefix):]
+        exact_pair_rows = []
+        same_symbol_other_identity = False
+        for ticker in tickers_payload["tickers"]:
+            if not isinstance(ticker, Mapping):
+                continue
+            market = ticker.get("market")
+            if not isinstance(market, Mapping):
+                continue
+            if (str(market.get("identifier", "")).lower() != self.exchange_id
+                    or ticker.get("base") != base_asset or ticker.get("target") != quote_asset):
+                continue
+            if ticker.get("coin_id") != coin_id:
+                same_symbol_other_identity = True
+                continue
+            exact_pair_rows.append(ticker)
+        if not exact_pair_rows:
+            reason = ("ticker base/quote matches but CoinGecko coin ID differs" if same_symbol_other_identity
+                      else "no exact Binance ticker matches canonical CoinGecko ID and base/quote")
+            return self._unverified(asset_id, base_asset, quote_asset, reason, observed_at,
+                                    data_hash=data_hash, provider_metadata=provider_metadata)
+        if len(exact_pair_rows) != 1:
+            return self._unverified(asset_id, base_asset, quote_asset,
+                                    "multiple exact Binance ticker rows make identity ambiguous", observed_at,
+                                    data_hash=data_hash, provider_metadata=provider_metadata)
+        ticker = exact_pair_rows[0]
+        if ticker.get("is_stale") is not False or ticker.get("is_anomaly") is not False:
+            return self._unverified(asset_id, base_asset, quote_asset,
+                                    "exact Binance ticker is stale, anomalous or missing quality flags", observed_at,
+                                    data_hash=data_hash, provider_metadata=provider_metadata)
+        source_timestamp = ticker.get("last_fetch_at")
+        if not isinstance(source_timestamp, str) or not source_timestamp.strip():
+            return self._unverified(asset_id, base_asset, quote_asset,
+                                    "exact Binance ticker is missing last_fetch_at", observed_at,
+                                    data_hash=data_hash, provider_metadata=provider_metadata)
+        try:
+            age = (_parse_time(observed_at) - _parse_time(source_timestamp)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return self._unverified(asset_id, base_asset, quote_asset,
+                                    "exact Binance ticker last_fetch_at is invalid", observed_at,
+                                    source_timestamp=source_timestamp, data_hash=data_hash,
+                                    provider_metadata=provider_metadata)
+        if age < -300 or age > max_age_seconds:
+            return self._unverified(asset_id, base_asset, quote_asset,
+                                    "exact Binance ticker last_fetch_at is stale or clock-skewed", observed_at,
+                                    source_timestamp=source_timestamp, data_hash=data_hash,
+                                    provider_metadata=provider_metadata)
+        ticker_timestamp = ticker.get("timestamp") or ""
+        if ticker_timestamp:
+            try:
+                _parse_time(ticker_timestamp)
+            except (TypeError, ValueError, OverflowError):
+                return self._unverified(asset_id, base_asset, quote_asset,
+                                        "exact Binance ticker timestamp is invalid", observed_at,
+                                        source_timestamp=source_timestamp, data_hash=data_hash,
+                                        provider_metadata=provider_metadata)
+        proof = AssetIdentityProof(
+            "VERIFIED", asset_id, base_asset, quote_asset, self.exchange_id,
+            f"{base_asset}/{quote_asset}",
+            "CoinGecko coin ID matches one fresh, non-anomalous Binance ticker",
+            "coingecko_coin_tickers", observed_at, source_timestamp, ticker_timestamp,
+            data_hash, dict(provider_metadata or {}),
+        )
+        proof.validate()
+        return proof
+
+
+@dataclass(frozen=True)
 class EligibilityDecision:
     status: str
     asset_id: str
@@ -250,74 +416,149 @@ class EligibilityDecision:
     eligible_pairs: tuple[str, ...] = ()
     reason: str = ""
     verified_at: str = ""
-    source: str = "https://api.binance.com/api/v3/exchangeInfo"
+    source: str = "https://api.binance.com/api/v3/exchangeInfo?permissions=SPOT"
+    identity_proof_status: str = "UNVERIFIED"
+    identity_proof_source: str = ""
+    identity_proof_verified_at: str = ""
+    identity_proof_source_timestamp: str = ""
+    identity_proof_reason: str = ""
+    identity_proof_data_hash: str = ""
 
 
 class BinanceListingEligibilityEngine:
-    """Exact Binance Spot pair eligibility against a fresh official metadata snapshot."""
-    def __init__(self, allowed_quote_assets: Sequence[str] = ("USDT",), max_snapshot_age_seconds: int = 300):
+    """Fail-closed exact Spot eligibility using Binance metadata and canonical ID proof."""
+    SOURCE = "https://api.binance.com/api/v3/exchangeInfo?permissions=SPOT"
+    KNOWN_SYMBOL_STATUSES = {"TRADING", "HALT", "BREAK", "CANCEL_ONLY"}
+
+    def __init__(self, allowed_quote_assets: Sequence[str] = ("USDT",),
+                 max_snapshot_age_seconds: int = 300, max_identity_proof_age_seconds: int = 900):
         normalized = [str(q).upper() for q in allowed_quote_assets]
         if not normalized or len(set(normalized)) != len(normalized) or any(not q.isalnum() for q in normalized):
             raise ValueError("allowed quote assets must be unique uppercase alphanumeric symbols")
         if isinstance(max_snapshot_age_seconds, bool) or not isinstance(max_snapshot_age_seconds, int) or max_snapshot_age_seconds <= 0:
             raise ValueError("max_snapshot_age_seconds must be a positive integer")
+        if isinstance(max_identity_proof_age_seconds, bool) or not isinstance(max_identity_proof_age_seconds, int) or max_identity_proof_age_seconds <= 0:
+            raise ValueError("max_identity_proof_age_seconds must be a positive integer")
         self.allowed_quotes = set(normalized)
         self.max_snapshot_age_seconds = max_snapshot_age_seconds
+        self.max_identity_proof_age_seconds = max_identity_proof_age_seconds
+
+    @staticmethod
+    def _decision(status: str, identity: AssetIdentity, reason: str,
+                  verified_at: str = "", proof: Optional[AssetIdentityProof] = None,
+                  eligible_pairs: tuple[str, ...] = ()) -> EligibilityDecision:
+        proof = proof or AssetIdentityProof(
+            "UNVERIFIED", identity.asset_id or "unknown", identity.base_asset or "UNKNOWN",
+            identity.quote_asset or "UNKNOWN", reason="identity proof missing",
+        )
+        return EligibilityDecision(
+            status, identity.asset_id, identity.base_asset, eligible_pairs, reason, verified_at,
+            BinanceListingEligibilityEngine.SOURCE, proof.status, proof.source,
+            proof.verified_at, proof.source_timestamp, proof.reason, proof.data_hash,
+        )
 
     def evaluate(self, identity: AssetIdentity, exchange_info: Mapping[str, Any],
-                 verified_at: Optional[str] = None) -> EligibilityDecision:
-        if not identity.asset_id or not identity.asset_name or not identity.base_asset:
-            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
-                                       reason="canonical asset identity incomplete")
+                 verified_at: Optional[str] = None,
+                 identity_proof: Optional[AssetIdentityProof] = None) -> EligibilityDecision:
+        if not isinstance(identity, AssetIdentity):
+            return EligibilityDecision(
+                "UNVERIFIED", "unknown", "", reason="canonical asset identity object is invalid",
+                source=self.SOURCE,
+            )
+        if (not isinstance(identity.asset_id, str) or not identity.asset_id.startswith("coingecko:")
+                or not isinstance(identity.asset_name, str) or not identity.asset_name.strip()
+                or not isinstance(identity.base_asset, str) or not isinstance(identity.quote_asset, str)
+                or not identity.base_asset.isalnum() or identity.base_asset != identity.base_asset.upper()
+                or not identity.quote_asset.isalnum() or identity.quote_asset != identity.quote_asset.upper()):
+            return self._decision("UNVERIFIED", identity, "canonical asset identity incomplete or invalid", proof=identity_proof)
         if identity.quote_asset not in self.allowed_quotes:
-            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
-                                       reason="requested quote asset is not allowed by configuration")
-        if not isinstance(exchange_info, Mapping):
-            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
-                                       reason="exchangeInfo snapshot is not an object")
-        snapshot_time = verified_at
-        if not snapshot_time:
-            server_time = exchange_info.get("serverTime")
-            if isinstance(server_time, (int, float)) and not isinstance(server_time, bool):
-                snapshot_time = datetime.fromtimestamp(float(server_time) / 1000.0, timezone.utc).isoformat()
-        if not snapshot_time:
-            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
-                                       reason="exchangeInfo snapshot timestamp missing")
+            return self._decision("UNVERIFIED", identity, "requested quote asset is not allowed by configuration", proof=identity_proof)
+        if not isinstance(identity_proof, AssetIdentityProof):
+            return self._decision("UNVERIFIED", identity, "canonical CoinGecko-to-Binance identity proof missing")
         try:
-            normalized_snapshot_time = _parse_time(snapshot_time)
+            identity_proof.validate()
+        except (TypeError, ValueError):
+            return self._decision("UNVERIFIED", identity, "canonical asset identity proof is invalid", proof=identity_proof)
+        if identity_proof.status != "VERIFIED":
+            return self._decision(
+                "UNVERIFIED", identity,
+                f"canonical asset identity proof unavailable: {identity_proof.reason}",
+                proof=identity_proof,
+            )
+        if (identity_proof.asset_id != identity.asset_id
+                or identity_proof.base_asset != identity.base_asset
+                or identity_proof.quote_asset != identity.quote_asset
+                or identity_proof.exchange_id != "binance"):
+            return self._decision("UNVERIFIED", identity,
+                                  "canonical asset identity proof does not match requested asset/pair",
+                                  proof=identity_proof)
+        if not identity_proof.is_fresh(self.max_identity_proof_age_seconds):
+            return self._decision("UNVERIFIED", identity,
+                                  "canonical asset identity proof source timestamp is stale",
+                                  proof=identity_proof)
+        if not isinstance(exchange_info, Mapping):
+            return self._decision("UNVERIFIED", identity, "exchangeInfo snapshot is not an object", proof=identity_proof)
+        server_time = exchange_info.get("serverTime")
+        if isinstance(server_time, bool) or not isinstance(server_time, (int, float)) or server_time <= 0:
+            return self._decision("UNVERIFIED", identity, "exchangeInfo serverTime missing or invalid", proof=identity_proof)
+        try:
+            server_timestamp = datetime.fromtimestamp(float(server_time) / 1000.0, timezone.utc).isoformat()
+            normalized_snapshot_time = _parse_time(server_timestamp)
+            retrieval_time = _parse_time(verified_at or utc_now())
         except (TypeError, ValueError, OverflowError):
-            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
-                                       reason="exchangeInfo snapshot timestamp invalid")
-        age_seconds = (datetime.now(timezone.utc) - normalized_snapshot_time).total_seconds()
-        if age_seconds < -300 or age_seconds > self.max_snapshot_age_seconds:
-            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
-                                       reason="exchangeInfo snapshot is stale or clock-skewed",
-                                       verified_at=normalized_snapshot_time.isoformat())
+            return self._decision("UNVERIFIED", identity, "exchangeInfo snapshot timestamp invalid", proof=identity_proof)
+        server_age = (datetime.now(timezone.utc) - normalized_snapshot_time).total_seconds()
+        retrieval_age = (datetime.now(timezone.utc) - retrieval_time).total_seconds()
+        if (server_age < -300 or server_age > self.max_snapshot_age_seconds
+                or retrieval_age < -300 or retrieval_age > self.max_snapshot_age_seconds
+                or abs((retrieval_time - normalized_snapshot_time).total_seconds()) > 300):
+            return self._decision("UNVERIFIED", identity, "exchangeInfo snapshot is stale or clock-skewed",
+                                  normalized_snapshot_time.isoformat(), identity_proof)
         symbols = exchange_info.get("symbols")
         if not isinstance(symbols, list) or not symbols:
-            return EligibilityDecision("UNVERIFIED", identity.asset_id, identity.base_asset,
-                                       reason="exchangeInfo symbols missing/empty",
-                                       verified_at=normalized_snapshot_time.isoformat())
-        matches = []
+            return self._decision("UNVERIFIED", identity, "exchangeInfo symbols missing/empty", proof=identity_proof)
+        seen_symbols = set()
+        validated = []
         for item in symbols:
-            if not isinstance(item, dict):
-                continue
-            if (item.get("baseAsset") != identity.base_asset
-                or item.get("quoteAsset") != identity.quote_asset
-                or item.get("quoteAsset") not in self.allowed_quotes
-                or item.get("status") != "TRADING"
-                or item.get("isSpotTradingAllowed") is not True):
-                continue
-            pair = item.get("symbol")
-            if isinstance(pair, str) and pair and pair.isalnum():
-                matches.append(pair)
+            if not isinstance(item, Mapping):
+                return self._decision("UNVERIFIED", identity, "exchangeInfo contains a malformed symbol record", proof=identity_proof)
+            pair, base, quote = item.get("symbol"), item.get("baseAsset"), item.get("quoteAsset")
+            status, spot_allowed, permission_sets = (
+                item.get("status"), item.get("isSpotTradingAllowed"), item.get("permissionSets")
+            )
+            if (not isinstance(pair, str) or not pair.isalnum() or pair != pair.upper()
+                    or not isinstance(base, str) or not base.isalnum() or base != base.upper()
+                    or not isinstance(quote, str) or not quote.isalnum() or quote != quote.upper()
+                    or pair != base + quote
+                    or not isinstance(status, str) or status not in self.KNOWN_SYMBOL_STATUSES
+                    or not isinstance(spot_allowed, bool)
+                    or not isinstance(permission_sets, list)):
+                return self._decision("UNVERIFIED", identity, "exchangeInfo symbol schema/semantics incomplete", proof=identity_proof)
+            if pair in seen_symbols:
+                return self._decision("UNVERIFIED", identity, "exchangeInfo contains duplicate symbol records", proof=identity_proof)
+            seen_symbols.add(pair)
+            for group in permission_sets:
+                if (not isinstance(group, list) or not group
+                        or any(not isinstance(permission, str) or not permission for permission in group)):
+                    return self._decision("UNVERIFIED", identity, "exchangeInfo permissionSets schema invalid", proof=identity_proof)
+            validated.append((item, "SPOT" in {permission for group in permission_sets for permission in group}))
+        matches = [(item, has_spot) for item, has_spot in validated
+                   if item["baseAsset"] == identity.base_asset and item["quoteAsset"] == identity.quote_asset]
         if not matches:
-            return EligibilityDecision("INELIGIBLE", identity.asset_id, identity.base_asset,
-                                       reason="no active exact Spot pair for canonical base/quote identity",
-                                       verified_at=normalized_snapshot_time.isoformat())
-        return EligibilityDecision("ELIGIBLE", identity.asset_id, identity.base_asset,
-                                   tuple(sorted(set(matches))), "active exact Binance Spot pair verified",
-                                   normalized_snapshot_time.isoformat())
+            return self._decision("INELIGIBLE", identity,
+                                  "no exact Binance Spot pair for canonical base/quote identity",
+                                  normalized_snapshot_time.isoformat(), identity_proof)
+        if len(matches) != 1:
+            return self._decision("UNVERIFIED", identity, "multiple exact base/quote pairs are ambiguous",
+                                  normalized_snapshot_time.isoformat(), identity_proof)
+        item, has_spot_permission = matches[0]
+        if (item["status"] != "TRADING" or item["isSpotTradingAllowed"] is not True
+                or not has_spot_permission):
+            return self._decision("INELIGIBLE", identity,
+                                  "exact Binance pair is inactive or lacks applicable Spot permission",
+                                  normalized_snapshot_time.isoformat(), identity_proof)
+        return self._decision("ELIGIBLE", identity, "active exact Binance Spot pair and canonical identity verified",
+                              normalized_snapshot_time.isoformat(), identity_proof, (item["symbol"],))
 
 
 @dataclass(frozen=True)
@@ -930,7 +1171,7 @@ class RelevanceScore:
 
 
 class Layer1Store:
-    """Auditable persistence for Modules 2, 4, 5, 6 and 7."""
+    """Auditable persistence for market evidence, identity proofs and candidate decisions."""
     def __init__(self, database_path: str):
         from pathlib import Path
         Path(database_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
@@ -941,6 +1182,12 @@ class Layer1Store:
             observation_key TEXT PRIMARY KEY, asset_id TEXT NOT NULL,
             provider TEXT NOT NULL, endpoint TEXT NOT NULL,
             observed_at TEXT NOT NULL, payload_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS layer1_identity_proofs (
+            asset_id TEXT NOT NULL, base_asset TEXT NOT NULL, quote_asset TEXT NOT NULL,
+            exchange_id TEXT NOT NULL, status TEXT NOT NULL, expires_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY(asset_id, base_asset, quote_asset, exchange_id)
         );
         CREATE TABLE IF NOT EXISTS layer1_announcement_evidence (
             source_id TEXT PRIMARY KEY, source_url TEXT NOT NULL, publisher TEXT NOT NULL,
@@ -972,6 +1219,46 @@ class Layer1Store:
             PRIMARY KEY(candidate_id, score_version)
         );
         """)
+
+    def get_identity_proof(self, identity: AssetIdentity, now: Optional[str] = None) -> Optional[AssetIdentityProof]:
+        row = self.conn.execute(
+            "SELECT expires_at, payload_json FROM layer1_identity_proofs "
+            "WHERE asset_id=? AND base_asset=? AND quote_asset=? AND exchange_id='binance'",
+            (identity.asset_id, identity.base_asset, identity.quote_asset),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            expires_at = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+            current_time = datetime.fromisoformat(str(now or utc_now()).replace("Z", "+00:00"))
+            if expires_at <= current_time:
+                raise ValueError("identity proof cache expired")
+            proof = AssetIdentityProof(**json.loads(row[1]))
+            proof.validate()
+            return proof
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            self.conn.execute(
+                "DELETE FROM layer1_identity_proofs WHERE asset_id=? AND base_asset=? "
+                "AND quote_asset=? AND exchange_id='binance'",
+                (identity.asset_id, identity.base_asset, identity.quote_asset),
+            )
+            self.conn.commit()
+            return None
+
+    def save_identity_proof(self, proof: AssetIdentityProof, ttl_seconds: int) -> None:
+        proof.validate()
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
+            raise ValueError("identity proof cache TTL must be a positive integer")
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+        payload = json.dumps(proof.__dict__, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        self.conn.execute(
+            "INSERT INTO layer1_identity_proofs VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(asset_id, base_asset, quote_asset, exchange_id) DO UPDATE SET "
+            "status=excluded.status, expires_at=excluded.expires_at, payload_json=excluded.payload_json",
+            (proof.asset_id, proof.base_asset, proof.quote_asset, proof.exchange_id,
+             proof.status, expires_at, payload),
+        )
+        self.conn.commit()
 
     def save_market(self, observation: MarketObservation) -> None:
         observation.validate()
