@@ -4286,7 +4286,7 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
     from layer1.foundation import (
         AssetIdentity, BinanceListingEligibilityEngine, CandidateDiscoveryFilteringEngine,
         Layer1Store, MarketDataIntelligenceEngine, RelevanceScore, RelevanceScoringEngine,
-        TrendSignal, TrendingNarrativeIntelligenceEngine,
+        TrendSignal, TrendingNarrativeIntelligenceEngine, MarketAnalysisEngine,
     )
 
     store = Layer1Store(database_path)
@@ -4296,6 +4296,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         "scores_deferred": 0, "ready_asset_ids": [],
         "identity_proof_requests": 0, "identity_proof_cache_hits": 0,
         "identity_proof_verified": 0, "identity_proof_unverified": 0,
+        "market_analyses": 0, "market_analysis_partial": 0,
+        "market_analysis_quality_flags": {},
         "trend_clusters": 0, "trend_source_count": 0,
         "trend_independent_source_cluster_total": 0, "trend_independent_source_counts": {},
         "announcements": 0, "announcement_hints": [],
@@ -4446,6 +4448,7 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             lambda *_: None, timeout=CONFIG.http_timeout_seconds,
             cache_ttl_seconds=CONFIG.market_data_cache_ttl_seconds,
         )
+        market_analysis_engine = MarketAnalysisEngine()
         for signal in trend_signals:
             store.save_trend(signal)
             summary["trends"] += 1
@@ -4552,6 +4555,38 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             # persistence failure stops the complete cycle.
             store.save_market(market)
             summary["observations"] += 1
+            # Analysis consumes only persisted, provider/currency-matched timestamped
+            # observations. Untimestamped CoinGecko sparkline arrays are never used
+            # as historical return baselines.
+            market_history = store.get_market_history(asset_id, market.provider, market.currency)
+            peer_history = store.get_market_history(asset_id, None, market.currency)
+            peer_observations = [item for item in peer_history if item.provider != market.provider]
+            benchmark_current = None
+            benchmark_history = []
+            benchmark_asset_id = "coingecko:bitcoin"
+            if asset_id != benchmark_asset_id:
+                candidate_benchmark_history = store.get_market_history(
+                    benchmark_asset_id, market.provider, market.currency
+                )
+                if candidate_benchmark_history:
+                    latest_benchmark = candidate_benchmark_history[-1]
+                    market_time = _parse_time(market.source_timestamp or market.published_at or market.observed_at)
+                    benchmark_time = _parse_time(
+                        latest_benchmark.source_timestamp or latest_benchmark.published_at
+                        or latest_benchmark.observed_at
+                    )
+                    if -300 <= (market_time - benchmark_time).total_seconds() <= 900:
+                        benchmark_current = latest_benchmark
+                        benchmark_history = candidate_benchmark_history
+            analysis = market_analysis_engine.analyze(
+                market, market_history, benchmark_current=benchmark_current,
+                benchmark_history=benchmark_history, peer_observations=peer_observations,
+            )
+            store.save_market_analysis(analysis)
+            summary["market_analyses"] += 1
+            if analysis.status != "ANALYZED":
+                summary["market_analysis_partial"] += 1
+            summary["market_analysis_quality_flags"][asset_id] = list(analysis.quality_flags)
             asset_trends = [signal for signal in trend_signals if asset_id in signal.asset_ids]
             asset_trend_clusters = [cluster for cluster in trend_clusters if asset_id in cluster.asset_ids]
             summary["trend_independent_source_counts"][asset_id] = {

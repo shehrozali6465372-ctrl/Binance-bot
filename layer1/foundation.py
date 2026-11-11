@@ -11,6 +11,7 @@ import math
 import re
 import os
 import sqlite3
+import statistics
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -673,6 +674,212 @@ class MarketObservation:
             json.dumps(dict(self.provider_metadata), sort_keys=True, allow_nan=False)
         except (TypeError, ValueError):
             raise ValueError("market provider metadata must be JSON-safe") from None
+
+
+@dataclass(frozen=True)
+class MarketAnalysisResult:
+    analysis_id: str
+    asset_id: str
+    provider: str
+    currency: str
+    observed_at: str
+    status: str
+    return_1h_pct: Optional[float]
+    return_24h_pct: Optional[float]
+    provider_reported_change_24h_pct: Optional[float]
+    volume_to_market_cap_ratio_pct: Optional[float]
+    benchmark_asset_id: Optional[str]
+    benchmark_return_24h_pct: Optional[float]
+    benchmark_relative_24h_pct: Optional[float]
+    facts: tuple[str, ...]
+    hypotheses: tuple[str, ...]
+    unknowns: tuple[str, ...]
+    quality_flags: tuple[str, ...]
+    evidence_refs: tuple[str, ...]
+
+    def validate(self) -> None:
+        if not all(isinstance(value, str) and value.strip() for value in
+                   (self.analysis_id, self.asset_id, self.provider, self.currency, self.observed_at, self.status)):
+            raise ValueError("market analysis identity and status are required")
+        _parse_time(self.observed_at)
+        if self.status not in {"ANALYZED", "PARTIAL", "UNAVAILABLE"}:
+            raise ValueError("market analysis status is invalid")
+        numeric = (
+            "return_1h_pct", "return_24h_pct", "provider_reported_change_24h_pct",
+            "volume_to_market_cap_ratio_pct", "benchmark_return_24h_pct", "benchmark_relative_24h_pct",
+        )
+        for name in numeric:
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+            ):
+                raise ValueError(f"market analysis {name} must be finite or unavailable")
+        for name in ("facts", "hypotheses", "unknowns", "quality_flags", "evidence_refs"):
+            value = getattr(self, name)
+            if not isinstance(value, tuple) or any(not isinstance(item, str) or not item for item in value):
+                raise ValueError(f"market analysis {name} must be a tuple of non-empty strings")
+        if self.benchmark_asset_id is not None and (
+            not isinstance(self.benchmark_asset_id, str) or not self.benchmark_asset_id.strip()
+            or self.benchmark_asset_id == self.asset_id
+        ):
+            raise ValueError("market analysis benchmark must be a distinct canonical asset ID")
+        if self.hypotheses:
+            raise ValueError("market analysis engine does not create causal hypotheses without evidence")
+
+
+class MarketAnalysisEngine:
+    """Derive bounded market facts only from comparable, timestamped observations."""
+    ANALYSIS_VERSION = "market-analysis-v1"
+    WINDOW_TOLERANCE_SECONDS = {"1h": 15 * 60, "24h": 60 * 60}
+
+    @staticmethod
+    def _fresh_price(item: "MarketObservation") -> bool:
+        freshness = item.freshness_by_field.get("price")
+        if freshness in {"STALE", "UNKNOWN", "UNAVAILABLE"}:
+            return False
+        return item.price is not None
+
+    @staticmethod
+    def _return(current: "MarketObservation", history: Sequence["MarketObservation"],
+                hours: int) -> Optional[float]:
+        current_time = _parse_time(current.source_timestamp or current.published_at or current.observed_at)
+        target = current_time - timedelta(hours=hours)
+        tolerance = MarketAnalysisEngine.WINDOW_TOLERANCE_SECONDS["1h" if hours == 1 else "24h"]
+        comparable = []
+        for item in history:
+            if (item.asset_id != current.asset_id or item.provider != current.provider
+                    or item.currency != current.currency or item.price is None
+                    or item.freshness_by_field.get("price") in {"STALE", "UNKNOWN", "UNAVAILABLE"}):
+                continue
+            item_time = _parse_time(item.source_timestamp or item.published_at or item.observed_at)
+            distance = abs((item_time - target).total_seconds())
+            if distance <= tolerance and item_time < current_time:
+                comparable.append((distance, -item_time.timestamp(), item))
+        if not comparable:
+            return None
+        baseline = min(comparable, key=lambda entry: (entry[0], entry[1]))[2]
+        if baseline.price is None or baseline.price <= 0:
+            return None
+        return (float(current.price) / float(baseline.price) - 1.0) * 100.0
+
+    def analyze(self, current: "MarketObservation", history: Sequence["MarketObservation"],
+                benchmark_current: Optional["MarketObservation"] = None,
+                benchmark_history: Sequence["MarketObservation"] = (),
+                peer_observations: Sequence["MarketObservation"] = ()) -> MarketAnalysisResult:
+        current.validate()
+        if not self._fresh_price(current):
+            raise ValueError("current market price is missing or not fresh")
+        for item in history:
+            item.validate()
+        for item in benchmark_history:
+            item.validate()
+        for item in peer_observations:
+            item.validate()
+        if benchmark_current is not None:
+            benchmark_current.validate()
+
+        facts: list[str] = []
+        unknowns: list[str] = []
+        flags: set[str] = set()
+        return_1h = self._return(current, history, 1)
+        return_24h = self._return(current, history, 24)
+        if return_1h is None:
+            unknowns.append("Comparable timestamped 1h baseline unavailable for the same asset, provider and currency")
+        else:
+            facts.append(f"Calculated 1h price return: {return_1h:.6f}%")
+        if return_24h is None:
+            unknowns.append("Comparable timestamped 24h baseline unavailable for the same asset, provider and currency")
+            flags.add("HISTORY_BASELINE_24H_UNAVAILABLE")
+        else:
+            facts.append(f"Calculated 24h price return: {return_24h:.6f}%")
+
+        reported_change = current.change_24h
+        if reported_change is not None:
+            facts.append(f"provider-reported 24h price change: {float(reported_change):.6f}% (not independently recalculated)")
+        else:
+            unknowns.append("Provider-reported 24h price change unavailable")
+        turnover = None
+        if current.volume_24h is not None and current.market_cap is not None and current.market_cap > 0:
+            turnover = float(current.volume_24h) / float(current.market_cap) * 100.0
+            facts.append(f"24h volume-to-market-cap ratio: {turnover:.6f}% (turnover proxy, not relative volume)")
+        else:
+            unknowns.append("Volume-to-market-cap ratio unavailable because volume or market cap is missing")
+
+        benchmark_return = None
+        relative_return = None
+        benchmark_asset_id = None
+        if benchmark_current is not None:
+            if (benchmark_current.asset_id == current.asset_id or benchmark_current.provider != current.provider
+                    or benchmark_current.currency != current.currency or not self._fresh_price(benchmark_current)):
+                unknowns.append("Benchmark is not a fresh, distinct asset from the same provider and currency")
+            else:
+                benchmark_asset_id = benchmark_current.asset_id
+                benchmark_return = self._return(benchmark_current, benchmark_history, 24)
+                if return_24h is not None and benchmark_return is not None:
+                    relative_return = return_24h - benchmark_return
+                    facts.append(f"24h return relative to {benchmark_asset_id}: {relative_return:.6f} percentage points")
+                else:
+                    unknowns.append("Comparable 24h asset or benchmark baseline unavailable for relative return")
+        else:
+            unknowns.append("No comparable broad-market benchmark observation supplied")
+
+        current_quote_time = _parse_time(current.source_timestamp or current.published_at or current.observed_at)
+        comparable_peers = []
+        for item in peer_observations:
+            peer_time = _parse_time(item.source_timestamp or item.published_at or item.observed_at)
+            if (item.asset_id == current.asset_id and item.provider != current.provider
+                    and item.currency == current.currency and self._fresh_price(item)
+                    and abs((peer_time - current_quote_time).total_seconds()) <= 300):
+                comparable_peers.append(item)
+        conflict_inputs = [current, *comparable_peers]
+        conflicts = MarketDataIntelligenceEngine.compare_observations(conflict_inputs)
+        if conflicts:
+            flags.add("PROVIDER_PRICE_CONFLICT")
+            facts.append("Same-asset, same-currency provider prices exceed the configured discrepancy threshold")
+        elif any(item.asset_id == current.asset_id and item.currency != current.currency
+                 for item in peer_observations):
+            unknowns.append("Cross-provider price comparison unavailable because observations are not same-currency")
+
+        series = [item for item in history if item.asset_id == current.asset_id
+                  and item.provider == current.provider and item.currency == current.currency
+                  and self._fresh_price(item)]
+        series.append(current)
+        series.sort(key=lambda item: _parse_time(item.source_timestamp or item.published_at or item.observed_at))
+        timestamps = [_parse_time(item.source_timestamp or item.published_at or item.observed_at) for item in series]
+        if any((right - left).total_seconds() >= 2 * 60 * 60 for left, right in zip(timestamps, timestamps[1:])):
+            flags.add("HISTORY_GAP_OVER_2H")
+        prices = [float(item.price) for item in series if item.price is not None]
+        if len(prices) >= 5:
+            median_price = statistics.median(prices)
+            if median_price > 0 and any(abs(value - median_price) / median_price > 0.20 for value in prices):
+                flags.add("POTENTIAL_PRICE_OUTLIER_REVIEW")
+
+        evidence_items = [current, *history, *peer_observations, *benchmark_history]
+        if benchmark_current is not None:
+            evidence_items.append(benchmark_current)
+        evidence_refs = tuple(sorted({item.data_hash for item in evidence_items if item.data_hash}))
+        if current.price is not None:
+            facts.append(f"Observed {current.asset_id} price: {float(current.price):.12g} {current.currency}")
+        status = "ANALYZED" if not unknowns and not flags else "PARTIAL"
+        fingerprint = json.dumps({
+            "version": self.ANALYSIS_VERSION, "asset_id": current.asset_id,
+            "provider": current.provider, "currency": current.currency,
+            "observed_at": current.observed_at, "evidence_refs": evidence_refs,
+            "benchmark_asset_id": benchmark_asset_id,
+        }, sort_keys=True, separators=(",", ":"))
+        result = MarketAnalysisResult(
+            analysis_id=hashlib.sha256(fingerprint.encode()).hexdigest(),
+            asset_id=current.asset_id, provider=current.provider, currency=current.currency,
+            observed_at=current.observed_at, status=status,
+            return_1h_pct=return_1h, return_24h_pct=return_24h,
+            provider_reported_change_24h_pct=reported_change,
+            volume_to_market_cap_ratio_pct=turnover, benchmark_asset_id=benchmark_asset_id,
+            benchmark_return_24h_pct=benchmark_return, benchmark_relative_24h_pct=relative_return,
+            facts=tuple(facts), hypotheses=(), unknowns=tuple(unknowns),
+            quality_flags=tuple(sorted(flags)), evidence_refs=evidence_refs,
+        )
+        result.validate()
+        return result
 
 
 class MarketDataIntelligenceEngine:
@@ -1400,6 +1607,11 @@ class Layer1Store:
             provider TEXT NOT NULL, endpoint TEXT NOT NULL,
             observed_at TEXT NOT NULL, payload_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS layer1_market_analyses (
+            analysis_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, provider TEXT NOT NULL,
+            currency TEXT NOT NULL, observed_at TEXT NOT NULL, status TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS layer1_identity_proofs (
             asset_id TEXT NOT NULL, base_asset TEXT NOT NULL, quote_asset TEXT NOT NULL,
             exchange_id TEXT NOT NULL, status TEXT NOT NULL, expires_at TEXT NOT NULL,
@@ -1493,6 +1705,40 @@ class Layer1Store:
             "INSERT OR REPLACE INTO layer1_market_observations VALUES (?, ?, ?, ?, ?, ?)",
             (key, observation.asset_id, observation.provider, observation.endpoint,
              observation.observed_at, payload),
+        )
+        self.conn.commit()
+
+    def get_market_history(self, asset_id: str, provider: Optional[str] = None,
+                           currency: Optional[str] = None) -> list[MarketObservation]:
+        if not isinstance(asset_id, str) or not asset_id.strip():
+            raise ValueError("market history requires a canonical asset ID")
+        clauses = ["asset_id = ?"]
+        params: list[Any] = [asset_id]
+        if provider is not None:
+            clauses.append("provider = ?")
+            params.append(provider)
+        rows = self.conn.execute(
+            "SELECT payload_json FROM layer1_market_observations WHERE "
+            + " AND ".join(clauses) + " ORDER BY observed_at ASC, provider ASC", params,
+        ).fetchall()
+        observations = []
+        for (payload,) in rows:
+            decoded = json.loads(payload)
+            decoded["history"] = tuple(decoded.get("history") or ())
+            observation = MarketObservation(**decoded)
+            observation.validate()
+            if currency is None or observation.currency == currency:
+                observations.append(observation)
+        return observations
+
+    def save_market_analysis(self, result: MarketAnalysisResult) -> None:
+        result.validate()
+        payload = json.dumps(result.__dict__, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        self.conn.execute(
+            "INSERT INTO layer1_market_analyses VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(analysis_id) DO UPDATE SET status=excluded.status, payload_json=excluded.payload_json",
+            (result.analysis_id, result.asset_id, result.provider, result.currency,
+             result.observed_at, result.status, payload),
         )
         self.conn.commit()
 
