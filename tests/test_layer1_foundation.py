@@ -953,6 +953,10 @@ class Layer1FoundationTests(unittest.TestCase):
             with patch("main._fetch_coingecko_binance_identity_proof", return_value=proof_for(self.identity)):
                 result = main._persist_layer1_market_intelligence([coin], self.db, trends)
             self.assertEqual(result["observations"], 1)
+            self.assertEqual(result["market_analyses"], 1)
+            self.assertEqual(result["market_analysis_partial"], 1)
+            self.assertEqual(result["market_analysis_quality_flags"]["coingecko:bitcoin"],
+                             ["HISTORY_BASELINE_24H_UNAVAILABLE"])
             self.assertEqual(result["trends"], 3)
             self.assertEqual(result["trend_clusters"], 1)
             self.assertEqual(result["trend_source_count"], 3)
@@ -981,6 +985,13 @@ class Layer1FoundationTests(unittest.TestCase):
                 self.assertEqual(market_payload["provider_metadata"]["x-ratelimit-remaining-minute"], "29")
                 self.assertEqual(market_payload["source_timestamp"], coin.provider_published_at)
                 self.assertEqual(market_payload["observed_at"], coin.observed_at)
+                analysis_row = conn.execute(
+                    "SELECT status, payload_json FROM layer1_market_analyses"
+                ).fetchone()
+                self.assertEqual(analysis_row[0], "PARTIAL")
+                analysis_payload = json.loads(analysis_row[1])
+                self.assertIsNone(analysis_payload["return_24h_pct"])
+                self.assertIn("HISTORY_BASELINE_24H_UNAVAILABLE", analysis_payload["quality_flags"])
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_trend_signals").fetchone()[0], 3)
                 cluster_row = conn.execute(
                     "SELECT source_count, independent_source_count, signal_count, confidence_limit "
