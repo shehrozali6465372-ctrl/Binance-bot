@@ -1,8 +1,91 @@
 # Binance Square Write-to-Earn Agent — Canonical Project Context
 
-Last updated: 2026-11-11 (UTC) — Module 9 durable ingestion update
+Last updated: 2026-11-12 (UTC) — corrected continuation rules and Module 9 lease handoff
 
 This is the canonical working context for continuing the Binance Square Write-to-Earn Agent project. Keep this file in this GitHub repository and update it as work progresses. Do not use ChatGPT Library or create a parallel Library copy.
+
+## CURRENT CONTINUATION OVERRIDE — 2026-11-12
+
+This section is the authoritative instruction for the next continuation. If older notes elsewhere in this file conflict with it, follow this section.
+
+### Development method
+- **Do not use Codex.** The user has explicitly confirmed that the Codex usage limit is exhausted and Codex must no longer be used for this project. Do not check its quota, wait for a reset, invoke Codex, or make Codex availability a dependency.
+- Continue through the authorized Remote Desktop Commander connection. GPT performs repository inspection, implementation and tests directly.
+- Before editing, inspect the real repository, branch, HEAD, remotes, working tree and relevant code. Preserve every existing modification and untracked file.
+- Do not run destructive Git commands (reset, clean, forced checkout, destructive stash/pop) or overwrite existing work.
+- No paid infrastructure or service usage without explicit approval.
+
+### Latest actual local repository verification
+Verified on 2026-11-12 through Remote Desktop Commander:
+- Device: `localhost` (ID `e87fd591-3c93-40d6-8543-95eabff1ca2f`), online at verification time.
+- Working directory: `/tmp/binance-layer1-audit`.
+- Actual origin remote: `https://github.com/shehrozali6465372-ctrl/Binance-bot.git`.
+- Actual branch: `layer-1/module9-onchain-intelligence`.
+- Actual HEAD: `113be7d1f71a719329d4d1e6b4ca3c0c37206a9b`.
+- Actual Git status:
+  ```text
+  ## layer-1/module9-onchain-intelligence
+   M PROJECT_CONTEXT.md
+   M layer1/onchain_evm_worker.py
+   M tests/test_onchain_evm_worker.py
+  ?? .venv/
+  ?? layer1/onchain_evm_store.py
+  ?? layer1/onchain_worker_lifecycle.py
+  ?? tests/test_onchain_worker_lifecycle.py
+  ```
+- These are existing working-tree changes and must be preserved. In particular, do not stage or delete `.venv/`.
+- The historical handoff also mentioned `Binance-bot-staging`, but the actual local origin verified in this session is `Binance-bot`. Do not silently switch repositories; if the user later identifies staging as the intended target, clarify before changing remotes or working directories.
+- The current context file itself is modified and uncommitted. Do not assume this update has been committed or pushed.
+
+### Completed Module 9 work — do not duplicate
+- Multi-network ingestion for Bitcoin, Ethereum, BNB Smart Chain, Solana and XRPL.
+- Provider retry classification/backoff across EVM, Bitcoin, Solana and XRPL workers.
+- Reorg handling, canonical block/slot journals, durable checkpoints and checkpoint CAS.
+- PostgreSQL persistence adapters and migration runner.
+- Real isolated Neon PostgreSQL 16 integration batch: 13 passed, 0 failed. This was run against the dedicated `binance_onchain_test` database on the isolated `module9-pg-integration-test` branch, not the parent staging branch.
+- Latest recorded local full suite: 329 passed, 0 failed, 12 skipped. The 12 live PostgreSQL tests were separately executed in the Neon batch above. This is historical verification; rerun relevant tests after further changes.
+- EVM worker store-boundary adapters in `layer1/onchain_evm_store.py` were added in the current working tree. They explicitly support the existing SQLite and PostgreSQL store classes and reject arbitrary duck-typed stores.
+- Process-local lifecycle runner in `layer1/onchain_worker_lifecycle.py` was added in the current working tree. It supports explicit start/stop, periodic bounded `run_once()`, status/error reporting and exception isolation. Its focused test suite previously passed 5 tests; re-run before relying on that result.
+- The lifecycle runner is **not** distributed ownership, a persistent heartbeat, a PostgreSQL lease, or multi-instance duplicate-worker protection.
+
+### Exact next task — Module 9 distributed worker ownership
+Do not redo the lifecycle runner, EVM adapter, PostgreSQL persistence layer or provider ingestion.
+
+First inspect the existing PostgreSQL migrations, `PostgresOnChainIngestionStore`, `PostgresOnChainStore`, transaction/locking patterns, checkpoint CAS, existing agent-wide `RunLease`, any SQLite lease implementation, and related tests. Reuse an existing lease abstraction only if its scope and lifecycle semantics demonstrably fit.
+
+Implement PostgreSQL-backed, scoped worker leases with:
+1. Atomic acquisition and explicit worker identity/scope.
+2. Database-time expiry where appropriate.
+3. Heartbeat/renewal and safe release.
+4. Owner verification and stale-owner rejection.
+5. Safe takeover after expiry.
+6. Monotonically increasing fencing token/generation.
+7. Concurrent acquisition safety.
+8. Ownership/fencing validation in the same transaction as event, journal and checkpoint commit, so a stale worker cannot commit after lease expiry or takeover.
+9. Independent scopes for network/provider/monitored ingestion as appropriate; do not use one global lease.
+10. Preserve SQLite development/test support. No in-memory fallback for distributed ownership.
+
+Lease ownership and checkpoint CAS are separate protections; retain both. Event/journal/checkpoint atomicity must remain intact.
+
+### Required TDD coverage
+Test successful and competing acquisition, renewal, wrong-owner renewal, release, wrong-owner release, expired takeover, stale owner rejection after takeover, monotonic fencing generation, concurrent workers, stale-owner commit rejection, rollback consistency, and scope isolation.
+
+Run live PostgreSQL concurrency/rollback tests only against a dedicated isolated test database. SQLite or mocks alone do not establish PostgreSQL concurrency correctness. Report clearly which PostgreSQL tests actually ran.
+
+### Safety and release boundaries
+- Never publish a real Binance Square post or activate the publisher.
+- No production database writes, production credential/schedule changes, deployment, PR merge, commit or push without explicit approval.
+- Do not expose secret values in logs/output.
+- No unrelated module changes.
+- Preserve the existing publisher and earning workflow.
+- Update this canonical context after each meaningful implementation and verification milestone.
+
+### First actions in the next continuation
+1. Re-list Remote Desktop Commander devices and verify the intended device is online.
+2. Reconfirm working directory, origin, branch, HEAD and full Git status.
+3. Read this context and inspect the lease/transaction code listed above.
+4. Run focused lifecycle tests and `git diff --check` before making changes.
+5. Present a concise verified state report, then implement only the distributed lease slice.
 
 ## Repository and working branch
 
@@ -840,4 +923,21 @@ Implement PostgreSQL schema/migration and real PostgreSQL transaction/concurrenc
 - Focused provider/ingestion/XRPL/aggregation regression batch: **86 passed, 0 failed**. compileall and git diff --check passed.
 - The pre-existing .venv/ directory was not staged. The temporary test DSN file is test-only and will be removed after the integration run.
 - No real Binance Square post, provider RPC, production database mutation, deployment, PR merge or publishing workflow activation occurred.
-- Module 9 remains not production-ready: worker supervision/lifecycle, distributed ownership/leases, observability/alerts, retention/runbook, and live provider verification still require separate work and approval.
+- Module 9 remains not production-ready: distributed ownership/leases, observability/alerts, retention/runbook, and live provider verification still require separate work and approval. A process-local, explicit-start lifecycle runner was added in `layer1/onchain_worker_lifecycle.py`; it supervises bounded `run_once()` cycles, records run/error status and supports graceful stop, but does not provide distributed ownership or persistent heartbeat.
+
+### Canonical EVM header verification checkpoint — 2026-11-12
+
+- Reviewed the current Ethereum/BNB provider, ingestion worker and durable-store architecture against the requested bounded slice. The slice is already implemented in the checked-out branch; no duplicate adapter, event store or journal was added.
+- Existing verified behavior: Ethereum and BNB use scoped `eth_getLogs` Transfer extraction; finalized-height and chain-ID checks are enforced; each scanned block gets an independently fetched canonical header with exact height, hash and timestamp validation; every log is compared with that header before normalization; canonical block hashes/timestamps, normalized events and the next cursor commit atomically; bounded lookback re-fetches headers and reconciles reorgs.
+- TDD result: no new RED test was added because there was no safe unimplemented behavior in this slice to drive. Existing regression tests already cover the required failure modes and pass without code changes.
+- Focused verification: `./.venv/bin/python -m unittest tests.test_onchain_providers tests.test_onchain_ingestion tests.test_onchain_evm_worker -v` — **75 passed, 0 failed**.
+- Full repository verification: `./.venv/bin/python -m unittest discover -s tests -v` — **336 passed, 0 failed, 12 skipped**. The skips are guarded PostgreSQL live integration tests because `TEST_POSTGRES_DSN` is not configured. No live RPC or publishing was used.
+- Precise blocker for further implementation in this slice: `EvmTransferIngestionWorker` currently requires the concrete SQLite `OnChainStore` and `OnChainIngestionStore`, while the branch also contains separate PostgreSQL store implementations. Making the EVM worker consume PostgreSQL stores would be a new store-interface/adapter and contract-test slice, not canonical-header verification; it is unsafe to guess that interface here.
+- Existing untracked `.venv/` was preserved and untouched. No source/test changes, commit, push, PR update, deployment, production DB/secret change or Binance Square publication occurred in this continuation.
+
+### EVM worker store boundary — 2026-11-12
+
+- Added `layer1/onchain_evm_store.py` with explicit `EvmMappingStoreAdapter` and `EvmIngestionStoreAdapter` boundaries. The adapters accept only the existing SQLite or PostgreSQL store classes; arbitrary duck-typed objects are rejected.
+- Verified the EVM worker-reachable contracts: `list_verified_mappings()` for the mapping store, and `get_checkpoint()`, atomic `commit_page()`, `get_block_hash()` and scoped `reconcile_block()` for the ingestion store. Both backends have matching call signatures and preserve their own transaction, expected-cursor CAS, canonical-header journal, and reorg semantics through delegation.
+- Added boundary tests proving SQLite compatibility, PostgreSQL implementation compatibility without a live database, and rejection of undeclared duck types. Existing SQLite EVM ingestion/restart/reorg tests remain passing.
+- No schema/API expansion was required. No live chain RPC, production database/secret access, commit, push, deployment, PR change or Binance Square publication occurred. `.venv/` was preserved.
