@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from pathlib import Path
 
 # Image Intelligence
@@ -3636,7 +3636,8 @@ class PostPublisher:
         return text + "\n" + " ".join(tags[:max_tags])
 
 
-def _run_once_impl(config, scanner, announcement_engine, research, generator, publisher, posted_symbols, hot_search_engine=None) -> bool:
+def _run_once_impl(config, scanner, announcement_engine, research, generator, publisher,
+                   posted_symbols, hot_search_engine=None, onchain_aggregation_by_asset=None) -> bool:
     """Run one iteration using Opportunity Intelligence Architecture.
     
     Flow:
@@ -3731,7 +3732,8 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
     try:
         trend_records = hot_search_engine.get_trending(force_refresh=True) if hot_search_engine else []
         layer1_summary = _persist_layer1_market_intelligence(
-            raw_candidates, config.database_path, trend_records
+            raw_candidates, config.database_path, trend_records,
+            onchain_aggregation_by_asset=onchain_aggregation_by_asset,
         )
         ready_asset_ids = set(layer1_summary.get("ready_asset_ids", []))
         layer1_candidates = [
@@ -4280,7 +4282,8 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
 
 
 
-def _persist_layer1_market_intelligence(candidates, database_path: str, trend_records=None) -> dict:
+def _persist_layer1_market_intelligence(candidates, database_path: str, trend_records=None,
+                                        onchain_aggregation_by_asset=None) -> dict:
     """Persist real market evidence and auditable candidate decisions; never fabricate scores."""
     global _LAYER1_LAST_SUMMARY
     from layer1.foundation import (
@@ -4288,6 +4291,16 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         Layer1Store, MarketDataIntelligenceEngine, RelevanceScore, RelevanceScoringEngine,
         TrendSignal, TrendingNarrativeIntelligenceEngine, MarketAnalysisEngine,
     )
+    from layer1.onchain_aggregation import TransferAggregationResult
+
+    if onchain_aggregation_by_asset is None:
+        onchain_aggregation_by_asset = {}
+    if not isinstance(onchain_aggregation_by_asset, Mapping):
+        raise ValueError("onchain_aggregation_by_asset must map canonical asset IDs to aggregation results")
+    for asset_id, result in onchain_aggregation_by_asset.items():
+        if (not isinstance(asset_id, str) or not asset_id.startswith("coingecko:")
+                or not isinstance(result, TransferAggregationResult)):
+            raise ValueError("on-chain runtime injection contains an invalid canonical asset/result pair")
 
     store = Layer1Store(database_path)
     summary = {
@@ -4308,6 +4321,9 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         "announcement_coverage": "NOT_CONFIGURED",
         "announcement_status": "UNAVAILABLE_MISSING_ANNOUNCEMENT_DATABASE_URL",
         "provider_health": {},
+        "onchain_aggregation_status": "PROVIDED" if onchain_aggregation_by_asset else "NOT_PROVIDED",
+        "onchain_summaries_attached": 0,
+        "onchain_assets_with_corroboration": 0,
     }
     trend_signals = []
     for record in (trend_records or []):
@@ -4595,9 +4611,13 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             }
             asset_announcements = [event for event in announcement_events if asset_id in event.asset_ids]
             candidate = candidate_engine.build(
-                identity, eligibility, [market], asset_announcements, asset_trends
+                identity, eligibility, [market], asset_announcements, asset_trends,
+                onchain_aggregation=onchain_aggregation_by_asset.get(asset_id),
             )
             store.save_candidate(candidate)
+            if candidate.onchain_transfer_summary_ids:
+                summary["onchain_assets_with_corroboration"] += 1
+                summary["onchain_summaries_attached"] += len(candidate.onchain_transfer_summary_ids)
             summary["candidates"] += 1
             summary["ready" if candidate.state == "READY_FOR_RESEARCH" else "rejected"] += 1
             if candidate.state == "READY_FOR_RESEARCH":
@@ -4652,7 +4672,7 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         store.close()
 
 def run_once(config, scanner, announcement_engine, research, generator, publisher,
-             posted_symbols, hot_search_engine=None) -> bool:
+             posted_symbols, hot_search_engine=None, onchain_aggregation_by_asset=None) -> bool:
     """Execute one Layer 1+ downstream cycle under a durable run lease."""
     global _LAYER1_LAST_SUMMARY
     from layer1.foundation import AgentConfig, ConfigurationOrchestrator, RunLease
@@ -4698,7 +4718,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
                     context.run_id, context.config_hash)
         outcome = _run_once_impl(
             config, scanner, announcement_engine, research, generator,
-            publisher, posted_symbols, hot_search_engine
+            publisher, posted_symbols, hot_search_engine, onchain_aggregation_by_asset,
         )
         status = "SUCCEEDED" if outcome else "NO_CANDIDATE_OR_BLOCKED"
         summary["cycle_result"] = status
