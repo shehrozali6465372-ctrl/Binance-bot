@@ -805,3 +805,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Final rule: `Detail:` under an explicit `Type: MARKET MOVEMENT` remains qualified `ANALYST_INTERPRETATION`; unmatched details under announcement types or without that explicit context remain `UNCLASSIFIED` unless exact accepted title evidence is linked.
 - Added a regression for this explicit market-movement exception. Focused evidence/research/content/end-to-end/DeepSeek suite: **71 passed**. Full suite: **507 passed, 0 failed, 12 skipped**. `compileall` and `git diff --check` pass.
 - This fixes the headline-classification laundering path without misclassifying the agent's own clearly labeled market-movement heuristic. General semantic fact/causal verification remains open; Module 11 is still PARTIAL.
+
+## GitHub follow-up confirmation — 2026-11-15
+- Follow-up implementation commit `43f5329103fc48772ce10503d55cac9349a9843e` is pushed to `layer-1/module9-onchain-continuation`.
+- GitHub Actions run `43640134763` for that exact commit completed **SUCCESS**. PR #14 remains Draft/open/unmerged; its description now carries the latest 507/0/12 local test count and the remaining release blockers.

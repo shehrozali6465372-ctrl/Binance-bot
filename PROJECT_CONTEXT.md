@@ -1359,3 +1359,8 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - Full repository suite after the final narrowed fix: **507 passed, 0 failed, 12 skipped** in 32.048s. The 12 skipped require `TEST_POSTGRES_DSN`.
 - `compileall` and `git diff --check` pass. No provider inference, upload, production DB write, or real Square publication.
 - The code and documentation follow-up is local and uncommitted at this checkpoint; Module 11 remains PARTIAL due general semantic factual/causal verification and sentence-level generated-post attribution gaps.
+
+## GitHub follow-up confirmation — 2026-11-15
+- The Module 11 unmatched-announcement-detail fix and its tests were committed as `43f5329103fc48772ce10503d55cac9349a9843e` and pushed to `layer-1/module9-onchain-continuation`.
+- GitHub Actions run `43640134763` for this exact commit completed **SUCCESS**. PR #14 was updated with the final local verification counts and current release blockers; it remains Draft, open, unmerged and mergeable.
+- Local working tree was clean immediately after the push. No production integration or publishing actions were taken.
