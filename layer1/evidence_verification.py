@@ -903,6 +903,7 @@ class EvidenceVerificationEngine:
         claims: list[Claim] = []
         seen: set[tuple[str, str]] = set()
         selected_announcement_lineage: Optional[str] = None
+        selected_event_type: Optional[str] = None
 
         def append_claim(claim: Claim) -> None:
             identity = (claim.claim_key, claim.text)
@@ -1122,6 +1123,8 @@ class EvidenceVerificationEngine:
                 if segment.startswith(("Type:", "Detail:")):
                     field = "announcement.event_type" if segment.startswith("Type:") else "announcement.title"
                     raw_value = segment.split(":", 1)[1].strip()
+                    if field == "announcement.event_type":
+                        selected_event_type = raw_value.casefold()
                     if field == "announcement.event_type" and raw_value.casefold() == "market movement":
                         append_claim(Claim(
                             text=segment, subject=subject, asset_id=asset_id,
@@ -1151,12 +1154,23 @@ class EvidenceVerificationEngine:
                             evidence_ids=tuple(sorted(item.evidence_id for item in linked)),
                             max_age_seconds=86400,
                         ))
-                    elif segment.startswith("Detail:"):
+                    elif segment.startswith("Detail:") and selected_event_type == "market movement":
+                        # These Detail lines are generated heuristic commentary only when
+                        # the package explicitly identifies the section as MARKET MOVEMENT.
                         append_claim(Claim(
                             text=segment, subject=subject, asset_id=asset_id,
                             claim_key="research.interpretation", value=segment,
                             observed_at=observed_at, claim_type="ANALYST_INTERPRETATION",
                             impact="LOW", evidence_ids=(),
+                        ))
+                    elif segment.startswith("Detail:"):
+                        # An unmatched announcement headline is factual, not analysis.
+                        # Keep it unresolved unless an exact accepted source record matches.
+                        append_claim(Claim(
+                            text=segment, subject=subject, asset_id=asset_id,
+                            claim_key=field, value=raw_value, observed_at=observed_at,
+                            claim_type="UNCLASSIFIED", impact="MEDIUM", evidence_ids=(),
+                            max_age_seconds=86400,
                         ))
                     else:
                         append_claim(Claim(

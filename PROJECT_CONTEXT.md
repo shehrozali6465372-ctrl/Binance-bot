@@ -1339,3 +1339,23 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - Worktree contains 16 modified tracked files and 20 untracked files; all existing changes are preserved. No reset/clean, commit, push, merge, deployment, provider inference, media upload or real Binance Square post was performed. GitHub still points at the old committed fixture versions, so the CI run has not yet been re-triggered against the corrected working tree.
 - Module 11 remains PARTIAL because semantic non-numeric factual/causal claim verification is not complete. Modules 12–21 have implementations but the documented acceptance gaps remain; PostgreSQL integration, live DeepSeek/Cloudflare proof, configured opportunity policy and production recovery drill are outstanding.
 - PR #13 is an older Draft PR from `layer-1/module9-onchain-intelligence` into `layer-1/module8-market-analysis`; it is not the current continuation branch. PR #2 is the separate CMS announcement-worker PR. Neither PR was modified.
+
+
+## Module 11 continuation — unmatched announcement-detail laundering fix — 2026-11-15
+- Rechecked GitHub Actions for pushed commit `ea753d2cdbfea37f714de1c8daa2b9309bd2faf3`: `Phase 1 Safety Tests` run `43636409987`, job `mocked-safety-tests`, completed SUCCESS. This supersedes the earlier note that CI had not yet reported a run for that commit.
+- Found a claim-classification defect in `EvidenceVerificationEngine.claims_from_research_package()`: when a `Detail:` announcement headline did not exactly match an accepted source record, it was incorrectly labeled `ANALYST_INTERPRETATION`. `DeepResearchEngine` treats non-factual types separately from unresolved factual claims, so this could allow an unsupported headline to be treated as qualified inference when other verified facts existed.
+- Changed unmatched `Detail:` lines to `UNCLASSIFIED` with the announcement-title claim key and no evidence IDs. Exact title matches still bind to source lineage and remain source assertions; unmatched titles now produce `UNVERIFIED` and block research readiness.
+- Added regression tests proving unmatched headlines appear in the unresolved register and force `RESEARCH_MORE`, never the qualified-inference section.
+- TDD evidence: new regression initially failed (`ANALYST_INTERPRETATION` returned instead of `UNCLASSIFIED`); after the fix, it passed. Focused batch across evidence verification, research packages, content verification and end-to-end pipeline: **54 passed, 0 failed**.
+- This closes one concrete Module 11 classification defect only. General semantic factual/causal validation, conservative compound-clause decomposition and complete generated-post sentence-to-evidence attribution remain open. Do not mark Module 11 complete.
+- No external provider call, media upload, production DB write, publisher activation, real Binance Square post, workflow/secrets/schedule change, merge or deployment.
+- Working branch before this follow-up: `layer-1/module9-onchain-continuation`, pushed base commit `ea753d2cdbfea37f714de1c8daa2b9309bd2faf3`; follow-up code/docs/tests are currently local pending verification and review.
+
+
+## Module 11 follow-up verification supersession — 2026-11-15 01:56 PKT
+- A first full-suite run after the initial unmatched-Detail fix exposed an over-broad classification change: generated `Type: MARKET MOVEMENT` heuristic details were also being marked unresolved. No code was pushed from that failing state.
+- Narrowed the rule using explicit preceding `Type:` context: `Detail:` text under `MARKET MOVEMENT` remains labeled `ANALYST_INTERPRETATION`; an unmatched `Detail:` under announcement types or without explicit market-movement context remains `UNCLASSIFIED` unless an exact accepted announcement-title record matches.
+- Added a regression for the explicit market-movement classification. The focused evidence/research/content/end-to-end/DeepSeek batch now passes **71 tests, 0 failures**.
+- Full repository suite after the final narrowed fix: **507 passed, 0 failed, 12 skipped** in 32.048s. The 12 skipped require `TEST_POSTGRES_DSN`.
+- `compileall` and `git diff --check` pass. No provider inference, upload, production DB write, or real Square publication.
+- The code and documentation follow-up is local and uncommitted at this checkpoint; Module 11 remains PARTIAL due general semantic factual/causal verification and sentence-level generated-post attribution gaps.

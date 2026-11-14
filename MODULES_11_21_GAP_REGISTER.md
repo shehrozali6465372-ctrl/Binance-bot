@@ -790,3 +790,18 @@ This checklist does not authorize the work to be marked done merely by checking 
 - The preserved local continuation worktree replaces those fixed fixture timestamps with current UTC-relative fixture data. No freshness policy or production validation was relaxed.
 - Corrected focused Module 9 test batch: **74 passed, 0 failed**. Full local suite: **503 passed, 0 failed, 12 skipped**; the skips are PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`.
 - Static checks (`compileall`, `git diff --check`) pass. The corrected worktree remains uncommitted/unpushed, so the remote CI result is still the failure on the old committed files until a reviewed checkpoint is pushed and CI rerun.
+
+
+## Module 11 continuation — unmatched announcement-detail laundering fix — 2026-11-15
+- Found and fixed a classification gap: an unmatched `Detail:` headline with no exact accepted announcement-title evidence was labeled `ANALYST_INTERPRETATION`. This was unsafe because unverified non-factual claims are listed as qualified analysis rather than unresolved facts in the research package.
+- Unmatched `Detail:` lines now remain `UNCLASSIFIED` under `announcement.title`, with no evidence IDs; exact accepted source-title matches still retain their source assertion and lineage. The unmatched claim is UNVERIFIED and forces `RESEARCH_MORE`.
+- TDD regression was observed failing before the code change and passing afterward. Focused evidence/research/content-verification/end-to-end batch: **54 passed, 0 failed**.
+- GitHub Actions for commit `ea753d2cdbfea37f714de1c8daa2b9309bd2faf3` succeeded: run `43636409987`, job `mocked-safety-tests`.
+- Remaining Module 11 blockers are unchanged: complete semantic non-numeric/causal verification, reliable compound-clause splitting, complete sentence-to-evidence attribution for generated posts, and production persistence validation. This is a narrow defect fix, not Module 11 completion.
+
+
+## Module 11 follow-up verification supersession — 2026-11-15
+- The initial `Detail:` correction was narrowed after full-suite regression caught generated `Type: MARKET MOVEMENT` details being over-classified as unresolved factual claims.
+- Final rule: `Detail:` under an explicit `Type: MARKET MOVEMENT` remains qualified `ANALYST_INTERPRETATION`; unmatched details under announcement types or without that explicit context remain `UNCLASSIFIED` unless exact accepted title evidence is linked.
+- Added a regression for this explicit market-movement exception. Focused evidence/research/content/end-to-end/DeepSeek suite: **71 passed**. Full suite: **507 passed, 0 failed, 12 skipped**. `compileall` and `git diff --check` pass.
+- This fixes the headline-classification laundering path without misclassifying the agent's own clearly labeled market-movement heuristic. General semantic fact/causal verification remains open; Module 11 is still PARTIAL.

@@ -405,6 +405,29 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertEqual(claims[0].claim_type, "UNCLASSIFIED")
         self.assertEqual(claims[0].evidence_ids, ())
 
+    def test_unmatched_announcement_detail_is_not_laundered_as_analysis(self):
+        claims = self.engine.claims_from_research_package(
+            "Detail: Binance approved ABC for a new listing", [],
+            subject="coingecko:abc", asset_id="coingecko:abc", observed_at=iso(),
+        )
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0].claim_type, "UNCLASSIFIED")
+        self.assertEqual(claims[0].claim_key, "announcement.title")
+        registry = self.engine.verify(claims, ())
+        self.assertEqual(registry.results[0].state, "UNVERIFIED")
+        rendered = render_claim_registry(registry, asset_id="coingecko:abc")
+        self.assertIn("UNRESOLVED_COUNT: 1", rendered)
+        self.assertIn("Binance approved ABC for a new listing", rendered)
+
+    def test_market_movement_details_are_analysis_only_when_explicitly_typed(self):
+        claims = self.engine.claims_from_research_package(
+            "Type: MARKET MOVEMENT\nDetail: Strong +6.2% momentum",
+            [], subject="coingecko:abc", asset_id="coingecko:abc", observed_at=iso(),
+        )
+        detail = next(item for item in claims if item.text.startswith("Detail:"))
+        self.assertEqual(detail.claim_type, "ANALYST_INTERPRETATION")
+        self.assertEqual(detail.claim_key, "research.interpretation")
+
     def test_binance_spot_evidence_requires_active_allowed_spot_pair(self):
         pairs = [
             {

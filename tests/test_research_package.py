@@ -85,6 +85,22 @@ class DeepResearchEngineTests(unittest.TestCase):
         self.assertEqual(package.completeness, "RESEARCH_MORE")
         self.assertIn("UNRESOLVED_FACTUAL_CLAIMS:1", package.gaps)
 
+    def test_unmatched_announcement_detail_cannot_become_a_qualified_inference(self):
+        unlinked_detail = Claim(
+            text="Detail: Binance approved ABC for a new listing",
+            subject=self.asset_id, claim_key="announcement.title",
+            value="Binance approved ABC for a new listing", observed_at=iso(),
+            evidence_ids=(), asset_id=self.asset_id, claim_type="UNCLASSIFIED",
+        )
+        registry = EvidenceVerificationEngine().verify(
+            self.registry.claims + (unlinked_detail,), self.registry.evidence_records,
+        )
+        package = self.build(registry=registry)
+        self.assertEqual(package.completeness, "RESEARCH_MORE")
+        self.assertEqual(len(package.unknown_claims), 1)
+        self.assertEqual(package.inferences, ())
+        self.assertIn("UNRESOLVED_FACTUAL_CLAIMS:1", package.gaps)
+
     def test_stale_event_defers_and_withdrawn_event_rejects(self):
         stale = self.build(event_states=("STALE",))
         withdrawn = self.build(event_states=("WITHDRAWN",))
