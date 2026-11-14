@@ -821,3 +821,9 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Improved the existing deterministic atomic-claim splitter so common abbreviations (`U.S.`, `e.g.`, `i.e.`, `Dr.`, `etc.` and related forms) are not incorrectly split into separate claims at their internal periods.
 - Added a regression that failed before the fix (`U.S.` and `e.g.` were split into fragments); after the fix the focused evidence-verification suite passes **41 tests, 0 failures**.
 - This is a narrow segmentation correctness improvement only. It does not provide semantic compound-clause decomposition or generated-post sentence-to-evidence entailment; Module 11 remains PARTIAL.
+
+## GitHub Actions provider wiring — 2026-11-15
+- With explicit user approval, updated the scheduled workflow environment mapping from unused Gemini variables to the configured DeepSeek API key/model, and added the Cloudflare Workers AI token/account ID mapping. Kept the code-expected `ANNOUNCEMENT_DATABASE_URL` binding.
+- The workflow remains `DRY_RUN: "1"`; schedule, Square key mapping, permissions, and publisher safety controls were not changed. No real post or live media upload was performed.
+- Added regression assertions; focused workflow/importer and DeepSeek client tests: **19 passed**. YAML parse/binding assertions, compileall and `git diff --check` passed. Full suite / remote CI confirmation pending because Pillow is missing in the available local Python runtime.
+- Workflow change is local only until pushed; actual scheduled GitHub Actions execution against DeepSeek has not yet been verified.

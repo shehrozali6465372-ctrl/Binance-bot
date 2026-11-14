@@ -77,6 +77,12 @@ class AnnouncementImporterDependencyTests(unittest.TestCase):
         self.assertIn('DRY_RUN: "1"', content)
         self.assertIn("ANNOUNCEMENT_DATABASE_URL: ${{ secrets.ANNOUNCEMENT_DATABASE_URL }}", content)
         self.assertNotIn("secrets.BINANCE_ANNOUNCEMENT_DATABASE_URL", content)
+        self.assertIn("DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}", content)
+        self.assertIn("DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}", content)
+        self.assertIn("CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}", content)
+        self.assertIn("CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}", content)
+        self.assertNotIn("GEMINI_API_KEY:", content)
+        self.assertNotIn("GEMINI_MODEL:", content)
 
 
 class AnnouncementImporterTests(unittest.TestCase):
