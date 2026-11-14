@@ -4309,6 +4309,7 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         "onchain_assets_with_corroboration": 0,
     }
     trend_signals = []
+    onchain_graph_refs = []
     for record in (trend_records or []):
         asset_id = record.get("asset_id")
         source = record.get("source")
@@ -4598,6 +4599,27 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 onchain_aggregation=onchain_aggregation_by_asset.get(asset_id),
             )
             store.save_candidate(candidate)
+            aggregation = onchain_aggregation_by_asset.get(asset_id)
+            if isinstance(aggregation, TransferAggregationResult):
+                accepted_summary_ids = set(candidate.onchain_transfer_summary_ids)
+                for network_summary in aggregation.qualifying_network_summaries:
+                    if network_summary.summary_id not in accepted_summary_ids:
+                        continue
+                    onchain_graph_refs.append({
+                        "summary_id": network_summary.summary_id,
+                        "asset_id": network_summary.asset_id,
+                        "network_id": network_summary.network_id,
+                        "mapping_id": network_summary.mapping_id,
+                        "observed_at": aggregation.generated_at,
+                        "representation": network_summary.representation,
+                        "decimals": network_summary.decimals,
+                        "transfer_count": network_summary.transfer_count,
+                        "total_amount": network_summary.total_amount,
+                        "minimum_amount": network_summary.minimum_amount,
+                        "first_block_time": network_summary.first_block_time,
+                        "last_block_time": network_summary.last_block_time,
+                        "threshold_met": network_summary.threshold_met,
+                    })
             if candidate.onchain_transfer_summary_ids:
                 summary["onchain_assets_with_corroboration"] += 1
                 summary["onchain_summaries_attached"] += len(candidate.onchain_transfer_summary_ids)
@@ -4617,6 +4639,22 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             store.save_score(score)
             if score.score == 0 and "deferred" in score.reason:
                 summary["scores_deferred"] += 1
+        from layer1.event_graph import EventIntelligenceGraphEngine
+        event_graph = EventIntelligenceGraphEngine().rebuild_from_store(
+            store, onchain_summary_refs=onchain_graph_refs,
+        )
+        summary["event_graph"] = event_graph.to_dict()
+        summary["event_graph_summary"] = {
+            "status": "AVAILABLE" if event_graph.entities else "AVAILABLE_EMPTY",
+            "entity_count": len(event_graph.entities),
+            "relationship_count": len(event_graph.relationships),
+            "event_count": sum(entity.entity_type == "event" for entity in event_graph.entities),
+            "duplicate_cluster_count": len(event_graph.duplicate_cluster_ids),
+            "duplicate_cluster_ids": list(event_graph.duplicate_cluster_ids),
+            "onchain_observation_count": sum(
+                entity.entity_type == "onchain_observation" for entity in event_graph.entities
+            ),
+        }
         summary["provider_health"] = {
             "binance_announcements": summary["announcement_status"],
             "binance_spot_metadata": (
@@ -4648,6 +4686,7 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         log_summary = dict(summary)
         log_summary.pop("announcement_hints", None)
         log_summary.pop("announcement_revision_warnings", None)
+        log_summary.pop("event_graph", None)
         log_summary["announcement_hint_count"] = len(summary.get("announcement_hints", []))
         LOGGER.info("Layer 1 evidence persisted: %s", json.dumps(log_summary, sort_keys=True))
         return summary
