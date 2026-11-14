@@ -47,10 +47,57 @@ class PublisherSafetyTests(unittest.TestCase):
         os.chdir(self.old_cwd)
         self.tmp.cleanup()
 
+    def _authorization(self, coin, content, image_hashes=None):
+        from layer1.content_generation import DraftStore
+        from layer1.publication_authorization import PublicationAuthorizationEngine
+        coin = dict(coin)
+        symbol = str(coin.get("symbol") or "").upper()
+        coin.setdefault("asset_id", "coingecko:" + symbol.lower())
+        hashes = list(image_hashes or [])
+        engine = PublicationAuthorizationEngine(self.publisher.db.conn)
+        reservation = engine.reserve_daily_quota(symbol=symbol, daily_limit=100)
+        draft_hash = main.hashlib.sha256(content.encode("utf-8")).hexdigest()
+        draft_store = DraftStore(self.publisher.db.conn)
+        draft_store.save_draft(
+            content, asset_id=coin["asset_id"],
+            research_package_id="research:test:" + coin["asset_id"],
+            editorial_brief_id="brief:test:" + draft_hash,
+            approved_claim_ids=("claim:verified:test",),
+        )
+        draft_store.save_text_validation(
+            draft_hash=draft_hash, status="PASS", reasons=(),
+            validation_version="content-verification-v1",
+        )
+        auth = engine.authorize(
+            symbol=symbol, asset_id=coin["asset_id"], content=content,
+            image_hashes=hashes, eligibility_snapshot_at=main.utc_now(),
+            eligibility_max_age_seconds=300, event_state="NO_EVENT",
+            evidence_status="VERIFIED", text_validation_status="PASS",
+            visual_validation_status="PASS" if hashes else "NOT_REQUIRED",
+            quota_reservation_id=reservation, duplicate_policy_passed=True,
+        )
+        return coin, auth, hashes
+
+    def _publish(self, coin, content, image_list=None):
+        coin, auth, hashes = self._authorization(coin, content)
+        return self.publisher.publish(
+            coin, content, image_list=image_list,
+            authorization=auth, image_hashes=hashes,
+        )
+
+    def test_square_publish_transport_refuses_redirects(self):
+        from urllib.request import Request
+        handler = main._NoRedirectHTTPHandler()
+        request = Request(main.PostPublisher.API_URL, data=b"{}", method="POST")
+        self.assertIsNone(handler.redirect_request(
+            request, None, 307, "Temporary Redirect", {},
+            "https://evil.example/collect",
+        ))
+
     def test_dry_run_never_posts(self):
         dry = main.PostPublisher(replace(self.config, dry_run=True))
         try:
-            with patch("main.urllib.request.urlopen") as urlopen:
+            with patch("main._open_binance_publish_no_redirect") as urlopen:
                 result = dry.publish({"symbol": "BTC"}, "educational content")
             self.assertEqual(result.status, "DRY_RUN")
             self.assertFalse(result.confirmed)
@@ -63,9 +110,9 @@ class PublisherSafetyTests(unittest.TestCase):
             "code": "000000",
             "data": {"id": "remote-123", "shareLink": "https://example.invalid/post/remote-123"},
         })
-        with patch("main.urllib.request.urlopen", return_value=response) as urlopen:
-            first = self.publisher.publish({"symbol": "BTC"}, "same educational content")
-            second = self.publisher.publish({"symbol": "BTC"}, "same educational content")
+        with patch("main._open_binance_publish_no_redirect", return_value=response) as urlopen:
+            first = self._publish({"symbol": "BTC"}, "same educational content")
+            second = self._publish({"symbol": "BTC"}, "same educational content")
 
         self.assertEqual(first.status, "PUBLISHED_CONFIRMED")
         self.assertEqual(first.post_id, "remote-123")
@@ -74,10 +121,45 @@ class PublisherSafetyTests(unittest.TestCase):
         self.assertFalse(second.confirmed)
         self.assertEqual(urlopen.call_count, 1)
 
+    def test_live_publisher_rechecks_exact_persisted_draft_claim_provenance(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "immutable provenance test",
+        )
+        self.publisher.db.conn.execute(
+            "UPDATE content_draft_versions SET approved_claim_ids_json=? WHERE draft_id=?",
+            (json.dumps(["claim:tampered"]), authorization.draft_id),
+        )
+        self.publisher.db.conn.commit()
+        with patch("main._open_binance_publish_no_redirect") as urlopen:
+            result = self.publisher.publish(
+                coin, "immutable provenance test",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("provenance", result.error)
+        urlopen.assert_not_called()
+
+    def test_live_publisher_blocks_missing_or_mismatched_authorization(self):
+        with patch("main._open_binance_publish_no_redirect") as urlopen:
+            missing = self.publisher.publish(
+                {"symbol": "BTC", "asset_id": "coingecko:btc"},
+                "no authorization",
+            )
+            coin, authorization, hashes = self._authorization(
+                {"symbol": "BTC"}, "authorized draft",
+            )
+            changed = self.publisher.publish(
+                coin, "changed after authorization",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(missing.status, "FAILED_CONFIRMED")
+        self.assertEqual(changed.status, "FAILED_CONFIRMED")
+        urlopen.assert_not_called()
+
     def test_ambiguous_timeout_blocks_changed_content_for_same_symbol(self):
-        with patch("main.urllib.request.urlopen", side_effect=URLError("socket timeout")) as urlopen:
-            first = self.publisher.publish({"symbol": "ETH"}, "first generated text")
-            second = self.publisher.publish({"symbol": "ETH"}, "different regenerated text")
+        with patch("main._open_binance_publish_no_redirect", side_effect=URLError("socket timeout")) as urlopen:
+            first = self._publish({"symbol": "ETH"}, "first generated text")
+            second = self._publish({"symbol": "ETH"}, "different regenerated text")
 
         self.assertEqual(first.status, "PUBLICATION_UNKNOWN")
         self.assertEqual(second.status, "PUBLICATION_UNKNOWN")
@@ -87,9 +169,9 @@ class PublisherSafetyTests(unittest.TestCase):
         response = FakeResponse({"code": "400001", "message": "Rejected"})
         from urllib.error import HTTPError
         error = HTTPError("https://example.invalid", 400, "Bad Request", {}, io.BytesIO(b""))
-        with patch("main.urllib.request.urlopen", side_effect=error) as urlopen:
-            first = self.publisher.publish({"symbol": "SOL"}, "rejected content")
-            second = self.publisher.publish({"symbol": "SOL"}, "rejected content")
+        with patch("main._open_binance_publish_no_redirect", side_effect=error) as urlopen:
+            first = self._publish({"symbol": "SOL"}, "rejected content")
+            second = self._publish({"symbol": "SOL"}, "rejected content")
 
         self.assertEqual(first.status, "FAILED_CONFIRMED")
         self.assertEqual(second.status, "DUPLICATE_BLOCKED")
@@ -100,10 +182,10 @@ class PublisherSafetyTests(unittest.TestCase):
             "code": "000000",
             "data": {"id": "remote-after-db-error", "shareLink": "https://example.invalid/post/remote-after-db-error"},
         })
-        with patch("main.urllib.request.urlopen", return_value=response) as urlopen:
+        with patch("main._open_binance_publish_no_redirect", return_value=response) as urlopen:
             with patch.object(self.publisher.db, "save_post", side_effect=sqlite3.OperationalError("disk full")):
-                first = self.publisher.publish({"symbol": "XRP"}, "first content")
-            second = self.publisher.publish({"symbol": "XRP"}, "regenerated content")
+                first = self._publish({"symbol": "XRP"}, "first content")
+            second = self._publish({"symbol": "XRP"}, "regenerated content")
 
         self.assertEqual(first.status, "PUBLICATION_UNKNOWN")
         self.assertEqual(second.status, "PUBLICATION_UNKNOWN")
@@ -117,9 +199,9 @@ class PublisherSafetyTests(unittest.TestCase):
 
     def test_success_response_without_remote_id_is_unknown_and_not_retried(self):
         response = FakeResponse({"code": "000000", "data": {"shareLink": "https://example.invalid/no-id"}})
-        with patch("main.urllib.request.urlopen", return_value=response) as urlopen:
-            first = self.publisher.publish({"symbol": "ADA"}, "content without remote identity")
-            second = self.publisher.publish({"symbol": "ADA"}, "regenerated content")
+        with patch("main._open_binance_publish_no_redirect", return_value=response) as urlopen:
+            first = self._publish({"symbol": "ADA"}, "content without remote identity")
+            second = self._publish({"symbol": "ADA"}, "regenerated content")
 
         self.assertEqual(first.status, "PUBLICATION_UNKNOWN")
         self.assertEqual(second.status, "PUBLICATION_UNKNOWN")
@@ -189,8 +271,14 @@ class PublisherSafetyTests(unittest.TestCase):
             key = self.publisher._idempotency_key("LINK", "reserved content", [])
             content_hash = main.hashlib.sha256(b"reserved content").hexdigest()
             self.assertIsNone(self.publisher._begin_attempt(key, "LINK", content_hash))
-            with patch("main.urllib.request.urlopen") as urlopen:
-                result = second.publish({"symbol": "LINK"}, "different regenerated content")
+            coin, authorization, hashes = self._authorization(
+                {"symbol": "LINK"}, "different regenerated content",
+            )
+            with patch("main._open_binance_publish_no_redirect") as urlopen:
+                result = second.publish(
+                    coin, "different regenerated content",
+                    authorization=authorization, image_hashes=hashes,
+                )
             self.assertEqual(result.status, "PUBLICATION_UNKNOWN")
             urlopen.assert_not_called()
         finally:
@@ -234,10 +322,61 @@ class PublisherSafetyTests(unittest.TestCase):
         finally:
             check.close()
 
+    def test_operator_reconciliation_rejects_untrusted_or_mismatched_post_links(self):
+        from scripts.reconcile_publications import _validate_reconciliation_identity
+        self.assertEqual(
+            _validate_reconciliation_identity(
+                "remote-atom", "https://www.binance.com/square/post/remote-atom",
+            ),
+            "https://www.binance.com/square/post/remote-atom",
+        )
+        invalid_links = (
+            "http://www.binance.com/square/post/remote-atom",
+            "https://binance.com.evil.example/square/post/remote-atom",
+            "https://user:pass@www.binance.com/square/post/remote-atom",
+            "https://www.binance.com/square/post/different-id",
+            "https://www.binance.com/profile/remote-atom",
+        )
+        for link in invalid_links:
+            with self.subTest(link=link):
+                with self.assertRaisesRegex(ValueError, "HTTPS Binance Square"):
+                    _validate_reconciliation_identity("remote-atom", link)
+        with self.assertRaisesRegex(ValueError, "remote post ID"):
+            _validate_reconciliation_identity("remote atom", "")
+
     def test_operator_reconciliation_confirms_known_remote_id_without_network(self):
+        from layer1.publication_authorization import PublicationAuthorizationEngine
+        from layer1.content_generation import DraftStore
+        quota = PublicationAuthorizationEngine(self.publisher.db.conn)
+        reservation = quota.reserve_daily_quota(symbol="ATOM", daily_limit=6)
+        draft_hash = main.hashlib.sha256(b"pending content").hexdigest()
+        DraftStore(self.publisher.db.conn).save_draft(
+            "pending content", asset_id="coingecko:atom",
+            research_package_id="research:test:coingecko:atom",
+            editorial_brief_id="brief:test:" + draft_hash,
+            approved_claim_ids=("claim:verified:test",),
+        )
+        DraftStore(self.publisher.db.conn).save_text_validation(
+            draft_hash=draft_hash,
+            status="PASS", reasons=(), validation_version="content-verification-v1",
+        )
+        auth = quota.authorize(
+            symbol="ATOM", asset_id="coingecko:atom", content="pending content",
+            image_hashes=[], eligibility_snapshot_at=main.utc_now(),
+            eligibility_max_age_seconds=300, event_state="NO_EVENT",
+            evidence_status="VERIFIED", text_validation_status="PASS",
+            visual_validation_status="NOT_REQUIRED", quota_reservation_id=reservation,
+            duplicate_policy_passed=True,
+        )
         key = self.publisher._idempotency_key("ATOM", "pending content", [])
         digest = main.hashlib.sha256(b"pending content").hexdigest()
         self.assertIsNone(self.publisher._begin_attempt(key, "ATOM", digest))
+        attempt_id = self.publisher.db.conn.execute(
+            "SELECT id FROM publication_attempts WHERE idempotency_key=?", (key,),
+        ).fetchone()["id"]
+        quota.bind_attempt(reservation, attempt_id)
+        quota.mark_quota_status(reservation, "SUBMITTING")
+        quota.mark_quota_status(reservation, "PUBLICATION_UNKNOWN")
         import scripts.reconcile_publications as reconcile
         args = type("Args", (), {
             "action": "confirm-published", "attempt_id": 1,
@@ -246,7 +385,7 @@ class PublisherSafetyTests(unittest.TestCase):
             "remote_post_id": "remote-atom",
             "share_link": "https://www.binance.com/square/post/remote-atom",
         })()
-        with patch("main.urllib.request.urlopen") as urlopen:
+        with patch("main._open_binance_publish_no_redirect") as urlopen:
             reconcile.reconcile(self.publisher.db.conn, args)
         urlopen.assert_not_called()
         row = self.publisher.db.conn.execute(
@@ -257,6 +396,7 @@ class PublisherSafetyTests(unittest.TestCase):
         self.assertEqual(row["remote_post_id"], "remote-atom")
         self.assertEqual(row["reconciled_by"], "test-operator")
         self.assertEqual(row["reconciliation_note"], "Verified in Creator Center")
+        self.assertEqual(quota.quota_status(reservation), "PUBLISHED_CONFIRMED")
 
     def test_failed_reconciliation_requires_explicit_no_post_acknowledgement(self):
         key = self.publisher._idempotency_key("ETC", "ambiguous content", [])
@@ -272,7 +412,7 @@ class PublisherSafetyTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             reconcile.reconcile(self.publisher.db.conn, type("Args", (), base)())
         base["confirm_no_post_created"] = True
-        with patch("main.urllib.request.urlopen") as urlopen:
+        with patch("main._open_binance_publish_no_redirect") as urlopen:
             reconcile.reconcile(self.publisher.db.conn, type("Args", (), base)())
         urlopen.assert_not_called()
         row = self.publisher.db.conn.execute(

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from layer1.event_lifecycle import EventLifecycleStore
 from layer1.event_graph import (
     EventGraph,
     EventIntelligenceGraphEngine,

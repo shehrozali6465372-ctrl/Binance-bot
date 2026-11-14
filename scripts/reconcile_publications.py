@@ -6,14 +6,17 @@ This tool never performs network requests and never submits or retries a post.
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
+from urllib.parse import urlsplit
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from main import Database  # noqa: E402
+from layer1.publication_authorization import PublicationAuthorizationEngine  # noqa: E402
 
 
 UNRESOLVED = ("SUBMITTING", "PUBLICATION_UNKNOWN")
@@ -50,15 +53,49 @@ def show_attempt(conn, attempt_id: int):
     _print_row(row)
 
 
+def _validate_reconciliation_identity(remote_post_id: str, share_link: str) -> str:
+    if not isinstance(remote_post_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", remote_post_id.strip()):
+        raise ValueError("remote post ID has an invalid format")
+    link = share_link.strip() if isinstance(share_link, str) else ""
+    if not link:
+        return ""
+    try:
+        parsed = urlsplit(link)
+        match = re.fullmatch(r"/square/post/([A-Za-z0-9_-]{1,128})/?", parsed.path)
+        valid = (
+            parsed.scheme == "https"
+            and parsed.hostname in {"www.binance.com", "binance.com"}
+            and parsed.port in (None, 443)
+            and parsed.username is None and parsed.password is None
+            and not parsed.fragment
+            and match is not None
+            and match.group(1) == remote_post_id.strip()
+        )
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise ValueError("share link must be an HTTPS Binance Square post URL matching the remote post ID")
+    return link
+
+
 def reconcile(conn, args):
     if not args.note.strip() or not args.evidence.strip() or not args.operator.strip():
         raise SystemExit("--note, --evidence and --operator must be non-empty")
 
     if args.action == "confirm-published":
-        if not args.remote_post_id.strip():
+        if not isinstance(args.remote_post_id, str) or not args.remote_post_id.strip():
             raise SystemExit("--remote-post-id is required for confirm-published")
+        try:
+            validated_share_link = _validate_reconciliation_identity(
+                args.remote_post_id, getattr(args, "share_link", ""),
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
         target = "PUBLISHED_CONFIRMED"
     else:
+        if getattr(args, "share_link", ""):
+            raise SystemExit("--share-link is not valid when confirming that no post was created")
+        validated_share_link = ""
         if not args.confirm_no_post_created:
             raise SystemExit(
                 "Refusing: pass --confirm-no-post-created only after independently "
@@ -67,6 +104,7 @@ def reconcile(conn, args):
         target = "FAILED_CONFIRMED"
 
     try:
+        PublicationAuthorizationEngine(conn)
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM publication_attempts WHERE id = ?", (args.attempt_id,)
@@ -101,7 +139,7 @@ def reconcile(conn, args):
             WHERE id = ? AND status IN ('SUBMITTING', 'PUBLICATION_UNKNOWN')
             """,
             (
-                target, final_id or None, args.share_link.strip() or None,
+                target, final_id or None, validated_share_link or None,
                 args.note.strip(), args.evidence.strip(), args.operator.strip(),
                 f"Operator reconciliation: {target}", args.attempt_id,
             ),
@@ -109,6 +147,19 @@ def reconcile(conn, args):
         changed = conn.execute("SELECT changes()").fetchone()[0]
         if changed != 1:
             raise ValueError("Concurrent reconciliation detected; no state changed")
+        quota_rows = conn.execute(
+            "SELECT reservation_id, status FROM publication_quota_reservations "
+            "WHERE attempt_id=?",
+            (args.attempt_id,),
+        ).fetchall()
+        for quota_row in quota_rows:
+            if quota_row["status"] not in UNRESOLVED:
+                raise ValueError("Quota reservation is terminal or inconsistent with unresolved attempt")
+            conn.execute(
+                "UPDATE publication_quota_reservations SET status=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE reservation_id=? AND status IN ('SUBMITTING','PUBLICATION_UNKNOWN')",
+                (target, quota_row["reservation_id"]),
+            )
         conn.commit()
     except Exception:
         conn.rollback()

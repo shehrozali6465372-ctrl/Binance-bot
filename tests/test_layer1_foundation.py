@@ -965,6 +965,12 @@ class Layer1FoundationTests(unittest.TestCase):
             self.assertEqual(result["candidates"], 1)
             self.assertEqual(result["ready_asset_ids"], ["coingecko:bitcoin"])
             self.assertEqual(result["event_graph_summary"]["status"], "AVAILABLE")
+            self.assertEqual(result["claim_verification_summary"]["status"], "AVAILABLE")
+            self.assertEqual(
+                result["claim_verification_summary"]["coverage"],
+                "PERSISTED_SOURCE_RECORD_ASSERTIONS_ONLY",
+            )
+            self.assertGreater(result["claim_verification_summary"]["claim_count"], 0)
             self.assertGreater(result["event_graph_summary"]["entity_count"], 0)
             self.assertGreater(result["event_graph_summary"]["relationship_count"], 0)
             self.assertEqual(result["event_graph_summary"]["duplicate_cluster_count"], 1)
@@ -998,6 +1004,9 @@ class Layer1FoundationTests(unittest.TestCase):
                 self.assertIsNone(analysis_payload["return_24h_pct"])
                 self.assertIn("HISTORY_BASELINE_24H_UNAVAILABLE", analysis_payload["quality_flags"])
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_trend_signals").fetchone()[0], 3)
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM layer1_claim_verification_runs").fetchone()[0], 1
+                )
                 cluster_row = conn.execute(
                     "SELECT source_count, independent_source_count, signal_count, confidence_limit "
                     "FROM layer1_trend_clusters"
@@ -1016,6 +1025,13 @@ class Layer1FoundationTests(unittest.TestCase):
             self.assertEqual(cached_result["identity_proof_requests"], 0)
             self.assertEqual(cached_result["identity_proof_cache_hits"], 1)
             self.assertEqual(cached_result["identity_proof_verified"], 1)
+            conn = sqlite3.connect(self.db)
+            try:
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM layer1_claim_verification_runs").fetchone()[0], 1
+                )
+            finally:
+                conn.close()
         finally:
             main._binance_spot_pairs_cache = old_pairs
             main._binance_spot_snapshot_observed_at = old_snapshot

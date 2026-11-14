@@ -4,6 +4,18 @@ This register tracks whether the locked architecture contracts are reachable and
 
 ## 5.11 Module 11 — Evidence Verification Engine
 
+### Latest checkpoint — 2026-11-14 (PARTIAL; supersedes older verification counts below)
+
+- Focused verification: **47 passed, 0 failed**. Full repository suite: **398 passed, 0 failed, 12 skipped**. The 12 skips are PostgreSQL integration tests because `TEST_POSTGRES_DSN` is not configured.
+- Research-package claims now use deterministic atomic sentence/semicolon splitting, exact candidate `market_data_hash` linkage, exact rendered-number-to-source-value checks, currency-aware evidence matching, Binance Spot exchangeInfo evidence, announcement freshness evidence tied to title lineage, and local latest-200-publication-ledger evidence.
+- DeepSeek Phase 2 now rejects numeric tokens not present in the trusted verified/corroborated claim lines. The guard ignores hashtags and is intentionally a numeric consistency check, not a semantic fact checker.
+- Unknown content remains `UNCLASSIFIED` and blocks DeepSeek. Qualified analysis is kept separate from unresolved factual claims. Skills Hub metrics are excluded from LLM research packages until their source provenance is verified; their existing internal scoring path is not changed.
+- Market evidence retains exact provider event timestamps. Distinct snapshots are not collapsed into a UTC-minute bucket. The registry's package view selects the latest claim per asset/mapping/key/timeframe scope while preserving historical snapshots in append-only storage.
+- Module 9 freshness rules were not weakened. Only stale fixed timestamps in five Module 9 test fixtures were changed to current UTC-relative values; the affected batch passes 74/74.
+- Module 11 remains **PARTIAL**: trend/on-chain evidence is adapted but not yet surfaced comprehensively in research packages; non-numeric factual claims in generated posts still lack complete semantic validation; production persistence integration remains unverified. Do not start Module 12 until those acceptance gaps are resolved.
+
+Earlier checkpoint details below are historical and are superseded where counts or implementation descriptions differ.
+
 **Purpose:** Validate every material factual claim against attributable evidence.
 
 **Claim states:** `VERIFIED`, `CORROBORATED`, `UNVERIFIED`, `CONTRADICTED`, `STALE`.
@@ -23,6 +35,30 @@ This register tracks whether the locked architecture contracts are reachable and
 **Outputs:** Claim registry, evidence links, verification state and unresolved issue list.
 
 **Acceptance:** Unsupported claim cannot pass; number/date/entity mismatch caught; contradictions remain visible; stale claims fail; source lineage is retained.
+
+### Implementation checkpoint — 2026-11-14 (PARTIAL; NOT COMPLETE)
+
+- Added `layer1/evidence_verification.py` with typed `EvidenceRecord`, `Claim`, `ClaimVerificationResult` and `ClaimRegistry` models, stable SHA-256 IDs, deterministic verification, source adapters and an append-only `ClaimRegistryStore`.
+- The engine supports the five required states: `VERIFIED`, `CORROBORATED`, `UNVERIFIED`, `CONTRADICTED`, and `STALE`.
+- Evidence adapters reuse persisted announcement revisions, market observations and trend signals, plus matching Module 9 accepted observations / threshold-qualified aggregation summaries. Mapping IDs and original source lineage are retained.
+- Exact subject, asset/mapping identity, value, unit, timeframe, event time and status are compared. Publication, update and observation timestamps are retained separately; future/stale evidence does not pass.
+- Independent-source grouping unions shared source-family, content-hash and lineage identifiers, so syndicated copies do not count as independent. Contradictory accepted evidence is retained on both sides.
+- High-impact claims require an explicit freshness policy, a primary source and at least two independent source groups. Estimates, interpretations, hypotheses and unclassified drafts cannot be verified as facts.
+- `_persist_layer1_market_intelligence()` now rebuilds and persists source-record claim assertions. Package assembly creates unclassified sentence drafts, persists the package registry and appends a bounded verification register.
+- DeepSeek Phase 1 and Phase 2 now fail closed unless the final trusted register reports at least one verified/corroborated claim and zero unresolved claims. A marker-spoofing test ensures earlier untrusted text cannot override the appended register. Unsupported smart-money/trending/Alpha heuristic instructions and fabricated trade-level requirements were removed from the writing prompt.
+- Market snapshots retain exact provider event timestamps; publication/update/observation timestamps are not truncated for comparison or freshness checks.
+
+**Focused verification:** 30 tests passed, 0 failed (21 evidence-verification tests, 8 DeepSeek-generator tests and 1 Layer 1 runtime persistence integration test). Python compile check and `git diff --check` passed.
+
+The package-facing register selects the latest claim per asset/mapping/key/timeframe scope so historical stale market snapshots do not block current research. Announcement and individual on-chain transaction claims retain event-specific scope; the latest stale observation remains unresolved and blocks generation. Historical records remain in the append-only registry.
+
+**Full repository verification:** 381 tests ran: 320 passed, 48 errored, 1 failed, 12 skipped. All 49 non-passing tests are in existing Module 9 on-chain test files: 48 fixtures fail with `ONCHAIN_OBSERVATION_STALE`; one expects `ACCEPTED` but receives `UNAVAILABLE`. The 12 PostgreSQL integration tests were skipped because `TEST_POSTGRES_DSN` is not configured. No Module 11 test failed. The Module 9 failures were not changed or bypassed.
+
+**Remaining gaps — Module 11 is not complete:**
+- `split_atomic_claims()` currently segments sentences/semicolon clauses; it does not semantically split compound sentences or classify each factual statement.
+- Research-package sentence drafts are deliberately `UNCLASSIFIED`, carry no evidence IDs, and therefore keep the DeepSeek gate blocked. Structured mapping of every material sentence to evidence IDs and an explicit claim type is still required before the gate can be relaxed.
+- Current persistence uses the existing Layer 1 SQLite store. Integration with the final Module 21 / production persistence boundary has not been validated.
+- No live DeepSeek request, live RPC, production database write, publisher activation, Binance Square post, workflow change, merge or deployment was performed.
 
 ## 5.12 Module 12 — Event Lifecycle Intelligence
 
@@ -578,3 +614,179 @@ This checklist does not authorize the work to be marked done merely by checking 
 | 1.0 | 2026-11-09 | Initial locked 21-module architecture; recorded permanent open-source reuse, no-duplicate/no-useless-logic, no-fake production, Binance Spot-only eligibility, listed-asset-only on-chain analysis, direct DeepSeek API, Cloudflare Workers AI image generation, single publishing gateway and safe verification requirements. | 🔒 Locked baseline |
 
 **No repository code, runtime configuration, credentials, workflow, deployment, paid plan, or Binance Square publication was changed while authoring this architecture document.**
+
+
+## Latest continuation checkpoint — 2026-11-14 (supersedes previous test counts)
+
+### Module 11 incremental work
+- Added `EvidenceVerificationEngine.append_asset_evidence_context()` and wired it into `main._attach_claim_register()`. It surfaces accepted trend topics and threshold-qualified Module 9 summary IDs only for the exact canonical subject/asset. No cross-asset evidence is attached.
+- `claims_from_research_package()` now recognizes exact `Trend topic:` and `On-chain transfer summary ID:` lines. Trend claims link only matching topic-digest/subject/asset SOCIAL evidence. On-chain claims link only exact summary ID + subject/asset + accepted THRESHOLD_MET evidence, retaining mapping/network/event scope. Unknown trend topics remain unverified.
+- Added regression tests for exact linkage, unknown trend topic blocking and cross-asset isolation.
+- Evidence-verification focused tests: **36 passed**.
+- Cross-layer focused batch (evidence, event graph, DeepSeek client, on-chain aggregation/providers/workers/normalizers): **245 passed, 0 failed, 12 skipped**.
+- Full repository suite, after installing Pillow 13.0.0 into temporary `/tmp/binance-test-deps` only: **402 passed, 0 failed, 12 skipped**. The 12 skips are PostgreSQL integration tests without `TEST_POSTGRES_DSN`. The first run without Pillow had five import errors because the repository workflow installs Pillow but the remote test environment did not. No repository dependency or workflow file was changed to hide this.
+- `python -m compileall -q layer1 main.py image_engine.py tests` and `git diff --check` passed.
+
+### Module 15 direct DeepSeek update
+- Official current API documentation lists `deepseek-flash` and `deepseek-v4-pro`; the legacy `deepseek-chat` / `deepseek-reasoner` aliases were scheduled for discontinuation on 2026-07-24. The project default is now `deepseek-flash`, with explicit `DEEPSEEK_MODEL` override retained.
+- Requests explicitly set `thinking: {type: disabled}` for the current deterministic text-generation path and bounded token use.
+- Mocked direct API and configuration tests pass. No real API call was made; the runtime secret/workflow mismatch remains unchanged.
+
+### Remaining status — do not overstate completion
+- Module 11 remains **PARTIAL** because non-numeric semantic hallucination detection and the final production persistence boundary are not fully proven. The numeric guard is not a semantic fact checker.
+- Modules 12–21 remain unaudited/not verified against all acceptance criteria. In particular, Module 12 has an event graph but no demonstrated durable event lifecycle state machine; Module 14 currently defers scoring when its five required inputs are absent; Modules 19–20 do not yet have proven Cloudflare image inference plus final image/draft consistency validation; Module 21 requires deeper authorization, quota, idempotency, reconciliation and recovery audit.
+- Current workflow remains unchanged and still supplies Gemini variable names while runtime expects DeepSeek variables. No secret or workflow changes without explicit approval.
+- Cloudflare current model candidate: `@cf/black-forest-labs/flux-2-klein-4b`. Official docs list 10,000 free Neurons/day for Workers AI overall; free-plan model access and actual inference must be confirmed in the user's account before activation. No inference was run.
+- No commit, push, merge, deployment, real post, live RPC, production DB write, publisher activation or paid infrastructure provisioning occurred.
+
+
+## Module 12 implementation checkpoint — 2026-11-14
+
+### Implemented
+- Added `layer1/event_lifecycle.py` backed by the existing `Layer1Store` SQLite connection; no new database/service.
+- Stable event identity uses canonical asset + event type + stable provider source ID. Fingerprint-only CMS IDs are intentionally not merged across revisions because title edits cannot be reliably correlated.
+- Separate first-published, first-observed, last-source-update and effective-event timestamps.
+- Explicit legal transition map and append-only transition history, with source revision history and transactional current-state updates.
+- First observation enters `DISCOVERED → UNDER_VERIFICATION`; only Module 11 VERIFIED/CORROBORATED source claim evidence can confirm.
+- Stale source evidence transitions to `STALE`; duplicate old source observations cannot reopen it. Reopening stale/resolved state requires a new revision explicitly marked materially new and verified.
+- Resolution/withdrawal requires explicit verified resolution evidence; withdrawal is terminal.
+- Multi-asset announcements split into one event per canonical asset.
+- Wired announcement lifecycle synchronization into `_persist_layer1_market_intelligence` after the Module 11 claim registry is rebuilt.
+- Regression coverage includes legal transitions, exact verified source linkage, stale and unknown handling, multi-asset splitting, duplicate updates, fingerprint non-correlation, append-only history and restart recovery.
+- Module 12 focused tests: **12 passed**; event graph + lifecycle tests: **22 passed**.
+
+### Explicit remaining limitation
+- Runtime currently passes `materially_new=False` because the imported announcement evidence contains title/hash/timestamps but not enough normalized change semantics to prove materiality. The lifecycle API supports an explicit material-new flag, but automated classification of material changes is not yet proven. Module 12 is therefore **PARTIAL**, not complete.
+- Per-event-type stale TTL configuration and operator/reconciliation policy remain to be wired; do not apply a guessed global TTL.
+
+## 2026-11-14 — Modules 12–21 continuation status (local implementation; acceptance incomplete)
+
+### Implemented code and current status
+| Module | Current status | Evidence / code | Remaining acceptance gap |
+|---|---|---|---|
+| 11 Evidence verification | PARTIAL | layer1/evidence_verification.py; source adapters, exact trend/on-chain links, registry and numeric gate | Complete semantic sentence-to-evidence validation; semantic hallucination/causal coverage; production persistence boundary |
+| 12 Event lifecycle | PARTIAL | layer1/event_lifecycle.py; explicit state machine, disputed state, append-only transitions, multi-asset and restart tests | Automated material-change classification and source-specific freshness policy |
+| 13 Deep research | PARTIAL | layer1/research_package.py; versioned package, cutoff, evidence/source coverage, facts/inferences/disputed/unknown, idempotent persistence | Full bounded source acquisition/corroboration and complete sentence-level claim mapping |
+| 14 Opportunity evaluation | PARTIAL / FAIL-CLOSED | layer1/opportunity.py; hard gates, deterministic optional weighted scoring, persisted decisions | Approved weights and evidence-derived factor providers absent; runtime currently supplies no policy/factors and correctly returns DEFER |
+| 15 AI decision / DeepSeek | PARTIAL | layer1/deepseek_client.py; direct API client; official deepseek-flash model contract verified; mocked client tests | No authenticated live API test; GitHub Actions still maps Gemini secrets while runtime reads DeepSeek variables |
+| 16 Editorial strategy | PARTIAL | layer1/editorial_strategy.py; event/on-chain/market angle, prohibited claims, uncertainty and duplicate angle versioning | No live AI/editorial quality evaluation; no complete semantic duplicate-angle detection |
+| 17 Content generation | PARTIAL | layer1/content_generation.py; append-only draft versions, research/brief/claim provenance and validation ledgers | No live DeepSeek generation; exact generated content still needs stronger semantic verification |
+| 18 Content verification | PARTIAL | layer1/content_verification.py; canonical asset/ticker, claim states, numeric guard, prohibited trade/guarantee phrases | No full semantic factual/causal/repetition validator; numeric allowlist is not semantic proof |
+| 19 Image generation | PARTIAL | image_engine.py; direct Cloudflare FLUX.2 Klein 4B client, multipart and image-byte checks, deterministic composition and provenance sidecar | No real authenticated Workers AI inference, account access/cost validation or provider output evidence |
+| 20 Visual quality | PARTIAL | layer1/visual_quality.py; exact draft/image hash pair, PNG/dimensions/size/identity/metadata/overlay checks | No independent OCR/visual audit for contrast, clipping, readability or semantic mismatch |
+| 21 Publishing/persistence | PARTIAL | layer1/publication_authorization.py, main.py, scripts/reconcile_publications.py; immutable auth, daily quota, attempt binding, persisted validation and manual unknown-outcome reconciliation | PostgreSQL integration skipped; no production recovery drill/provider request; media upload currently precedes final publication authorization |
+
+### Verification (latest available)
+- Full suite completed before the final lifecycle edge-case test: 474 passed, 0 failed, 12 skipped.
+- New lifecycle/disputed-resolution regression plus the other focused integration gates: 56 passed, 0 failed.
+- The full suite was rerun after the latest changes; its result is being collected from /tmp/full-suite-2026-11-14-latest.log and must supersede earlier counts only after confirmed.
+- Twelve skipped tests are PostgreSQL integration tests requiring TEST_POSTGRES_DSN.
+- Python compileall and git diff --check passed in the latest focused batch.
+- No live DeepSeek API, Cloudflare inference, RPC, production DB write, Binance media upload or real Binance Square publication.
+
+### Official provider contract checks
+- DeepSeek official API docs: deepseek-flash and deepseek-v4-pro are listed model IDs; use current API contract, not retired aliases. https://api-docs.deepseek.com/api/create-chat-completion/ and https://api-docs.deepseek.com/api/list-models/.
+- Cloudflare official model page lists @cf/black-forest-labs/flux-2-klein-4b; model requires multipart form data and supports prompt, width and height. https://developers.cloudflare.com/workers-ai/models/flux-2-klein-4b/.
+- Official documentation verification is not the same as authenticated account entitlement or a real inference test.
+
+### Explicit release blockers
+- Do not mark Modules 11–21 complete: each has a documented remaining acceptance gap above.
+- Module 14 is deliberately fail-closed until the owner approves/calibrates a scoring policy and source-backed factor values; no fabricated weights.
+- Do not activate live publishing until the media-upload/authorization ordering, PostgreSQL persistence, workflow DeepSeek-secret mapping, and provider-safe recovery have been separately resolved and approved.
+- Do not commit, push, merge, deploy, change workflow/secrets/schedule, activate publisher or publish a real post without explicit approval.
+- Preserve current branch/worktree and continue the module-by-module audit; no duplicate implementations.
+
+## Final verification supersession — 2026-11-14 22:22 UTC
+- Final full suite: **478 passed, 0 failed, 12 skipped**. Skips are PostgreSQL integration tests without TEST_POSTGRES_DSN.
+- compileall and git diff --check passed; final log /tmp/full-suite-2026-11-14-final-final.log.
+- Cloudflare FLUX.2 Klein 4B request bounds now enforce the official 256–1920 width/height range; the upper-bound regression is included.
+- This is test evidence only; Modules 11–21 remain PARTIAL for the explicit acceptance gaps in the table above. No live provider inference or publishing was performed.
+
+## Latest Module 19–21 hardening — 2026-11-14
+- Module 19 image provenance is now persisted in image_generation_artifacts, including prompt hash, inference parameters, provider/model/request ID, timestamps, source and final image hashes, draft hash and canonical asset. Immutable exact-pair replay is idempotent; conflicting metadata for an existing pair is rejected.
+- Module 20 validates prompt hash and the official Cloudflare FLUX.2 Klein 4B generation bounds (256–1920) in addition to final image/draft hashes, format, dimensions and allowed overlays.
+- Module 21 authorization rejects noncanonical asset IDs, invalid ticker strings, duplicate image hashes and non-hex image digests.
+- Added IMAGE_REQUIRED (default true). Generation/visual QA failure, required media-upload failure or image-pipeline exception blocks publication. Text-only operation requires explicit IMAGE_REQUIRED=false; dry-run does not call Binance media upload.
+- Repository search confirms one live publisher.publish() call site in main.py. ImageUploader's media endpoints are separate and are not a second publication gateway.
+- Focused regression batch: 28 passed, 0 failed. Latest full suite: **483 passed, 0 failed, 12 skipped**; skips require TEST_POSTGRES_DSN. compileall and git diff --check passed.
+- This is deterministic test evidence, not proof of real Cloudflare inference, Binance media upload, PostgreSQL persistence or live publication. Modules 11–21 remain PARTIAL as listed above.
+
+## Module 19–20 provenance persistence update — 2026-11-14
+- Added durable local SQLite image-generation artifact records to DraftStore with canonical artifact ID, exact hashes, provider/model/request metadata, prompt hash, generation parameters, asset identity and image path. The pipeline writes this before visual validation.
+- Visual QA enforces prompt provenance and official Cloudflare model request bounds (256–1920), plus supported output format. Added regression coverage.
+- Verification: full suite **483 passed, 0 failed, 12 skipped**; compileall and git diff --check passed. PostgreSQL tests remain skipped; no real provider call/upload/publication occurred.
+- Module 19/20 remain PARTIAL: persistence is currently SQLite-only, no authenticated Cloudflare inference, and no independent OCR/visual semantic QA.
+
+## Module 21 safety refinement — 2026-11-14
+- Fixed a real dry-run side-effect gap: generated images were being uploaded to Binance media endpoint even with DRY_RUN=1. Upload now requires explicit non-dry-run and an existing image path; regression test covers dry-run/no-image/live-eligible predicate.
+- Verification: full suite **484 passed, 0 failed, 12 skipped**; compileall and git diff --check passed.
+- Live-mode media upload still precedes final publication authorization; this is not considered resolved and remains a production release blocker.
+
+## Module 21 publication-order fix — 2026-11-14
+- **Resolved:** media upload previously happened before final publication authorization. Pipeline now persists exact image artifact, passes visual QA, revalidates Spot, reserves quota and persists immutable authorization before media upload. The upload helper verifies authorization integrity and exact draft/image binding before invoking the external upload callback. Upload failure releases reservation and aborts; dry-run never uploads.
+- Regression tests cover missing/tampered authorization and exact image/draft hash binding. Static call order: authorize → upload_authorized_image → publisher.publish.
+- Verification: **486 passed, 0 failed, 12 skipped**; compileall and git diff --check passed. No real media upload or post performed.
+- Remaining Module 21 gaps: PostgreSQL integration suite unavailable without TEST_POSTGRES_DSN; no production DB/recovery drill; no live API side-effect test. Treat this particular ordering defect as fixed, not all of Module 21.
+
+## Module 15 strict response and bounded retry update — 2026-11-14
+- Direct client now rejects any response that is not the expected chat.completion object, exact configured model, non-empty response ID, finish_reason=stop, non-empty text and text-only (no refusal/tool_calls). In particular, length/content_filter/aborted/tool_calls/unknown finish reasons fail closed because official DeepSeek docs state length may be truncated.
+- Added bounded exponential retry for transient HTTP 408/429/500/502/503/504 and transport failures only; auth errors do not retry. Response ID, model, token counts and measured latency are retained/logged safely.
+- Official contract: https://api-docs.deepseek.com/api/create-chat-completion/.
+- Focused DeepSeek tests: 27 passed, 0 failed; full-suite verification pending. No authenticated live API request.
+
+## Module 19/21 media transport security update — 2026-11-14
+- Presigned upload URL allowlist and HTTPS/port/userinfo/query/fragment checks are enforced before PUT and again inside the low-level upload method. Final processed media URL must be the Binance CDN host bin.bnbstatic.com or subdomain.
+- Sensitive presigned URLs, file tickets and response bodies were removed from logs.
+- Regression tests cover SSRF-style destinations and invalid final media hosts. Focused batch: 32 passed, 0 failed; static checks passed.
+- Still requires a safe authenticated provider validation to confirm the current real storage/CDN hostnames; no external upload performed.
+
+## Final current verification — 2026-11-14 22:58 UTC
+- Latest full suite after all changes in this checkpoint: **495 passed, 0 failed, 12 skipped**. 12 skipped require TEST_POSTGRES_DSN.
+- compileall and git diff --check passed. Log: /tmp/full-suite-2026-11-14-no-redirect.log.
+- Binance media upload presigned URL, image-status and PUT calls now reject redirects; they use an HTTP opener with redirect handling disabled. This prevents silent destination changes.
+- Module 19/21 still need real authenticated provider/media validation; no live upload, DeepSeek request or Square post has been made.
+
+## Module 19/21 no-redirect transport hardening — 2026-11-14
+- Binance media API and presigned PUT operations now disable HTTP redirects to prevent destination changes after URL/key validation.
+- Regression coverage added. Latest full suite: **495 passed, 0 failed, 12 skipped**; compileall and git diff --check passed.
+- No live media upload performed; provider's current returned hostnames remain to be validated through an approved safe authenticated test.
+
+## Module 17 draft provenance integrity update — 2026-11-14
+- Fixed immutable provenance idempotency: an identical draft hash cannot silently be rebound to a different research package or approved claim set. Conflicting provenance now raises and requires a new editorial brief/version.
+- Input validation strengthened for claim-ID sequences and text/visual validation hash/status/version/reason schemas.
+- Focused regression batch: 24 passed, 0 failed; full-suite rerun pending.
+
+## Module 21 exact draft provenance binding — 2026-11-14
+- Authorization payload now binds draft_id, research_package_id, editorial_brief_id, approved_claim_ids and a provenance digest, not only text/image hashes.
+- Authorization requires persisted exact draft and source/brief/claim references plus persisted PASS validation. Publisher rechecks the exact draft/provenance immediately before network POST and releases quota on mismatch/missing row.
+- Added regression for no persisted draft and DB tampering of approved claim IDs; focused batch 44 passed, 0 failed. Full suite pending.
+
+## Latest verification and provider readiness — 2026-11-14 23:05 UTC
+- Full suite after Module 21 exact draft provenance binding: **499 passed, 0 failed, 12 skipped**; compileall and git diff --check passed. PostgreSQL tests skipped due missing TEST_POSTGRES_DSN.
+- Local execution environment has no DEEPSEEK_API_KEY, SQUARE_API_KEY, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, DATABASE_URL or TEST_POSTGRES_DSN configured; no .env files present.
+- Workflow currently maps Gemini secret/model but runtime expects DeepSeek secret/model; Cloudflare credentials are not mapped; DRY_RUN remains "1". No workflow/secret changes made.
+- Live provider integration is blocked until correct credentials/config are provisioned and an explicit safe non-publishing provider test is approved. No actual external request/upload/post has been made.
+
+## Module 21 publish/reconciliation URL hardening — 2026-11-14
+- Square publication POST redirects are disabled to prevent API-key/body forwarding to a new host.
+- Manual reconciliation validates remote IDs and supplied Binance Square links against official HTTPS host and exact post ID/path; a failure decision cannot include a share link.
+- Focused publisher/reconciliation tests: 31 passed, 0 failed; full suite pending.
+
+## Module 21 latest gateway verification — 2026-11-14
+- Square publish POST no longer follows redirects; operator reconciliation validates official HTTPS Binance post links and exact remote post IDs.
+- Production code search found exactly one content/add endpoint reference (PostPublisher.API_URL in main.py).
+- Full suite: **501 passed, 0 failed, 12 skipped**; compileall and git diff --check passed. No real post.
+
+## Module 11 asset isolation update — 2026-11-14
+- Base registry was global across candidate assets; candidate-specific drafting now scopes the registry to exact canonical asset ID before rendering/number allowlisting. Other-asset evidence cannot leak into a draft's context. Cross-asset evidence references become unresolved.
+- Focused tests: 153 passed, 0 failed; full suite pending.
+
+## Module 11 current verification — 2026-11-14 23:12 UTC
+- Asset-scoped claim registry implementation passed full suite: **503 passed, 0 failed, 12 skipped**. compileall and git diff --check passed.
+- 12 skipped require TEST_POSTGRES_DSN. Semantic sentence-level attribution remains an explicit acceptance gap.
+
+## CI fixture failure diagnosis — 2026-11-15
+- GitHub Actions run `43602790623` was inspected. Its 49 non-passing tests (48 errors, 1 failure) were caused by hard-coded 2026-11-11 on-chain test fixture timestamps running on 2026-11-14; the production freshness validator correctly returned `ONCHAIN_OBSERVATION_STALE`.
+- The preserved local continuation worktree replaces those fixed fixture timestamps with current UTC-relative fixture data. No freshness policy or production validation was relaxed.
+- Corrected focused Module 9 test batch: **74 passed, 0 failed**. Full local suite: **503 passed, 0 failed, 12 skipped**; the skips are PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`.
+- Static checks (`compileall`, `git diff --check`) pass. The corrected worktree remains uncommitted/unpushed, so the remote CI result is still the failure on the old committed files until a reviewed checkpoint is pushed and CI rerun.

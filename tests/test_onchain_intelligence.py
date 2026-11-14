@@ -1,5 +1,7 @@
 import unittest
 
+from datetime import datetime, timedelta, timezone
+
 from layer1.foundation import EligibilityDecision
 from layer1.onchain import (
     OnChainAssetMapping,
@@ -10,15 +12,19 @@ from layer1.onchain import (
 )
 
 
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
+
+
 def eligible_decision(asset_id, symbol):
+    proof_time = (NOW - timedelta(minutes=2)).isoformat()
     return EligibilityDecision(
         status="ELIGIBLE", asset_id=asset_id, symbol=symbol,
         eligible_pairs=(f"{symbol}USDT",),
-        verified_at="2026-11-11T12:00:00+00:00",
+        verified_at=proof_time,
         identity_proof_status="VERIFIED",
         identity_proof_source="coingecko_coin_tickers",
-        identity_proof_verified_at="2026-11-11T12:00:00+00:00",
-        identity_proof_source_timestamp="2026-11-11T12:00:00+00:00",
+        identity_proof_verified_at=proof_time,
+        identity_proof_source_timestamp=proof_time,
         identity_proof_data_hash="a" * 64,
     )
 
@@ -47,7 +53,7 @@ class OnChainIntelligenceTests(unittest.TestCase):
             mapping_status="VERIFIED",
             source_type="OFFICIAL_NETWORK",
             source_url="https://bitcoin.org/",
-            verified_at="2026-11-11T12:00:00+00:00",
+            verified_at=(NOW - timedelta(hours=2)).isoformat(),
         )
         self.observation = OnChainObservation(
             observation_id="btc-block-900000-tx-1",
@@ -61,8 +67,8 @@ class OnChainIntelligenceTests(unittest.TestCase):
             block_height=900000,
             block_hash="a" * 64,
             transaction_hash="b" * 64,
-            block_time="2026-11-11T11:59:00+00:00",
-            observed_at="2026-11-11T12:00:00+00:00",
+            block_time=(NOW - timedelta(minutes=1)).isoformat(),
+            observed_at=NOW.isoformat(),
             finality="CONFIRMED",
             finality_reference="confirmations=6",
         )

@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from layer1.foundation import EligibilityDecision
 from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine, OnChainObservation, OnChainStore
@@ -12,11 +12,11 @@ from layer1.onchain_bitcoin_worker import BitcoinAddressIngestionWorker
 ADDRESS = "bc1q" + "a" * 38
 TXID = "a" * 64
 HASH = "b" * 64
-NOW = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 def history(txid=TXID, height=100, confirmations=8, block_hash=HASH):
-    return BitcoinAddressTransaction(txid, confirmations, height, block_hash, 1794398400,
+    return BitcoinAddressTransaction(txid, confirmations, height, block_hash, int(NOW.timestamp()) - 600,
                                      "CONFIRMED", {"txid": txid})
 
 
@@ -44,7 +44,7 @@ class FakeBitcoinProvider:
 
     def fetch_bitcoin_block_header(self, height):
         return self.headers.get(height, {
-            "number": height, "hash": HASH, "timestamp": 1794398400 + height,
+            "number": height, "hash": HASH, "timestamp": int(NOW.timestamp()) - (110 - height) * 60,
         })
 
     def fetch_bitcoin_address_transactions(self, address, page, page_size, from_height, to_height):
@@ -71,7 +71,7 @@ class BitcoinAddressIngestionWorkerTests(unittest.TestCase):
         self.mapping = OnChainAssetMapping(
             "bitcoin-native-v1", "coingecko:bitcoin", "BTC", "bitcoin-mainnet",
             "UTXO", "bitcoin-mainnet", "NATIVE", None, None, 8, "VERIFIED",
-            "OFFICIAL_NETWORK", "https://bitcoin.org", "2026-11-11T10:00:00+00:00")
+            "OFFICIAL_NETWORK", "https://bitcoin.org", (NOW - timedelta(hours=2)).isoformat())
         stamp = NOW.isoformat()
         eligibility = EligibilityDecision(
             status="ELIGIBLE", asset_id="coingecko:bitcoin", symbol="BTC",
