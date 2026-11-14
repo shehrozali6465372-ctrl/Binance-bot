@@ -93,11 +93,11 @@ class Layer1FoundationTests(unittest.TestCase):
         self.assertEqual(len(context.config_hash), 64)
 
     def test_module1_live_mode_requires_generation_and_publisher_credentials(self):
-        with self.assertRaisesRegex(ValueError, "GEMINI_API_KEY"):
-            replace(main.CONFIG, dry_run=False, gemini_api_key="", square_api_key="configured").validate()
+        with self.assertRaisesRegex(ValueError, "DEEPSEEK_API_KEY"):
+            replace(main.CONFIG, dry_run=False, deepseek_api_key="", square_api_key="configured").validate()
         with self.assertRaisesRegex(ValueError, "SQUARE_API_KEY"):
-            replace(main.CONFIG, dry_run=False, gemini_api_key="configured", square_api_key="").validate()
-        replace(main.CONFIG, dry_run=True, gemini_api_key="", square_api_key="").validate()
+            replace(main.CONFIG, dry_run=False, deepseek_api_key="configured", square_api_key="").validate()
+        replace(main.CONFIG, dry_run=True, deepseek_api_key="", square_api_key="").validate()
 
     def test_module1_boolean_environment_values_are_strict(self):
         self.assertTrue(main._parse_env_bool("DRY_RUN", "true", default=False))

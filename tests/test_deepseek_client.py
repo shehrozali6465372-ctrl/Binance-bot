@@ -48,10 +48,9 @@ class DeepSeekClientTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["stream"], False)
         self.assertEqual(captured["headers"]["Authorization"], "Bearer test-secret")
 
-    def test_missing_choices_is_rejected(self):
+    def test_missing_choices_returns_no_response_without_raising(self):
         client = self._client(lambda request, timeout: FakeResponse({"choices": []}))
-        with self.assertRaises(ValueError):
-            client.chat("prompt")
+        self.assertIsNone(client.chat("prompt"))
 
     def test_empty_content_returns_no_response(self):
         client = self._client(lambda request, timeout: FakeResponse({

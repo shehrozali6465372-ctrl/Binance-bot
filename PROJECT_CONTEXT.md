@@ -966,3 +966,39 @@ Implement PostgreSQL schema/migration and real PostgreSQL transaction/concurrenc
 - Cloudflare Workers AI image generation has not been implemented or runtime-verified.
 - Modules 11–21 remain unverified/partial until each is mapped against code and tested. No real Binance Square post has been made.
 - Do not report the added client as full completion of Module 15, and do not report all 21 modules complete.
+
+
+## 2026-11-14 — DeepSeek runtime verification and workflow compatibility checkpoint
+
+### Exact continuation state
+- Continuation branch: `layer-1/module9-onchain-continuation`.
+- Verified branch HEAD before this checkpoint's test/documentation changes: `bbb71fc6056afa5a998fddf602eb46a0c02ae779` (`feat(ai): wire Layer 1 content generation to DeepSeek`).
+- This branch is separate from PR #13. PR #13 remains open, Draft and unmerged.
+- Verification was performed in a new isolated worktree at `/tmp/binance-deepseek-verify`. The pre-existing `/tmp/binance-layer1-audit` worktree, including its modified and untracked Module 9 files, was preserved. The unrelated `/root/Binance-bot` CMS-worker worktree and its three modified files were also preserved.
+- No worktree was switched, reset, cleaned, or overwritten to obtain this verification checkout.
+
+### DeepSeek integration findings
+- `main.py` defines `Config` with `deepseek_api_key`, `deepseek_model`, temperature/top-p/output-token settings, and reads `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL`.
+- `DeepSeekGenerator` is wired into both existing runtime entrypoints (`main()` and `main_loop()`). Its `decide()` and `generate()` methods call the direct `layer1.deepseek_client.DeepSeekClient`.
+- Missing `DEEPSEEK_API_KEY` fails closed: `decide()` returns an empty ranking and `generate()` returns empty content. A failed/empty Phase 2 generation reaches the existing early return before the publisher call. No alternate AI provider is invoked.
+- Existing database field `gemini_decision`, scoring constant names, and historical Gemini wording remain compatibility/history artifacts; they were not renamed indiscriminately.
+- Updated the stale application Config test from Gemini to DeepSeek fields. Updated the malformed-client-response test to assert the actual client contract: invalid response structure returns `None` rather than propagating a `ValueError`.
+- Added `tests/test_deepseek_generator.py` covering Config environment loading, mocked `decide()`, mocked `generate()`, missing-key fail-closed behavior, no legacy-provider fallback, and the empty-content-before-publisher guard.
+- No live DeepSeek API request was made; all generator/client tests use deterministic mocks/fake transport.
+
+### Fresh verification evidence
+- Focused DeepSeek + foundation + market-analysis + announcement-importer/runtime + publisher-safety batch: **144 passed, 0 failed**.
+- Python compile check for `main.py`, DeepSeek client, and touched tests: passed.
+- `git diff --check`: passed.
+- Full repository discovery was also attempted: **346 tests ran, 1 failed, 48 errored, 12 skipped**. The failures are outside the DeepSeek-focused batch and predominantly originate in Module 9 fixture/observation freshness (`ONCHAIN_OBSERVATION_STALE`); one on-chain intelligence fixture returned `UNAVAILABLE` where it expected `ACCEPTED`. The 12 PostgreSQL integration tests were skipped because `TEST_POSTGRES_DSN` was absent. These failures have not been changed as part of Task 1 and must not be represented as a green full suite.
+
+### Workflow/configuration mismatch — documented, not changed
+- `.github/workflows/run_bot.yml` still supplies `GEMINI_API_KEY` and `GEMINI_MODEL`; current application Config reads `DEEPSEEK_API_KEY` and `DEEPSEEK_MODEL`. Therefore the workflow does not currently supply the API key/model fields expected by the DeepSeek runtime.
+- Workflow still explicitly sets `DRY_RUN: "1"`. This safety setting was not changed.
+- Safe compatibility plan only: keep the workflow, secrets, schedule, permissions, and activation untouched until the owner approves a separate change. Before any approved workflow migration, verify the intended official DeepSeek model ID and secret availability, then propose replacing the workflow environment mapping with `DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}` and an explicit `DEEPSEEK_MODEL`; do not add Gemini fallback or expose/modify secret values. Keep `DRY_RUN: "1"` throughout test and staging validation. No workflow_dispatch or scheduled workflow was triggered during this checkpoint.
+
+### Safety
+- No Codex use.
+- No live DeepSeek request, live RPC, production database write, production credential/secret/schedule change, publisher activation, Binance Square publication, commit to `main`, merge, or deployment.
+- The new test changes and this checkpoint are local to the isolated verification worktree at the time of writing; they require a reviewed commit to the designated continuation branch before they become canonical remote history.
+- Module 15 is not declared complete, and Modules 10–21 are not declared complete. Proceed to Modules 10–14 only after the DeepSeek test changes are reviewed and recorded on the continuation branch; do not repeat completed Modules 1–9.
