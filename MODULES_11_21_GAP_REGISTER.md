@@ -827,3 +827,8 @@ This checklist does not authorize the work to be marked done merely by checking 
 - The workflow remains `DRY_RUN: "1"`; schedule, Square key mapping, permissions, and publisher safety controls were not changed. No real post or live media upload was performed.
 - Added regression assertions; focused workflow/importer and DeepSeek client tests: **19 passed**. YAML parse/binding assertions, compileall and `git diff --check` passed. Full suite / remote CI confirmation pending because Pillow is missing in the available local Python runtime.
 - Workflow change is local only until pushed; actual scheduled GitHub Actions execution against DeepSeek has not yet been verified.
+
+## Workflow integration CI confirmation — 2026-11-15
+- GitHub Actions run `43644649579` for commit `2b8a3ec959d465a747fa54a51736e63fa459e475` completed **SUCCESS**. The mocked safety job compiled the project and ran the full unittest discovery: **510 passed, 0 failed, 12 skipped**. The 12 skips require `TEST_POSTGRES_DSN`.
+- This verifies mocked safety and test suite compatibility with the workflow change. It is not a live DeepSeek/Cloudflare provider check and does not establish that the scheduled `run_bot.yml` workflow has successfully completed a provider-backed run.
+- PR #14 remains Draft/open/unmerged. `DRY_RUN=1` remains set; no live inference, media upload or real Square post was triggered.

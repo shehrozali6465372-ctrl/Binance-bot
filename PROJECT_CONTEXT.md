@@ -1397,3 +1397,10 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - Verification: focused workflow/importer and DeepSeek client suite **19 passed**; workflow YAML parsed successfully and the expected DeepSeek, Cloudflare, database, and DRY_RUN bindings were asserted; `python -m compileall -q main.py image_engine.py layer1 scripts tests` and `git diff --check` passed.
 - A broader test collection including runtime integration was blocked because Pillow (`PIL`) is absent in available remote Python environments. No package was installed. Full repository suite and GitHub Actions confirmation remain pending.
 - No live DeepSeek request, Cloudflare inference/upload, production database write, publisher activation, real Square post, merge, or deployment was performed. Workflow edits are local only at this checkpoint; do not claim GitHub Actions is already using the new mapping until the change is pushed and a successful run is observed.
+
+## Workflow integration CI confirmation — 2026-11-15
+- GitHub Actions run `43644649579` for exact commit `2b8a3ec959d465a747fa54a51736e63fa459e475` completed **SUCCESS**. Job `mocked-safety-tests` completed all steps successfully.
+- The GitHub-hosted CI environment installed Pillow, compiled the project, and ran `python -m unittest discover -s tests -v`: **510 tests ran, OK, 12 skipped**. The 12 skips are PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`.
+- This is mocked safety CI, not a live provider execution. It does not prove the DeepSeek API key works, Cloudflare inference works, or the scheduled `run_bot.yml` workflow has completed a provider-backed run.
+- PR #14 remains Draft, open, unmerged, and mergeable. Its description was refreshed to show the workflow mapping and remaining release blockers.
+- The workflow continues to preserve `DRY_RUN=1`; no workflow_dispatch, scheduled provider inference, media upload, production database write, or real Binance Square post was initiated by this work.
