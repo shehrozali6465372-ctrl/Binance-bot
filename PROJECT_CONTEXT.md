@@ -537,3 +537,29 @@ This section supersedes earlier status/gap statements above where they conflict.
 - Required repository Actions secrets (values must never be committed or sent in chat): `BINANCE_API_KEY`, `BINANCE_API_SECRET`, and `BINANCE_ANNOUNCEMENT_DATABASE_URL` (dedicated worker-role PostgreSQL URL with `sslmode=verify-full`). The secret values have not been configured or verified yet.
 - Added `announcement-worker/test/scheduled-workflow.test.js`; focused workflow guard tests passed 5/5 locally on Node v22.23.1. After the change, `npm ci --omit=dev` installed 48 packages and reported 0 vulnerabilities; full Node suite passed 42 tests with 1 expected PostgreSQL integration skip; Python Layer 1 suite passed 65/65; compileall, YAML parse, and `git diff --check` passed. GitHub Actions push run `42834842465` and PR run `42834856446` both completed SUCCESS on commit `1e68450a8ba1aa54baa00a9bf124e169b0e2bbf2`; all three jobs passed in both runs, including disposable PostgreSQL 16 role/TLS integration. The new schedule itself was not dispatched or run.
 - GitHub schedule events execute only from the default branch (`main`, verified from repository metadata). This workflow remains dormant while it exists only on `feature/binance-cms-announcement-worker`. PR #2 currently targets `layer-1/completion-hardening`, not the default branch, so merging PR #2 into its current base alone will NOT activate the schedule. The workflow must separately reach `main` through an explicitly approved integration path. No PR-base change, merge, dispatch, deployment, secret write, live CMS connection, or real Square post was performed.
+
+## Waiting list — CMS announcement delivery and historical gap recovery (2026-11-14 UTC)
+
+### Verified current checkpoint
+- Branch: `feature/binance-cms-announcement-worker`.
+- Branch HEAD verified from GitHub: `a99cd5be9a3ae8dbe5e655d8a9ed0eef00a6a911`.
+- Render service `binance-cms-announcement-worker` was last observed `not_suspended` on the Free plan. WebSocket heartbeat/pong activity was visible through approximately 2026-11-14 10:35:51 UTC.
+- Neon staging state at approximately 10:36 UTC: `status=LISTENING`, `last_error=NULL`, `last_message_at=NULL`, `last_persisted_at=NULL`, and `binance_announcement_events` row count = 0.
+- No CMS announcement message receipt or successful persistence has yet been evidenced. A heartbeat/pong proves transport responsiveness only; it does not prove message delivery or feed completeness. The `/health` endpoint is a basic process health response, not a CMS/DB end-to-end delivery check.
+- `PUBLIC_SERVICE_URL` is user-confirmed as configured; its actual Render environment value has not been independently read. The 13-minute self-request is only a mitigation against idle spin-down, not a guarantee that a Free service will never sleep.
+
+### Existing Layer 1 importer finding
+- Existing `layer1/announcement_importer.py` was inspected. It executes a bounded SELECT against the existing `binance_announcement_events` PostgreSQL ledger (default seven-day lookback, max 250 rows), uses PostgreSQL `sslmode=verify-full` and `default_transaction_read_only=on`, matches only unambiguous explicit parenthesized candidate tickers, then writes validated evidence into the existing Layer 1 SQLite store.
+- This importer does NOT query Binance's website/CMS for historical announcements and cannot recover records that were never inserted into the PostgreSQL ledger. With the current ledger row count of zero, it has no CMS event rows to reconcile.
+- Existing README documents no historical replay guarantee for the CMS WebSocket stream. Reconnection resumes future events but cannot establish recovery of announcements missed before connection or during gaps.
+
+### Waiting list / next actions (do not duplicate completed inspection)
+1. **Live delivery proof:** continue read-only monitoring of the existing Render worker and Neon staging state. When a genuine new Binance CMS announcement arrives, verify the message-handler log, `last_message_at`, `last_persisted_at`, and a corresponding Neon ledger row. Do not inject fake events or publish a Square post.
+2. **Historical source research:** determine whether Binance exposes an official, supported historical announcement listing/API/feed that can safely be used for gap reconciliation. Do not assume the CMS WebSocket itself supports replay.
+3. **Recovery design:** only if an authoritative source is verified, design a separate staging-only importer/reconciliation path with deduplication and provenance. Preserve the existing read-only PostgreSQL importer permissions and do not alter production publisher behavior.
+4. **Operational reliability:** assess Free Render sleep/restart limitations and whether the configured self-request is actually reaching public ingress. Do not claim guaranteed always-on operation or complete feed coverage.
+5. **Before any implementation:** re-fetch branch, HEAD, working tree/relevant files and current Neon/Render state. Do not edit code, change secrets/environment, dispatch or modify workflows, commit, push, merge, deploy, provision paid infrastructure, or touch publisher credentials/schedules without separate explicit approval.
+
+### Change-safety record
+- This update records findings and pending work only. No application code, database rows/schema/credentials, Render configuration, GitHub Actions workflow, publisher workflow, schedule, or deployment was changed.
+- No Codex was used. No real Binance Square post was published.
