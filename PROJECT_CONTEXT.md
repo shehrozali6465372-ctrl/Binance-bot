@@ -1000,5 +1000,5 @@ Implement PostgreSQL schema/migration and real PostgreSQL transaction/concurrenc
 ### Safety
 - No Codex use.
 - No live DeepSeek request, live RPC, production database write, production credential/secret/schedule change, publisher activation, Binance Square publication, commit to `main`, merge, or deployment.
-- Task 1 verification changes were reviewed and committed on the designated continuation branch as `65a0aa2224883aeef2c02b5968dc91519fbbda6e` (`test(ai): verify DeepSeek runtime integration`). This commit is local pending push; no other branch was modified.
+- Task 1 verification changes were committed as `65a0aa2224883aeef2c02b5968dc91519fbbda6e` (`test(ai): verify DeepSeek runtime integration`) and the checkpoint was committed as `a7fe1368b7a8dd5a67abe4e2371efcd46f28cde` (`docs: record DeepSeek verification checkpoint`). Both commits were pushed to `layer-1/module9-onchain-continuation`; remote HEAD was verified at `a7fe1368b7a8dd5a67abe4e2371efcd46f28cde`. No other branch was modified.
 - Module 15 is not declared complete, and Modules 10–21 are not declared complete. Proceed to Modules 10–14 only after the DeepSeek test changes are reviewed and recorded on the continuation branch; do not repeat completed Modules 1–9.
