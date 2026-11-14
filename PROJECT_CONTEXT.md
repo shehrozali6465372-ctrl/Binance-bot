@@ -1364,3 +1364,12 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - The Module 11 unmatched-announcement-detail fix and its tests were committed as `43f5329103fc48772ce10503d55cac9349a9843e` and pushed to `layer-1/module9-onchain-continuation`.
 - GitHub Actions run `43640134763` for this exact commit completed **SUCCESS**. PR #14 was updated with the final local verification counts and current release blockers; it remains Draft, open, unmerged and mergeable.
 - Local working tree was clean immediately after the push. No production integration or publishing actions were taken.
+
+
+## Module 12 material event-time revision detection — 2026-11-15
+- Closed one deterministic lifecycle gap: `sync_announcements()` previously passed `materially_new=False` unconditionally, so a verified source revision that explicitly changed the event's effective `event_at` could never move a CONFIRMED event to DEVELOPING.
+- Added conservative comparison against the prior persisted revision payload. Only an explicit change to `event_at` is treated as material. Content-hash changes, `updated_at` changes, observation timestamps, and unchanged event times are not material by themselves.
+- Added two TDD regressions: verified event-time change transitions to DEVELOPING; content-hash/source-update-only revision remains CONFIRMED. The first test failed before the implementation and both pass after.
+- Full repository suite with the project virtualenv: **509 passed, 0 failed, 12 skipped** in 32.184s. The 12 skips require `TEST_POSTGRES_DSN`. `python -m compileall -q layer1 tests` and `git diff --check` pass.
+- This is a narrow Module 12 fix, not full material-change classification. Meaningful body/title changes cannot be judged from the currently persisted announcement schema alone; do not infer materiality from a hash/title change. Full event semantic-diff remains open.
+- No live provider call, DB production write, media upload, real Square post, credential/workflow/schedule change, merge or deployment. Local worktree contains this code/test/doc update pending push and CI confirmation.

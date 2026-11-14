@@ -264,6 +264,25 @@ class EventLifecycleStore:
                 self._transition(event_id, current_state, target, reason, evidence_refs, now)
             return self.get(event_id)
 
+    @staticmethod
+    def _has_material_event_time_change(previous_payload_json: Optional[str],
+                                        evidence: AnnouncementEvidence) -> bool:
+        """Only an explicit change to the source's effective event time is material.
+
+        Content hashes, observation timestamps, and source update timestamps are
+        revision signals, not proof that the underlying event materially changed.
+        """
+        if previous_payload_json is None:
+            return False
+        previous = json.loads(previous_payload_json)
+        old_event_at = previous.get("event_at")
+        new_event_at = evidence.event_at
+        if old_event_at is None and new_event_at is None:
+            return False
+        if old_event_at is None or new_event_at is None:
+            return True
+        return _time(old_event_at) != _time(new_event_at)
+
     def sync_announcements(
         self, announcements: tuple[AnnouncementEvidence, ...] | list[AnnouncementEvidence],
         claim_registry: Any,
@@ -309,9 +328,20 @@ class EventLifecycleStore:
                     verification_state = "STALE"
                 else:
                     verification_state = "UNVERIFIED"
+                event_id = self.event_identity(single_asset, asset_id)
+                previous_revision = self.conn.execute(
+                    "SELECT r.payload_json FROM layer1_event_lifecycle AS e "
+                    "JOIN layer1_event_revisions AS r "
+                    "ON r.event_id=e.event_id AND r.revision_hash=e.latest_revision_hash "
+                    "WHERE e.event_id=?", (event_id,),
+                ).fetchone()
+                previous_payload_json = previous_revision[0] if previous_revision else None
+                materially_new = self._has_material_event_time_change(
+                    previous_payload_json, single_asset,
+                )
                 output.append(self.observe(
                     single_asset, verification_state=verification_state,
-                    materially_new=False,
+                    materially_new=materially_new,
                 ))
         return output
 

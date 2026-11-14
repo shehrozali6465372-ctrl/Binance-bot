@@ -809,3 +809,10 @@ This checklist does not authorize the work to be marked done merely by checking 
 ## GitHub follow-up confirmation — 2026-11-15
 - Follow-up implementation commit `43f5329103fc48772ce10503d55cac9349a9843e` is pushed to `layer-1/module9-onchain-continuation`.
 - GitHub Actions run `43640134763` for that exact commit completed **SUCCESS**. PR #14 remains Draft/open/unmerged; its description now carries the latest 507/0/12 local test count and the remaining release blockers.
+
+
+## Module 12 narrow material-change fix — 2026-11-15
+- `sync_announcements()` now compares the previous persisted revision's explicit `event_at` with the incoming revision. A verified change to that event time is marked material and can move a CONFIRMED event to DEVELOPING.
+- A changed content hash, source `updated_at`, or observation timestamp alone is not material. Two regression tests cover both positive and negative cases.
+- Full suite: **509 passed, 0 failed, 12 skipped** (PostgreSQL integration requires `TEST_POSTGRES_DSN`); compileall and diff checks pass.
+- Remaining Module 12 acceptance gap: semantic materiality for announcement body/title/status changes cannot be safely inferred from the currently persisted schema. Need structured source fields or a validated diff policy; no hash/title heuristics have been invented.

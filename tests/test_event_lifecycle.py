@@ -166,6 +166,71 @@ class EventLifecycleStoreTests(unittest.TestCase):
         records = self.store.sync_announcements([item], registry)
         self.assertEqual(records[0].state, "STALE")
 
+    def test_sync_recognizes_verified_material_event_time_change(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+
+        first = AnnouncementEvidence(
+            source_id="stable-event-time-change",
+            source_url="https://www.binance.com/en/support/announcement/stable-event-time-change",
+            publisher="Binance", event_type="listing", title="ABC Spot listing",
+            published_at=iso(-300), observed_at=iso(), asset_ids=("coingecko:abc",),
+            content_hash="a" * 64, updated_at=iso(-200), event_at=iso(3600),
+        )
+        engine = EvidenceVerificationEngine()
+        first_evidence = engine.evidence_from_announcement(first)
+        first_registry = engine.verify(
+            engine._source_assertion_claims(first_evidence), first_evidence,
+        )
+        initial = self.store.sync_announcements([first], first_registry)[0]
+        self.assertEqual(initial.state, "CONFIRMED")
+
+        revised = AnnouncementEvidence(
+            source_id=first.source_id, source_url=first.source_url,
+            publisher=first.publisher, event_type=first.event_type, title=first.title,
+            published_at=first.published_at, observed_at=iso(),
+            asset_ids=first.asset_ids, content_hash="b" * 64,
+            updated_at=iso(-30), event_at=iso(7200),
+        )
+        revised_evidence = engine.evidence_from_announcement(revised)
+        revised_registry = engine.verify(
+            engine._source_assertion_claims(revised_evidence), revised_evidence,
+        )
+        updated = self.store.sync_announcements([revised], revised_registry)[0]
+        self.assertEqual(updated.state, "DEVELOPING")
+        self.assertEqual(self.store.history(updated.event_id)[-1]["reason_code"],
+                         "MATERIAL_NEW_EVIDENCE")
+
+    def test_sync_does_not_treat_content_hash_or_source_update_time_as_material_change(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+
+        first = AnnouncementEvidence(
+            source_id="stable-nonmaterial-revision",
+            source_url="https://www.binance.com/en/support/announcement/stable-nonmaterial-revision",
+            publisher="Binance", event_type="listing", title="ABC Spot listing",
+            published_at=iso(-300), observed_at=iso(), asset_ids=("coingecko:abc",),
+            content_hash="c" * 64, updated_at=iso(-200), event_at=iso(3600),
+        )
+        engine = EvidenceVerificationEngine()
+        first_evidence = engine.evidence_from_announcement(first)
+        first_registry = engine.verify(
+            engine._source_assertion_claims(first_evidence), first_evidence,
+        )
+        self.store.sync_announcements([first], first_registry)
+
+        revised = AnnouncementEvidence(
+            source_id=first.source_id, source_url=first.source_url,
+            publisher=first.publisher, event_type=first.event_type, title=first.title,
+            published_at=first.published_at, observed_at=iso(),
+            asset_ids=first.asset_ids, content_hash="d" * 64,
+            updated_at=iso(-30), event_at=first.event_at,
+        )
+        revised_evidence = engine.evidence_from_announcement(revised)
+        revised_registry = engine.verify(
+            engine._source_assertion_claims(revised_evidence), revised_evidence,
+        )
+        updated = self.store.sync_announcements([revised], revised_registry)[0]
+        self.assertEqual(updated.state, "CONFIRMED")
+
     def test_sync_unverified_announcement_does_not_confirm_event(self):
         from layer1.evidence_verification import EvidenceVerificationEngine
 
