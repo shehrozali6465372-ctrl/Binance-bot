@@ -1,5 +1,3 @@
-[Reading 508 lines from start (total: 508 lines, 0 remaining)]
-
 import assert from "node:assert/strict";
 import test from "node:test";
 import { startAnnouncementWorker } from "../src/worker.js";
@@ -508,5 +506,3 @@ test("worker rejects a database URL without verified TLS before creating a pool"
   }), /DATABASE_URL must include sslmode=verify-full/);
   assert.equal(poolFactoryCalled, false);
 });
-
-[executed on device: localhost (e87fd591-3c93-40d6-8543-95eabff1ca2f)]

@@ -1,5 +1,3 @@
-[Reading 403 lines from start (total: 403 lines, 0 remaining)]
-
 import { Cms, CMS_WS_STREAMS_PROD_URL } from "@binance/cms";
 import pg from "pg";
 import { createServer } from "node:http";
@@ -403,5 +401,3 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       process.exitCode = 1;
     });
 }
-
-[executed on device: localhost (e87fd591-3c93-40d6-8543-95eabff1ca2f)]

@@ -1,5 +1,3 @@
-[Reading 98 lines from start (total: 98 lines, 0 remaining)]
-
 # Binance CMS Announcement Worker
 
 This is an isolated, read-only consumer of Binance's official English CMS announcement stream. It does not import the Square publisher, does not contain a Square publishing endpoint, and has no capability to create a Binance Square post.
@@ -98,5 +96,3 @@ The workflow uses a dedicated worker-role PostgreSQL URL and a read-only Binance
 GitHub location: repository **Settings → Secrets and variables → Actions → New repository secret**. Do not use the migrator or importer URL for the worker secret. No credentials are stored in the workflow or repository. The scheduled workflow is intentionally separate from the existing Square publishing workflow and calls only `node src/worker.js`; it cannot publish a Square post.
 
 GitHub limitation: `schedule` events run only from the repository's default branch (`main`). This workflow currently lives on `feature/binance-cms-announcement-worker`, while PR #2 currently targets `layer-1/completion-hardening`; merging PR #2 into that non-default base alone will NOT activate the schedule. The workflow must separately reach `main` through an explicitly approved integration path. `workflow_dispatch` can be used for a controlled manual run after secrets are configured, by selecting the feature branch. Do not change the PR base, merge, or deploy without separate approval.
-
-[executed on device: localhost (e87fd591-3c93-40d6-8543-95eabff1ca2f)]
