@@ -1002,3 +1002,39 @@ Implement PostgreSQL schema/migration and real PostgreSQL transaction/concurrenc
 - No live DeepSeek request, live RPC, production database write, production credential/secret/schedule change, publisher activation, Binance Square publication, commit to `main`, merge, or deployment.
 - Task 1 verification changes were committed as `65a0aa2224883aeef2c02b5968dc91519fbbda6e` (`test(ai): verify DeepSeek runtime integration`) and the checkpoint was committed as `a7fe1368b7a8dd5a67abe4e2371efcd46f28cde` (`docs: record DeepSeek verification checkpoint`). Both commits were pushed to `layer-1/module9-onchain-continuation`; remote HEAD was verified at `a7fe1368b7a8dd5a67abe4e2371efcd46f28cde`. No other branch was modified.
 - Module 15 is not declared complete, and Modules 10–21 are not declared complete. Proceed to Modules 10–14 only after the DeepSeek test changes are reviewed and recorded on the continuation branch; do not repeat completed Modules 1–9.
+
+
+## 2026-11-14 — Module 10 Event Intelligence Graph implementation checkpoint
+
+### Architecture contract inspected
+- Read the exact locked contract at section 5.10, "Module 10 — Event Intelligence Graph".
+- Existing Modules 4–6 already supplied announcement source/revision provenance, canonical event grouping, trend copy clustering, candidate event-cluster references and persisted source records. These were reused; no duplicate discovery or trend-clustering implementation was created.
+- The verified gap was the absence of a unified typed graph/relationship view across the existing evidence records.
+
+### Minimal implementation
+- Added `layer1/event_graph.py` with deterministic `GraphEntity`, `GraphRelationship`, `EventGraph` and `EventIntelligenceGraphEngine`.
+- Uses existing Layer1 SQLite persistence and standard-library data structures only. No graph database, third-party graph framework, microservice or paid infrastructure.
+- Entity types include asset, project, announcement, event, source, market observation, on-chain observation, trend signal and duplicate cluster. Stable IDs are SHA-256 derived from typed canonical IDs.
+- Every relationship requires typed endpoints, a timestamp, a bounded deterministic confidence weight, a state (`CONFIRMED`, `POSSIBLE`, `UNKNOWN`) and one or more evidence entity references. Graph validation rejects dangling endpoints/evidence and duplicate IDs.
+- Confidence weights are deterministic evidence-strength weights, not calibrated probabilities or LLM confidence.
+- Causal edge types are rejected; the graph does not infer that a market move was caused by an announcement or transfer.
+- Copied reports are clustered only on exact content-hash equality. Their original announcement/trend nodes and publisher/provider ancestry remain in the graph; identical content is one content lineage, not independent corroboration.
+- Announcement revisions are linked only when the source provides a stable provider ID. Fingerprint-only CMS records remain uncorrelated. Where a stable provider revision changes the canonical event, the old event is linked to the updated event; unrelated event fingerprints remain separate.
+- `rebuild_from_store()` reconstructs announcements/revisions, market observations and trend signals from existing Layer1 persisted source tables. Module 9 data is a separate store: callers supply its persisted raw observations with matching accepted `OnChainValidationResult` records or candidate-accepted network aggregation summary references. Unvalidated raw on-chain observations remain `POSSIBLE`; unqualified aggregation summaries are rejected.
+- Project nodes and evidence-backed additional relationships are supported, but no project entity is fabricated where the repository has no verified project source record.
+- `EventGraph.to_dict()` exposes the relationship set and duplicate-cluster references as a JSON-safe graph view.
+- Integrated graph construction into `_persist_layer1_market_intelligence()`. The Layer1 runtime summary now returns `event_graph` and a compact `event_graph_summary`; full graph payload is omitted from routine log lines. Empty source coverage is explicitly reported as `AVAILABLE_EMPTY`.
+
+### Acceptance tests and verification
+- Added 11 deterministic Module 10 tests in `tests/test_event_graph.py` covering stable IDs, entity types, project relationships, evidence traceability, confidence/timestamps, causal-edge rejection, exact copied-content clustering and source ancestry, stable-provider updates versus fingerprint-only records, distinct events, Module 9 accepted/unqualified summary handling, and deterministic reconstruction from persisted records.
+- Extended the existing Layer1 runtime persistence test to assert that the graph is built and returned by the live application pipeline (using mocked market/provider inputs; no live RPC).
+- Focused suite after Module 10 changes: **155 passed, 0 failed** across DeepSeek, event graph, Layer1 foundation, market analysis, announcement importer/runtime and publisher-safety tests.
+- Python compile check: passed.
+- `git diff --check`: passed.
+- No live RPC, production database write, Binance Square publication, workflow trigger, credential change, deployment or merge was performed.
+
+### Module 10 status
+- Implementation and deterministic acceptance tests are verified in the isolated continuation worktree.
+- The graph is a reproducible derived view of persisted source evidence, not a separately persisted graph database. Module 9 observations/aggregation summaries must be supplied from the existing Module 9 persistent source boundary as described above.
+- No production-readiness claim is made. The previously observed full-suite Module 9 freshness/fixture failures remain outside this module change and have not been hidden or modified.
+- Implementation commit: `289f214b3992c21f7e0340b7847f9026f25d8a17` (`feat(layer1): add evidence-backed event intelligence graph`). This commit is local pending the context checkpoint and push to the designated continuation branch.
