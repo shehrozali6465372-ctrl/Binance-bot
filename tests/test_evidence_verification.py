@@ -503,6 +503,15 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertIn("BTC price is $100", claims[0])
         self.assertIn("Binance published a listing notice", claims[2])
 
+    def test_atomic_claim_splitter_preserves_common_abbreviations(self):
+        claims = split_atomic_claims(
+            "U.S. regulators reviewed the filing. e.g. the listing date remains unconfirmed."
+        )
+        self.assertEqual(
+            claims,
+            ("U.S. regulators reviewed the filing.", "e.g. the listing date remains unconfirmed."),
+        )
+
     def test_adapters_preserve_source_identity_and_lineage(self):
         announcement = AnnouncementEvidence(
             source_id="binance-article-1", source_url="https://www.binance.com/en/support/announcement/article-1",

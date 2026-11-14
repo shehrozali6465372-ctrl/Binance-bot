@@ -816,3 +816,8 @@ This checklist does not authorize the work to be marked done merely by checking 
 - A changed content hash, source `updated_at`, or observation timestamp alone is not material. Two regression tests cover both positive and negative cases.
 - Full suite: **509 passed, 0 failed, 12 skipped** (PostgreSQL integration requires `TEST_POSTGRES_DSN`); compileall and diff checks pass.
 - Remaining Module 12 acceptance gap: semantic materiality for announcement body/title/status changes cannot be safely inferred from the currently persisted schema. Need structured source fields or a validated diff policy; no hash/title heuristics have been invented.
+
+## Module 11 sentence splitter hardening — 2026-11-15
+- Improved the existing deterministic atomic-claim splitter so common abbreviations (`U.S.`, `e.g.`, `i.e.`, `Dr.`, `etc.` and related forms) are not incorrectly split into separate claims at their internal periods.
+- Added a regression that failed before the fix (`U.S.` and `e.g.` were split into fragments); after the fix the focused evidence-verification suite passes **41 tests, 0 failures**.
+- This is a narrow segmentation correctness improvement only. It does not provide semantic compound-clause decomposition or generated-post sentence-to-evidence entailment; Module 11 remains PARTIAL.

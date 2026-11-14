@@ -1373,3 +1373,9 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - Full repository suite with the project virtualenv: **509 passed, 0 failed, 12 skipped** in 32.184s. The 12 skips require `TEST_POSTGRES_DSN`. `python -m compileall -q layer1 tests` and `git diff --check` pass.
 - This is a narrow Module 12 fix, not full material-change classification. Meaningful body/title changes cannot be judged from the currently persisted announcement schema alone; do not infer materiality from a hash/title change. Full event semantic-diff remains open.
 - No live provider call, DB production write, media upload, real Square post, credential/workflow/schedule change, merge or deployment. Local worktree contains this code/test/doc update pending push and CI confirmation.
+
+## Module 11 continuation — abbreviation-safe claim segmentation — 2026-11-15
+- Verified the active worktree and branch before editing: `/tmp/binance-deepseek-verify`, `layer-1/module9-onchain-continuation`, HEAD `ca3afbd7744c197875565d385daaf706cd213bc3`; worktree was clean at start.
+- Existing `split_atomic_claims()` incorrectly split common abbreviations such as `U.S.` and `e.g.` into fragments, creating malformed atomic claim records and degrading later evidence attribution.
+- Added a failing regression first, confirmed RED, then protected common abbreviations during deterministic sentence segmentation. Focused `tests.test_evidence_verification`: **41 passed, 0 failed**.
+- This does not solve semantic clause decomposition or generated-post sentence-to-evidence entailment. Module 11 remains PARTIAL. Full suite and CI verification pending.

@@ -1287,12 +1287,21 @@ def split_atomic_claims(text: str) -> tuple[str, ...]:
     if not isinstance(text, str) or not text.strip():
         return ()
     output = []
+    protected_period = "\uE000"
+    abbreviation_pattern = re.compile(
+        r"\b(?:e\.g|i\.e|etc|mr|mrs|ms|dr|prof|vs|approx|no)\.|"
+        r"\b(?:[A-Za-z]\.){2,}",
+        re.IGNORECASE,
+    )
     for line in text.replace("\r", "\n").split("\n"):
         line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
         if not line or (line.startswith("──") and line.endswith("──")):
             continue
+        line = abbreviation_pattern.sub(
+            lambda match: match.group(0).replace(".", protected_period), line,
+        )
         for part in re.split(r"(?<=[.!?])\s+|;\s+", line):
-            normalized = part.strip(" \t\"'")
+            normalized = part.replace(protected_period, ".").strip(" \t\"'")
             if normalized:
                 output.append(normalized)
     return tuple(output)
