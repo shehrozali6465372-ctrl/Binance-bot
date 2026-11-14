@@ -941,3 +941,28 @@ Implement PostgreSQL schema/migration and real PostgreSQL transaction/concurrenc
 - Verified the EVM worker-reachable contracts: `list_verified_mappings()` for the mapping store, and `get_checkpoint()`, atomic `commit_page()`, `get_block_hash()` and scoped `reconcile_block()` for the ingestion store. Both backends have matching call signatures and preserve their own transaction, expected-cursor CAS, canonical-header journal, and reorg semantics through delegation.
 - Added boundary tests proving SQLite compatibility, PostgreSQL implementation compatibility without a live database, and rejection of undeclared duck types. Existing SQLite EVM ingestion/restart/reorg tests remain passing.
 - No schema/API expansion was required. No live chain RPC, production database/secret access, commit, push, deployment, PR change or Binance Square publication occurred. `.venv/` was preserved.
+
+
+## 2026-11-14 — Codex-free implementation continuation
+
+### User directive
+- User explicitly instructed: do not use Codex for this project. All further implementation is performed directly through ChatGPT's authorized GitHub tools and the authorized remote environment, never through Codex.
+
+### Branch and preservation
+- Created isolated continuation branch `layer-1/module9-onchain-continuation` from `layer-1/module9-onchain-intelligence` to avoid modifying PR #13 or the local working tree.
+- PR #13 remains open, Draft and unmerged. Its head at branch creation was `3afed37192b66c57aba2f17ba841a84a60227cda`.
+- No commit was made to `main`; no merge, deployment, production configuration, credential, schedule or publisher activation was performed.
+
+### Implemented on the continuation branch
+- Added `layer1/deepseek_client.py`: direct HTTPS client to the official DeepSeek Chat Completions API, using the standard library, schema validation, timeout, response-usage parsing, bounded error reporting, and no credential logging.
+- Added `tests/test_deepseek_client.py`: deterministic fake-transport tests for endpoint/payload, response parsing, malformed response, empty content, HTTPS-only configuration and secret redaction.
+- Added `MODULES_11_21_GAP_REGISTER.md`: copied the locked Module 11–21 contract text into a traceability register. This is documentation only; it does not assert those modules are implemented.
+- GitHub creation commits: DeepSeek client `ff58c82b12534339c1cf2524a9a9f94998cedf0b`; tests `13b99be87f70208914d44adcae0db58d2a2c9a1d`; gap register `6ae7c3095f267061e48fe129952e8b42f501b162`.
+
+### Verification status and limitations
+- The GitHub connector was used to write the files. The new code has **not yet been executed**, because the local Codex-free test environment and GitHub Actions run are not verified.
+- The existing application still instantiates the legacy `GeminiGenerator`; this new DeepSeek client is not yet wired into the runtime.
+- Workflow file `.github/workflows/run_bot.yml` currently references Gemini credentials/model and has `DRY_RUN: "1"`. Do not modify workflow, secrets or activation without explicit approval.
+- Cloudflare Workers AI image generation has not been implemented or runtime-verified.
+- Modules 11–21 remain unverified/partial until each is mapped against code and tested. No real Binance Square post has been made.
+- Do not report the added client as full completion of Module 15, and do not report all 21 modules complete.
