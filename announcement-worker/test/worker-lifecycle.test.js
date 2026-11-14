@@ -1,3 +1,5 @@
+[Reading 508 lines from start (total: 508 lines, 0 remaining)]
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import { startAnnouncementWorker } from "../src/worker.js";
@@ -98,7 +100,7 @@ const logger = {
   error() {},
 };
 
-async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs, heartbeatIntervalMs, heartbeatTimeoutMs } = {}) {
+async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs, heartbeatIntervalMs, heartbeatTimeoutMs, healthServerFactory, publicServiceUrl, keepaliveIntervalMs, fetchImpl } = {}) {
   const pool = new FakePool(poolOptions);
   const connection = new FakeConnection();
   const configuration = {};
@@ -125,9 +127,79 @@ async function startWithFakes({ connectError, poolOptions, shutdownTimeoutMs, he
     shutdownTimeoutMs,
     heartbeatIntervalMs,
     heartbeatTimeoutMs,
+    healthServerFactory,
+    publicServiceUrl,
+    keepaliveIntervalMs,
+    fetchImpl,
   });
   return { worker, pool, connection, configuration, poolOptions: configuration.poolOptions };
 }
+
+
+test("worker starts an injectable health listener and exposes readiness without secrets", async () => {
+  const lifecycle = [];
+  const healthServerFactory = ({ handler }) => {
+    lifecycle.push({ handler });
+    return {
+      async listen() { lifecycle.push("listen"); },
+      async close() { lifecycle.push("close"); },
+    };
+  };
+  const { worker } = await startWithFakes({ healthServerFactory });
+  assert.equal(lifecycle[1], "listen");
+  const response = await lifecycle[0].handler({ method: "GET", url: "/health" });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, { status: "ok", service: "binance-cms-announcement-worker" });
+  assert.equal(lifecycle[1], "listen");
+  await worker.shutdown("test");
+  assert.equal(lifecycle.at(-1), "close");
+});
+
+
+test("default health server binds PORT on 0.0.0.0 and responds over HTTP", async () => {
+  const { worker } = await startWithFakes();
+  const address = worker.healthServer.address();
+  assert.equal(address.address, "0.0.0.0");
+  const response = await fetch(`http://127.0.0.1:${address.port}/health`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { status: "ok", service: "binance-cms-announcement-worker" });
+  const missing = await fetch(`http://127.0.0.1:${address.port}/not-health`);
+  assert.equal(missing.status, 404);
+  await worker.shutdown("test");
+});
+
+test("worker rejects malformed public service URLs before starting resources", async () => {
+  let poolCreated = false;
+  await assert.rejects(startAnnouncementWorker({
+    apiKey: "offline-test-key", apiSecret: "offline-test-secret",
+    databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
+    publicServiceUrl: "http://127.0.0.1:10000/health",
+    poolFactory: () => { poolCreated = true; throw new Error("should not start"); },
+    logger,
+  }), /PUBLIC_SERVICE_URL must be an absolute HTTPS URL/);
+  assert.equal(poolCreated, false);
+});
+
+test("keepalive sends a real HTTP request to the configured public health URL and stops on shutdown", async () => {
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, status: 200 };
+  };
+  const { worker } = await startWithFakes({
+    publicServiceUrl: "https://cms-worker.example.onrender.com/health",
+    keepaliveIntervalMs: 5,
+    fetchImpl,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 18));
+  assert.ok(requests.length > 0, "keepalive must make an inbound request, not only schedule a timer");
+  assert.equal(String(requests[0].url), "https://cms-worker.example.onrender.com/health");
+  assert.equal(requests[0].options.method, "GET");
+  await worker.shutdown("test");
+  const countAtShutdown = requests.length;
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(requests.length, countAtShutdown, "keepalive must stop on shutdown");
+});
 
 test("worker bounds PostgreSQL connection establishment", async () => {
   const { worker, poolOptions } = await startWithFakes();
@@ -436,3 +508,5 @@ test("worker rejects a database URL without verified TLS before creating a pool"
   }), /DATABASE_URL must include sslmode=verify-full/);
   assert.equal(poolFactoryCalled, false);
 });
+
+[executed on device: localhost (e87fd591-3c93-40d6-8543-95eabff1ca2f)]

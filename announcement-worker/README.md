@@ -1,3 +1,5 @@
+[Reading 98 lines from start (total: 98 lines, 0 remaining)]
+
 # Binance CMS Announcement Worker
 
 This is an isolated, read-only consumer of Binance's official English CMS announcement stream. It does not import the Square publisher, does not contain a Square publishing endpoint, and has no capability to create a Binance Square post.
@@ -38,6 +40,14 @@ The tests are fully mocked and do not connect to Binance, PostgreSQL, or Binance
 - Set the three required environment variables in Render's secret environment configuration.
 
 The worker does not create or alter schema at startup and bounds new PostgreSQL connection establishment to 10 seconds. As the database owner, create two fresh login roles (`binance_announcement_worker` and `binance_announcement_importer`) without embedding passwords in SQL files; set their passwords through the database provider's secret UI or an interactive `psql` `\password` prompt. Then run `npm run migrate` with `MIGRATION_DATABASE_URL` set to a dedicated schema-owner/migration connection URL, and apply `migrations/001_runtime_role_grants.sql` as the schema owner. Set `DATABASE_URL` to the worker role and `ANNOUNCEMENT_DATABASE_URL` to the importer role. Ensure these roles have no membership in broader privileged roles. All PostgreSQL URLs must include `sslmode=verify-full`. The database must be durable and shared with the agent's ingestion adapter; a worker-local SQLite file or Render filesystem is not a valid substitute.
+
+## Render Free Web Service (Singapore)
+
+The CMS announcement consumer can run as a dedicated Render Web Service without changing the Square publisher workflow. Configure the service with root directory `announcement-worker`, Node runtime 22.12+, build command `npm ci`, and start command `npm start`. The HTTP listener binds `0.0.0.0:$PORT`; `GET /health` returns only a minimal status document and does not expose credentials or database details. Render's HTTP health check path should be `/health`.
+
+Required Render secrets remain `BINANCE_API_KEY`, `BINANCE_API_SECRET`, and `DATABASE_URL` (worker role only, with `sslmode=verify-full`). Set `PUBLIC_SERVICE_URL` to the service's own public HTTPS health URL (for example `https://<service>.onrender.com/health`) to enable the optional 13-minute self-request. This is a real outbound HTTP request that loops back through Render's public ingress, so it creates inbound activity. The timer by itself does not keep a Free service awake. The worker uses a single in-flight request, a 10-second abort timeout, and cancels its keepalive timer on shutdown. The interval is configurable for tests, but production default is 13 minutes.
+
+Self-requests consume outbound/public traffic and are not a Render guarantee against suspension or enforcement; monitor the service and prefer a separately managed external uptime monitor if self-traffic is disallowed. A CMS WebSocket heartbeat is outbound and is not a substitute for an inbound Render request. Do not add this health listener or keepalive to the Square publisher process.
 
 ## Event identity and replay limitations
 
@@ -88,3 +98,5 @@ The workflow uses a dedicated worker-role PostgreSQL URL and a read-only Binance
 GitHub location: repository **Settings → Secrets and variables → Actions → New repository secret**. Do not use the migrator or importer URL for the worker secret. No credentials are stored in the workflow or repository. The scheduled workflow is intentionally separate from the existing Square publishing workflow and calls only `node src/worker.js`; it cannot publish a Square post.
 
 GitHub limitation: `schedule` events run only from the repository's default branch (`main`). This workflow currently lives on `feature/binance-cms-announcement-worker`, while PR #2 currently targets `layer-1/completion-hardening`; merging PR #2 into that non-default base alone will NOT activate the schedule. The workflow must separately reach `main` through an explicitly approved integration path. `workflow_dispatch` can be used for a controlled manual run after secrets are configured, by selecting the feature branch. Do not change the PR base, merge, or deploy without separate approval.
+
+[executed on device: localhost (e87fd591-3c93-40d6-8543-95eabff1ca2f)]

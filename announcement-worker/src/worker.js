@@ -1,5 +1,8 @@
+[Reading 403 lines from start (total: 403 lines, 0 remaining)]
+
 import { Cms, CMS_WS_STREAMS_PROD_URL } from "@binance/cms";
 import pg from "pg";
+import { createServer } from "node:http";
 import { normalizeAnnouncementMessage } from "./normalize.js";
 import { AnnouncementStore } from "./store.js";
 
@@ -26,6 +29,46 @@ function requireVerifiedPostgresUrl(value, name) {
   return value;
 }
 
+function createHealthServer({ handler }) {
+  return {
+    server: createServer((request, response) => {
+      Promise.resolve(handler(request)).then((result) => {
+        response.writeHead(result.statusCode, {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+        });
+        response.end(JSON.stringify(result.body));
+      }).catch(() => {
+        response.writeHead(500);
+        response.end();
+      });
+    }),
+    listen(port, host) {
+      return new Promise((resolve, reject) => {
+        const server = this.server;
+        const onError = (error) => {
+          server.off("listening", onListening);
+          reject(error);
+        };
+        const onListening = () => {
+          server.off("error", onError);
+          resolve();
+        };
+        server.once("error", onError);
+        server.once("listening", onListening);
+        server.listen(port, host);
+      });
+    },
+    address() { return this.server.address(); },
+    close() {
+      if (!this.server.listening) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        this.server.close((error) => error ? reject(error) : resolve());
+      });
+    },
+  };
+}
+
 export async function startAnnouncementWorker({
   apiKey = requiredEnv("BINANCE_API_KEY"),
   apiSecret = requiredEnv("BINANCE_API_SECRET"),
@@ -36,6 +79,10 @@ export async function startAnnouncementWorker({
   shutdownTimeoutMs = 30_000,
   heartbeatIntervalMs = 30_000,
   heartbeatTimeoutMs = 10_000,
+  healthServerFactory = createHealthServer,
+  publicServiceUrl = process.env.PUBLIC_SERVICE_URL,
+  keepaliveIntervalMs = 13 * 60 * 1000,
+  fetchImpl = globalThis.fetch,
 } = {}) {
   databaseUrl = requireVerifiedPostgresUrl(databaseUrl, "DATABASE_URL");
   const maxTimerDelayMs = 2_147_483_647;
@@ -45,6 +92,22 @@ export async function startAnnouncementWorker({
   if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 1 || heartbeatTimeoutMs > maxTimerDelayMs) {
     throw new RangeError(`heartbeatTimeoutMs must be between 1 and ${maxTimerDelayMs}`);
   }
+  if (!Number.isSafeInteger(keepaliveIntervalMs) || keepaliveIntervalMs < 1 || keepaliveIntervalMs > maxTimerDelayMs) {
+    throw new RangeError(`keepaliveIntervalMs must be between 1 and ${maxTimerDelayMs}`);
+  }
+
+  let parsedPublicServiceUrl;
+  if (publicServiceUrl !== undefined && publicServiceUrl !== "") {
+    try { parsedPublicServiceUrl = new URL(publicServiceUrl); } catch { /* checked below */ }
+    if (!parsedPublicServiceUrl || parsedPublicServiceUrl.protocol !== "https:" ||
+        parsedPublicServiceUrl.username || parsedPublicServiceUrl.password) {
+      throw new Error("PUBLIC_SERVICE_URL must be an absolute HTTPS URL without embedded credentials");
+    }
+    if (typeof fetchImpl !== "function") {
+      throw new Error("fetch implementation is required when PUBLIC_SERVICE_URL is configured");
+    }
+  }
+
   const pool = poolFactory({
     connectionString: databaseUrl,
     max: 3,
@@ -61,6 +124,9 @@ export async function startAnnouncementWorker({
   let writeQueue = Promise.resolve();
   let heartbeatInterval;
   let heartbeatTimeout;
+  let healthServer;
+  let keepaliveInterval;
+  let keepaliveInFlight = false;
   let awaitingHeartbeatPong = false;
   const degradationReasons = new Map();
 
@@ -118,6 +184,48 @@ export async function startAnnouncementWorker({
     await store.setState("LISTENING");
     logger.info("Binance CMS announcement stream connected; read-only ingestion active");
 
+    const healthHandler = (request) => {
+      if (request.method !== "GET" || request.url?.split("?", 1)[0] !== "/health") {
+        return { statusCode: 404, body: { status: "not_found" } };
+      }
+      return {
+        statusCode: 200,
+        body: { status: "ok", service: "binance-cms-announcement-worker" },
+      };
+    };
+    healthServer = healthServerFactory({ handler: healthHandler });
+    await healthServer.listen(Number(process.env.PORT || 10000), "0.0.0.0");
+
+    if (parsedPublicServiceUrl) {
+      keepaliveInterval = setInterval(async () => {
+        if (closed || keepaliveInFlight) return;
+        keepaliveInFlight = true;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10_000);
+        timeout.unref?.();
+        try {
+          const response = await fetchImpl(parsedPublicServiceUrl, {
+            method: "GET",
+            signal: controller.signal,
+            headers: { "user-agent": "binance-cms-worker-keepalive/1.0" },
+          });
+          if (!response?.ok) {
+            logger.warn("CMS worker keepalive health request returned non-2xx", { status: response?.status });
+          }
+        } catch (error) {
+          if (!closed) {
+            logger.warn("CMS worker keepalive health request failed", {
+              error: String(error?.message || error).slice(0, 200),
+            });
+          }
+        } finally {
+          clearTimeout(timeout);
+          keepaliveInFlight = false;
+        }
+      }, keepaliveIntervalMs);
+      keepaliveInterval.unref?.();
+    }
+
     stream.on("message", (message) => {
       if (!acceptingMessages) return;
       writeQueue = writeQueue.then(async () => {
@@ -130,18 +238,26 @@ export async function startAnnouncementWorker({
           degradationReasons.delete("queue");
           if (inserted) {
             await persistOperationalState({ lastMessageAt: receivedAt, lastPersistedAt: new Date().toISOString() });
-            logger.info("Binance announcement persisted", { catalogId: event.catalogId, eventType: event.eventType, contentHash: event.contentHash });
+            logger.info("Binance announcement persisted", {
+              catalogId: event.catalogId,
+              eventType: event.eventType,
+              contentHash: event.contentHash,
+            });
           } else {
             await persistOperationalState({ lastMessageAt: receivedAt });
             logger.info("Duplicate Binance announcement ignored", { contentHash: event.contentHash });
           }
         } catch (error) {
           await markDegraded("message", error, { lastMessageAt: receivedAt });
-          logger.error("Announcement rejected or persistence failed", { error: String(error?.message || error).slice(0, 500) });
+          logger.error("Announcement rejected or persistence failed", {
+            error: String(error?.message || error).slice(0, 500),
+          });
         }
       }).catch(async (error) => {
         await markDegraded("queue", error);
-        logger.error("Announcement processing queue failed", { error: String(error?.message || error).slice(0, 500) });
+        logger.error("Announcement processing queue failed", {
+          error: String(error?.message || error).slice(0, 500),
+        });
       });
     });
 
@@ -209,6 +325,7 @@ export async function startAnnouncementWorker({
       if (resourcesClosed) return;
       resourcesClosed = true;
       await store.setState("STOPPED").catch(() => {});
+      try { await healthServer.close(); } catch {}
       try { await connection.disconnect(); } catch {}
       await pool.end();
     };
@@ -221,6 +338,7 @@ export async function startAnnouncementWorker({
       acceptingMessages = false;
       closed = true;
       if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (keepaliveInterval) clearInterval(keepaliveInterval);
       clearPendingHeartbeat();
       logger.info("Stopping announcement worker", { signal });
       try { stream.unsubscribe(); } catch {}
@@ -240,8 +358,6 @@ export async function startAnnouncementWorker({
           await Promise.race([acceptedWrites, timeout]);
         } catch (error) {
           if (error?.code === "ERR_SHUTDOWN_TIMEOUT") {
-            // Do not close the pool under in-flight writes. Report the bounded
-            // shutdown timeout now, then release resources once the queue settles.
             void acceptedWrites.finally(finalizeShutdown).catch((cleanupError) => {
               logger.error("Deferred shutdown cleanup failed", {
                 error: String(cleanupError?.message || cleanupError).slice(0, 500),
@@ -258,11 +374,12 @@ export async function startAnnouncementWorker({
       return shutdownPromise;
     };
 
-    return { shutdown, stream, connection, store, pool };
+    return { shutdown, stream, connection, store, pool, healthServer };
   } catch (error) {
     await store.setState("FAILED", { lastError: String(error?.message || error).slice(0, 500) }).catch(() => {});
     try { stream?.unsubscribe(); } catch {}
     try { await connection?.disconnect(); } catch {}
+    try { await healthServer?.close?.(); } catch {}
     await pool.end().catch(() => {});
     throw error;
   }
@@ -286,3 +403,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       process.exitCode = 1;
     });
 }
+
+[executed on device: localhost (e87fd591-3c93-40d6-8543-95eabff1ca2f)]
