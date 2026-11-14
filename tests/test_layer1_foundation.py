@@ -279,7 +279,7 @@ class Layer1FoundationTests(unittest.TestCase):
             self.assertEqual(result["provider_health"]["coingecko_trending"], "AVAILABLE")
             self.assertEqual(
                 result["provider_health"]["binance_announcements"],
-                "UNAVAILABLE_NO_VERIFIED_DOCUMENTED_ADAPTER",
+                "UNAVAILABLE_NO_DATABASE_URL",
             )
             conn = sqlite3.connect(self.db)
             try:
