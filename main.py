@@ -36,7 +36,7 @@ def _parse_env_bool(name: str, value: Optional[str], default: bool) -> bool:
 
 @dataclass(frozen=True)
 class Config:
-    gemini_api_key: str
+    deepseek_api_key: str
     square_api_key: str
     post_interval: int
     database_path: str
@@ -45,11 +45,11 @@ class Config:
     dry_run: bool
     log_level: str
     live_market_data: bool
-    gemini_model: str
+    deepseek_model: str
     http_timeout_seconds: int
-    gemini_temperature: float
-    gemini_top_p: float
-    gemini_max_output_tokens: int
+    deepseek_temperature: float
+    deepseek_top_p: float
+    deepseek_max_output_tokens: int
     
     # --- Performance tuning (env configurable) ---
     min_word_count: int
@@ -65,7 +65,7 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         return cls(
-            gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+            deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
             square_api_key=os.getenv("SQUARE_API_KEY", ""),
             post_interval=int(os.getenv("POST_INTERVAL", "300")),
             database_path=os.getenv("DATABASE_PATH", "agent.db"),
@@ -74,11 +74,11 @@ class Config:
             dry_run=_parse_env_bool("DRY_RUN", os.getenv("DRY_RUN"), True),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             live_market_data=_parse_env_bool("LIVE_MARKET_DATA", os.getenv("LIVE_MARKET_DATA"), False),
-            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
             http_timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "15")),
-            gemini_temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.9")),
-            gemini_top_p=float(os.getenv("GEMINI_TOP_P", "0.95")),
-            gemini_max_output_tokens=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "2048")),
+            deepseek_temperature=float(os.getenv("DEEPSEEK_TEMPERATURE", "0.9")),
+            deepseek_top_p=float(os.getenv("DEEPSEEK_TOP_P", "0.95")),
+            deepseek_max_output_tokens=int(os.getenv("DEEPSEEK_MAX_OUTPUT_TOKENS", "2048")),
             
             # Performance tuning defaults
             min_word_count=int(os.getenv("MIN_WORD_COUNT", "50")),
@@ -101,7 +101,7 @@ class Config:
             "post_interval": (0, None),
             "max_iterations": (0, None),
             "http_timeout_seconds": (1, None),
-            "gemini_max_output_tokens": (1, None),
+            "deepseek_max_output_tokens": (1, None),
             "min_word_count": (30, None),
             "min_hashtags": (2, None),
             "min_candidates": (2, None),
@@ -125,17 +125,17 @@ class Config:
             raise ValueError("LOG_LEVEL must be a supported logging level")
         if not isinstance(self.dry_run, bool) or not isinstance(self.live_market_data, bool):
             raise ValueError("DRY_RUN and LIVE_MARKET_DATA must be booleans")
-        if not isinstance(self.gemini_model, str) or not self.gemini_model.strip():
-            raise ValueError("GEMINI_MODEL must be non-empty")
+        if not isinstance(self.deepseek_model, str) or not self.deepseek_model.strip():
+            raise ValueError("DEEPSEEK_MODEL must be non-empty")
         if not self.dry_run:
-            if not isinstance(self.gemini_api_key, str) or not self.gemini_api_key.strip():
-                raise ValueError("GEMINI_API_KEY is required when DRY_RUN is disabled")
+            if not isinstance(self.deepseek_api_key, str) or not self.deepseek_api_key.strip():
+                raise ValueError("DEEPSEEK_API_KEY is required when DRY_RUN is disabled")
             if not isinstance(self.square_api_key, str) or not self.square_api_key.strip():
                 raise ValueError("SQUARE_API_KEY is required when DRY_RUN is disabled")
-        if not isinstance(self.gemini_temperature, (int, float)) or isinstance(self.gemini_temperature, bool) or not math.isfinite(self.gemini_temperature) or not (0.0 < self.gemini_temperature <= 2.0):
-            raise ValueError("GEMINI_TEMPERATURE must be finite and between 0 and 2")
-        if not isinstance(self.gemini_top_p, (int, float)) or isinstance(self.gemini_top_p, bool) or not math.isfinite(self.gemini_top_p) or not (0.0 < self.gemini_top_p <= 1.0):
-            raise ValueError("GEMINI_TOP_P must be finite and between 0 and 1")
+        if not isinstance(self.deepseek_temperature, (int, float)) or isinstance(self.deepseek_temperature, bool) or not math.isfinite(self.deepseek_temperature) or not (0.0 < self.deepseek_temperature <= 2.0):
+            raise ValueError("DEEPSEEK_TEMPERATURE must be finite and between 0 and 2")
+        if not isinstance(self.deepseek_top_p, (int, float)) or isinstance(self.deepseek_top_p, bool) or not math.isfinite(self.deepseek_top_p) or not (0.0 < self.deepseek_top_p <= 1.0):
+            raise ValueError("DEEPSEEK_TOP_P must be finite and between 0 and 1")
 
 
 CONFIG = Config.from_env()
@@ -3152,12 +3152,12 @@ class EmotionEngine:
             }
 
 
-class GeminiGenerator:
+class DeepSeekGenerator:
     """Opportunity Intelligence Content Engine.
     
     Phase 1 — decide(): Rank top opportunities (Publish/Watch/Skip).
     Phase 2 — generate(): Write professional Binance Square post.
-    Gemini is the decision maker AND writer. System handles deterministic gates.
+    DeepSeek is the decision maker AND writer. System handles deterministic gates.
     """
     
     def __init__(self, config: Config = CONFIG):
@@ -3168,101 +3168,84 @@ class GeminiGenerator:
     # ──────────────────────────────────────────────
     
     def decide(self, research_packages: List[str]) -> List[Dict[str, Any]]:
-        """Phase 1: Send research packages to Gemini for ranking.
+        """Phase 1: Send research packages to DeepSeek for ranking.
         
         Returns list of {'rank': int, 'symbol': str, 'reason': str}
         Ordered from BEST to WORST opportunity.
-        Returns empty list if Gemini fails.
+        Returns empty list if DeepSeek fails.
         """
         if not research_packages:
             return []
         
         prompt = self._build_decision_prompt(research_packages)
-        response = self._call_gemini(prompt)
+        response = self._call_deepseek(prompt)
         
         if not response:
-            LOGGER.warning("Gemini Phase 1 (decision) failed — no ranking returned")
+            LOGGER.warning("DeepSeek Phase 1 (decision) failed — no ranking returned")
             return []
         
         rankings = self._parse_decision_response(response)
         if not rankings:
-            LOGGER.warning("Gemini Phase 1 returned unparseable response")
+            LOGGER.warning("DeepSeek Phase 1 returned unparseable response")
             LOGGER.debug("Raw response: %s", response[:300])
             return []
         
-        LOGGER.info("Gemini Phase 1 ranking: %s",
+        LOGGER.info("DeepSeek Phase 1 ranking: %s",
                      ", ".join("#'%d'=$%s" % (r.get('rank', 0), r.get('symbol', '?')) for r in rankings))
         return rankings
     
     def generate(self, coin: Dict[str, Any], research_package: str) -> str:
-        """Phase 2: Gemini writes the post based on complete research.
+        """Phase 2: DeepSeek writes the post based on complete research.
         
         Returns post text (80-110 words, Write-to-Earn optimized).
-        Returns empty string if Gemini fails (post skipped, not published).
+        Returns empty string if DeepSeek fails (post skipped, not published).
         """
         if not research_package:
             return ""
         
         prompt = self._build_writing_prompt(coin, research_package)
-        response = self._call_gemini(prompt)
+        response = self._call_deepseek(prompt)
         
         if response:
-            LOGGER.info("Gemini Phase 2 generated post successfully")
+            LOGGER.info("DeepSeek Phase 2 generated post successfully")
             return response.strip()
         
-        LOGGER.warning("Gemini Phase 2 (writing) failed — post will not be published")
+        LOGGER.warning("DeepSeek Phase 2 (writing) failed — post will not be published")
         return ""
     
     # ──────────────────────────────────────────────
     # GEMINI API CALL (shared by Phase 1 + Phase 2)
     # ──────────────────────────────────────────────
     
-    def _call_gemini(self, prompt: str) -> Optional[str]:
-        """Call Gemini API with model fallback chain."""
-        if not self.config.gemini_api_key:
-            LOGGER.warning("No GEMINI_API_KEY set")
+    def _call_deepseek(self, prompt: str) -> Optional[str]:
+        """Call the official DeepSeek API directly without provider/model fallback."""
+        from layer1.deepseek_client import DeepSeekClient
+        if not self.config.deepseek_api_key:
+            LOGGER.warning("No DEEPSEEK_API_KEY configured; AI generation is unavailable")
             return None
-        
-        models_to_try = [
-            "gemini-2.5-flash",
-            os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-2.0-flash-lite",
-            "gemini-2.0-flash",
-        ]
-        # Deduplicate
-        seen_models = set()
-        models = []
-        for m in models_to_try:
-            if m not in seen_models:
-                seen_models.add(m)
-                models.append(m)
-        
-        for model in models:
-            url = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                "%s:generateContent?key=%s" % (model, self.config.gemini_api_key)
+        try:
+            result = DeepSeekClient(
+                self.config.deepseek_api_key,
+                self.config.deepseek_model,
+                timeout_seconds=self.config.http_timeout_seconds,
+                temperature=self.config.deepseek_temperature,
+                top_p=self.config.deepseek_top_p,
+                max_tokens=self.config.deepseek_max_output_tokens,
+            ).chat(prompt)
+            if result is None:
+                return None
+            LOGGER.info(
+                "DeepSeek response: model=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+                result.model, result.prompt_tokens, result.completion_tokens, result.total_tokens,
             )
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": self.config.gemini_temperature,
-                    "topP": self.config.gemini_top_p,
-                    "maxOutputTokens": self.config.gemini_max_output_tokens,
-                },
-            }
-            try:
-                resp = http_post_json(url, payload, timeout=self.config.http_timeout_seconds, retries=2)
-                text = resp.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                if text and text.strip():
-                    return text.strip()
-            except Exception as exc:
-                LOGGER.warning("Gemini %s failed: %s", model, exc)
-                continue
-        
-        return None
-    
+            return result.text
+        except (TypeError, ValueError):
+            LOGGER.warning("DeepSeek configuration or response validation failed")
+            return None
+        except Exception as exc:
+            LOGGER.warning("DeepSeek call failed: %s", type(exc).__name__)
+            return None
+
     # ──────────────────────────────────────────────
     # PROMPT BUILDERS
     # ──────────────────────────────────────────────
@@ -4694,16 +4677,16 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     safe_runtime_config = {
         key: getattr(config, key) for key in (
             "post_interval", "database_path", "publish_log_path", "max_iterations",
-            "dry_run", "log_level", "live_market_data", "gemini_model",
-            "http_timeout_seconds", "gemini_temperature", "gemini_top_p",
-            "gemini_max_output_tokens", "min_word_count", "min_hashtags",
+            "dry_run", "log_level", "live_market_data", "deepseek_model",
+            "http_timeout_seconds", "deepseek_temperature", "deepseek_top_p",
+            "deepseek_max_output_tokens", "min_word_count", "min_hashtags",
             "min_candidates", "repetition_hard_hours", "repetition_soft_hours",
             "save_research_packages", "max_daily_posts", "min_cap_for_safety",
         )
     }
     # Only secret-presence booleans enter the immutable config fingerprint.
     # Secret values, tokens and credentials are never serialized or logged.
-    safe_runtime_config["gemini_api_key_configured"] = bool(config.gemini_api_key)
+    safe_runtime_config["deepseek_api_key_configured"] = bool(config.deepseek_api_key)
     safe_runtime_config["square_api_key_configured"] = bool(config.square_api_key)
     safe_runtime_config["github_token_configured"] = bool(os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN"))
     context = ConfigurationOrchestrator(layer_config).create_context(safe_runtime_config)
@@ -4789,7 +4772,7 @@ def main_loop() -> None:
     announcement_engine = BinanceAnnouncementEngine(config)
     hot_search_engine = HotSearchEngine(config)
     research = ResearchEngine()
-    generator = GeminiGenerator(config)
+    generator = DeepSeekGenerator(config)
     publisher_db = Database(config.database_path)
     publisher = PostPublisher(config)
     publisher.db = publisher_db
@@ -4841,7 +4824,7 @@ def main() -> None:
     announcement_engine = BinanceAnnouncementEngine(config)
     hot_search_engine = HotSearchEngine(config)
     research = ResearchEngine()
-    generator = GeminiGenerator(config)
+    generator = DeepSeekGenerator(config)
     publisher_db = Database(config.database_path)
     publisher = PostPublisher(config)
     publisher.db = publisher_db
