@@ -289,6 +289,67 @@ class EventLifecycleStoreTests(unittest.TestCase):
         self.assertEqual(updated.state, "DEVELOPING")
         self.assertEqual(self.store.history(updated.event_id)[-1]["reason_code"], "MATERIAL_NEW_EVIDENCE")
 
+    def test_sync_semantic_body_paraphrase_does_not_mark_event_developing(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+
+        first = AnnouncementEvidence(
+            source_id="stable-semantic-paraphrase",
+            source_url="https://www.binance.com/en/support/announcement/stable-semantic-paraphrase",
+            publisher="Binance", event_type="listing", title="ABC Spot listing announced",
+            published_at=iso(-300), observed_at=iso(), asset_ids=("coingecko:abc",),
+            content_hash="a" * 64, updated_at=iso(-200), event_at=iso(3600),
+            body="Binance will list ABC on 2026-12-01. Trading starts at 08:00 UTC.",
+        )
+        engine = EvidenceVerificationEngine()
+        first_evidence = engine.evidence_from_announcement(first)
+        first_registry = engine.verify(engine._source_assertion_claims(first_evidence), first_evidence)
+        initial = self.store.sync_announcements([first], first_registry)[0]
+        self.assertEqual(initial.state, "CONFIRMED")
+
+        paraphrase = AnnouncementEvidence(
+            source_id=first.source_id, source_url=first.source_url, publisher=first.publisher,
+            event_type=first.event_type, title=first.title, published_at=first.published_at,
+            observed_at=iso(), asset_ids=first.asset_ids, content_hash="b" * 64,
+            updated_at=iso(-100), event_at=first.event_at,
+            body="Binance is going to list ABC on 2026-12-01. Trading will begin at 08:00 UTC.",
+        )
+        revised_evidence = engine.evidence_from_announcement(paraphrase)
+        revised_registry = engine.verify(
+            engine._source_assertion_claims(revised_evidence), revised_evidence,
+        )
+        unchanged = self.store.sync_announcements([paraphrase], revised_registry)[0]
+        self.assertEqual(unchanged.state, "CONFIRMED")
+        self.assertEqual(self.store.history(unchanged.event_id)[-1]["reason_code"], "EVIDENCE_VERIFIED")
+
+    def test_sync_detects_announcement_status_change_as_material(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+
+        first = AnnouncementEvidence(
+            source_id="stable-status-change",
+            source_url="https://www.binance.com/en/support/announcement/stable-status-change",
+            publisher="Binance", event_type="listing", title="ABC Spot listing",
+            published_at=iso(-300), observed_at=iso(), asset_ids=("coingecko:abc",),
+            content_hash="a" * 64, updated_at=iso(-200), event_at=iso(3600),
+            body="Trading for ABC will start at 08:00 UTC on 2026-12-01.",
+        )
+        engine = EvidenceVerificationEngine()
+        first_evidence = engine.evidence_from_announcement(first)
+        first_registry = engine.verify(engine._source_assertion_claims(first_evidence), first_evidence)
+        self.assertEqual(self.store.sync_announcements([first], first_registry)[0].state, "CONFIRMED")
+
+        changed = AnnouncementEvidence(
+            source_id=first.source_id, source_url=first.source_url, publisher=first.publisher,
+            event_type=first.event_type, title=first.title, published_at=first.published_at,
+            observed_at=iso(), asset_ids=first.asset_ids, content_hash="b" * 64,
+            updated_at=iso(-100), event_at=first.event_at,
+            body="Trading for ABC has been suspended at 08:00 UTC on 2026-12-01.",
+        )
+        changed_evidence = engine.evidence_from_announcement(changed)
+        changed_registry = engine.verify(engine._source_assertion_claims(changed_evidence), changed_evidence)
+        updated = self.store.sync_announcements([changed], changed_registry)[0]
+        self.assertEqual(updated.state, "DEVELOPING")
+        self.assertEqual(self.store.history(updated.event_id)[-1]["reason_code"], "MATERIAL_NEW_EVIDENCE")
+
     def test_sync_detects_material_body_change_but_ignores_body_formatting(self):
         from layer1.evidence_verification import EvidenceVerificationEngine
 

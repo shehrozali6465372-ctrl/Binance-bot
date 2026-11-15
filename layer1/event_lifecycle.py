@@ -276,26 +276,57 @@ class EventLifecycleStore:
             return ""
         return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
+    _MATERIAL_STOPWORDS = frozenset({
+        "a", "an", "and", "are", "as", "at", "be", "been", "being", "by",
+        "for", "from", "in", "into", "is", "it", "of", "on", "or", "the",
+        "this", "that", "these", "those", "to", "was", "were", "will", "with", "going",
+    })
+    _MATERIAL_TOKEN_ALIASES = {
+        "announced": "announce", "announces": "announce", "announcement": "announce",
+        "listed": "list", "listing": "list", "lists": "list",
+        "began": "start", "begin": "start", "begins": "start", "beginning": "start",
+        "started": "start", "starts": "start",
+        "postponed": "postpone", "postponement": "postpone", "postpones": "postpone",
+        "cancelled": "cancel", "canceled": "cancel", "cancellation": "cancel",
+        "suspended": "suspend", "suspension": "suspend", "suspends": "suspend",
+        "resumed": "resume", "resumption": "resume", "resumes": "resume",
+        "delisted": "delist", "delisting": "delist", "delists": "delist",
+        "opened": "open", "opens": "open", "closed": "close", "closes": "close",
+        "updated": "update", "updates": "update",
+    }
+
+    @classmethod
+    def _semantic_material_tokens(cls, value: Any) -> tuple[str, ...]:
+        """Canonicalize grammar/formatting while retaining facts, order, negation and status."""
+        if not isinstance(value, str):
+            return ()
+        tokens = re.findall(r"[a-z0-9]+", value.casefold())
+        return tuple(
+            cls._MATERIAL_TOKEN_ALIASES.get(token, token)
+            for token in tokens if token not in cls._MATERIAL_STOPWORDS
+        )
+
     @classmethod
     def _has_material_event_change(cls, previous_payload_json: Optional[str],
                                    evidence: AnnouncementEvidence) -> bool:
-        """Compare source-stable event facts, not incidental revision metadata.
+        """Compare normalized event meaning, not raw wording or revision metadata.
 
-        Title, event type and announcement body capture source-visible changes;
-        effective event time captures rescheduling. Body comparison is deliberately
-        conservative: any normalized textual change is material, without claiming
-        to understand its semantics. Content hashes, observation timestamps and
-        source update timestamps alone do not prove a material event development.
+        Function words and common grammatical variants are normalized, while
+        entities, negation, dates, numbers, event actions and status terms remain
+        significant. A changed substantive token is conservatively material;
+        this deterministic comparator does not claim general natural-language
+        semantic equivalence. Content hashes and source timestamps alone are not
+        material event developments.
         """
         if previous_payload_json is None:
             return False
         previous = json.loads(previous_payload_json)
-        if cls._normalized_material_text(previous.get("title")) != cls._normalized_material_text(evidence.title):
+        if cls._semantic_material_tokens(previous.get("title")) != cls._semantic_material_tokens(evidence.title):
             return True
         if cls._normalized_material_text(previous.get("event_type")) != cls._normalized_material_text(evidence.event_type):
             return True
-        previous_body = cls._normalized_material_text(previous.get("body"))
-        current_body = cls._normalized_material_text(evidence.body)
+        previous_body = cls._semantic_material_tokens(previous.get("body"))
+        current_body = cls._semantic_material_tokens(evidence.body)
         if previous_body != current_body and (previous_body or current_body):
             return True
         old_event_at = previous.get("event_at")

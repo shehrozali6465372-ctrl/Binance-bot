@@ -1170,3 +1170,10 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Guarded disposable Neon lifecycle integration: **2 passed, 0 failed**, covering first observation, verification, confirmation, material revision, duplicate replay, legacy snapshot bootstrap and idempotent re-bootstrap. Exact generated IDs were used for cleanup.
 - Focused local runtime/lifecycle tests: **24 passed**. Full local suite: **624 tests, 0 failures, 35 skipped** (guarded PostgreSQL skips, not passes). `compileall` and `git diff --check` passed.
 - Legacy post-history and analytics are now covered by the following PostgreSQL implementation checkpoint. The remaining gap is full runtime/provider/media/scheduled acceptance; no production cutover, provider run, or Binance publication.
+
+## Module 12 semantic event revision classifier — 2026-11-16
+- Added deterministic token-level normalization for title/body revisions. It canonicalizes a bounded set of grammatical variants and function words but preserves token order, negation, entities, numbers, dates/times and status/action tokens. A substantive ordered-token difference remains conservatively material; this is not a general NLP semantic classifier.
+- The prior comparator falsely moved a confirmed event to DEVELOPING for an active-voice grammar paraphrase that preserved the same listing facts. A regression test reproduced the failure before the fix.
+- SQLite lifecycle tests: **23 passed**; local lifecycle + PostgreSQL adapter contract tests: **25 passed**. Guarded disposable Neon lifecycle integration: **3 passed**, proving paraphrase remains CONFIRMED while a trading-suspension status change moves the event to DEVELOPING.
+- Full local suite: **631 tests, 0 failures, 38 skipped** (guarded PostgreSQL skips, not passes). Compileall and diff-check passed.
+- Remaining semantic evidence gaps: causal/compound claim coverage and full generated-post sentence-to-evidence attribution acceptance. Module 12 remains an acceptance gap until a broader owner-reviewed semantic policy is specified and tested. No live Binance POST or production changes.

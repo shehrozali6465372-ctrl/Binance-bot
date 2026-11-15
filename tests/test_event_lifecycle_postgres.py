@@ -104,6 +104,45 @@ class PostgresEventLifecycleIntegrationTests(unittest.TestCase):
             legacy.close()
             temporary.cleanup()
 
+    def test_postgres_sync_uses_semantic_paraphrase_and_status_change_classifier(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+
+        engine = EvidenceVerificationEngine()
+        first = self._evidence(
+            "a", title="ABC Spot listing announced",
+            body="Binance will list ABC on 2026-12-01. Trading starts at 08:00 UTC.",
+        )
+        first_evidence = engine.evidence_from_announcement(first)
+        first_registry = engine.verify(engine._source_assertion_claims(first_evidence), first_evidence)
+        initial = self.store.sync_announcements([first], first_registry)[0]
+        self.event_id = initial.event_id
+        self.assertEqual(initial.state, "CONFIRMED")
+
+        paraphrase = self._evidence(
+            "b", title=first.title,
+            body="Binance is going to list ABC on 2026-12-01. Trading will begin at 08:00 UTC.",
+            observed_delta=1,
+        )
+        paraphrase_evidence = engine.evidence_from_announcement(paraphrase)
+        paraphrase_registry = engine.verify(
+            engine._source_assertion_claims(paraphrase_evidence), paraphrase_evidence,
+        )
+        unchanged = self.store.sync_announcements([paraphrase], paraphrase_registry)[0]
+        self.assertEqual(unchanged.state, "CONFIRMED")
+
+        status_change = self._evidence(
+            "c", title=first.title,
+            body="Trading for ABC has been suspended at 08:00 UTC on 2026-12-01.",
+            observed_delta=2,
+        )
+        status_evidence = engine.evidence_from_announcement(status_change)
+        status_registry = engine.verify(
+            engine._source_assertion_claims(status_evidence), status_evidence,
+        )
+        developing = self.store.sync_announcements([status_change], status_registry)[0]
+        self.assertEqual(developing.state, "DEVELOPING")
+        self.assertEqual(self.store.history(developing.event_id)[-1]["reason_code"], "MATERIAL_NEW_EVIDENCE")
+
     def test_postgres_event_lifecycle_persists_verified_transitions_and_material_revision(self):
         first = self._evidence("a")
         record = self.store.observe(first, verification_state="UNVERIFIED")
