@@ -75,6 +75,8 @@ class Config:
     min_cap_for_safety: int
     market_data_cache_ttl_seconds: int = 60
     image_required: bool = True
+    persistence_backend: str = "sqlite"
+    postgres_dsn: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -105,9 +107,17 @@ class Config:
             min_cap_for_safety=int(os.getenv("MIN_CAP_FOR_SAFETY", "500000")),
             market_data_cache_ttl_seconds=int(os.getenv("MARKET_DATA_CACHE_TTL_SECONDS", "60")),
             image_required=_parse_env_bool("IMAGE_REQUIRED", os.getenv("IMAGE_REQUIRED"), True),
+            persistence_backend=os.getenv("PERSISTENCE_BACKEND", "sqlite").strip().lower(),
+            postgres_dsn=os.getenv("POSTGRES_DSN", ""),
         )
 
     def validate(self) -> None:
+        if not isinstance(self.persistence_backend, str) or self.persistence_backend not in {"sqlite", "postgresql"}:
+            raise ValueError("PERSISTENCE_BACKEND must be sqlite or postgresql")
+        if self.persistence_backend == "postgresql" and (
+            not isinstance(self.postgres_dsn, str) or not self.postgres_dsn.strip()
+        ):
+            raise ValueError("POSTGRES_DSN is required when PERSISTENCE_BACKEND=postgresql")
         for name in ("database_path", "publish_log_path"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
@@ -4146,6 +4156,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
         layer1_summary = _persist_layer1_market_intelligence(
             raw_candidates, config.database_path, trend_records,
             onchain_aggregation_by_asset=onchain_aggregation_by_asset,
+            postgres_store=getattr(publisher, "postgres_store", None),
         )
         ready_asset_ids = set(layer1_summary.get("ready_asset_ids", []))
         layer1_candidates = [
@@ -4165,6 +4176,16 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
             from layer1.evidence_verification import (
                 ClaimRegistryStore, EvidenceVerificationEngine, render_claim_registry,
             )
+            from layer1.research_package import DeepResearchEngine, ResearchPackageStore
+            from layer1.opportunity import OpportunityDecisionStore, OpportunityEvaluationEngine
+            from layer1.editorial_strategy import EditorialBriefStore, EditorialStrategyEngine
+            if publisher.postgres_store is not None:
+                from layer1.publication_runtime import (
+                    PostgresClaimRegistryStore as ClaimRegistryStore,
+                    PostgresResearchPackageStore as ResearchPackageStore,
+                    PostgresOpportunityDecisionStore as OpportunityDecisionStore,
+                    PostgresEditorialBriefStore as EditorialBriefStore,
+                )
             base_registry = layer1_summary.get("_claim_registry")
             if base_registry is None:
                 return package
@@ -4216,9 +4237,10 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
             claim_connection = sqlite3.connect(config.database_path, timeout=30)
             research_rendered = ""
             try:
-                ClaimRegistryStore(claim_connection).save(package_registry)
+                ClaimRegistryStore(
+                    publisher.postgres_store if publisher.postgres_store is not None else claim_connection
+                ).save(package_registry)
                 if asset_id and symbol:
-                    from layer1.research_package import DeepResearchEngine, ResearchPackageStore
                     selected_event = layer1_summary.get(
                         "event_lifecycle_by_asset_source", {},
                     ).get(str(asset_id), {}).get(
@@ -4239,7 +4261,9 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                         event_states=() if lifecycle_state == "NO_EVENT" else (lifecycle_state,),
                         required_source_kinds=("PRIMARY", "MARKET"),
                     )
-                    research_package = ResearchPackageStore(claim_connection).save(research_package)
+                    research_package = ResearchPackageStore(
+                        publisher.postgres_store if publisher.postgres_store is not None else claim_connection
+                    ).save(research_package)
                     research_packages_by_asset_id[str(asset_id)] = research_package
                     research_rendered = (
                         "<<<RESEARCH_PACKAGE_START>>>\n"
@@ -4248,7 +4272,6 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                         + research_package.render()
                         + "\n<<<RESEARCH_PACKAGE_END>>>"
                     )
-                    from layer1.opportunity import OpportunityDecisionStore, OpportunityEvaluationEngine
                     opportunity_decision = OpportunityEvaluationEngine().evaluate(
                         eligibility_status="ELIGIBLE" if str(asset_id) in ready_asset_ids else "UNKNOWN",
                         eligibility_verified_at=_binance_spot_snapshot_observed_at or observed_at,
@@ -4265,9 +4288,9 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                         factors=None,
                         policy=None,
                     )
-                    OpportunityDecisionStore(claim_connection).save(
-                        research_package.package_id, opportunity_decision,
-                    )
+                    OpportunityDecisionStore(
+                        publisher.postgres_store if publisher.postgres_store is not None else claim_connection
+                    ).save(research_package.package_id, opportunity_decision)
                     opportunity_decisions_by_asset_id[str(asset_id)] = opportunity_decision
                     research_rendered += (
                         "\n\n<<<OPPORTUNITY_DECISION_START>>>\n"
@@ -4277,12 +4300,13 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                         + "<<<OPPORTUNITY_DECISION_END>>>"
                     )
                     if opportunity_decision.state == "PROCEED":
-                        from layer1.editorial_strategy import EditorialBriefStore, EditorialStrategyEngine
                         event_id = (
                             selected_event["event_id"] if selected_event
                             else research_package.research_key
                         )
-                        brief_store = EditorialBriefStore(claim_connection)
+                        brief_store = EditorialBriefStore(
+                            publisher.postgres_store if publisher.postgres_store is not None else claim_connection
+                        )
                         editorial_brief = EditorialStrategyEngine().build(
                             research_package, event_id=event_id, store=brief_store,
                             min_words=config.min_word_count, max_words=180,
@@ -4674,7 +4698,11 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
     if content:
         from layer1.content_generation import DraftStore
         from layer1.content_verification import ContentVerificationEngine
-        draft_store = DraftStore(publisher.db.conn)
+        if publisher.postgres_store is not None:
+            from layer1.publication_runtime import PostgresDraftStore
+            draft_store = PostgresDraftStore(publisher.postgres_store)
+        else:
+            draft_store = DraftStore(publisher.db.conn)
         content_verification = ContentVerificationEngine().validate(
             content, registry=best_registry,
             symbol=str(best_coin.get("symbol") or ""),
@@ -4856,7 +4884,11 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
     if not config.dry_run:
         from layer1.publication_authorization import PublicationAuthorizationEngine
         from layer1.event_lifecycle import EventLifecycleStore
-        quota_engine = PublicationAuthorizationEngine(publisher.db.conn)
+        if publisher.postgres_store is not None:
+            from layer1.publication_runtime import PostgresPublicationAuthorizationEngine
+            quota_engine = PostgresPublicationAuthorizationEngine(publisher.postgres_store)
+        else:
+            quota_engine = PublicationAuthorizationEngine(publisher.db.conn)
         reservation_id = quota_engine.reserve_daily_quota(
             symbol=str(best_coin.get("symbol") or ""),
             daily_limit=config.max_daily_posts,
@@ -4868,9 +4900,20 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
             if best_coin.get("announcement_boost"):
                 if best_editorial_brief is None:
                     raise ValueError("exact announcement editorial brief is missing")
-                event_record = EventLifecycleStore(publisher.db).get(
-                    best_editorial_brief.event_id,
-                )
+                if publisher.postgres_store is not None:
+                    from layer1.event_lifecycle import EventLifecycleRecord
+                    event_data = publisher.postgres_store.load_event_lifecycle(best_editorial_brief.event_id)
+                    if event_data is None:
+                        raise ValueError("PostgreSQL event lifecycle record is missing")
+                    event_record = EventLifecycleRecord(**{
+                        key: event_data[key] for key in (
+                            "event_id", "asset_id", "source_id", "event_type", "state",
+                            "first_published_at", "first_observed_at", "last_updated_at",
+                            "effective_event_at", "latest_revision_hash",
+                        )
+                    })
+                else:
+                    event_record = EventLifecycleStore(publisher.db).get(best_editorial_brief.event_id)
                 if event_record.asset_id != str(best_coin.get("asset_id") or ""):
                     raise ValueError("editorial event does not match the publication asset")
                 event_state = event_record.state
@@ -5014,7 +5057,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
 
 
 def _persist_layer1_market_intelligence(candidates, database_path: str, trend_records=None,
-                                        onchain_aggregation_by_asset=None) -> dict:
+                                        onchain_aggregation_by_asset=None, postgres_store=None) -> dict:
     """Persist real market evidence and auditable candidate decisions; never fabricate scores."""
     global _LAYER1_LAST_SUMMARY
     from layer1.foundation import (
@@ -5409,10 +5452,15 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             store, onchain_summary_refs=onchain_graph_refs,
         )
         ClaimRegistryStore(store.conn).save(claim_registry)
+        if postgres_store is not None:
+            postgres_store.save_claim_registry(claim_registry)
         from layer1.event_lifecycle import EventLifecycleStore
         lifecycle_records = EventLifecycleStore(store).sync_announcements(
             announcement_events, claim_registry,
         )
+        if postgres_store is not None:
+            for lifecycle_record in lifecycle_records:
+                postgres_store.sync_event_lifecycle_snapshot(store.conn, lifecycle_record.event_id)
         lifecycle_states = [record.state for record in lifecycle_records]
         # Legacy compatibility projections are lossy when an asset has multiple events.
         # Event-specific decisions must use event_lifecycle_by_asset_source below.
@@ -5590,6 +5638,17 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         finally:
             lease.close()
 
+def _create_runtime_postgres_store(config):
+    """Create the explicitly selected PostgreSQL backend; never silently fall back."""
+    if config.persistence_backend == "sqlite":
+        return None
+    from layer1.publication_postgres import (
+        PostgresPublicationStore, apply_publication_postgres_migrations,
+    )
+    apply_publication_postgres_migrations(config.postgres_dsn)
+    return PostgresPublicationStore(config.postgres_dsn)
+
+
 def main_loop() -> None:
     """Main loop that runs continuously with configured interval."""
     config = CONFIG
@@ -5613,7 +5672,8 @@ def main_loop() -> None:
     research = ResearchEngine()
     generator = DeepSeekGenerator(config)
     publisher_db = Database(config.database_path)
-    publisher = PostPublisher(config)
+    postgres_store = _create_runtime_postgres_store(config)
+    publisher = PostPublisher(config, postgres_store=postgres_store)
     publisher.db = publisher_db
     
     iteration = 0
@@ -5651,6 +5711,8 @@ def main_loop() -> None:
         while slept < interval:
             time.sleep(sleep_chunk)
             slept += sleep_chunk
+    if postgres_store is not None:
+        postgres_store.close()
 
 
 def main() -> None:
@@ -5665,7 +5727,8 @@ def main() -> None:
     research = ResearchEngine()
     generator = DeepSeekGenerator(config)
     publisher_db = Database(config.database_path)
-    publisher = PostPublisher(config)
+    postgres_store = _create_runtime_postgres_store(config)
+    publisher = PostPublisher(config, postgres_store=postgres_store)
     publisher.db = publisher_db
     
     posted_symbols = publisher_db.get_posted_symbols(hours=48)
@@ -5674,6 +5737,9 @@ def main() -> None:
     except Exception as exc:
         _log_iteration_failure(1, exc)
         raise SystemExit(1) from None
+    finally:
+        if postgres_store is not None:
+            postgres_store.close()
 
 
 if __name__ == "__main__":

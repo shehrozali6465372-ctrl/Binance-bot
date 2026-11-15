@@ -681,6 +681,76 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
 
 
 class PublicationPostgresEventLifecycleTests(unittest.TestCase):
+    @unittest.skipUnless(__import__("os").environ.get("TEST_POSTGRES_DSN"), "TEST_POSTGRES_DSN is not configured")
+    def test_runtime_event_snapshot_mirror_is_append_only_and_idempotent(self):
+        import json
+        import os
+        import sqlite3
+        import uuid
+        from psycopg.conninfo import conninfo_to_dict
+        from layer1.publication_postgres import PostgresPublicationStore, apply_publication_postgres_migrations
+
+        dsn = os.environ["TEST_POSTGRES_DSN"]
+        info = conninfo_to_dict(dsn)
+        self.assertEqual(info.get("dbname") or info.get("database"), "binance_onchain_test")
+        self.assertEqual(info.get("host"), os.environ.get("TEST_POSTGRES_ALLOWED_HOST"))
+        self.assertIn(info.get("sslmode"), {"require", "verify-ca", "verify-full"})
+        apply_publication_postgres_migrations(dsn)
+        store = PostgresPublicationStore(dsn)
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        event_id = "runtime-event-mirror:" + uuid.uuid4().hex
+        stamp = "2026-11-15T12:00:00+00:00"
+        revision_hash = "a" * 64
+        payload = {"title": "BTC listing", "body": "Source announcement body"}
+        try:
+            connection.executescript("""
+                CREATE TABLE layer1_event_lifecycle (
+                    event_id TEXT PRIMARY KEY, asset_id TEXT, source_id TEXT, event_type TEXT,
+                    state TEXT, first_published_at TEXT, first_observed_at TEXT,
+                    last_updated_at TEXT, effective_event_at TEXT, latest_revision_hash TEXT,
+                    updated_at TEXT
+                );
+                CREATE TABLE layer1_event_revisions (
+                    event_id TEXT, revision_hash TEXT, source_published_at TEXT,
+                    source_updated_at TEXT, observed_at TEXT, evidence_ref TEXT, payload_json TEXT
+                );
+                CREATE TABLE layer1_event_transitions (
+                    transition_id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT,
+                    from_state TEXT, to_state TEXT, reason_code TEXT,
+                    evidence_refs_json TEXT, transitioned_at TEXT
+                );
+            """)
+            connection.execute(
+                "INSERT INTO layer1_event_lifecycle VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (event_id, "coingecko:bitcoin", "source-1", "listing", "UNDER_VERIFICATION",
+                 stamp, stamp, stamp, stamp, revision_hash, stamp),
+            )
+            connection.execute(
+                "INSERT INTO layer1_event_revisions VALUES (?,?,?,?,?,?,?)",
+                (event_id, revision_hash, stamp, stamp, stamp, "evidence:source-1",
+                 json.dumps(payload, sort_keys=True, separators=(",", ":"))),
+            )
+            connection.executemany(
+                "INSERT INTO layer1_event_transitions (event_id,from_state,to_state,reason_code,evidence_refs_json,transitioned_at) VALUES (?,?,?,?,?,?)",
+                [
+                    (event_id, None, "DISCOVERED", "FIRST_SOURCE_OBSERVATION", '["evidence:source-1"]', stamp),
+                    (event_id, "DISCOVERED", "UNDER_VERIFICATION", "AWAITING_EVIDENCE_VERIFICATION", '["evidence:source-1"]', stamp),
+                ],
+            )
+            store.sync_event_lifecycle_snapshot(connection, event_id)
+            store.sync_event_lifecycle_snapshot(connection, event_id)
+            loaded = store.load_event_lifecycle(event_id)
+            self.assertEqual(loaded["state"], "UNDER_VERIFICATION")
+            self.assertEqual(len(loaded["revisions"]), 1)
+            self.assertEqual([item["to_state"] for item in loaded["history"]], ["DISCOVERED", "UNDER_VERIFICATION"])
+        finally:
+            store.conn.execute("DELETE FROM layer1_event_transitions WHERE event_id=%s", (event_id,))
+            store.conn.execute("DELETE FROM layer1_event_revisions WHERE event_id=%s", (event_id,))
+            store.conn.execute("DELETE FROM layer1_event_lifecycle WHERE event_id=%s", (event_id,))
+            connection.close()
+            store.close()
+
     def test_event_lifecycle_input_validation_is_deterministic(self):
         from layer1.publication_postgres import validate_event_lifecycle_input
 

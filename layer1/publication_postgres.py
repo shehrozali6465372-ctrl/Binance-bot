@@ -456,6 +456,95 @@ class PostgresPublicationStore:
     def load_event_lifecycle(self, event_id: str) -> Optional[dict]:
         return _load_event_lifecycle(self, event_id)
 
+    def sync_event_lifecycle_snapshot(self, sqlite_connection, event_id: str) -> None:
+        """Import an exact SQLite lifecycle snapshot into the publication ledger.
+
+        The foundation store remains SQLite, but this append-only mirror makes
+        PostgreSQL authorization evaluate the same event identity and transition
+        history. Existing PostgreSQL history must be an exact prefix; divergence
+        fails closed rather than overwriting it.
+        """
+        event = sqlite_connection.execute(
+            "SELECT event_id,asset_id,source_id,event_type,state,first_published_at,"
+            "first_observed_at,last_updated_at,effective_event_at,latest_revision_hash,updated_at "
+            "FROM layer1_event_lifecycle WHERE event_id=?", (event_id,),
+        ).fetchone()
+        if event is None:
+            raise ValueError("SQLite event lifecycle snapshot is missing")
+        revisions = sqlite_connection.execute(
+            "SELECT revision_hash,source_published_at,source_updated_at,observed_at,evidence_ref,payload_json "
+            "FROM layer1_event_revisions WHERE event_id=? ORDER BY observed_at,revision_hash", (event_id,),
+        ).fetchall()
+        transitions = sqlite_connection.execute(
+            "SELECT from_state,to_state,reason_code,evidence_refs_json,transitioned_at "
+            "FROM layer1_event_transitions WHERE event_id=? ORDER BY transition_id", (event_id,),
+        ).fetchall()
+        if not revisions or not transitions:
+            raise ValueError("event lifecycle snapshot has no durable revision/transition history")
+        with self.conn.transaction():
+            self.conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("event-lifecycle:" + event_id,))
+            current = self.conn.execute("SELECT * FROM layer1_event_lifecycle WHERE event_id=%s FOR UPDATE", (event_id,)).fetchone()
+            identity = (event[1], event[2], event[3])
+            if current is None:
+                if transitions[0][0] is not None or transitions[0][1] != "DISCOVERED":
+                    raise ValueError("event lifecycle history does not begin at DISCOVERED")
+                self.conn.execute(
+                    "INSERT INTO layer1_event_lifecycle (event_id,asset_id,source_id,event_type,state,first_published_at,first_observed_at,last_updated_at,effective_event_at,latest_revision_hash,updated_at) "
+                    "VALUES (%s,%s,%s,%s,'DISCOVERED',%s,%s,%s,%s,%s,%s)",
+                    (event_id, *identity, event[5], event[6], event[7], event[8], revisions[0][0], event[10]),
+                )
+                current_state = None
+                existing_transitions = []
+            else:
+                if (current["asset_id"], current["source_id"], current["event_type"]) != identity:
+                    raise ValueError("PostgreSQL event lifecycle identity conflicts with SQLite")
+                rows = self.conn.execute(
+                    "SELECT from_state,to_state,reason_code,evidence_refs_json,transitioned_at FROM layer1_event_transitions WHERE event_id=%s ORDER BY transition_id", (event_id,),
+                ).fetchall()
+                existing_transitions = []
+                for row in rows:
+                    refs = row["evidence_refs_json"] if isinstance(row["evidence_refs_json"], list) else json.loads(row["evidence_refs_json"])
+                    existing_transitions.append((row["from_state"], row["to_state"], row["reason_code"], refs, row["transitioned_at"].isoformat()))
+                current_state = current["state"]
+            local_transitions = []
+            for row in transitions:
+                refs = json.loads(row[3]) if isinstance(row[3], str) else row[3]
+                local_transitions.append((row[0], row[1], row[2], refs, _utc(row[4]).isoformat()))
+            if existing_transitions != local_transitions[:len(existing_transitions)]:
+                raise ValueError("PostgreSQL event transition history diverges from SQLite; refusing overwrite")
+            for revision in revisions:
+                payload = json.loads(revision[5]) if isinstance(revision[5], str) else revision[5]
+                prior = self.conn.execute(
+                    "SELECT payload_json FROM layer1_event_revisions WHERE event_id=%s AND revision_hash=%s FOR UPDATE",
+                    (event_id, revision[0]),
+                ).fetchone()
+                if prior is not None:
+                    saved = prior["payload_json"] if isinstance(prior["payload_json"], dict) else json.loads(prior["payload_json"])
+                    if saved != payload:
+                        raise ValueError("event revision identity conflicts across persistence backends")
+                else:
+                    self.conn.execute(
+                        "INSERT INTO layer1_event_revisions (event_id,revision_hash,source_published_at,source_updated_at,observed_at,evidence_ref,payload_json) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                        (event_id, revision[0], revision[1], revision[2], revision[3], revision[4], json.dumps(payload,sort_keys=True,separators=(",", ":"))),
+                    )
+            for transition in local_transitions[len(existing_transitions):]:
+                if transition[0] != current_state:
+                    raise ValueError("event lifecycle transition sequence is not contiguous")
+                allowed = _EVENT_TRANSITIONS.get(current_state, set())
+                if transition[1] not in allowed:
+                    raise ValueError("event lifecycle snapshot contains an illegal transition")
+                self.conn.execute(
+                    "INSERT INTO layer1_event_transitions (event_id,from_state,to_state,reason_code,evidence_refs_json,transitioned_at) VALUES (%s,%s,%s,%s,%s::jsonb,%s)",
+                    (event_id, transition[0], transition[1], transition[2], json.dumps(transition[3],separators=(",", ":")), transition[4]),
+                )
+                current_state = transition[1]
+            if current_state != event[4]:
+                raise ValueError("PostgreSQL event lifecycle final state does not match SQLite")
+            self.conn.execute(
+                "UPDATE layer1_event_lifecycle SET state=%s,last_updated_at=%s,effective_event_at=%s,latest_revision_hash=%s,updated_at=%s WHERE event_id=%s",
+                (event[4], event[7], event[8], event[9], event[10], event_id),
+            )
+
     def save_publication_authorization(self, authorization) -> str:
         from dataclasses import asdict
         if not hasattr(authorization, "verify_integrity") or not authorization.verify_integrity():
@@ -682,6 +771,10 @@ class PostgresPublicationStore:
         payload_json = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
         )
+        # JSONB normalizes tuple-like JSON arrays to Python lists on readback.
+        # Compare the canonical JSON representation, not the pre-serialization
+        # Python container types, so identical snapshots remain idempotent.
+        canonical_payload = json.loads(payload_json)
         verification_id = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
         states = [result.state for result in registry.results]
         counts = {
@@ -700,7 +793,7 @@ class PostgresPublicationStore:
                 stored_payload = existing["payload_json"]
                 if isinstance(stored_payload, str):
                     stored_payload = json.loads(stored_payload)
-                if stored_payload != payload or any(existing[key] != value for key, value in counts.items()):
+                if stored_payload != canonical_payload or any(existing[key] != value for key, value in counts.items()):
                     raise ValueError("claim registry identity is immutable; conflicting payload reuse")
                 return verification_id
             self.conn.execute(
