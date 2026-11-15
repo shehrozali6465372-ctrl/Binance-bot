@@ -49,6 +49,52 @@ class PostgresLayer1StoreIntegrationTests(unittest.TestCase):
         self.layer1.close()
         self.owner.close()
 
+    def test_full_layer1_persistence_runtime_uses_postgres_without_creating_sqlite_database(self):
+        import hashlib
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        import main
+
+        captured = []
+        original_save = self.owner.save_claim_registry
+
+        def capture_registry(registry):
+            payload = json.dumps(
+                registry.to_dict(), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            )
+            verification_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            exists = self.owner.conn.execute(
+                "SELECT 1 FROM layer1_claim_verification_runs WHERE verification_id=%s",
+                (verification_id,),
+            ).fetchone() is not None
+            result = original_save(registry)
+            captured.append((result, exists))
+            return result
+
+        self.owner.save_claim_registry = capture_registry
+        try:
+            with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"ANNOUNCEMENT_DATABASE_URL": ""}):
+                database_path = Path(tmp) / "must-not-be-created.sqlite"
+                summary = main._persist_layer1_market_intelligence(
+                    [], str(database_path), [], postgres_store=self.owner,
+                )
+                self.assertFalse(database_path.exists())
+                self.assertEqual(summary["observations"], 0)
+                self.assertEqual(summary["claim_verification_summary"]["status"], "AVAILABLE_EMPTY")
+            self.assertEqual(len(captured), 1)
+        finally:
+            for verification_id, existed in captured:
+                if not existed:
+                    self.owner.conn.execute(
+                        "DELETE FROM layer1_claim_verification_runs WHERE verification_id=%s",
+                        (verification_id,),
+                    )
+            self.owner.save_claim_registry = original_save
+
     def test_postgres_layer1_store_round_trips_source_records_and_writes_atomically(self):
         from layer1.foundation import (
             AnnouncementEvidence, AssetIdentity, AssetIdentityProof, Candidate,
