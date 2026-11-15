@@ -1222,3 +1222,14 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Existing deterministic media tests verify HTTP acknowledgement and upload sequencing only with mocked network calls.
 - No production DB, publisher activation, real post, credentials/schedules/workflow changes, merge, deployment, or paid resources.
 - Outstanding next gate: safely validate provider credentials through the existing secure environment and obtain explicit authorization before any potentially billable live provider request. Then test DeepSeek and Cloudflare separately, without invoking the scheduled workflow or production publishing path.
+
+
+## 2026-11-16 manual provider-verification workflow checkpoint
+- User explicitly approved creating a separate manual-only provider verification workflow on the condition that API keys must never be exposed.
+- Added `.github/workflows/provider-verification.yml` (workflow_dispatch only) and `tests/test_provider_verification_workflow.py` on `layer-1/module9-onchain-continuation`.
+- Workflow uses only existing GitHub Secrets/Variables: `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `CLOUDFLARE_API_TOKEN`, and `CLOUDFLARE_ACCOUNT_ID`. Secret values are passed only as process environment variables; the script does not print, serialize, echo, or upload them. Shell tracing is disabled.
+- The job has read-only contents permission, a five-minute job timeout, one bounded DeepSeek completion (20-second timeout, zero retries, 32-token cap), and one 256x256 Cloudflare Workers AI image generation (60-second timeout). It logs only pass/fail, model, latency, token count, image metadata, and exception class; it does not log generated text, auth headers, response bodies, or secret values. Temporary image output is deleted and is not uploaded.
+- Both provider checks run independently. The workflow does not invoke `main.py`, `run_bot.yml`, the publisher, Binance APIs, Square credentials, announcement DB, production DB, caches, or artifact uploads. Existing scheduled `run_bot.yml` was inspected and left unchanged.
+- Static safety tests were added, but have not yet been executed in this environment. GitHub Actions may run the repository's existing mocked push CI due to commits on the layer-1 branch; that is separate from live provider verification.
+- **Live verification has NOT been run.** The workflow has not been manually dispatched; no provider API request has been made by this workflow. DeepSeek/Cloudflare calls may incur provider usage charges. Obtain explicit confirmation before manually running it.
+- PR #14 remains open, draft, and unmerged. No real Binance Square post, publisher activation, production DB operation, credential/schedule modification, merge, or deployment.
