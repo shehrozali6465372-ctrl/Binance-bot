@@ -561,33 +561,14 @@ class EventIntelligenceGraphEngine:
         On-chain observations live in the dedicated Module 9 store, so callers
         supply those persisted records explicitly rather than inventing them.
         """
-        connection = store.conn
-        announcements = []
-        for (payload,) in connection.execute(
-            "SELECT payload_json FROM layer1_announcement_revisions "
-            "ORDER BY source_id, first_seen_at, revision_key"
-        ).fetchall():
-            decoded = json.loads(payload)
-            decoded["asset_ids"] = tuple(decoded.get("asset_ids") or ())
-            announcements.append(AnnouncementEvidence(**decoded))
-
-        markets = []
-        for (payload,) in connection.execute(
-            "SELECT payload_json FROM layer1_market_observations "
-            "ORDER BY observed_at, provider, observation_key"
-        ).fetchall():
-            decoded = json.loads(payload)
-            decoded["history"] = tuple(decoded.get("history") or ())
-            markets.append(MarketObservation(**decoded))
-
-        trends = []
-        for (payload,) in connection.execute(
-            "SELECT payload_json FROM layer1_trend_signals "
-            "ORDER BY observed_at, signal_key"
-        ).fetchall():
-            decoded = json.loads(payload)
-            decoded["asset_ids"] = tuple(decoded.get("asset_ids") or ())
-            trends.append(TrendSignal(**decoded))
+        required_reads = (
+            "iter_announcement_revisions", "iter_market_observations", "iter_trend_signals",
+        )
+        if any(not callable(getattr(store, name, None)) for name in required_reads):
+            raise TypeError("Layer1 persistence store is missing source-record read methods")
+        announcements = store.iter_announcement_revisions()
+        markets = store.iter_market_observations()
+        trends = store.iter_trend_signals()
 
         return self.build(
             announcements=announcements,

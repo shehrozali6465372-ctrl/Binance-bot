@@ -1237,29 +1237,18 @@ class EvidenceVerificationEngine:
         onchain_records: Sequence[tuple[OnChainObservation, OnChainValidationResult]] = (),
         onchain_summary_refs: Sequence[Mapping[str, Any]] = (),
     ) -> ClaimRegistry:
-        connection = store.conn
+        required_reads = (
+            "iter_announcement_revisions", "iter_market_observations", "iter_trend_signals",
+        )
+        if any(not callable(getattr(store, name, None)) for name in required_reads):
+            raise TypeError("Layer1 persistence store is missing source-record read methods")
         evidence = []
-        for (payload,) in connection.execute(
-            "SELECT payload_json FROM layer1_announcement_revisions "
-            "ORDER BY source_id, first_seen_at, revision_key"
-        ).fetchall():
-            decoded = json.loads(payload)
-            decoded["asset_ids"] = tuple(decoded.get("asset_ids") or ())
-            evidence.extend(self.evidence_from_announcement(AnnouncementEvidence(**decoded)))
-        for (payload,) in connection.execute(
-            "SELECT payload_json FROM layer1_market_observations "
-            "ORDER BY observed_at, provider, observation_key"
-        ).fetchall():
-            decoded = json.loads(payload)
-            decoded["history"] = tuple(decoded.get("history") or ())
-            evidence.extend(self.evidence_from_market_observation(MarketObservation(**decoded)))
-        for (payload,) in connection.execute(
-            "SELECT payload_json FROM layer1_trend_signals "
-            "ORDER BY observed_at, signal_key"
-        ).fetchall():
-            decoded = json.loads(payload)
-            decoded["asset_ids"] = tuple(decoded.get("asset_ids") or ())
-            evidence.extend(self.evidence_from_trend_signal(TrendSignal(**decoded)))
+        for announcement in store.iter_announcement_revisions():
+            evidence.extend(self.evidence_from_announcement(announcement))
+        for observation in store.iter_market_observations():
+            evidence.extend(self.evidence_from_market_observation(observation))
+        for signal in store.iter_trend_signals():
+            evidence.extend(self.evidence_from_trend_signal(signal))
         for observation, validation in onchain_records:
             evidence.append(self.evidence_from_onchain_observation(observation, validation))
         for summary in onchain_summary_refs:

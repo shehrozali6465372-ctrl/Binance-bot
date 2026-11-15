@@ -84,6 +84,36 @@ class Layer1FoundationTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_layer1_store_exposes_ordered_source_record_read_contract(self):
+        store = Layer1Store(self.db)
+        try:
+            older = AnnouncementEvidence(
+                "source-a", "https://www.binance.com/en/support/announcement/source-a",
+                "Binance", "listing", "Older announcement", iso(-120), iso(-120),
+                (self.identity.asset_id,), "1" * 64,
+            )
+            newer = AnnouncementEvidence(
+                "source-a", "https://www.binance.com/en/support/announcement/source-a",
+                "Binance", "listing", "Newer announcement", iso(-60), iso(-60),
+                (self.identity.asset_id,), "2" * 64,
+            )
+            observation = MarketObservation(self.identity.asset_id, "provider", "/market", iso(), price=100)
+            signal = TrendSignal("BTC", "provider-a", iso(), 1, (self.identity.asset_id,), "item-1", "3" * 64)
+            store.save_announcement(older)
+            store.save_announcement(newer)
+            store.save_market(observation)
+            store.save_trend(signal)
+
+            revisions = store.iter_announcement_revisions()
+            markets = store.iter_market_observations()
+            trends = store.iter_trend_signals()
+
+            self.assertEqual([item.content_hash for item in revisions], ["1" * 64, "2" * 64])
+            self.assertEqual([item.data_hash for item in markets], [observation.data_hash])
+            self.assertEqual([item.source_item_id for item in trends], [signal.source_item_id])
+        finally:
+            store.close()
+
     def test_module1_config_validation_and_run_context(self):
         with self.assertRaises(ValueError):
             AgentConfig(http_timeout_seconds=0).validate()

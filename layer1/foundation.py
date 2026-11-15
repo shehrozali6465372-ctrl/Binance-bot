@@ -1824,6 +1824,50 @@ class Layer1Store:
                 observations.append(observation)
         return observations
 
+    def iter_announcement_revisions(self) -> tuple[AnnouncementEvidence, ...]:
+        """Return every persisted source revision in deterministic lineage order."""
+        rows = self.conn.execute(
+            "SELECT payload_json FROM layer1_announcement_revisions "
+            "ORDER BY source_id, first_seen_at, revision_key"
+        ).fetchall()
+        records = []
+        for (payload,) in rows:
+            decoded = json.loads(payload)
+            decoded["asset_ids"] = tuple(decoded.get("asset_ids") or ())
+            record = AnnouncementEvidence(**decoded)
+            record.validate()
+            records.append(record)
+        return tuple(records)
+
+    def iter_market_observations(self) -> tuple[MarketObservation, ...]:
+        """Return persisted market observations in stable chronological order."""
+        rows = self.conn.execute(
+            "SELECT payload_json FROM layer1_market_observations "
+            "ORDER BY observed_at, provider, observation_key"
+        ).fetchall()
+        records = []
+        for (payload,) in rows:
+            decoded = json.loads(payload)
+            decoded["history"] = tuple(decoded.get("history") or ())
+            record = MarketObservation(**decoded)
+            record.validate()
+            records.append(record)
+        return tuple(records)
+
+    def iter_trend_signals(self) -> tuple[TrendSignal, ...]:
+        """Return persisted trend signals in stable chronological order."""
+        rows = self.conn.execute(
+            "SELECT payload_json FROM layer1_trend_signals ORDER BY observed_at, signal_key"
+        ).fetchall()
+        records = []
+        for (payload,) in rows:
+            decoded = json.loads(payload)
+            decoded["asset_ids"] = tuple(decoded.get("asset_ids") or ())
+            record = TrendSignal(**decoded)
+            record.validate()
+            records.append(record)
+        return tuple(records)
+
     def save_market_analysis(self, result: MarketAnalysisResult) -> None:
         result.validate()
         payload = json.dumps(result.__dict__, sort_keys=True, separators=(",", ":"), allow_nan=False)
