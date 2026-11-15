@@ -1177,3 +1177,9 @@ This checklist does not authorize the work to be marked done merely by checking 
 - SQLite lifecycle tests: **23 passed**; local lifecycle + PostgreSQL adapter contract tests: **25 passed**. Guarded disposable Neon lifecycle integration: **3 passed**, proving paraphrase remains CONFIRMED while a trading-suspension status change moves the event to DEVELOPING.
 - Full local suite: **631 tests, 0 failures, 38 skipped** (guarded PostgreSQL skips, not passes). Compileall and diff-check passed.
 - Remaining semantic evidence gaps: causal/compound claim coverage and full generated-post sentence-to-evidence attribution acceptance. Module 12 remains an acceptance gap until a broader owner-reviewed semantic policy is specified and tested. No live Binance POST or production changes.
+
+## Module 11 causal/compound claim evidence guard — 2026-11-16
+- Hardened `EvidenceVerificationEngine._verify_one`: one structured field/value evidence link can no longer verify a claim whose text adds a recognized causal relation or contains multiple independent atomic propositions. Such claims stay `UNVERIFIED` with explicit causal/compound issue codes.
+- Exact attributed source assertion exception is limited to accepted, exact announcement title/body evidence and canonical source-assertion text. This closes the prior route where arbitrary causal prose could inherit a price or announcement-body evidence link.
+- TDD reproduced the prior false `VERIFIED` outcomes for causal, compound and laundering cases. Evidence module: **55 passed**. Full suite: **636 tests, 0 failures, 38 skipped** (guarded PostgreSQL skips, not passes); compileall and diff-check passed.
+- Scope limitation: deterministic bounded phrase detection and atomic splitter, not general NLP causal reasoning. Broader semantic coverage and full generated-post attribution acceptance remain open.

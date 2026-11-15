@@ -97,6 +97,70 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertEqual(result.state, "UNVERIFIED")
         self.assertIn("NO_EVIDENCE_LINKED", result.issues)
 
+    def test_causal_relation_cannot_borrow_market_field_evidence(self):
+        market = record(value=100.0, claim_key="market.price", unit="USD")
+        candidate = Claim(
+            text="ABC price is 100 USD because Binance listed ABC",
+            subject=market.subject, asset_id=market.asset_id,
+            claim_key="market.price", value=100.0, unit="USD", timeframe="spot",
+            observed_at=iso(), evidence_ids=(market.evidence_id,), max_age_seconds=3600,
+        )
+        result = self.engine.verify([candidate], [market]).results[0]
+        self.assertEqual(result.state, "UNVERIFIED")
+        self.assertIn("CAUSAL_RELATION_REQUIRES_DIRECT_SOURCE_ASSERTION", result.issues)
+
+    def test_active_causal_relation_cannot_borrow_market_field_evidence(self):
+        market = record(value=100.0, claim_key="market.price", unit="USD")
+        candidate = Claim(
+            text="ABC listing caused the price to rise",
+            subject=market.subject, asset_id=market.asset_id,
+            claim_key="market.price", value=100.0, unit="USD", timeframe="spot",
+            observed_at=iso(), evidence_ids=(market.evidence_id,), max_age_seconds=3600,
+        )
+        result = self.engine.verify([candidate], [market]).results[0]
+        self.assertEqual(result.state, "UNVERIFIED")
+        self.assertIn("CAUSAL_RELATION_REQUIRES_DIRECT_SOURCE_ASSERTION", result.issues)
+
+    def test_compound_claim_cannot_borrow_one_atomic_field_evidence(self):
+        market = record(value=100.0, claim_key="market.price", unit="USD")
+        candidate = Claim(
+            text="ABC is 100 USD and volume rose 5%",
+            subject=market.subject, asset_id=market.asset_id,
+            claim_key="market.price", value=100.0, unit="USD", timeframe="spot",
+            observed_at=iso(), evidence_ids=(market.evidence_id,), max_age_seconds=3600,
+        )
+        result = self.engine.verify([candidate], [market]).results[0]
+        self.assertEqual(result.state, "UNVERIFIED")
+        self.assertIn("COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE", result.issues)
+
+    def test_direct_primary_announcement_body_can_remain_attributed_source_assertion(self):
+        body = "Binance listed ABC because the project completed its review."
+        source = record(
+            value=body, source_id="binance-announcement-body", source_family="binance",
+            claim_key="announcement.body", unit=None, timeframe=None,
+        )
+        candidate = self.engine._source_assertion_claims((source,))[0]
+        result = self.engine.verify([candidate], [source]).results[0]
+        self.assertEqual(result.state, "VERIFIED")
+
+    def test_causal_text_cannot_launder_under_an_announcement_body_key(self):
+        body = "Binance listed ABC because the project completed its review."
+        source = record(
+            value=body, source_id="binance-announcement-body-launder",
+            source_family="binance", claim_key="announcement.body",
+            unit=None, timeframe=None,
+        )
+        candidate = Claim(
+            text="ABC price rose because Binance listed ABC",
+            subject=source.subject, asset_id=source.asset_id,
+            claim_key="announcement.body", value=body, observed_at=iso(),
+            claim_type="SOURCE_ASSERTION", evidence_ids=(source.evidence_id,),
+            max_age_seconds=3600,
+        )
+        result = self.engine.verify([candidate], [source]).results[0]
+        self.assertEqual(result.state, "UNVERIFIED")
+        self.assertIn("CAUSAL_RELATION_REQUIRES_DIRECT_SOURCE_ASSERTION", result.issues)
+
     def test_unlinked_claim_cannot_auto_attach_matching_registry_evidence(self):
         evidence = record()
         unlinked = claim(evidence, evidence_ids=())

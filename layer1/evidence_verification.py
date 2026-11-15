@@ -27,6 +27,14 @@ CLAIM_TYPES = {
 IMPACT_LEVELS = {"LOW", "MEDIUM", "HIGH"}
 SOURCE_KINDS = {"PRIMARY", "SECONDARY", "MARKET", "ONCHAIN", "SOCIAL"}
 SOURCE_STATUSES = {"ACCEPTED", "UNVERIFIED", "REJECTED", "STALE"}
+_CAUSAL_RELATION_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    r"\bbecause\b", r"\bdue\s+to\b", r"\bcaus(?:ed|es|ing)\b",
+    r"\bdriven\s+by\b", r"\btriggered\s+by\b", r"\battributed\s+to\b",
+    r"\bcontributed\s+to\b", r"\bboosted\s+by\b", r"\bfueled\s+by\b",
+    r"\bthanks\s+to\b", r"\bled\s+to\b", r"\bleading\s+to\b", r"\bresulted\s+in\b",
+    r"\bas\s+a\s+result\b", r"\bon\s+account\s+of\b",
+    r"\btherefore\b", r"\bconsequently\b",
+))
 
 
 def _timestamp(value: str) -> datetime:
@@ -322,6 +330,35 @@ class EvidenceVerificationEngine:
         if missing:
             issues.add("MISSING_EVIDENCE_ID")
 
+        # One typed field/value cannot verify a causal relation or several
+        # independent propositions. The narrow exception is an explicitly
+        # attributed announcement title/body whose exact source payload is linked.
+        direct_announcement_assertion = (
+            claim.claim_type == "SOURCE_ASSERTION"
+            and claim.claim_key in {"announcement.title", "announcement.body"}
+            and bool(linked)
+            and all(
+                evidence.claim_key == claim.claim_key
+                and evidence.subject == claim.subject
+                and evidence.asset_id == claim.asset_id
+                and evidence.value == claim.value
+                and evidence.source_status == "ACCEPTED"
+                for evidence in linked
+            )
+        )
+        if direct_announcement_assertion:
+            exemplar = linked[0]
+            expected_source_text = (
+                f"Source assertion: {exemplar.subject} {exemplar.claim_key} = "
+                f"{json.dumps(exemplar.value, ensure_ascii=False)}"
+            )
+            direct_announcement_assertion = claim.text == expected_source_text
+        if (any(pattern.search(claim.text) for pattern in _CAUSAL_RELATION_PATTERNS)
+                and not direct_announcement_assertion):
+            issues.add("CAUSAL_RELATION_REQUIRES_DIRECT_SOURCE_ASSERTION")
+        if len(split_atomic_claims(claim.text)) > 1 and not direct_announcement_assertion:
+            issues.add("COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE")
+
         event_scope = claim.event_at
         if event_scope is None and linked:
             event_scope = linked[0].event_at
@@ -412,7 +449,9 @@ class EvidenceVerificationEngine:
         elif (not claim.evidence_ids or not supporting or missing or temporal_or_field_mismatch
               or "HIGH_IMPACT_FRESHNESS_POLICY_REQUIRED" in issues
               or "NON_FACTUAL_CLAIM_TYPE" in issues
-              or "CLAIM_TYPE_UNCLASSIFIED" in issues):
+              or "CLAIM_TYPE_UNCLASSIFIED" in issues
+              or "CAUSAL_RELATION_REQUIRES_DIRECT_SOURCE_ASSERTION" in issues
+              or "COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE" in issues):
             state = "UNVERIFIED"
         elif claim.impact == "HIGH" and (not primary_available or independent_count < 2):
             issues.add("HIGH_IMPACT_EVIDENCE_THRESHOLD_NOT_MET")
