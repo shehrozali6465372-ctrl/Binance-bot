@@ -672,6 +672,59 @@ class PostgresPublicationStore:
     def load_latest_visual_validation(self, draft_hash: str, image_hash: str) -> Optional[dict]:
         return _load_latest_validation(self, draft_hash=draft_hash, image_hash=image_hash)
 
+    def save_claim_registry(self, registry) -> str:
+        """Persist an immutable, append-only claim-verification snapshot."""
+        from layer1.evidence_verification import ClaimRegistry
+
+        if not isinstance(registry, ClaimRegistry):
+            raise TypeError("claim registry persistence requires a typed ClaimRegistry")
+        payload = registry.to_dict()
+        payload_json = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+        )
+        verification_id = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        states = [result.state for result in registry.results]
+        counts = {
+            "claim_count": len(registry.claims),
+            "verified_count": sum(state == "VERIFIED" for state in states),
+            "corroborated_count": sum(state == "CORROBORATED" for state in states),
+            "unresolved_count": len(registry.unresolved_issues),
+        }
+        with self.conn.transaction():
+            existing = self.conn.execute(
+                "SELECT payload_json,claim_count,verified_count,corroborated_count,unresolved_count "
+                "FROM layer1_claim_verification_runs WHERE verification_id=%s FOR UPDATE",
+                (verification_id,),
+            ).fetchone()
+            if existing is not None:
+                stored_payload = existing["payload_json"]
+                if isinstance(stored_payload, str):
+                    stored_payload = json.loads(stored_payload)
+                if stored_payload != payload or any(existing[key] != value for key, value in counts.items()):
+                    raise ValueError("claim registry identity is immutable; conflicting payload reuse")
+                return verification_id
+            self.conn.execute(
+                "INSERT INTO layer1_claim_verification_runs "
+                "(verification_id,created_at,claim_count,verified_count,corroborated_count,unresolved_count,payload_json) "
+                "VALUES (%s,now(),%s,%s,%s,%s,%s::jsonb)",
+                (verification_id, counts["claim_count"], counts["verified_count"],
+                 counts["corroborated_count"], counts["unresolved_count"], payload_json),
+            )
+        return verification_id
+
+    def load_latest_claim_registry(self) -> Optional[dict]:
+        """Load the newest persisted claim-verification snapshot."""
+        row = self.conn.execute(
+            "SELECT verification_id,payload_json FROM layer1_claim_verification_runs "
+            "ORDER BY created_at DESC,verification_id DESC LIMIT 1",
+        ).fetchone()
+        if row is None:
+            return None
+        payload = row["payload_json"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return {"verification_id": row["verification_id"], "payload": payload}
+
     def save_research_package(
         self, *, research_key: str, package_hash: str, cutoff_at: str, payload: dict,
     ) -> dict:
