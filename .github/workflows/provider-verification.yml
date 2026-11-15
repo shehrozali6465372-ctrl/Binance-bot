@@ -79,7 +79,7 @@ jobs:
                   print("DeepSeek authenticated generation: FAIL (response validation failed)")
                   failed = True
               else:
-                      print(
+                  print(
                       "DeepSeek authenticated generation: PASS"
                       f" | model={result.model}"
                       f" | latency_ms={result.latency_ms}"
