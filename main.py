@@ -5084,9 +5084,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
     if postgres_store is not None:
         from layer1.layer1_postgres import PostgresLayer1Store
         store = PostgresLayer1Store(postgres_store.conn)
-        # EventLifecycleStore still uses its legacy SQLite state-machine API.
-        # Its dedicated connection is opened inside the guarded runtime block below;
-        # discovery/evidence/market records themselves are PostgreSQL-authoritative.
+        # A read-only SQLite bootstrap connection is opened inside the guarded
+        # runtime block to import pre-cutover lifecycle history exactly once.
     else:
         store = Layer1Store(database_path)
     summary = {
@@ -5471,16 +5470,16 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             ClaimRegistryStore(store.conn).save(claim_registry)
         from layer1.event_lifecycle import EventLifecycleStore
         if postgres_store is not None:
+            from layer1.event_lifecycle_postgres import PostgresEventLifecycleStore
             lifecycle_connection = sqlite3.connect(database_path, timeout=30)
-            lifecycle_store = EventLifecycleStore(lifecycle_connection)
+            lifecycle_store = PostgresEventLifecycleStore(postgres_store)
+            lifecycle_store.bootstrap_sqlite_snapshots(lifecycle_connection)
         else:
+            from layer1.event_lifecycle import EventLifecycleStore
             lifecycle_store = EventLifecycleStore(store)
         lifecycle_records = lifecycle_store.sync_announcements(
             announcement_events, claim_registry,
         )
-        if postgres_store is not None:
-            for lifecycle_record in lifecycle_records:
-                postgres_store.sync_event_lifecycle_snapshot(lifecycle_connection, lifecycle_record.event_id)
         lifecycle_states = [record.state for record in lifecycle_records]
         # Legacy compatibility projections are lossy when an asset has multiple events.
         # Event-specific decisions must use event_lifecycle_by_asset_source below.

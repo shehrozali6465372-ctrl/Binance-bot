@@ -123,6 +123,8 @@ class Layer1FoundationTests(unittest.TestCase):
             def save_claim_registry(self, registry):
                 self.saved_registries.append(registry)
                 return "verification-id"
+            def load_event_lifecycle(self, event_id):
+                return None
             def sync_event_lifecycle_snapshot(self, connection, event_id):
                 self.lifecycle_snapshots.append((connection, event_id))
 
@@ -143,6 +145,10 @@ class Layer1FoundationTests(unittest.TestCase):
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='layer1_claim_verification_runs'"
             ).fetchone()
             self.assertIsNone(table)
+            lifecycle_table = check.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='layer1_event_lifecycle'"
+            ).fetchone()
+            self.assertIsNone(lifecycle_table)
         finally:
             check.close()
         postgres_store.conn.close()
