@@ -50,6 +50,38 @@ class ContentVerificationEngineTests(unittest.TestCase):
         self.assertIn("FACTUAL_SENTENCE_MISSING_CLAIM_ATTRIBUTION", result.reasons)
         self.assertEqual(result.approved_claim_ids, ())
 
+    def test_each_generated_post_sentence_maps_to_its_own_verified_claim(self):
+        timestamp = now()
+        price_claim = self.registry.claims[0]
+        change_evidence = EvidenceRecord(
+            source_id="market-change-1", source_family="coingecko",
+            source_kind="PRIMARY", publisher="CoinGecko", subject=self.asset_id,
+            claim_key="market.change_24h", value=2.0, published_at=timestamp,
+            observed_at=timestamp, asset_id=self.asset_id, unit="percent",
+            timeframe="24h", is_primary=True, source_status="ACCEPTED",
+        )
+        change_claim = Claim(
+            text="$ABC 24h change is +2.0%", subject=self.asset_id,
+            claim_key="market.change_24h", value=2.0, observed_at=timestamp,
+            evidence_ids=(change_evidence.evidence_id,), asset_id=self.asset_id,
+            unit="percent", timeframe="24h", claim_type="CONFIRMED_FACT",
+        )
+        registry = EvidenceVerificationEngine().verify(
+            (price_claim, change_claim),
+            self.registry.evidence_records + (change_evidence,),
+        )
+        result = self.engine.validate(
+            f"[[CLAIM:{price_claim.claim_id}]]{price_claim.text}. "
+            f"[[CLAIM:{change_claim.claim_id}]]{change_claim.text}. #ABC #Write2Earn",
+            registry=registry, symbol="ABC", asset_id=self.asset_id,
+            numeric_validator=lambda _: True,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(
+            result.approved_claim_ids,
+            tuple(sorted((price_claim.claim_id, change_claim.claim_id))),
+        )
+
     def test_generated_post_cannot_publish_a_causal_claim_with_only_market_field_evidence(self):
         evidence = self.registry.evidence_records[0]
         causal_claim = Claim(

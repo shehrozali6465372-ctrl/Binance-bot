@@ -1188,3 +1188,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Added a deterministic end-to-end test across claim verification and generated-post content validation. A claim marker cannot publish an unsupported causal sentence when its linked source only verifies the market field; the content gate rejects the unverified reference and unresolved asset claim.
 - No live model call, Binance transport, or publication is performed by this test.
 - Full suite: **637 tests, 0 failures, 38 skipped** (guarded PostgreSQL skips, not passes); compileall and diff-check passed.
+
+## Module 11 one-to-one generated sentence attribution — 2026-11-16
+- Added a positive-path test proving two separate factual sentences map to two distinct verified claim IDs and both are the only approved IDs. Negative-path causal attribution remains rejected when only market-field evidence is linked.
+- Full suite: **638 tests, 0 failures, 38 skipped** (guarded PostgreSQL skips, not passes); compileall and diff-check passed.

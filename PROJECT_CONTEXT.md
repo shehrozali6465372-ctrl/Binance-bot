@@ -1833,3 +1833,7 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - Added an end-to-end deterministic regression from typed market evidence -> `EvidenceVerificationEngine.verify()` -> `ContentVerificationEngine.validate()`. A draft that carries the correct claim marker but appends an unsupported causal clause is rejected because the underlying claim is unresolved; the generated-post gate also reports the unresolved asset claim.
 - This verifies the evidence-level causal/compound guard is enforced at the actual draft validation boundary, not only in an isolated unit test. No provider inference or publisher transport is called.
 - Full local suite after this integration test: **637 tests, 0 failures, 38 skipped** (guarded PostgreSQL skips, not passes). Compileall and diff-check passed.
+
+## Module 11 one-to-one generated sentence attribution — 2026-11-16
+- Added a positive-path draft validation integration test with two distinct verified market claims. Each factual sentence carries its own claim ID, and the validator returns PASS with exactly those two approved claim IDs. The prior negative-path causal test remains and rejects unsupported causal text even when it carries a syntactically valid claim marker.
+- Full local suite after both positive and negative attribution cases: **638 tests, 0 failures, 38 skipped** (guarded PostgreSQL skips, not passes). Compileall and diff-check passed.
