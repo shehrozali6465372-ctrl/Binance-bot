@@ -50,6 +50,24 @@ class ContentVerificationEngineTests(unittest.TestCase):
         self.assertIn("FACTUAL_SENTENCE_MISSING_CLAIM_ATTRIBUTION", result.reasons)
         self.assertEqual(result.approved_claim_ids, ())
 
+    def test_generated_post_cannot_publish_a_causal_claim_with_only_market_field_evidence(self):
+        evidence = self.registry.evidence_records[0]
+        causal_claim = Claim(
+            text="$ABC market price is 1.25 USD because Binance listed ABC",
+            subject=self.asset_id, asset_id=self.asset_id,
+            claim_key="market.price", value=1.25, unit="USD", timeframe="spot",
+            observed_at=now(), evidence_ids=(evidence.evidence_id,), max_age_seconds=3600,
+        )
+        registry = EvidenceVerificationEngine().verify((causal_claim,), (evidence,))
+        result = self.engine.validate(
+            f"[[CLAIM:{causal_claim.claim_id}]]{causal_claim.text}. #ABC #Write2Earn",
+            registry=registry, symbol="ABC", asset_id=self.asset_id,
+            numeric_validator=lambda _: True,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("UNKNOWN_OR_UNVERIFIED_CLAIM_REFERENCE", result.reasons)
+        self.assertIn("UNRESOLVED_ASSET_CLAIMS_REMAIN", result.reasons)
+
     def test_claim_marker_does_not_authorize_rewritten_sentence(self):
         claim = self.registry.claims[0]
         result = self.engine.validate(

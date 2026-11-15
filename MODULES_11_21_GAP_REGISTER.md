@@ -1183,3 +1183,8 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Exact attributed source assertion exception is limited to accepted, exact announcement title/body evidence and canonical source-assertion text. This closes the prior route where arbitrary causal prose could inherit a price or announcement-body evidence link.
 - TDD reproduced the prior false `VERIFIED` outcomes for causal, compound and laundering cases. Evidence module: **55 passed**. Full suite: **636 tests, 0 failures, 38 skipped** (guarded PostgreSQL skips, not passes); compileall and diff-check passed.
 - Scope limitation: deterministic bounded phrase detection and atomic splitter, not general NLP causal reasoning. Broader semantic coverage and full generated-post attribution acceptance remain open.
+
+## Module 11 generated-post causal attribution integration — 2026-11-16
+- Added a deterministic end-to-end test across claim verification and generated-post content validation. A claim marker cannot publish an unsupported causal sentence when its linked source only verifies the market field; the content gate rejects the unverified reference and unresolved asset claim.
+- No live model call, Binance transport, or publication is performed by this test.
+- Full suite: **637 tests, 0 failures, 38 skipped** (guarded PostgreSQL skips, not passes); compileall and diff-check passed.
