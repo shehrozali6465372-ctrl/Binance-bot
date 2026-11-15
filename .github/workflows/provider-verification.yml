@@ -59,8 +59,9 @@ jobs:
           from layer1.deepseek_client import DeepSeekClient
           from image_engine import CloudflareWorkersAIImageGenerator
 
+          # Run both providers independently so one failure does not hide the other result.
+          failed = False
           # One short text request; no retries, no user/project content, no output text in logs.
-          started = time.monotonic()
           try:
               deepseek = DeepSeekClient(
                   os.environ["DEEPSEEK_API_KEY"],
@@ -85,7 +86,7 @@ jobs:
               )
           except Exception as exc:
               print(f"DeepSeek authenticated generation: FAIL ({type(exc).__name__})")
-              sys.exit(1)
+              failed = True
 
           # One small generic image request. Output stays in /tmp and is deleted.
           image_path = Path("/tmp/provider-verification.png")
@@ -112,7 +113,10 @@ jobs:
               )
           except Exception as exc:
               print(f"Cloudflare Workers AI image generation: FAIL ({type(exc).__name__})")
-              sys.exit(1)
+              failed = True
           finally:
               image_path.unlink(missing_ok=True)
+
+          if failed:
+              sys.exit(1)
           PY
