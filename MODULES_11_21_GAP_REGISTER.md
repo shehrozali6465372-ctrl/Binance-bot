@@ -1198,3 +1198,8 @@ This checklist does not authorize the work to be marked done merely by checking 
 - TDD: added a status-matrix regression test; before the fix, 202/204/302/400/500 all incorrectly returned success. The uploader now accepts only 200/201 and rejects all other response statuses. Existing HTTPS presigned-host allowlist and redirect refusal are unchanged.
 - Focused Cloudflare image-generation + deterministic pipeline tests: **17 passed, 0 failed**. Full repository unittest discovery: **639 tests, 0 failures, 38 skipped** (guarded PostgreSQL integration skips, not passes). `compileall` and `git diff --check` passed. No real Cloudflare request, Binance media upload, real Square post, production DB, credential/workflow/schedule modification, merge or deployment.
 - This closes only the HTTP acknowledgement handling defect. Authenticated Cloudflare inference, actual Binance media upload and full scheduled provider-backed execution remain unverified; Modules 19–21 remain **PARTIAL**.
+
+## Module 19 Binance media-upload sequence regression — 2026-11-16
+- Added deterministic integration tests for the Binance media flow. Success path must call presigned URL → storage PUT → image status in that order and return the processed CDN URL. If storage PUT is not confirmed, image-status polling must not run.
+- All network-facing steps are stubbed. Focused image-generation suite: **18 passed**. Full local suite: **641 tests, 0 failures, 38 skipped** (guarded PostgreSQL integration skips, not passes). Compileall and diff-check passed.
+- This is mock-based orchestration evidence only; no authenticated media upload, live provider request, real Square post, production DB, workflow/schedule modification, merge or deployment. Module 19/21 remain PARTIAL.

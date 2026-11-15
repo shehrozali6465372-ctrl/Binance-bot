@@ -125,6 +125,37 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
                             image_path, "https://bucket.s3.amazonaws.com/object.png?sig=opaque",
                         ))
 
+    def test_binance_media_pipeline_polls_only_after_confirmed_storage_put(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            image_path.write_bytes(png_bytes())
+            uploader = ImageUploader()
+            order = []
+            with patch.object(uploader, "_request_presigned_url", side_effect=lambda *args: order.append("presign") or {
+                "presignedUrl": "https://bucket.s3.amazonaws.com/object.png?sig=opaque",
+                "fileTicket": "ticket-123",
+            }), patch.object(uploader, "_upload_to_presigned_url", side_effect=lambda *args: order.append("put") or True), patch.object(
+                uploader, "_poll_image_status", side_effect=lambda *args: order.append("poll") or "https://bin.bnbstatic.com/image/123.png",
+            ):
+                result = uploader.binance_media_upload(image_path, "test-square-key")
+            self.assertEqual(result, "https://bin.bnbstatic.com/image/123.png")
+            self.assertEqual(order, ["presign", "put", "poll"])
+
+    def test_binance_media_pipeline_never_polls_after_unconfirmed_storage_put(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            image_path.write_bytes(png_bytes())
+            uploader = ImageUploader()
+            with patch.object(uploader, "_request_presigned_url", return_value={
+                "presignedUrl": "https://bucket.s3.amazonaws.com/object.png?sig=opaque",
+                "fileTicket": "ticket-123",
+            }), patch.object(uploader, "_upload_to_presigned_url", return_value=False), patch.object(
+                uploader, "_poll_image_status",
+            ) as poll:
+                result = uploader.binance_media_upload(image_path, "test-square-key")
+            self.assertIsNone(result)
+            poll.assert_not_called()
+
     def test_final_media_url_must_be_binance_cdn_host(self):
         class Authorization:
             def verify_integrity(self):
