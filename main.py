@@ -1114,6 +1114,12 @@ def _extract_catalyst_for_coin(symbol: str, announcements: List[Dict[str, Any]])
 
 def _get_today_post_count(db) -> int:
     """Count how many posts have been published today (UTC)."""
+    postgres_counter = getattr(db, "get_today_post_count", None)
+    if callable(postgres_counter):
+        try:
+            return int(postgres_counter())
+        except Exception:
+            return 0
     today_before = utc_now()[:10]  # YYYY-MM-DD
     try:
         rows = db.conn.execute(
@@ -1450,6 +1456,7 @@ class PerformanceAnalyzer:
         decision_reason: str = "",
         square_link: str = "",
         remote_post_id: str = "",
+        local_post_id: Optional[int] = None,
     ) -> None:
         """Store metadata only for a confirmed remote publication."""
         symbol = coin.get("symbol", "")
@@ -1477,12 +1484,13 @@ class PerformanceAnalyzer:
                 self.db.conn.execute(
                     """
                     INSERT INTO post_analytics (
-                        coin_symbol, created_at, catalyst_type, narrative,
+                        post_id, coin_symbol, created_at, catalyst_type, narrative,
                         hook_style, trade_setup_style, decision_reason,
                         word_count, hashtags, square_post_link, remote_post_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        local_post_id,
                         symbol,
                         utc_now(),
                         catalyst_type,
@@ -1702,6 +1710,151 @@ class PerformanceAnalyzer:
             return 'target_only'
         else:
             return 'analysis_only'
+
+class PostgresPerformanceAnalyzer(PerformanceAnalyzer):
+    """PerformanceAnalyzer implementation using PostgreSQL JSONB/timestamptz storage."""
+
+    def __init__(self, db):
+        connection = getattr(db, "pg_conn", None)
+        if connection is None or not callable(getattr(connection, "execute", None)):
+            raise TypeError("PostgreSQL legacy database adapter is required")
+        self.db = db
+
+    def record_publish(
+        self, coin: Dict[str, Any], post_content: str,
+        decision_reason: str = "", square_link: str = "",
+        remote_post_id: str = "", local_post_id: Optional[int] = None,
+    ) -> None:
+        symbol = coin.get("symbol", "")
+        catalyst_type = coin.get("announcement_type", "market_move")
+        narrative = coin.get("narrative", "")
+        if not narrative:
+            ann_type = coin.get("announcement_type", "")
+            if ann_type in ("new_listing", "launchpool", "megadrop"):
+                narrative = "listing"
+            elif ann_type == "airdrop":
+                narrative = "airdrop"
+            elif ann_type == "delisting":
+                narrative = "delisting"
+        hook_style = self._detect_hook_style(post_content)
+        word_count = len(post_content.split())
+        hashtags_str = ",".join(self._extract_hashtags(post_content))
+        trade_style = self._detect_trade_setup_style(post_content)
+        try:
+            with self.db.pg_conn.transaction():
+                self.db.pg_conn.execute(
+                    "INSERT INTO post_analytics "
+                    "(post_id,coin_symbol,created_at,catalyst_type,narrative,hook_style,"
+                    "trade_setup_style,decision_reason,word_count,hashtags,square_post_link,remote_post_id) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (local_post_id,symbol,utc_now(),catalyst_type,narrative,hook_style,trade_style,
+                     (decision_reason or "")[:200],word_count,hashtags_str,square_link,remote_post_id or None),
+                )
+            LOGGER.info("PostgreSQL analytics: stored $%s (%s, %s, %d words)",
+                        symbol,catalyst_type,hook_style,word_count)
+        except Exception as exc:
+            LOGGER.error("PostgreSQL analytics storage failed (%s)",type(exc).__name__)
+
+    def update_metrics(
+        self, coin_symbol: str, views: int = None, likes: int = None,
+        comments: int = None, shares: int = None, traders: int = None,
+        reward: float = None, remote_post_id: str = None,
+    ) -> bool:
+        if not isinstance(remote_post_id,str) or not remote_post_id.strip():
+            return False
+        try:
+            with self.db.pg_conn.transaction():
+                row=self.db.pg_conn.execute(
+                    "SELECT id FROM post_analytics WHERE coin_symbol=%s AND remote_post_id=%s "
+                    "AND views IS NULL ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE",
+                    (coin_symbol.upper(),remote_post_id),
+                ).fetchone()
+                if row is None:
+                    LOGGER.warning("No pending PostgreSQL metrics row for $%s",coin_symbol)
+                    return False
+                updates=[]
+                params=[]
+                for column,value in (
+                    ("views",views),("likes",likes),("comments",comments),("shares",shares),
+                    ("eligible_traders",traders),("reward_earned",reward),
+                ):
+                    if value is not None:
+                        updates.append(column+"=%s")
+                        params.append(value)
+                updates.append("metrics_updated_at=%s")
+                params.append(utc_now())
+                params.append(row["id"])
+                self.db.pg_conn.execute(
+                    "UPDATE post_analytics SET "+",".join(updates)+" WHERE id=%s",params,
+                )
+            LOGGER.info("PostgreSQL metrics updated for $%s",coin_symbol)
+            return True
+        except Exception as exc:
+            LOGGER.warning("PostgreSQL metrics update failed (%s)",type(exc).__name__)
+            return False
+
+    def get_insights_summary(self) -> str:
+        insights=[]
+        try:
+            rows=self.db.pg_conn.execute(
+                "SELECT catalyst_type,COUNT(*) AS cnt,AVG(views) AS avg_views "
+                "FROM post_analytics GROUP BY catalyst_type ORDER BY cnt DESC LIMIT 5"
+            ).fetchall()
+            if rows:
+                best=rows[0]
+                info="Most used catalyst: %s (%d posts)" % (best["catalyst_type"],best["cnt"])
+                if best["avg_views"] is not None:
+                    info+=", avg views: %.0f" % best["avg_views"]
+                insights.append(info)
+        except Exception:
+            pass
+        try:
+            rows=self.db.pg_conn.execute(
+                "SELECT narrative,COUNT(*) AS cnt FROM post_analytics "
+                "WHERE narrative IS NOT NULL AND narrative<>'' GROUP BY narrative "
+                "ORDER BY cnt DESC LIMIT 5"
+            ).fetchall()
+            if rows:
+                insights.append("Narratives: "+", ".join(
+                    "%s (%d)" % (row["narrative"],row["cnt"]) for row in rows[:3]
+                ))
+        except Exception:
+            pass
+        try:
+            rows=self.db.pg_conn.execute(
+                "SELECT hook_style,COUNT(*) AS cnt FROM post_analytics "
+                "WHERE hook_style IS NOT NULL AND hook_style<>'' GROUP BY hook_style "
+                "ORDER BY cnt DESC LIMIT 5"
+            ).fetchall()
+            if rows:
+                insights.append("Hook styles: "+", ".join(
+                    "%s (%d)" % (row["hook_style"],row["cnt"]) for row in rows[:3]
+                ))
+        except Exception:
+            pass
+        try:
+            row=self.db.pg_conn.execute(
+                "SELECT AVG(word_count) AS average FROM post_analytics WHERE word_count IS NOT NULL"
+            ).fetchone()
+            if row and row["average"] is not None:
+                insights.append("Avg length: %.0f words" % row["average"])
+        except Exception:
+            pass
+        try:
+            rows=self.db.pg_conn.execute(
+                "SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::integer AS hour,COUNT(*) AS cnt "
+                "FROM post_analytics GROUP BY hour ORDER BY cnt DESC LIMIT 3"
+            ).fetchall()
+            if rows:
+                insights.append("Peak hours: "+", ".join(
+                    "%d:00 UTC (%d)" % (row["hour"],row["cnt"]) for row in rows
+                ))
+        except Exception:
+            pass
+        if not insights:
+            insights.append("Analytics DB building — insights will grow with each post.")
+        return "\n".join(insights)
+
 
 class SkillsHubEngine:
     """Binance Skills Hub Market Rank API integration.
@@ -3577,9 +3730,14 @@ class PostPublisher:
 
     def __init__(self, config: Config = CONFIG, *, postgres_store=None):
         self.config = config
-        self.db = Database(config.database_path)
-        # PostgreSQL is explicit opt-in; SQLite remains the default runtime backend.
         self.postgres_store = postgres_store
+        # PostgreSQL history/analytics use the shared PostgreSQL connection;
+        # no local SQLite database is opened when PostgreSQL is selected.
+        if postgres_store is not None and callable(getattr(getattr(postgres_store, "conn", None), "execute", None)):
+            from layer1.legacy_postgres import PostgresLegacyDatabase
+            self.db = PostgresLegacyDatabase(postgres_store)
+        else:
+            self.db = Database(config.database_path)
 
     @staticmethod
     def _idempotency_key(symbol: str, content: str, image_list: List[str]) -> str:
@@ -4008,6 +4166,13 @@ class PostPublisher:
                 key, "PUBLICATION_UNKNOWN", post_id=post_id, share_link=share_link,
                 http_status=http_status, error="Remote acceptance confirmed; finalization pending",
             )
+            local_post_id = None
+            if getattr(self.db, "pg_conn", None) is not None:
+                local_post_id = self.db.save_post({
+                    "content": content, "coin_symbol": symbol,
+                    "remote_post_id": post_id, "share_link": share_link,
+                    "publication_status": "PUBLISHED_CONFIRMED",
+                })
             store.finish_authorized_attempt(
                 key, "PUBLISHED_CONFIRMED", post_id=post_id, share_link=share_link,
                 http_status=http_status,
@@ -4015,7 +4180,7 @@ class PostPublisher:
             self._save_locally(coin, content, share_link=share_link or f"[POST-ID:{post_id}]")
             return PublishResult(
                 status="PUBLISHED_CONFIRMED", share_link=share_link, post_id=post_id,
-                http_status=http_status,
+                local_post_id=local_post_id, http_status=http_status,
             )
         except urllib.error.HTTPError as exc:
             status = "PUBLICATION_UNKNOWN" if exc.code in (408, 429) or exc.code >= 500 else "FAILED_CONFIRMED"
@@ -5029,13 +5194,17 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
 
     try:
         decision_reason = rankings[0].get("reason", "") if rankings else ""
-        performance = PerformanceAnalyzer(publisher.db)
+        if publisher.postgres_store is not None and getattr(publisher.db, "pg_conn", None) is not None:
+            performance = PostgresPerformanceAnalyzer(publisher.db)
+        else:
+            performance = PerformanceAnalyzer(publisher.db)
         performance.record_publish(
             coin=best_coin,
             post_content=content,
             decision_reason=decision_reason,
             square_link=link,
             remote_post_id=post_id,
+            local_post_id=getattr(publish_result, "local_post_id", None),
         )
     except Exception as e:
         LOGGER.error("Confirmed publication analytics persistence failed: %s", e)
@@ -5471,9 +5640,12 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         from layer1.event_lifecycle import EventLifecycleStore
         if postgres_store is not None:
             from layer1.event_lifecycle_postgres import PostgresEventLifecycleStore
-            lifecycle_connection = sqlite3.connect(database_path, timeout=30)
             lifecycle_store = PostgresEventLifecycleStore(postgres_store)
-            lifecycle_store.bootstrap_sqlite_snapshots(lifecycle_connection)
+            legacy_db_file = Path(database_path)
+            if legacy_db_file.is_file():
+                legacy_uri = legacy_db_file.resolve().as_uri() + "?mode=ro"
+                lifecycle_connection = sqlite3.connect(legacy_uri, uri=True, timeout=30)
+                lifecycle_store.bootstrap_sqlite_snapshots(lifecycle_connection)
         else:
             from layer1.event_lifecycle import EventLifecycleStore
             lifecycle_store = EventLifecycleStore(store)
@@ -5702,10 +5874,9 @@ def main_loop() -> None:
     hot_search_engine = HotSearchEngine(config)
     research = ResearchEngine()
     generator = DeepSeekGenerator(config)
-    publisher_db = Database(config.database_path)
     postgres_store = _create_runtime_postgres_store(config)
     publisher = PostPublisher(config, postgres_store=postgres_store)
-    publisher.db = publisher_db
+    publisher_db = publisher.db
     
     iteration = 0
     posted_symbols = set()
@@ -5742,6 +5913,7 @@ def main_loop() -> None:
         while slept < interval:
             time.sleep(sleep_chunk)
             slept += sleep_chunk
+    publisher_db.close()
     if postgres_store is not None:
         postgres_store.close()
 
@@ -5757,10 +5929,9 @@ def main() -> None:
     hot_search_engine = HotSearchEngine(config)
     research = ResearchEngine()
     generator = DeepSeekGenerator(config)
-    publisher_db = Database(config.database_path)
     postgres_store = _create_runtime_postgres_store(config)
     publisher = PostPublisher(config, postgres_store=postgres_store)
-    publisher.db = publisher_db
+    publisher_db = publisher.db
     
     posted_symbols = publisher_db.get_posted_symbols(hours=48)
     try:
@@ -5769,6 +5940,7 @@ def main() -> None:
         _log_iteration_failure(1, exc)
         raise SystemExit(1) from None
     finally:
+        publisher_db.close()
         if postgres_store is not None:
             postgres_store.close()
 

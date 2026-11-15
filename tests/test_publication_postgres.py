@@ -708,7 +708,7 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
         package_hash = hashlib.sha256(json.dumps(package_payload,sort_keys=True,separators=(",", ":")).encode()).hexdigest()
         brief_payload = {"angle":"auth-test"}
         brief_hash = hashlib.sha256(json.dumps(brief_payload,sort_keys=True,separators=(",", ":")).encode()).hexdigest()
-        content = "BTC market update supported by verified source."
+        content = "BTC market update supported by verified source " + suffix + "."
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         claim_ids = ("e"*64,)
         reservation = None
@@ -760,6 +760,13 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
                         result = publisher.publish({"symbol":symbol,"asset_id":"coingecko:bitcoin"}, content, authorization=auth, image_hashes=[])
                     self.assertEqual(result.status, "PUBLISHED_CONFIRMED")
                     self.assertEqual(result.post_id, "pg-integration-post-1")
+                    self.assertIsNotNone(result.local_post_id)
+                    post_row=store.conn.execute(
+                        "SELECT id,coin_symbol,content,metadata FROM posts WHERE id=%s",
+                        (result.local_post_id,),
+                    ).fetchone()
+                    self.assertEqual(post_row["coin_symbol"],symbol)
+                    self.assertEqual(post_row["metadata"]["remote_post_id"],"pg-integration-post-1")
                     transport.assert_called_once()
                     attempt_key = publisher._idempotency_key(symbol, content, [])
                     attempt = store.conn.execute("SELECT id,status FROM publication_attempts WHERE idempotency_key=%s",(attempt_key,)).fetchone()
@@ -770,10 +777,8 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
                         duplicate = publisher.publish({"symbol":symbol,"asset_id":"coingecko:bitcoin"}, content, authorization=auth, image_hashes=[])
                     self.assertEqual(duplicate.status, "DUPLICATE_BLOCKED")
                     second_transport.assert_not_called()
-                    sqlite_attempt_count = publisher.db.conn.execute(
-                        "SELECT COUNT(*) FROM publication_attempts"
-                    ).fetchone()[0]
-                    self.assertEqual(sqlite_attempt_count, 0)
+                    self.assertIsNone(publisher.db.conn)
+                    self.assertFalse(Path(config.database_path).exists())
                 finally:
                     publisher.db.close()
         finally:
@@ -781,6 +786,8 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
                 store.conn.execute("DELETE FROM publication_authorizations WHERE quota_reservation_id=%s",(reservation,))
                 store.conn.execute("DELETE FROM publication_quota_reservations WHERE reservation_id=%s",(reservation,))
             store.conn.execute("DELETE FROM publication_attempts WHERE idempotency_key=%s",(attempt_key,))
+            store.conn.execute("DELETE FROM post_analytics WHERE remote_post_id=%s",("pg-integration-post-1",))
+            store.conn.execute("DELETE FROM posts WHERE metadata->>'remote_post_id'=%s",("pg-integration-post-1",))
             store.conn.execute("DELETE FROM content_draft_validation_results WHERE draft_hash=%s",(content_hash,))
             store.conn.execute("DELETE FROM content_draft_versions WHERE editorial_brief_id IN (SELECT brief_id FROM editorial_brief_versions WHERE event_id=%s)",(event_id,))
             store.conn.execute("DELETE FROM editorial_brief_versions WHERE event_id=%s",(event_id,))
