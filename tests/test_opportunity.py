@@ -13,6 +13,7 @@ def now(delta=0):
 class OpportunityEvaluationEngineTests(unittest.TestCase):
     def setUp(self):
         self.engine = OpportunityEvaluationEngine()
+        self.fixed_now = now()
         self.policy = OpportunityPolicy(
             policy_version="test-policy-v1",
             weights={
@@ -26,8 +27,9 @@ class OpportunityEvaluationEngineTests(unittest.TestCase):
 
     def evaluate(self, **overrides):
         args = {
-            "eligibility_status": "ELIGIBLE", "eligibility_verified_at": now(),
+            "eligibility_status": "ELIGIBLE", "eligibility_verified_at": self.fixed_now,
             "research_completeness": "READY", "event_state": "CONFIRMED",
+            "now": self.fixed_now,
             "contradiction_count": 0, "unresolved_critical_count": 0,
             "unsupported_causal_framing": False, "duplicate_angle": False,
             "materially_new": False, "factors": self.factors, "policy": self.policy,
@@ -81,6 +83,90 @@ class OpportunityEvaluationEngineTests(unittest.TestCase):
         self.assertEqual(self.evaluate(event_state="WITHDRAWN").state, "REJECT")
         self.assertEqual(self.evaluate(event_state="DISPUTED").state, "REJECT")
         self.assertEqual(self.evaluate(event_state="STALE").state, "DEFER")
+
+    def test_decision_identity_binds_exact_factor_inputs_not_only_weighted_score(self):
+        first_factors = dict(self.factors)
+        second_factors = dict(self.factors)
+        first_factors["evidence_strength"] = 94
+        first_factors["timeliness"] = 85
+        second_factors["evidence_strength"] = 86
+        second_factors["timeliness"] = 95
+        first = self.evaluate(factors=first_factors)
+        second = self.evaluate(factors=second_factors)
+        self.assertEqual(first.score, second.score)
+        self.assertNotEqual(first.decision_id, second.decision_id)
+
+    def test_decision_identity_binds_policy_thresholds_and_weights(self):
+        from dataclasses import replace
+        first = self.evaluate()
+        alternate = replace(
+            self.policy,
+            weights={name: 1 / len(FACTOR_NAMES) for name in FACTOR_NAMES},
+            proceed_threshold=76,
+        )
+        second = self.evaluate(policy=alternate)
+        self.assertEqual(first.state, second.state)
+        self.assertEqual(first.score, second.score)
+        self.assertNotEqual(first.decision_id, second.decision_id)
+
+    def test_eligibility_age_bound_must_be_a_positive_integer_even_without_policy(self):
+        for invalid in (True, 0, -1, 1.5):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "eligibility age bound"):
+                    self.evaluate(policy=None, eligibility_max_age_seconds=invalid)
+
+    def test_policy_rejects_boolean_non_numeric_and_non_finite_thresholds(self):
+        for proceed, defer in ((True, 50), (75, False), (float("nan"), 50),
+                               (75, float("inf")), ("75", 50)):
+            with self.subTest(proceed=proceed, defer=defer):
+                invalid = OpportunityPolicy(
+                    policy_version="invalid-threshold",
+                    weights=self.policy.weights,
+                    proceed_threshold=proceed,
+                    defer_threshold=defer,
+                )
+                with self.assertRaisesRegex(ValueError, "thresholds"):
+                    invalid.validate()
+
+    def test_decision_store_rejects_malformed_decision_payload(self):
+        import sqlite3
+        from dataclasses import replace
+        from layer1.opportunity import OpportunityDecisionStore
+        connection = sqlite3.connect(":memory:")
+        try:
+            store = OpportunityDecisionStore(connection)
+            decision = self.evaluate()
+            with self.assertRaisesRegex(ValueError, "decision payload"):
+                store.save("research:package:1", replace(decision, state="UNKNOWN"))
+            with self.assertRaisesRegex(ValueError, "decision payload"):
+                store.save("research:package:1", replace(decision, score=float("nan")))
+        finally:
+            connection.close()
+
+    def test_decision_store_rejects_id_collision_with_different_decision_payload(self):
+        import sqlite3
+        from dataclasses import replace
+        from layer1.opportunity import OpportunityDecisionStore
+        connection = sqlite3.connect(":memory:")
+        try:
+            store = OpportunityDecisionStore(connection)
+            decision = self.evaluate()
+            store.save("research:package:1", decision)
+            stored = connection.execute(
+                "SELECT input_snapshot_json FROM opportunity_decisions WHERE decision_id=?",
+                (decision.decision_id,),
+            ).fetchone()
+            import json
+            snapshot = json.loads(stored[0])
+            self.assertEqual(snapshot["inputs"]["factors"]["evidence_strength"], 90.0)
+            self.assertEqual(snapshot["policy"]["policy_version"], "test-policy-v1")
+            tampered = replace(decision, score=decision.score - 1)
+            with self.assertRaisesRegex(ValueError, "decision ID"):
+                store.save("research:package:1", tampered)
+            with self.assertRaisesRegex(ValueError, "different research package"):
+                store.save("research:package:2", decision)
+        finally:
+            connection.close()
 
 
 if __name__ == "__main__":

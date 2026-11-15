@@ -45,6 +45,7 @@ class PublicationAuthorization:
     draft_id: str
     research_package_id: str
     editorial_brief_id: str
+    event_id: str
     approved_claim_ids: tuple[str, ...]
     draft_provenance_hash: str
     content_hash: str
@@ -79,6 +80,7 @@ class PublicationAuthorization:
             not isinstance(self.draft_id, str) or not self.draft_id
             or not isinstance(self.research_package_id, str) or not self.research_package_id
             or not isinstance(self.editorial_brief_id, str) or not self.editorial_brief_id
+            or not isinstance(self.event_id, str) or not self.event_id
             or not self.approved_claim_ids
         ):
             reasons.append("PERSISTED_DRAFT_PROVENANCE_MISSING")
@@ -240,6 +242,17 @@ class PublicationAuthorizationEngine:
         ):
             raise ValueError("persisted draft provenance does not match the authorized content")
         try:
+            editorial_brief = self.connection.execute(
+                "SELECT event_id, research_package_id FROM editorial_brief_versions "
+                "WHERE brief_id=?",
+                (persisted_draft[2],),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            raise ValueError("persisted editorial event provenance ledger is unavailable") from None
+        if editorial_brief is None or editorial_brief[1] != persisted_draft[1]:
+            raise ValueError("persisted editorial brief does not match the draft research package")
+        event_id = editorial_brief[0]
+        try:
             approved_claim_ids = json.loads(persisted_draft[3])
         except (TypeError, json.JSONDecodeError):
             raise ValueError("persisted draft approved-claim provenance is invalid") from None
@@ -257,12 +270,19 @@ class PublicationAuthorizationEngine:
             raise ValueError("persisted text validation is not PASS for this exact draft hash")
         for image_hash in image_hashes:
             visual_validation = self.connection.execute(
-                "SELECT status FROM visual_validation_results WHERE draft_hash=? AND image_hash=? "
+                "SELECT status, validation_version FROM visual_validation_results "
+                "WHERE draft_hash=? AND image_hash=? "
                 "ORDER BY created_at DESC, validation_id DESC LIMIT 1",
                 (draft_hash, image_hash),
             ).fetchone()
-            if visual_validation is None or visual_validation[0] != "PASS":
-                raise ValueError("persisted visual validation is not PASS for this exact draft/image pair")
+            if (
+                visual_validation is None or visual_validation[0] != "PASS"
+                or visual_validation[1] != "visual-quality-v2"
+            ):
+                raise ValueError(
+                    "persisted visual validation is not PASS from the current visual validation version "
+                    "for this exact draft/image pair"
+                )
         approved_claim_ids = tuple(sorted(approved_claim_ids))
         research_package_id = persisted_draft[1]
         editorial_brief_id = persisted_draft[2]
@@ -275,6 +295,7 @@ class PublicationAuthorizationEngine:
             draft_id=persisted_draft[0],
             research_package_id=research_package_id,
             editorial_brief_id=editorial_brief_id,
+            event_id=event_id,
             approved_claim_ids=approved_claim_ids,
             draft_provenance_hash=draft_provenance_hash,
             content_hash=draft_hash, image_hashes=image_hashes,
@@ -292,6 +313,7 @@ class PublicationAuthorizationEngine:
             symbol=symbol, asset_id=asset_id, content=content,
             image_hashes=image_hashes, now=current.isoformat(),
         )
+        reasons = tuple(sorted(set(reasons) | set(self.validate_persisted_event_binding(candidate))))
         if reasons:
             raise ValueError("publication authorization denied: " + ",".join(reasons))
         payload = asdict(candidate)
@@ -320,6 +342,44 @@ class PublicationAuthorizationEngine:
             if cursor.rowcount != 1:
                 raise ValueError("quota reservation is missing or no longer available")
         return authorized
+
+    def validate_persisted_event_binding(
+        self, authorization: PublicationAuthorization,
+    ) -> tuple[str, ...]:
+        """Recheck the exact immutable editorial-event link against current SQLite state."""
+        reasons: list[str] = []
+        try:
+            brief = self.connection.execute(
+                "SELECT event_id, research_package_id FROM editorial_brief_versions WHERE brief_id=?",
+                (authorization.editorial_brief_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return ("EDITORIAL_EVENT_LEDGER_UNAVAILABLE",)
+        if brief is None:
+            return ("EDITORIAL_BRIEF_MISSING",)
+        if brief[0] != authorization.event_id:
+            reasons.append("EDITORIAL_EVENT_IDENTITY_CHANGED")
+        if brief[1] != authorization.research_package_id:
+            reasons.append("EDITORIAL_RESEARCH_PACKAGE_CHANGED")
+        if authorization.event_state == "NO_EVENT":
+            return tuple(sorted(set(reasons)))
+        try:
+            event = self.connection.execute(
+                "SELECT asset_id, state FROM layer1_event_lifecycle WHERE event_id=?",
+                (authorization.event_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return tuple(sorted(set(reasons) | {"EVENT_LIFECYCLE_LEDGER_UNAVAILABLE"}))
+        if event is None:
+            reasons.append("EVENT_LIFECYCLE_RECORD_MISSING")
+        else:
+            if event[0] != authorization.asset_id:
+                reasons.append("EVENT_ASSET_IDENTITY_CHANGED")
+            if event[1] != authorization.event_state:
+                reasons.append("EVENT_LIFECYCLE_CHANGED_AFTER_AUTHORIZATION")
+            if event[1] not in {"CONFIRMED", "DEVELOPING"}:
+                reasons.append("EVENT_STATE_NOT_PUBLISHABLE")
+        return tuple(sorted(set(reasons)))
 
     def bind_attempt(self, reservation_id: str, attempt_id: int) -> None:
         if isinstance(attempt_id, bool) or not isinstance(attempt_id, int) or attempt_id < 1:

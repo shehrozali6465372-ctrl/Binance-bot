@@ -4,9 +4,19 @@ This register tracks whether the locked architecture contracts are reachable and
 
 ## 5.11 Module 11 — Evidence Verification Engine
 
-### Latest checkpoint — 2026-11-14 (PARTIAL; supersedes older verification counts below)
+### Latest checkpoint — 2026-11-15 (PARTIAL; supersedes older verification counts below)
 
-- Focused verification: **47 passed, 0 failed**. Full repository suite: **398 passed, 0 failed, 12 skipped**. The 12 skips are PostgreSQL integration tests because `TEST_POSTGRES_DSN` is not configured.
+- Added generated-post claim attribution: the trusted rendered register now exposes stable claim IDs; the writer is instructed to copy claim text exactly with an inline internal reference; the deterministic gate rejects unmarked sentences, unknown/foreign/unverified claim IDs, and any sentence that differs from its referenced claim text. Internal markers are removed before persistence/publication, and only actually referenced verified IDs are bound to the draft.
+- TDD regressions were observed failing before the implementation for missing attribution, rewritten text with a real claim ID, and unknown claim IDs. Latest targeted evidence-verification, content-verification and DeepSeek-generator batch: **75 passed, 0 failed**. `compileall` and `git diff --check` pass.
+- Full repository suite in an isolated temporary test venv (`/tmp/binance-module11-test-venv`; Pillow installed there only): **522 tests ran: 510 passed, 0 failed, 12 skipped**. The 12 skips require `TEST_POSTGRES_DSN`. The run included DeepSeek-generator, end-to-end and publisher-safety tests. `compileall` and `git diff --check` passed. No project dependency manifest or production environment was modified.
+- The deterministic conjunction splitter handles clear independent-subject clauses and explicit shared-subject predicates only when a recognized finite verb makes the next proposition clear. Coordinated object lists and ambiguous elliptical patterns are preserved instead of guessed apart; package-level tests show split factual assertions remain `UNCLASSIFIED` without matching evidence.
+- Explicit sentence-to-claim attribution is fail-closed and exact-match, not semantic entailment: paraphrases and ordinary unattributed prose are rejected. Internal claim markers are removed before draft hashing/storage, and only actually referenced claim IDs are attached to the saved draft.
+- Module 11 remains **PARTIAL**: full semantic fact/causal inference and all natural-language variants of ambiguous shared-subject/elliptical compound claims are not implemented. These ambiguous forms remain unresolved/fail-closed rather than being guessed. Module 11 persistence is verified against the existing append-only SQLite store; the separate Module 21 production-durability boundary is tracked under Module 21, not solved by introducing a second Module 11 database. The 12 PostgreSQL tests are unrelated configured integration skips because `TEST_POSTGRES_DSN` was not set; no test DB was provisioned.
+- Existing local changes are preserved; this checkpoint is uncommitted/unpushed. No live provider call, production write, publication, merge or deployment.
+
+Historical checkpoint details below are superseded where counts or implementation descriptions differ.
+
+- Earlier focused verification: **47 passed, 0 failed**. Earlier full repository suite: **398 passed, 0 failed, 12 skipped**. The 12 skips required PostgreSQL because `TEST_POSTGRES_DSN` was not configured.
 - Research-package claims now use deterministic atomic sentence/semicolon splitting, exact candidate `market_data_hash` linkage, exact rendered-number-to-source-value checks, currency-aware evidence matching, Binance Spot exchangeInfo evidence, announcement freshness evidence tied to title lineage, and local latest-200-publication-ledger evidence.
 - DeepSeek Phase 2 now rejects numeric tokens not present in the trusted verified/corroborated claim lines. The guard ignores hashtags and is intentionally a numeric consistency check, not a semantic fact checker.
 - Unknown content remains `UNCLASSIFIED` and blocks DeepSeek. Qualified analysis is kept separate from unresolved factual claims. Skills Hub metrics are excluded from LLM research packages until their source provenance is verified; their existing internal scoring path is not changed.
@@ -665,7 +675,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 | Module | Current status | Evidence / code | Remaining acceptance gap |
 |---|---|---|---|
 | 11 Evidence verification | PARTIAL | layer1/evidence_verification.py; source adapters, exact trend/on-chain links, registry and numeric gate | Complete semantic sentence-to-evidence validation; semantic hallucination/causal coverage; production persistence boundary |
-| 12 Event lifecycle | PARTIAL | layer1/event_lifecycle.py; explicit state machine, disputed state, append-only transitions, multi-asset and restart tests | Automated material-change classification and source-specific freshness policy |
+| 12 Event lifecycle | PARTIAL | layer1/event_lifecycle.py; explicit state machine, disputed state, append-only transitions, multi-asset/restart tests, normalized title/event-type/effective-time/full-body material-change detection | Semantic materiality classification, stable provider revision IDs where unavailable, and source-specific freshness policy |
 | 13 Deep research | PARTIAL | layer1/research_package.py; versioned package, cutoff, evidence/source coverage, facts/inferences/disputed/unknown, idempotent persistence | Full bounded source acquisition/corroboration and complete sentence-level claim mapping |
 | 14 Opportunity evaluation | PARTIAL / FAIL-CLOSED | layer1/opportunity.py; hard gates, deterministic optional weighted scoring, persisted decisions | Approved weights and evidence-derived factor providers absent; runtime currently supplies no policy/factors and correctly returns DEFER |
 | 15 AI decision / DeepSeek | PARTIAL | layer1/deepseek_client.py; direct API client; official deepseek-flash model contract verified; mocked client tests | No authenticated live API test; GitHub Actions still maps Gemini secrets while runtime reads DeepSeek variables |
@@ -673,15 +683,15 @@ This checklist does not authorize the work to be marked done merely by checking 
 | 17 Content generation | PARTIAL | layer1/content_generation.py; append-only draft versions, research/brief/claim provenance and validation ledgers | No live DeepSeek generation; exact generated content still needs stronger semantic verification |
 | 18 Content verification | PARTIAL | layer1/content_verification.py; canonical asset/ticker, claim states, numeric guard, prohibited trade/guarantee phrases | No full semantic factual/causal/repetition validator; numeric allowlist is not semantic proof |
 | 19 Image generation | PARTIAL | image_engine.py; direct Cloudflare FLUX.2 Klein 4B client, multipart and image-byte checks, deterministic composition and provenance sidecar | No real authenticated Workers AI inference, account access/cost validation or provider output evidence |
-| 20 Visual quality | PARTIAL | layer1/visual_quality.py; exact draft/image hash pair, PNG/dimensions/size/identity/metadata/overlay checks | No independent OCR/visual audit for contrast, clipping, readability or semantic mismatch |
-| 21 Publishing/persistence | PARTIAL | layer1/publication_authorization.py, main.py, scripts/reconcile_publications.py; immutable auth, daily quota, attempt binding, persisted validation and manual unknown-outcome reconciliation | PostgreSQL integration skipped; no production recovery drill/provider request; media upload currently precedes final publication authorization |
+| 20 Visual quality | PARTIAL | layer1/visual_quality.py; exact draft/image hash pair, PNG/dimensions/size/identity/metadata, deterministic overlay geometry, clipping/bounds, font-size, non-overlap and conservative WCAG contrast checks | No independent OCR/vision audit of AI background semantic mismatch or arbitrary generated text |
+| 21 Publishing/persistence | PARTIAL | layer1/publication_authorization.py, main.py, scripts/reconcile_publications.py, layer1/publication_postgres.py and layer1/migrations/publication_postgresql/; immutable auth, exact event binding, daily quota, attempt binding, visual-validation-version gate, persisted validation, manual unknown-outcome reconciliation, explicit opt-in PostgreSQL adapter and 29 mocked-transport integration tests on disposable Neon | SQLite remains default; no production cutover, isolated PostgreSQL recovery/concurrency drill, live Binance provider verification or real post (never performed) |
 
-### Verification (latest available)
-- Full suite completed before the final lifecycle edge-case test: 474 passed, 0 failed, 12 skipped.
-- New lifecycle/disputed-resolution regression plus the other focused integration gates: 56 passed, 0 failed.
-- The full suite was rerun after the latest changes; its result is being collected from /tmp/full-suite-2026-11-14-latest.log and must supersede earlier counts only after confirmed.
-- Twelve skipped tests are PostgreSQL integration tests requiring TEST_POSTGRES_DSN.
-- Python compileall and git diff --check passed in the latest focused batch.
+### Verification (latest available — 2026-11-15)
+- Full local repository suite: **585 tests ran, 0 failed, 27 skipped** with `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST` unset. The skips are environment-guarded integration tests; this run did not connect to PostgreSQL.
+- Module 13 research-package focused suite: **13 passed, 0 failed**, including a TDD regression for retaining cutoff-eligible contradictory evidence IDs.
+- Module 12 announcement-importer/event-lifecycle/event-graph focused suite from the immediately preceding checkpoint: **39 passed, 0 failed**.
+- `python -m compileall -q layer1 tests main.py image_engine.py` and `git diff --check` passed after the latest code and documentation edits.
+- The separate Module 21 disposable-Neon integration run remains **29/29 passed** from its own earlier checkpoint; it is not included in the 585-test local count.
 - No live DeepSeek API, Cloudflare inference, RPC, production DB write, Binance media upload or real Binance Square publication.
 
 ### Official provider contract checks
@@ -832,3 +842,277 @@ This checklist does not authorize the work to be marked done merely by checking 
 - GitHub Actions run `43644649579` for commit `2b8a3ec959d465a747fa54a51736e63fa459e475` completed **SUCCESS**. The mocked safety job compiled the project and ran the full unittest discovery: **510 passed, 0 failed, 12 skipped**. The 12 skips require `TEST_POSTGRES_DSN`.
 - This verifies mocked safety and test suite compatibility with the workflow change. It is not a live DeepSeek/Cloudflare provider check and does not establish that the scheduled `run_bot.yml` workflow has successfully completed a provider-backed run.
 - PR #14 remains Draft/open/unmerged. `DRY_RUN=1` remains set; no live inference, media upload or real Square post was triggered.
+
+## Module 11 abbreviation-safe organization-name segmentation — 2026-11-15
+- Added regression coverage for corporate suffixes (`Inc.`, `Corp.`, `Ltd.`, `PLC`, `LLC`, `Co.`) and clock-time abbreviations (`a.m.`, `p.m.`), which were previously split as sentence boundaries by `split_atomic_claims()`.
+- TDD RED reproduced malformed fragments; GREEN extends deterministic protection for corporate suffixes and preserves sentence boundaries after `a.m.`/`p.m.`. Focused evidence-verification suite: **43 passed, 0 failed**.
+- No NLP dependency or semantic inference added. This does not close semantic compound-clause decomposition or sentence-to-evidence entailment; Module 11 remains PARTIAL.
+- Full repository verification pending; no provider calls or publishing actions.
+
+
+## Module 11 verification clarification — 2026-11-15
+- Rechecked the existing runtime path: `_persist_layer1_market_intelligence()` rebuilds and saves source-record claim registries; `_attach_claim_register()` scopes evidence to the asset, extracts package claims, verifies and saves the package registry, and builds a `ResearchPackageStore` record. Existing `tests/test_layer1_foundation.py` asserts SQLite claim-run persistence and cache idempotency. This confirms local SQLite integration coverage; it does not prove a separate production/PostgreSQL persistence boundary.
+- Re-ran `tests.test_evidence_verification`: **43 passed**. A combined invocation including `tests.test_deepseek_generator` could not import `main` because this remote Python lacks Pillow (`ModuleNotFoundError: PIL`). No dependency was installed; this is an environment/import blocker, not a passing DeepSeek-generator result.
+- `git diff --check` passed. Module 11 remains PARTIAL: semantic compound-clause extraction and sentence-level semantic entailment are not implemented; lexical similarity is not accepted as proof.
+
+
+## Module 12 lifecycle revision checkpoint — 2026-11-15
+- Re-audited the existing `layer1/event_lifecycle.py` state machine and its `main.py` ingestion/publishing call sites; retained the existing SQLite store, transition history, legal-transition table and fail-closed behavior.
+- Added deterministic material revision detection for normalized announcement title and event type, alongside the existing effective event-time comparison. Cosmetic capitalization/spacing/punctuation differences do not create a material update; title changes such as a listing being postponed now transition a verified event from `CONFIRMED` to `DEVELOPING`. Content hash and source-update timestamp alone remain insufficient.
+- TDD: new regression first failed because the event stayed `CONFIRMED`; after the fix, the complete lifecycle suite passed **17/17**. `git diff --check` passed.
+- Module 12 remains **PARTIAL**: source model does not currently retain full announcement body/status/revision diff, and CMS fingerprint IDs still cannot safely correlate title revisions without a stable provider ID. Full semantic materiality and live source/restart integration remain open. No provider call, database provisioning, production write, publish, commit or push.
+
+
+## Module 13 research-cutoff integrity checkpoint — 2026-11-15
+- Re-audited `DeepResearchEngine.build()` and found a cutoff inconsistency: source coverage excluded post-cutoff evidence, but verified claims could still enter the package even when the claim or its only supporting evidence was observed/published after the cutoff.
+- Applied one eligible-evidence set to both source coverage and claim attribution. Claims observed after cutoff are excluded from latest-claim selection. A claim can appear as a verified fact or contradiction only when at least one of its actual supporting evidence IDs resolves to accepted, exact-asset evidence published and observed by cutoff; otherwise it is downgraded to `UNVERIFIED`/unknown with no future evidence IDs.
+- TDD: the new future-claim regression failed before the fix; both future-claim and future-only-support regressions pass after the fix. Full Module 13 test file: **10/10 passed**.
+- Module 13 remains **PARTIAL**: broad acquisition/source-class coverage and live provider-backed reproducibility remain constrained by configured providers and the upstream unresolved-claim gate. No live API, production DB, publish, commit or push.
+
+
+## Module 13 cutoff and contract validation checkpoint — 2026-11-15
+- Extended the Module 13 research cutoff from coverage-only to claim-level enforcement. Claims observed after cutoff are excluded before latest-claim selection. Verified/corroborated facts and contradictions require at least one actual supporting evidence ID that resolves to accepted, exact-asset evidence published and observed by cutoff; future-only evidence is stripped and the claim becomes `UNVERIFIED`/unknown. Evidence updated after cutoff is also excluded.
+- Added explicit validation for lifecycle-state values and source-kind values. Unknown states/classes can no longer silently pass through to a `READY` package.
+- TDD regressions reproduced future-dated verified claims and unknown event states passing before the fix. Research package suite: **12/12 passed**.
+- Module 13 remains **PARTIAL** pending broader source acquisition and real-provider reproducibility.
+
+
+## Module 15 direct DeepSeek contract checkpoint — 2026-11-15
+- Verified current official DeepSeek API docs: the official model-list endpoint is `GET https://api.deepseek.com/models`; current Chat Completions accepts `deepseek-flash` and `deepseek-v4-pro`, and the documented model ID for V4.1 Flash is `deepseek-flash`. The existing direct `https://api.deepseek.com/chat/completions` endpoint and model IDs remain valid.
+- Added the official request option `safety_check: {level: high}` to the direct client. This uses DeepSeek's documented basic risk-control review; it does not replace local evidence or content gates. Added a request-contract assertion.
+- Direct client suite: **11/11 passed** (mocked transport only). No live API call or paid inference was performed; provider credentials/access and actual response behavior remain unverified.
+- Official references: DeepSeek model list, Chat Completions API and API change log (2026-11-13).
+- Module 15 remains **PARTIAL** until a safe, explicitly approved real API request verifies the configured model/account.
+
+
+## Module 17 draft provenance hardening checkpoint — 2026-11-15
+- The draft persistence boundary previously accepted arbitrary non-empty strings as approved claim IDs. The evidence registry's claim IDs are lowercase SHA-256 digests, so this allowed malformed provenance to be stored even though later layers expected stable registry identifiers.
+- `DraftStore.save_draft()` now requires every approved claim ID to match lowercase `[0-9a-f]{64}` before any insert. Updated unit fixtures to use digest-shaped identifiers and added malformed/uppercase/short/long rejection coverage.
+- TDD regression failed against the previous implementation; after the change, Module 17 draft persistence plus Module 21 authorization tests passed **20/20**.
+- Module 17 remains **PARTIAL** pending end-to-end live-provider output and independent semantic quality checks; no live generation, upload or publication was performed.
+
+
+## Module 21 exact event-to-publication correlation audit — 2026-11-15
+- Reverified `/tmp/binance-deepseek-verify`: branch `layer-1/module9-onchain-continuation`, HEAD `3fe895493ef35b8177b037eef382384c8392abb6`, 19 pre-existing modified tracked files at audit start, and `git diff --check` clean. No reset/checkout/clean, commit, push, merge or deployment.
+- Confirmed the integrity defect by tracing announcement ingestion, candidate enrichment, research-package creation, editorial-brief persistence, draft provenance and publication authorization. The old per-asset dictionary collapsed distinct announcement events, while publication selected `latest_for_asset()` even though the selected editorial brief already carried an event identity. With two events for one asset, the latest record could be unrelated to the announcement used for the draft.
+- Added exact source lookup (`get_for_source`) and a lossless `index_by_asset_source()` keyed by canonical asset, source ID and event type. Announcement hints now retain the source event type; candidate enrichment carries the selected announcement source identity; research/editorial creation uses that exact event. Publication authorization now resolves the lifecycle record by the selected editorial brief's event ID and rejects an asset mismatch; it no longer chooses the latest event for the asset.
+- Deterministic two-events/one-asset regression confirms the old `latest_for_asset()` points to the second event while exact source resolution and the new index retain both event IDs. TDD RED initially failed because exact source resolution did not exist; GREEN passes after the minimal lifecycle-store addition.
+- Verification: focused regression **1/1 passed**; lifecycle suite **18/18 passed**; publication authorization suite **10/10 passed**; full suite **533 tests, 0 failures, 12 skipped**; `compileall` and `git diff --check` passed. The 12 skips require `TEST_POSTGRES_DSN`; this is local SQLite/mock verification, not PostgreSQL durability or live provider verification.
+- Module 21 remains **PARTIAL**. The exact event identity now flows through local announcement selection, research/editorial brief and the publication-time lifecycle lookup, but durable PostgreSQL event/draft correlation, recovery drills and safe provider submission/reconciliation remain unverified. No real Binance Square post, live DeepSeek/Cloudflare call, production DB operation or paid request occurred.
+- Existing legacy `event_lifecycle_by_asset` / `event_lifecycle_id_by_asset` summary projections remain for compatibility and are lossy; event-specific decisions must use `event_lifecycle_by_asset_source` instead. No commit or push was made.
+
+
+## Module 21 persistence backend audit — 2026-11-15
+- Read-only follow-up inspection found that the current publication-critical persistence path is SQLite-only: `main.Database` opens `sqlite3.connect()`, `PostPublisher` uses that database, `DraftStore` and `PublicationAuthorizationEngine` explicitly require `sqlite3.Connection`, and `EventLifecycleStore` also requires the existing SQLite-backed `Layer1Store` connection.
+- The only repository test module gated by `TEST_POSTGRES_DSN` is `tests/test_onchain_postgres.py`; the 12 skipped tests exercise Module 9 on-chain persistence, not Module 21 publication authorization/draft/event durability. The only PostgreSQL adapter/migration currently found is `layer1/onchain_postgres.py` and `layer1/migrations/postgresql/0001_onchain_storage.sql`, scoped to on-chain storage.
+- Therefore, the 12 skips must not be described as skipped Module 21 PostgreSQL integration tests. Module 21 does not currently have a PostgreSQL persistence adapter or PostgreSQL authorization/draft/event integration suite. This is an architecture/implementation gap, not merely a missing DSN.
+- No PostgreSQL resources were provisioned and no DB was modified. Implementing publication-critical PostgreSQL storage requires an explicit storage architecture and migration/transaction design across publisher attempts, quota reservations, drafts, validation results, event lifecycle and reconciliation; this audit did not attempt a broad storage rewrite.
+- Module 21 remains **PARTIAL / BLOCKED for PostgreSQL production durability** until that backend exists and is tested against a dedicated isolated PostgreSQL database. SQLite tests remain local deterministic coverage only.
+
+
+## Module 21 immutable event authorization and final pre-submit revalidation — 2026-11-15
+- Continued from the exact existing worktree after re-verifying branch `layer-1/module9-onchain-continuation`, HEAD `3fe895493ef35b8177b037eef382384c8392abb6`, 19 pre-existing modified tracked files, and clean `git diff --check`. Preserved all pre-existing changes.
+- Found a second event-provenance weakness: the immutable `PublicationAuthorization` included `editorial_brief_id` but did not include the exact `event_id`; `authorize()` also did not verify that the persisted editorial brief belonged to the persisted research package or that its event still matched the selected asset/lifecycle state.
+- Added `event_id` to the immutable authorization payload (therefore included in its authorization digest). Authorization now resolves the persisted editorial brief by exact `brief_id`, requires its `research_package_id` to match the draft, and verifies the exact event record has the same canonical asset and a publishable lifecycle state matching the authorization snapshot.
+- Added `validate_persisted_event_binding()` and invoked it again in `PostPublisher.publish()` immediately before the external HTTP POST, after the durable publication attempt reservation. If the event is withdrawn, its state changes, its asset changes, or the editorial-event link is altered/missing, the attempt is marked `FAILED_CONFIRMED`, quota is closed consistently, and the network POST is not made.
+- TDD: test first failed because `PublicationAuthorization` had no `event_id`; after implementation, authorization tests cover exact event binding and state/asset mutation. Publisher safety regression mutates the event to WITHDRAWN after the durable attempt reservation and proves the external transport is never called.
+- Verification after the final code change: focused Module 21 batch (`tests.test_publication_authorization`, `tests.test_publisher_safety`, `tests.test_event_lifecycle`) **52 passed, 0 failed**. Full suite: **536 tests, 0 failed, 12 skipped** (12 skips are the existing Module 9 on-chain PostgreSQL integration tests; no Module 21 PostgreSQL adapter/tests exist). `compileall` and `git diff --check` pass.
+- Updated working tree now has **20 modified tracked files**, zero untracked files; branch and HEAD unchanged. No reset, commit, push, merge, deploy, live provider request, paid API call, production DB write, image upload or real Binance Square post.
+- Module 21 remains **PARTIAL / BLOCKED for production durability**: publisher, drafts, authorization, quota and event lifecycle are still SQLite-backed. The existing PostgreSQL adapter/migration is Module 9 on-chain-only. A real Module 21 PostgreSQL backend, migration/transaction semantics, isolated PostgreSQL concurrency/rollback tests and recovery/reconciliation drill are still required; the 12 PostgreSQL skips do not test Module 21.
+
+
+## Module 20 deterministic overlay verification hardening — 2026-11-15
+- Re-audited the final image composition and found that Module 20 recorded the two deterministic text labels but did not persist their pixel bounds, font sizes, or text/background colors. The validator therefore could not prove that its own text layer was in bounds, readable, or non-overlapping.
+- `ImageComposer` now records each rendered label's actual Pillow text bounding box, font size, RGB fill, and the exact lower-panel rectangle/RGBA fill in the immutable image sidecar.
+- `VisualQualityEngine` now requires this geometry metadata and fails closed when it is missing or malformed. It checks canvas/panel bounds, text-box containment, minimum 28px font size, overlap, and conservative WCAG AA contrast (4.5:1) against the brightest possible panel background. Validation version is now `visual-quality-v2`.
+- Publication authorization and the publisher's persisted pre-submit recheck now require `visual-quality-v2` PASS for the exact draft/image pair. An older `visual-quality-v1` PASS can no longer authorize or submit an image after the validator contract changed.
+- Re-audited the legacy `ImageIntelligenceEngine` and found it generated a synthetic candlestick series from current price/change when no price history was supplied. Removed that fabricated chart path; without at least five supplied history points the renderer now shows `VERIFIED PRICE HISTORY REQUIRED` and draws no chart.
+- TDD: new tests first failed against the prior implementation for missing overlay geometry, clipped/overlapping boxes, insufficient contrast/small text, obsolete visual validation versions, and fabricated chart history. After implementation, focused visual/image/publisher/auth/end-to-end batch passed **37 tests**, and visual/image batch passed **25 tests**.
+- Full repository suite: **542 tests, 0 failures, 12 skipped**. The 12 skips are Module 9 on-chain PostgreSQL tests, not Module 21. `compileall` and `git diff --check` passed.
+- Module 20 remains PARTIAL: deterministic checks cover only the renderer-owned two-label overlay; no independent OCR/vision audit verifies the generated AI background's semantic match or arbitrary text embedded by a provider. No image-generation provider call or media upload was made.
+- Module 21 remains PARTIAL/BLOCKED for PostgreSQL durability. Installed `psycopg 3.3.9` only in the isolated temporary test venv, but a temporary local PostgreSQL 16 cluster could not initialize because this remote kernel returns `Function not implemented` for `shmget`. No PostgreSQL server/database was created, no production/Neon database was touched, and no paid infrastructure was provisioned. The publication-critical runtime remains SQLite-backed; a Module 21 PostgreSQL adapter and real integration/concurrency/recovery tests are still absent.
+- Latest working tree: 24 modified tracked files, zero untracked files; branch `layer-1/module9-onchain-continuation`, HEAD `3fe895493ef35b8177b037eef382384c8392abb6`. All prior uncommitted work preserved. No commit, push, merge, deployment, live provider call, upload, or real Binance Square post.
+
+
+## Neon persistence discovery — read-only audit, 2026-11-15
+- Read-only Neon account inspection found the existing free-plan project `Binance-bot-staging` (`orange-glade-36037611`) under the `Binance bot` connection. Its default `staging` branch (`br-rough-mud-az28jpxs`) contains database `binance_bot_staging` with only `binance_announcement_events`, `binance_announcement_schema_migrations`, and `binance_announcement_worker_state`.
+- Existing branches `module9-pg-integration-test` and `module9-pg-lease-fencing-disposable` contain those announcement tables plus the six Module 9 on-chain persistence tables. Read-only table listing found no Module 21 publication, quota, draft, authorization, event-lifecycle or reconciliation tables on these branches.
+- No Neon SQL writes, schema changes, branch creation/deletion, endpoint provisioning or credential retrieval were performed. Remote shell has `DATABASE_URL`, `POSTGRES_DSN`, `PUBLICATION_DATABASE_URL`, `TEST_POSTGRES_DSN` and `ANNOUNCEMENT_DATABASE_URL` all unset.
+- This corrects the earlier assumption that no PostgreSQL test route exists: an existing free Neon staging project is available for a disposable-branch integration path. The local PostgreSQL cluster still cannot bootstrap on this remote kernel (`shmget` unsupported). The Neon schema itself is not yet a Module 21 backend.
+- Next safe step requires approval to create a temporary test branch from `staging`, validate the Module 21 schema/adapter there, and later explicitly approve discarding the temporary branch or applying a migration to the staging parent. The default staging branch must remain untouched until explicit approval.
+
+
+## Module 14 deterministic decision identity and persistence hardening — 2026-11-15
+- Re-audited `layer1/opportunity.py` and found that `decision_id` previously hashed only the outcome state, weighted score, reasons, policy version and a few coarse gate states. Distinct factor vectors or changed policy weights/thresholds could therefore collapse to the same ID when their displayed score/outcome matched. The append-only decision store also used `INSERT OR IGNORE` and silently accepted a conflicting payload/package for an existing ID.
+- Decision identity now binds the exact normalized factor vector and factor-key set, full scoring policy snapshot (version, weights, thresholds and eligibility freshness bound), eligibility snapshot timestamp, effective freshness bound, research/event states, contradiction and unresolved counts, causal/duplicate/material-update flags, plus the resulting decision/reasons. JSON hashing rejects non-finite values.
+- Policy validation now rejects non-string/empty versions and boolean, nonnumeric or non-finite thresholds. Eligibility max-age validation runs even when policy is unconfigured. Persisted decisions validate state, finite bounded score, policy version, reason tuple and SHA-256-shaped decision ID.
+- `OpportunityDecisionStore.save()` now checks an existing ID's immutable stored package/outcome/score/reasons/policy payload and raises on conflicting reuse instead of silently ignoring it.
+- TDD: regressions first failed on the old code for score-collision factor vectors, policy changes reusing an ID, invalid max-age acceptance, malformed thresholds, and silent decision-store conflicts. After implementation, Opportunity/Research/Editorial/End-to-end focused batch passed **31 tests**.
+- Full repository suite: **548 tests, 0 failures, 12 skipped**. The 12 skips remain the Module 9 on-chain PostgreSQL integration tests; no Module 21 PostgreSQL integration is present. No real DeepSeek/Cloudflare request or Binance Square post occurred; provider transports in tests are mocked.
+- Module 14 remains PARTIAL: the scoring policy still requires external human approval and evidence-backed factor values; this hardening makes decision identity auditable but does not approve or invent policy weights. No commit, push, merge or deployment.
+
+
+## Module 14 persisted audit-input snapshot — 2026-11-15
+- Extended `OpportunityDecision` with a canonical `input_snapshot_json` containing the exact factor vector/key set, policy weights/thresholds/version/freshness bound and gate inputs. The decision ID is now reproducible from outcome plus this snapshot.
+- `OpportunityDecisionStore` adds the column additively for existing SQLite files, persists the full snapshot, verifies the decision digest before insert, and compares the snapshot on idempotent reuse. Existing decision rows are not dropped or rewritten.
+- Added a persistence assertion proving the stored record retains factor values and policy version. Opportunity tests: **14/14 passed**. Full repository suite after this final change: **548 tests, 0 failures, 12 skipped**.
+- This is local SQLite persistence coverage; PostgreSQL remains an open Module 21 integration gap.
+
+
+## Module 21 PostgreSQL persistence foundation — 2026-11-15
+- Added additive migration `layer1/migrations/publication_postgresql/0001_publication_storage.sql` and applied it to the existing disposable Neon branch `module9-pg-lease-fencing-disposable` (`br-falling-butterfly-az03rryi`) in both `binance_bot_staging` and `binance_onchain_test`. No new Neon branch/project/compute was created. The migration checksum is recorded and verified in both DBs; all newly added publication-critical tables are empty.
+- Added explicit-DSN-only `PostgresPublicationStore` primitives for atomic daily quota reservation, same-symbol pending attempt exclusion, idempotency identity checks, forward-only state transitions, pending attempt listing and operator-evidenced reconciliation. Reconciliation updates attempt status, quota status and append-only audit record in one transaction.
+- TDD evidence: state-machine/migration/identity contract tests pass. Four PostgreSQL integration tests are present and host/database/TLS guarded, but currently skip because `TEST_POSTGRES_DSN` is unset in the active worktree shell.
+- Full suite: **559 tests, 0 failures, 16 skipped** (12 existing Module 9 PG skips + 4 new Module 21 PG integration skips); `compileall` and `git diff --check` pass.
+- DSN was previously supplied only to an interactive shell in the separate `/tmp/binance-layer1-audit` worktree and explicitly unset after tests; the active `/tmp/binance-deepseek-verify` shell has no DSN and no repo `.env` file. Do not copy credentials from another worktree or retrieve/print secrets.
+- **Still PARTIAL:** runtime is still SQLite-backed; draft/research/editorial/event/authorization PostgreSQL store methods, PostPublisher backend integration, real Python adapter integration/concurrency/rollback tests and crash/restart recovery drills remain outstanding. No real post, provider call, production DB write, credential/schedule change, commit, push, merge or deploy.
+
+
+## Module 21 PostgreSQL DSN verification and live integration tests — 2026-11-15
+- User created `/tmp/binance-deepseek-verify/.env`. Verified file exists, is a regular file, mode `0600`, and contains non-empty `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST`. The secret DSN/password was never printed or copied into project documentation.
+- Sanitized DSN checks: scheme `postgresql`, expected Neon host `ep-autumn-frost-azvk3fj4.c-3.ap-southeast-1.aws.neon.tech`, database `binance_onchain_test`, TLS `sslmode=require`; expected-host allowlist matches. File size 278 bytes. The `.env` was loaded programmatically into Python rather than sourced by `/bin/sh`; do not rely on shell `.` for future validation.
+- Verified live connection successfully: database `binance_onchain_test`, role `binance_bot_staging_owner`, schema `public`. Confirmed `publication_attempts`, `publication_quota_reservations`, and `publication_reconciliation_events` exist. A preliminary lookup used a guessed table name `publication_daily_quota` which is not the schema's actual table name; no schema change was made.
+- Executed `tests.test_publication_postgres` with environment loaded directly from `.env`: **11 tests passed, 0 failures, 0 skipped**, including all four real Neon integration tests for concurrent quota reservations, idempotency/content binding, same-symbol attempt exclusion, and atomic unknown-outcome reconciliation. Tests completed against the disposable `binance_onchain_test` database.
+- Test effects were confined to test fixtures/database rows used by the integration tests; no real Binance Square post or production publisher action occurred. No production/default branch writes, credential changes, schedule/workflow changes, commit, push, merge or deployment.
+- Current branch/HEAD remain `layer-1/module9-onchain-continuation` / `3fe895493ef35b8177b037eef382384c8392abb6`. Existing modified/untracked project files preserved.
+- Module 21 remains PARTIAL: this verifies the quota/attempt/reconciliation adapter and actual Neon integration tests only. PostgreSQL persistence for event lifecycle, research packages, editorial briefs, drafts, text/visual validation, image artifacts and opportunity decisions, plus authorization persistence and `PostPublisher` backend integration, are still required.
+
+
+## Module 21 research-package and editorial-brief PostgreSQL persistence — 2026-11-15
+- Added opt-in `PostgresPublicationStore.save_research_package()` / `load_latest_research_package()`. Writes canonical JSONB payloads as append-only versions under a per-research-key transaction advisory lock; exact hash/payload/cutoff replays return the original immutable row, conflicting reuse is rejected, and latest-version reads return the stored payload.
+- Added opt-in `save_editorial_brief()` / `load_latest_editorial_brief()`. Editorial briefs are versioned under an event+angle advisory lock, FK-bound to an existing research package, idempotent for exact replays, and reject conflicting payload/research binding reuse.
+- Added validation for non-empty identities, lowercase SHA-256 hashes, timezone-aware cutoffs, JSON-object payloads and finite JSON values. No change to SQLite defaults or automatic backend selection.
+- TDD evidence: new validation test was observed RED before helper implementation; editorial integration test was observed RED before adapter implementation. Both research package and editorial brief live tests passed on the existing disposable Neon `binance_onchain_test` database. Final focused Module 21 test module: **14 tests passed, 0 failures, 0 skipped** (includes four publication-ledger integration tests plus research and editorial persistence integrations). `compileall` and `git diff --check` passed.
+- Tests use uniquely namespaced fixtures and delete only those fixture rows. No production/default branch changes, real publisher activation, external provider calls or real Binance Square posts. No commit, push, merge or deployment.
+- Still PARTIAL: PostgreSQL event lifecycle, drafts, text/visual validation, image artifacts, opportunity decisions, authorization, and publisher/backend integration remain unimplemented; crash/restart and full end-to-end durability validation remain open.
+
+
+## Module 21 PostgreSQL event-lifecycle persistence — 2026-11-15
+- Added opt-in event lifecycle persistence to `PostgresPublicationStore`: transaction/advisory-lock protected event creation and state transitions, append-only revision payloads, append-only transition history, exact latest-revision idempotency, immutable event/revision identity checks, and ordered load API.
+- Validation mirrors the existing SQLite lifecycle transition graph and requires timezone-aware timestamps, lowercase SHA-256 revision IDs, finite JSON payloads, and non-empty evidence references. SQLite `EventLifecycleStore` behavior/default remains unchanged.
+- TDD/live Neon evidence: initial live test caught duplicate replay handling; corrected and reran the Module 21 PostgreSQL suite **17/17 passed** on guarded disposable `binance_onchain_test`, including a two-worker same-event transition race (exactly one transition commits; the competing stale transition is rejected). Existing SQLite lifecycle suite **18/18 passed**; full repository suite **565 tests, 0 failures, 20 skipped** (run without PostgreSQL DSN; PG integration is separately run with guarded DSN). No production DB, real publisher, provider call or Binance Square post.
+- Remaining Module 21 gaps: connect the existing research/editorial/draft/validation/image/opportunity/authorization models to the PostgreSQL backend; integrate `PostPublisher` with one durable transaction/attempt contract; extend concurrency coverage across cross-record workflows, test transaction rollback, crash/restart and end-to-end recovery; preserve SQLite as explicit legacy/default until a reviewed cutover exists. Module 21 remains PARTIAL.
+
+## Module 21 PostgreSQL draft and validation persistence — 2026-11-15
+- Confirmed the existing draft append-only API and added a two-worker live concurrency test. Per-draft advisory locking correctly serialized writes into versions 1 and 2; replay/idempotency, immutable provenance and FK binding tests pass.
+- Added opt-in PostgreSQL save/load APIs for text and visual validation records. Both are append-only, hash-identified, JSONB-backed, exact-replay idempotent, and queryable by draft hash or exact draft/image pair. New validation versions preserve changed outcomes as new records.
+- Added deterministic input normalization tests and live Neon integration tests for persistence, replay and latest-record reads.
+- Guarded disposable database verification: `binance_onchain_test`, expected Neon host allowlist and TLS required; DSN loaded from local mode-0600 `.env` without printing secrets. Full `tests.test_publication_postgres`: **22 passed, 0 failed, 0 skipped**; draft/validation focused tests: **5 passed**.
+- Remaining gaps: image artifact persistence, opportunity decision persistence, authorization persistence, PostPublisher durable-backend integration, transaction rollback and cross-record concurrency, crash/restart recovery and end-to-end durability. SQLite remains runtime default; Module 21 remains PARTIAL. No production publisher, credentials, schedules, live Binance post, commit, push, merge or deployment.
+
+
+## Module 21 PostgreSQL image-artifact persistence — 2026-11-15
+- Added opt-in `save_image_artifact()` / `load_image_artifact()` on `PostgresPublicationStore`, reusing the existing migration table without schema changes.
+- Validation enforces the approved Cloudflare Workers AI provider/model, canonical asset ID, SHA-256 hashes, timezone-aware generation timestamp, bounded generation parameters, dimensions, image path and finite JSON metadata.
+- Writes are serialized by a transaction-scoped advisory lock for the exact draft/image pair. Exact metadata/path replay returns the immutable artifact ID; conflicting provenance for the same pair is rejected.
+- Deterministic validation and live disposable Neon persistence/replay/conflict tests pass **2/2**. Final complete `tests.test_publication_postgres`: **24 passed, 0 failed, 0 skipped** against guarded disposable `binance_onchain_test`; `compileall -q layer1 tests` and `git diff --check` pass.
+- Remaining gaps: opportunity-decision persistence, authorization persistence, `PostPublisher` durable backend integration, rollback/cross-record concurrency, crash/restart and end-to-end durability. SQLite remains runtime default; Module 21 is PARTIAL. No production publisher, provider inference, real post, commit, push, merge or deployment.
+
+
+## Module 21 PostgreSQL opportunity, authorization and atomic attempt ledger — 2026-11-15
+- Added immutable research-bound opportunity decision save/load with digest verification, JSONB input snapshots, exact replay idempotency and conflicting-payload rejection.
+- Added authorization save/load with integrity/expiry checks, exact editorial-event/research/draft/claim binding, text PASS and image artifact/current visual PASS checks, and exclusive quota binding in the same transaction.
+- Added atomic authorized-attempt begin/finish operations: a persisted unexpired authorization is checked against exact symbol/content hash, a single pending attempt per symbol is enforced, and attempt/quota states advance together transactionally.
+- Full PostgreSQL integration module: **27 passed, 0 failed, 0 skipped** against guarded disposable `binance_onchain_test`; focused opportunity **2/2**, authorization and no-network attempt/quota lifecycle **1/1**. `compileall` and `git diff --check` pass.
+- Still open: wire `PostPublisher` to this backend under explicit opt-in and prove all publisher gates/final pre-submit checks/recovery paths; transaction rollback, cross-record races, process crash/restart and full end-to-end recovery. SQLite remains runtime default; Module 21 remains PARTIAL. No real Binance Square post, commit, push, merge or deployment.
+
+
+## Module 21 full-suite verification — 2026-11-15
+- Full repository suite with `TEST_POSTGRES_DSN` intentionally unset: **575 tests, 0 failures, 26 skipped**.
+- Separate guarded disposable Neon integration run for `tests.test_publication_postgres`: **27 passed, 0 failed, 0 skipped**. These are separate test scopes; do not conflate full-suite skips with the live PostgreSQL result.
+- `compileall -q layer1 tests` and `git diff --check` pass. `PostPublisher` remains on SQLite and the durable PostgreSQL store is opt-in only. Module 21 remains PARTIAL pending publisher wiring and crash/restart/end-to-end recovery.
+
+
+## Module 21 PostgreSQL-backed publisher integration — 2026-11-15
+
+- `PostPublisher` now accepts an optional explicit `postgres_store`; the normal constructor path remains SQLite-backed and unchanged. No environment-based DSN discovery or backend cutover was introduced.
+- PostgreSQL opt-in publication uses `begin_authorized_attempt` and `finish_authorized_attempt`, keeping attempt and quota transitions atomic in PostgreSQL. It does not write publication attempts to the SQLite ledger.
+- Added a PostgreSQL pre-submit revalidation transaction: persisted authorization expiry and identity, draft/brief/claim provenance, current event lifecycle, latest text validation, image artifact/current visual validation, and exact quota-to-attempt binding are checked immediately before the external request.
+- Successful remote acceptance is first persisted as `PUBLICATION_UNKNOWN` with remote ID, then advanced to `PUBLISHED_CONFIRMED`; ambiguous HTTP/transport outcomes remain non-retryable. Existing pending attempts block submission.
+- Unit verification: publisher-safety suite **25 passed**; full repository suite **577 passed, 0 failed, 26 skipped** with PostgreSQL test DSN unset; `compileall` and `git diff --check` passed.
+- Two focused opt-in publisher tests use a mocked transport only. No real Binance Square post was made.
+- Live PostgreSQL integration could not be run in this continuation because `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST` were not available in the remote shell. The PostgreSQL authorization-to-publisher integration test is present but remains unexecuted here.
+- Module 21 remains **PARTIAL**: crash/restart recovery and full live PostgreSQL end-to-end verification remain open. SQLite remains the default runtime backend. No production credentials, schedules, publisher activation, commit, push, merge, or deployment were changed.
+
+
+## Module 21 crash/restart recovery hardening — 2026-11-15 continuation
+
+- Extended the disposable PostgreSQL unknown-outcome integration test to close the original DB connection and reopen a fresh `PostgresPublicationStore`, simulating process termination/restart. The test then verifies `list_pending_attempts()` still returns the durable `PUBLICATION_UNKNOWN` record and a repeated idempotency key resolves to the same existing attempt rather than creating a new submission.
+- The same test proceeds through operator reconciliation and checks the terminal attempt, quota state, and audit event together. This is a live PostgreSQL test when the guarded `TEST_POSTGRES_DSN` is supplied; it was not executed in this continuation because the required DSN/host allowlist variables are absent.
+- Static state-machine, migration-safety, identity tests: **7 passed**. Publisher safety tests: **25 passed**.
+- Full suite was not rerun after this test-only recovery extension; prior verified full-suite result remains **577 passed, 0 failed, 26 skipped**. Syntax compilation and `git diff --check` passed after the extension.
+- No automatic reconciliation or blind retry is introduced. `PUBLICATION_UNKNOWN` remains blocked until an operator supplies evidence and resolves it to a confirmed terminal state.
+- Module 21 remains **PARTIAL** pending live guarded PostgreSQL restart/reconciliation execution and complete live publisher end-to-end verification.
+
+### Module 21 — interrupted SUBMITTING recovery (2026-11-15)
+- Closed a recovery-policy gap: operator reconciliation may now resolve either `SUBMITTING` (process died after reservation; remote outcome must be independently checked) or `PUBLICATION_UNKNOWN` attempts. This does not authorize automatic retry.
+- Reconciliation retains the required operator/evidence/note fields and atomic attempt + quota + audit update. Terminal states remain immutable.
+- Tests: publisher safety 25 passed; full suite 579 ran, 0 failed, 27 skipped. New guarded live PostgreSQL restart/reconciliation test was skipped because the test DSN/allowed-host environment variables were unavailable. Do not count it as verified.
+- Status remains PARTIAL; live disposable PostgreSQL integration and publisher E2E are still outstanding.
+
+### Module 21 — guarded live PostgreSQL end-to-end verification (2026-11-15)
+- Ran `tests.test_publication_postgres` against the existing disposable Neon branch `module9-pg-lease-fencing-disposable` / database `binance_onchain_test`, with the exact host/TLS guard satisfied: **29 passed, 0 failed, 0 skipped**.
+- The suite covers all publication PostgreSQL persistence adapters, append-only versioning, event lifecycle replay/transition concurrency, quota concurrency, same-symbol pending attempt fencing, authorization persistence, and both `PUBLICATION_UNKNOWN` and interrupted `SUBMITTING` process-restart/reconciliation paths.
+- The actual `PostPublisher(postgres_store=...)` integration test ran against the disposable PostgreSQL ledger with a deterministic mocked Binance transport. It confirmed successful durable attempt/quota finalization and that a second invocation is blocked without a second transport call. This is not a live Binance publication test.
+- Separate local full-suite result remains **579 tests, 0 failures, 27 skipped** with the PG DSN unset; separate live PG suite is **29/29 passed**. Do not merge these counts. `compileall` and `git diff --check` pass.
+- Safety: the connection string was passed only to the remote test process and not printed or stored in repository files. No production/default DB, credentials, schedules, publisher activation, real Binance POST, commit, push, merge, or deploy.
+- Do not run `tests.test_onchain_postgres` against this shared disposable branch in this continuation: its setup truncates Module 9 on-chain tables. That suite was intentionally excluded to preserve the branch's existing Module 9 test data.
+- Status: Module 21's opt-in PostgreSQL adapter and mocked publisher integration are verified against the disposable test database. SQLite remains the runtime default; production cutover/activation is not performed or authorized. Overall project/module completion is not claimed from this isolated Module 21 test result.
+
+
+## Module 11 explicit comma-adverb shared-subject segmentation — 2026-11-15
+- TDD RED reproduced a concrete gap: `BTC rose 8%, then fell 4%.` and `ETH gained 3%, later dropped 2%.` remained single compound claims because the deterministic shared-subject splitter only recognized `and`/`but` conjunctions.
+- Extended the narrow grammar to split only explicit comma + `then`/`later`/`subsequently` + recognized finite predicate, reusing the original explicit subject for the second predicate. Coordinated object lists and ambiguous elliptical constructions remain preserved; no NLP dependency or semantic inference was added.
+- Regression test was observed failing before the change and passes after. Evidence-verification suite: **49 passed, 0 failed**.
+- Full repository suite with PostgreSQL DSN intentionally unset: **580 tests ran, 0 failed, 27 skipped**. `compileall -q layer1 tests main.py` and `git diff --check` passed. The 27 PostgreSQL skips are not counted as live integration tests.
+- This is a bounded segmentation improvement only. It does not establish sentence-level semantic entailment, resolve arbitrary compound/elliptical forms, or close Module 11. Unknown/ambiguous forms continue to fail closed. No live provider inference, production database write, publisher activation, real Binance Square post, commit, push, merge or deployment.
+
+
+## 2026-11-15 — Announcement body provenance preservation (Modules 4, 11, 12)
+- Audit found the read-only announcement importer selected the full CMS `body` column but discarded it when constructing `AnnouncementEvidence`; Module 12 therefore could not retain full source revision content even though the upstream ledger provided it.
+- Added an optional backward-compatible `AnnouncementEvidence.body` field (default empty string), strict text-type validation, and passed the exact imported body into the evidence object. Existing SQLite `save_announcement()` and Module 12 revision payload serialization already persist the dataclass payload, so no new table or duplicate persistence layer was introduced.
+- TDD regression was observed RED before the change (`AnnouncementEvidence` had no `body` attribute). After implementation, importer + event lifecycle + event graph focused suites: **38 passed, 0 failed**. This includes a new check that the exact body is present in the append-only event revision payload. `compileall` and `git diff --check` passed.
+- This preserves the source body for downstream claim extraction and revision review; it does **not** prove semantic materiality of arbitrary body edits, complete claim-to-evidence entailment, or source-specific freshness policy. Module 12 and Module 11 remain PARTIAL. No live CMS connection, production DB write, publisher activation, real Binance Square post, commit, push, merge or deployment.
+
+
+## Full-suite verification after announcement-body provenance change — 2026-11-15
+- Full local unittest suite with `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST` unset: **581 tests ran, 0 failed, 27 skipped**. The skipped tests are guarded PostgreSQL integration tests; the separate Module 21 live Neon run remains **29/29 passed** and is not combined with this local count.
+- Latest focused announcement-importer + event-lifecycle + event-graph batch: **38 passed, 0 failed**. `compileall -q layer1 tests main.py image_engine.py` and `git diff --check` passed after the code change.
+- This confirms local regression coverage only. It does not close the documented semantic/source-provider/production acceptance gaps across Modules 1–21. No production DB, live CMS, live DeepSeek/Cloudflare inference, real Binance POST, publisher activation, commit, push, merge or deployment.
+
+
+## Exact duplicate artifact cleanup — 2026-11-15
+- SHA-256 audit of tracked files found two exact duplicate legacy Python entrypoint copies (`Main.pay` and `python agent_bot.py`) and two exact duplicate 1080x1080 PNG assets (`NEAR_20260626_000440_9cdf83a40992d848.png` and `NEAR_20260626_002414_65c7c25e71a0e4ae.png`).
+- Confirmed the scheduled workflow invokes only `python main.py`; neither legacy duplicate entrypoint was referenced by `.github/workflows` or `scripts`. Removed only `python agent_bot.py`, retaining `Main.pay` as the one legacy copy. Removed only the later-named duplicate PNG, retaining the earlier `000440` copy; both had identical SHA-256 `bb080aabd15ed0b1767a8f21670b31ea23d2ea2c9ab721153090bbbb95e6cb22` and neither filename was referenced by source/docs.
+- No `.env*` swap/backup files, posted-symbol records, publication logs, workflow entrypoint, `main.py`, or production data files were modified. Deletions remain local/uncommitted; no deployment occurred.
+
+
+## Module 12 full-body revision materiality checkpoint — 2026-11-15
+- TDD RED reproduced a lifecycle gap: with a stable provider article ID, a verified announcement could change its full body (including a scheduled listing date) while keeping the same title, event type and effective event timestamp; the event remained `CONFIRMED` instead of moving to `DEVELOPING`.
+- Extended `_has_material_event_change()` to compare normalized full-body text in addition to title, event type and effective event time. Normalization is case/whitespace/punctuation insensitive. Any remaining normalized body difference is conservatively material; this is text-difference detection, not semantic interpretation. Empty legacy body vs empty body remains non-material; newly populated body vs absent body is material.
+- Added regression covering a date change in body => `DEVELOPING`, and cosmetic case/spacing/punctuation changes => remains `CONFIRMED`. Regression failed before implementation and passed after. Lifecycle + event graph + announcement importer suites: **39 passed, 0 failed**.
+- Full local suite with PostgreSQL DSN unset: **582 tests ran, 0 failed, 27 skipped**. `compileall` and `git diff --check` passed. The skipped PostgreSQL tests remain separately gated; no new live PostgreSQL run in this continuation.
+- Module 12 remains PARTIAL: no semantic diff classifier, stable CMS revision ID unavailable for fingerprint-based records, and live provider/restart integration remains unverified. No live CMS, production DB, real Binance POST, publisher activation, commit, push, merge or deployment.
+
+
+## Module 11 exact announcement-body attribution checkpoint — 2026-11-15
+- TDD RED reproduced a provenance gap: `AnnouncementEvidence.body` was retained in source revisions, but the Module 11 evidence adapter emitted only title/event-type/freshness/asset records. A research-package `Detail:` containing an exact source-body passage therefore could not link to the source body.
+- Added a typed `announcement.body` evidence record when a non-empty source body exists. `Detail:` lines now link to that record only when the complete text matches the source body (case-insensitive, surrounding whitespace ignored); title matching remains the existing exact title path. Paraphrases or partially overlapping statements remain UNCLASSIFIED with no evidence IDs and verify UNVERIFIED. This is exact-string provenance matching, not semantic entailment or proof that arbitrary claims follow from a passage.
+- Added regression for exact source-body matching and paraphrase rejection. The regression failed before implementation and passed after. Evidence-verification suite: **50 passed, 0 failed**.
+- Full local suite with PostgreSQL DSN unset: **583 tests ran, 0 failed, 27 skipped**. No PostgreSQL integration rerun in this continuation. Module 11 remains PARTIAL: sentence-level semantic entailment, compound/elliptical parsing beyond the bounded grammar, and complete claim attribution are still unresolved.
+- No live provider call, production DB write, real Binance POST, publisher activation, commit, push, merge or deployment.
+
+
+## Module 13 contradiction-evidence retention checkpoint — 2026-11-15
+- TDD RED reproduced a research-package audit defect: `DeepResearchEngine.build()` selected only `supporting_evidence_ids` when filtering evidence by cutoff. For a `CONTRADICTED` result, the relevant IDs are in `contradicting_evidence_ids`, so the package retained the disputed claim but omitted the very evidence that contradicted it.
+- Updated cutoff filtering to independently filter supporting and contradicting evidence IDs against the package's eligible evidence set. Contradicted claims now retain only cutoff-eligible conflicting evidence IDs; verified/corroborated facts continue to use supporting IDs. A contradiction with eligible conflicting evidence still forces `REJECT`.
+- Added regression proving conflict ID retention and rejection. It failed before the fix and passes afterward. Module 13 focused suite: **13 passed, 0 failed**.
+- Full local suite with PostgreSQL DSN unset: **585 tests ran, 0 failed, 27 skipped**. No new PostgreSQL integration run. `compileall` and `git diff --check` checked separately after edits.
+- Module 13 remains PARTIAL pending broader source acquisition, multi-provider reproducibility, and full coverage of provider outage/independence scenarios. No live API, production DB, real Binance POST, publisher activation, commit, push, merge or deployment.
+
+## Module 17 latest-validation ordering fix — 2026-11-15
+- TDD RED reproduced a safety defect in `DraftStore`: when two text or visual validation records shared the same `created_at` timestamp, `latest_text_validation()` / `visual_validation()` broke the tie using lexical `validation_id`. A lexically larger older `PASS` could therefore outrank a later inserted `REJECT`, potentially exposing a stale approval.
+- Changed both latest-record queries to use SQLite `rowid DESC` after `created_at DESC`, preserving append/insertion order for timestamp ties. No schema migration or production database operation was needed.
+- Added a deterministic regression that inserts older `PASS` then newer `REJECT` with an identical timestamp and deliberately reverse-ordered IDs; the test failed before the fix and passes after for both text and visual validation.
+- Modules 16–18 focused tests: **38 passed, 0 failed**. Full local suite using `/tmp/binance-module11-test-venv/bin/python`: **586 tests ran, 0 failed, 27 skipped**. The 27 guarded PostgreSQL tests are skips, not live DB verification. `compileall` and `git diff --check` passed.
+- Module 17 remains PARTIAL pending direct DeepSeek generation/provider acceptance and independent semantic quality checks. Modules 16 and 18 remain PARTIAL for the documented angle/semantic-entailment, numeric/source/causal, originality and current platform-policy gaps. No live provider calls, real Binance POST, production DB/credential/schedule changes, publisher activation, commit, push, merge or deployment.

@@ -51,6 +51,7 @@ class DeepSeekClientTests(unittest.TestCase):
         self.assertEqual(captured["url"], "https://api.deepseek.com/chat/completions")
         self.assertEqual(captured["payload"]["model"], "deepseek-flash")
         self.assertEqual(captured["payload"]["thinking"], {"type": "disabled"})
+        self.assertEqual(captured["payload"]["safety_check"], {"level": "high"})
         self.assertEqual(captured["payload"]["stream"], False)
         self.assertEqual(captured["headers"]["Authorization"], "Bearer test-secret")
 

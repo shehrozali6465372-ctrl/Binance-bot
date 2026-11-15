@@ -136,6 +136,7 @@ class DeepSeekClient:
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
             "thinking": {"type": "disabled"},
+            "safety_check": {"level": "high"},
             "stream": False,
         }
         request = urllib.request.Request(

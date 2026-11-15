@@ -247,6 +247,7 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertIn("[VERIFIED/CONFIRMED_FACT]", rendered)
         self.assertIn("[UNVERIFIED/UNCLASSIFIED]", rendered)
         self.assertIn("model confidence is not evidence", rendered)
+        self.assertIn(f"claim ID: {verified_claim.claim_id}", rendered)
         self.assertIn("VERIFIED_COUNT: 1", rendered)
         self.assertIn("UNRESOLVED_COUNT: 1", rendered)
 
@@ -397,6 +398,26 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertEqual(claims[0].text, "Unverified claim A is 12")
         self.assertEqual(claims[1].text, "Unverified claim B is 34")
 
+    def test_research_package_splits_shared_subject_predicates_without_inventing_evidence(self):
+        claims = self.engine.claims_from_research_package(
+            "BTC rose 8% and later fell 4%.", [],
+            subject="coingecko:abc", asset_id="coingecko:abc", observed_at=iso(),
+        )
+        self.assertEqual([item.text for item in claims], ["BTC rose 8%", "BTC fell 4%"])
+        self.assertTrue(all(item.claim_type == "UNCLASSIFIED" for item in claims))
+        self.assertTrue(all(not item.evidence_ids for item in claims))
+
+    def test_research_package_splits_independent_conjunctions_into_unclassified_claims(self):
+        claims = self.engine.claims_from_research_package(
+            "Binance announced the ABC listing, and ABC rose 12%.", [],
+            subject="coingecko:abc", asset_id="coingecko:abc", observed_at=iso(),
+        )
+        self.assertEqual([item.text for item in claims], [
+            "Binance announced the ABC listing", "ABC rose 12%",
+        ])
+        self.assertEqual([item.claim_type for item in claims], ["UNCLASSIFIED", "UNCLASSIFIED"])
+        self.assertTrue(all(not item.evidence_ids for item in claims))
+
     def test_unknown_research_assertion_remains_unclassified(self):
         claims = self.engine.claims_from_research_package(
             "Binance Alpha selected this token", [], subject="coingecko:abc",
@@ -495,6 +516,42 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertEqual([result.state for result in registry.results], ["VERIFIED", "VERIFIED"])
         self.assertTrue(all(result.supporting_evidence_ids for result in registry.results))
 
+    def test_atomic_claim_splitter_separates_independent_conjunction_clauses(self):
+        self.assertEqual(
+            split_atomic_claims("Binance announced the ABC listing, and ABC rose 12%."),
+            ("Binance announced the ABC listing", "ABC rose 12%.",),
+        )
+        self.assertEqual(
+            split_atomic_claims("BTC rose 8% but ETH fell 4%."),
+            ("BTC rose 8%", "ETH fell 4%.",),
+        )
+
+    def test_atomic_claim_splitter_separates_shared_subject_predicates(self):
+        self.assertEqual(
+            split_atomic_claims("BTC rose 8% and later fell 4%."),
+            ("BTC rose 8%", "BTC fell 4%."),
+        )
+        self.assertEqual(
+            split_atomic_claims("Binance listed ABC and launched a new trading pair."),
+            ("Binance listed ABC", "Binance launched a new trading pair."),
+        )
+
+    def test_atomic_claim_splitter_separates_explicit_comma_then_shared_predicate(self):
+        self.assertEqual(
+            split_atomic_claims("BTC rose 8%, then fell 4%."),
+            ("BTC rose 8%", "BTC fell 4%."),
+        )
+        self.assertEqual(
+            split_atomic_claims("ETH gained 3%, later dropped 2%."),
+            ("ETH gained 3%", "ETH dropped 2%."),
+        )
+
+    def test_atomic_claim_splitter_preserves_conjunctions_that_join_objects(self):
+        self.assertEqual(
+            split_atomic_claims("Binance listed ABC and BNB."),
+            ("Binance listed ABC and BNB.",),
+        )
+
     def test_atomic_claim_splitter_separates_sentences_and_semicolon_clauses(self):
         claims = split_atomic_claims(
             "BTC price is $100. Volume is $5m; Binance published a listing notice.\n- Market cap is $2b."
@@ -510,6 +567,24 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertEqual(
             claims,
             ("U.S. regulators reviewed the filing.", "e.g. the listing date remains unconfirmed."),
+        )
+
+    def test_atomic_claim_splitter_preserves_time_and_organization_abbreviations(self):
+        claims = split_atomic_claims(
+            "Binance Inc. confirmed the review. SEC Corp. responded."
+        )
+        self.assertEqual(
+            claims,
+            ("Binance Inc. confirmed the review.", "SEC Corp. responded."),
+        )
+
+    def test_atomic_claim_splitter_preserves_clock_time_abbreviations(self):
+        claims = split_atomic_claims(
+            "The notice arrived at 9 a.m. The review ended at 4 p.m."
+        )
+        self.assertEqual(
+            claims,
+            ("The notice arrived at 9 a.m.", "The review ended at 4 p.m."),
         )
 
     def test_adapters_preserve_source_identity_and_lineage(self):
@@ -538,6 +613,32 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertTrue(market_records)
         self.assertEqual(market_records[0].source_family, "binance_spot")
         self.assertFalse(trend_records[0].is_primary)
+
+    def test_announcement_body_detail_requires_exact_source_text_match(self):
+        engine = EvidenceVerificationEngine()
+        announcement = AnnouncementEvidence(
+            source_id="binance-body-exact", source_url="https://www.binance.com/en/support/announcement/body-exact",
+            publisher="Binance", event_type="listing", title="ABC listing",
+            published_at=iso(-60), observed_at=iso(), asset_ids=("coingecko:abc",),
+            content_hash="9" * 64,
+            body="Binance will list ABC on 2026-12-01 at 08:00 UTC.",
+        )
+        evidence = engine.evidence_from_announcement(announcement)
+        exact = engine.claims_from_research_package(
+            "Detail: Binance will list ABC on 2026-12-01 at 08:00 UTC.", evidence,
+            subject="coingecko:abc", asset_id="coingecko:abc", observed_at=announcement.observed_at,
+        )[0]
+        self.assertEqual(exact.claim_key, "announcement.body")
+        self.assertEqual(exact.evidence_ids, tuple(item.evidence_id for item in evidence if item.claim_key == "announcement.body"))
+        self.assertEqual(engine.verify([exact], evidence).results[0].state, "VERIFIED")
+
+        paraphrase = engine.claims_from_research_package(
+            "Detail: Binance will list ABC next month at 08:00 UTC.", evidence,
+            subject="coingecko:abc", asset_id="coingecko:abc", observed_at=announcement.observed_at,
+        )[0]
+        self.assertEqual(paraphrase.claim_type, "UNCLASSIFIED")
+        self.assertEqual(paraphrase.evidence_ids, ())
+        self.assertEqual(engine.verify([paraphrase], evidence).results[0].state, "UNVERIFIED")
 
     def test_announcement_freshness_is_linked_to_the_exact_title_and_stale_updates_fail(self):
         engine = EvidenceVerificationEngine()

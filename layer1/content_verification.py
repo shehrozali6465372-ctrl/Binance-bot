@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from layer1.evidence_verification import ClaimRegistry
+from layer1.evidence_verification import ClaimRegistry, split_atomic_claims
 
 
 TRADE_INSTRUCTION_PATTERNS = (
@@ -26,11 +26,22 @@ class ContentVerificationResult:
     symbol: str
     approved_claim_ids: tuple[str, ...]
     reasons: tuple[str, ...]
-    validation_version: str = "content-verification-v1"
+    clean_content: str
+    validation_version: str = "content-verification-v2-claim-attribution"
 
 
 class ContentVerificationEngine:
     """Deterministic gate. It does not use an LLM to overrule failed checks."""
+
+    CLAIM_MARKER = re.compile(r"\[\[CLAIM:([0-9a-f]{64})\]\]")
+
+    @staticmethod
+    def _normalize_claim_text(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip().casefold().rstrip(" .!?")
+
+    @staticmethod
+    def _is_hashtag_only(value: str) -> bool:
+        return bool(re.fullmatch(r"(?:#[A-Za-z0-9_]+[\s,]*)+", value.strip()))
 
     def validate(
         self,
@@ -55,7 +66,10 @@ class ContentVerificationEngine:
         result_by_claim = {result.claim_id: result for result in registry.results}
         latest_by_scope = {}
         for claim in registry.claims:
-            if claim.asset_id not in {None, asset_id}:
+            if claim.asset_id is not None:
+                if claim.asset_id != asset_id:
+                    continue
+            elif claim.subject != asset_id:
                 continue
             scope = (
                 claim.subject, claim.asset_id, claim.mapping_id,
@@ -85,10 +99,34 @@ class ContentVerificationEngine:
                 and claim.claim_type not in {"ESTIMATE", "ANALYST_INTERPRETATION", "HYPOTHESIS"}
             )
         ]
-        approved = tuple(sorted(claim.claim_id for claim, _ in verified_pairs))
+        verified_by_id = {claim.claim_id: (claim, result) for claim, result in verified_pairs}
+        used_claim_ids: set[str] = set()
         reasons: set[str] = set()
+        for sentence in split_atomic_claims(content):
+            markers = self.CLAIM_MARKER.findall(sentence)
+            sentence_text = self.CLAIM_MARKER.sub("", sentence).strip()
+            if not sentence_text or self._is_hashtag_only(sentence_text):
+                continue
+            if not markers:
+                reasons.add("FACTUAL_SENTENCE_MISSING_CLAIM_ATTRIBUTION")
+                continue
+            if len(markers) != 1:
+                reasons.add("SENTENCE_REQUIRES_EXACTLY_ONE_CLAIM_REFERENCE")
+                continue
+            claim_id = markers[0]
+            pair = verified_by_id.get(claim_id)
+            if pair is None:
+                reasons.add("UNKNOWN_OR_UNVERIFIED_CLAIM_REFERENCE")
+                continue
+            claim, _ = pair
+            if self._normalize_claim_text(sentence_text) != self._normalize_claim_text(claim.text):
+                reasons.add("SENTENCE_DOES_NOT_MATCH_REFERENCED_CLAIM")
+                continue
+            used_claim_ids.add(claim_id)
+
+        approved = tuple(sorted(used_claim_ids))
         if not approved:
-            reasons.add("NO_VERIFIED_CLAIMS_FOR_CANONICAL_ASSET")
+            reasons.add("NO_VERIFIED_CLAIMS_ATTRIBUTED_TO_DRAFT")
         if unresolved_pairs:
             reasons.add("UNRESOLVED_ASSET_CLAIMS_REMAIN")
         if any(result is not None and result.state == "CONTRADICTED"
@@ -103,10 +141,12 @@ class ContentVerificationEngine:
             reasons.add("PROHIBITED_TRADE_INSTRUCTION_OR_GUARANTEE")
         if numeric_validator is None or not numeric_validator(content):
             reasons.add("NUMERIC_CLAIM_GUARD_FAILED")
+        clean_content = self.CLAIM_MARKER.sub("", content)
+        clean_content = re.sub(r"\s+([.!?,;:])", r"\1", clean_content)
         return ContentVerificationResult(
             status="PASS" if not reasons else "REJECT",
-            draft_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            draft_hash=hashlib.sha256(clean_content.encode("utf-8")).hexdigest(),
             asset_id=asset_id, symbol=symbol,
             approved_claim_ids=approved,
-            reasons=tuple(sorted(reasons)),
+            reasons=tuple(sorted(reasons)), clean_content=clean_content,
         )

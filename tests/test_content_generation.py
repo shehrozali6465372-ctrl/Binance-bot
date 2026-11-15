@@ -12,7 +12,7 @@ class DraftStoreTests(unittest.TestCase):
             "asset_id": "coingecko:abc",
             "research_package_id": "research:abc:1",
             "editorial_brief_id": "brief:abc:1",
-            "approved_claim_ids": ("claim-a", "claim-b"),
+            "approved_claim_ids": ("a" * 64, "b" * 64),
         }
 
     def tearDown(self):
@@ -24,7 +24,7 @@ class DraftStoreTests(unittest.TestCase):
         loaded = self.store.load_latest(draft.draft_key)
         self.assertEqual(loaded["content"], "$ABC market update.")
         self.assertEqual(loaded["research_package_id"], "research:abc:1")
-        self.assertEqual(loaded["approved_claim_ids"], ["claim-a", "claim-b"])
+        self.assertEqual(loaded["approved_claim_ids"], ["a" * 64, "b" * 64])
         self.assertIsNone(self.store.latest_text_validation(draft.content_hash))
 
     def test_identical_draft_is_idempotent_and_revision_is_append_only(self):
@@ -43,12 +43,21 @@ class DraftStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicting immutable"):
             self.store.save_draft(
                 "$ABC market update.",
-                **{**self.args, "approved_claim_ids": ("claim-a", "claim-c")},
+                **{**self.args, "approved_claim_ids": ("a" * 64, "c" * 64)},
             )
         with self.assertRaisesRegex(ValueError, "sequence"):
             self.store.save_draft(
                 "$ABC another update.", **{**self.args, "approved_claim_ids": "claim-a"},
             )
+
+    def test_draft_rejects_malformed_claim_ids(self):
+        for values in (("claim-not-a-digest",), ("A" * 64,), ("f" * 63,), ("f" * 65,)):
+            with self.subTest(values=values):
+                with self.assertRaisesRegex(ValueError, "SHA-256 claim IDs"):
+                    self.store.save_draft(
+                        "$ABC invalid provenance.",
+                        **{**self.args, "approved_claim_ids": values},
+                    )
 
     def test_text_validation_is_bound_to_exact_draft_hash(self):
         draft = self.store.save_draft("$ABC market update.", **self.args)
@@ -82,7 +91,7 @@ class DraftStoreTests(unittest.TestCase):
         image_hash = "a" * 64
         self.store.save_visual_validation(
             draft_hash=draft.content_hash, image_hash=image_hash,
-            status="PASS", reasons=(), validation_version="visual-quality-v1",
+            status="PASS", reasons=(), validation_version="visual-quality-v2",
         )
         self.assertEqual(self.store.visual_validation(draft.content_hash, image_hash), "PASS")
         self.assertIsNone(self.store.visual_validation(draft.content_hash, "b" * 64))
@@ -121,6 +130,30 @@ class DraftStoreTests(unittest.TestCase):
     def test_image_artifact_rejects_missing_or_invalid_hash_provenance(self):
         with self.assertRaisesRegex(ValueError, "incomplete"):
             self.store.save_image_artifact({}, image_path="/tmp/abc.png")
+
+    def test_latest_validation_uses_insertion_order_when_timestamps_tie(self):
+        draft = self.store.save_draft("$ABC market update.", **self.args)
+        tied_time = "2026-11-15T12:00:00+00:00"
+        # Simulate two append-only decisions recorded at the same timestamp.
+        # The lexically larger ID belongs to the older PASS; the later REJECT
+        # must win even when timestamps collide.
+        self.store.connection.executemany(
+            "INSERT INTO content_draft_validation_results VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                ("f" * 64, draft.content_hash, "PASS", "[]", "v1", tied_time),
+                ("a" * 64, draft.content_hash, "REJECT", '["later rejection"]', "v1", tied_time),
+            ],
+        )
+        image_hash = "b" * 64
+        self.store.connection.executemany(
+            "INSERT INTO visual_validation_results VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("f" * 64, draft.content_hash, image_hash, "PASS", "[]", "v1", tied_time),
+                ("a" * 64, draft.content_hash, image_hash, "REJECT", '["later rejection"]', "v1", tied_time),
+            ],
+        )
+        self.assertEqual(self.store.latest_text_validation(draft.content_hash), "REJECT")
+        self.assertEqual(self.store.visual_validation(draft.content_hash, image_hash), "REJECT")
 
     def test_rejected_validation_never_becomes_pass_for_another_draft(self):
         draft = self.store.save_draft("$ABC unsupported.", **self.args)

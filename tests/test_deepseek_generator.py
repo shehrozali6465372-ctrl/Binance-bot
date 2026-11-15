@@ -110,6 +110,14 @@ class DeepSeekGeneratorTests(unittest.TestCase):
         self.assertNotIn("[UNCLASSIFIED]", rendered)
         self.assertIn("- None.", rendered)
 
+    def test_writing_prompt_requires_exact_sentence_claim_ids(self):
+        prompt = self.generator._build_writing_prompt(
+            {"symbol": "ABC", "name": "Alpha Coin"}, VERIFIED_PACKAGE,
+        )
+        self.assertIn("Every factual sentence MUST copy one claim's text verbatim", prompt)
+        self.assertIn("[[CLAIM:<64-character claim ID>]]", prompt)
+        self.assertIn("do not paraphrase, combine, embellish or add a new fact", prompt)
+
     def test_generated_post_numeric_guard_accepts_only_verified_register_values(self):
         self.assertTrue(main.DeepSeekGenerator._validate_generated_post_numbers(
             "ABC is trading at $1.234568 after a +6.2% move over 24h. #Write2Earn",

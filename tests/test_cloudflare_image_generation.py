@@ -12,7 +12,7 @@ from PIL import Image
 
 from image_engine import (
     CloudflareImageArtifact, CloudflareWorkersAIImageGenerator, ImageComposer,
-    ImageUploader, should_upload_image, upload_authorized_image,
+    ImageIntelligenceEngine, ImageUploader, should_upload_image, upload_authorized_image,
 )
 from layer1.visual_quality import VisualQualityEngine
 
@@ -266,6 +266,19 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
             self.generator(lambda request, timeout: self.fail("must not call")).generate(
                 "prompt", self.output, width=1921, height=512,
             )
+
+    def test_legacy_renderer_never_invents_chart_history_when_history_is_missing(self):
+        engine = ImageIntelligenceEngine()
+        with patch.object(engine, "_draw_candlestick_chart") as draw_chart:
+            image = engine._render_image(
+                symbol="ABC", price=1.0, change=2.0, volume_ratio=1.2,
+                market_cap=0, headline="MARKET UPDATE", reasons=["Evidence-backed update"],
+                setup={"entry": "1", "target1": "2", "target2": "3", "stop": "0.5"},
+                is_bullish=True, primary_color=(20, 180, 120), dim_color=(20, 40, 60),
+                coin_history=None,
+            )
+        self.assertEqual(image.size, (1080, 1350))
+        draw_chart.assert_not_called()
 
 
 if __name__ == "__main__":

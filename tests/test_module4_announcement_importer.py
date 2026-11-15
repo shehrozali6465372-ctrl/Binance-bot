@@ -115,6 +115,7 @@ class AnnouncementImporterTests(unittest.TestCase):
         self.assertEqual(result["evidence_saved"], 1)
         self.assertEqual(result["unmatched_rows"], 0)
         self.assertEqual(len(self.store.saved), 1)
+        self.assertEqual(self.store.saved[0].body, "Support for BTC and ETH (ETH).")
         self.assertEqual(
             self.store.saved[0].asset_ids,
             ("coingecko:bitcoin", "coingecko:ethereum"),

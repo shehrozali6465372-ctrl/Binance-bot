@@ -39,6 +39,18 @@ class VisualQualityEngineTests(unittest.TestCase):
             "symbol": self.symbol,
             "dimensions": [1080, 1350],
             "rendered_labels": ["MARKET UPDATE", "$ABC"],
+            "visual_overlay": {
+                "background_panel": {
+                    "bbox": [0, 960, 1080, 1350],
+                    "fill_rgba": [5, 12, 24, 190],
+                },
+                "items": [
+                    {"text": "MARKET UPDATE", "bbox": [350, 1020, 730, 1060],
+                     "font_size_px": 42, "fill_rgb": [170, 195, 225]},
+                    {"text": "$ABC", "bbox": [400, 1080, 680, 1170],
+                     "font_size_px": 82, "fill_rgb": [255, 255, 255]},
+                ],
+            },
             "chart_data_refs": [],
             "numeric_overlays": [],
         }
@@ -107,6 +119,58 @@ class VisualQualityEngineTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "REJECT")
         self.assertIn("IMAGE_PROVENANCE_SIDECAR_MISSING_OR_INVALID", result.reasons)
+
+    def test_missing_deterministic_overlay_geometry_fails_closed(self):
+        self._write_sidecar(visual_overlay=None)
+        result = VisualQualityEngine().validate(
+            self.image_path, draft_content=self.draft,
+            symbol=self.symbol, asset_id=self.asset_id,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("TEXT_OVERLAY_GEOMETRY_MISSING_OR_INVALID", result.reasons)
+
+    def test_clipped_or_overlapping_overlay_boxes_fail_closed(self):
+        self._write_sidecar(visual_overlay={
+            "background_panel": {"bbox": [0, 960, 1080, 1350], "fill_rgba": [5, 12, 24, 190]},
+            "items": [
+                {"text": "MARKET UPDATE", "bbox": [100, 1020, 980, 1060], "font_size_px": 42, "fill_rgb": [170, 195, 225]},
+                {"text": "$ABC", "bbox": [900, 1080, 1100, 1170], "font_size_px": 82, "fill_rgb": [255, 255, 255]},
+            ],
+        })
+        result = VisualQualityEngine().validate(
+            self.image_path, draft_content=self.draft,
+            symbol=self.symbol, asset_id=self.asset_id,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("TEXT_OVERLAY_OUT_OF_BOUNDS", result.reasons)
+
+        self._write_sidecar(visual_overlay={
+            "background_panel": {"bbox": [0, 960, 1080, 1350], "fill_rgba": [5, 12, 24, 190]},
+            "items": [
+                {"text": "MARKET UPDATE", "bbox": [100, 1020, 700, 1120], "font_size_px": 42, "fill_rgb": [170, 195, 225]},
+                {"text": "$ABC", "bbox": [350, 1080, 730, 1170], "font_size_px": 82, "fill_rgb": [255, 255, 255]},
+            ],
+        })
+        result = VisualQualityEngine().validate(
+            self.image_path, draft_content=self.draft,
+            symbol=self.symbol, asset_id=self.asset_id,
+        )
+        self.assertIn("TEXT_OVERLAY_BOXES_OVERLAP", result.reasons)
+
+    def test_low_contrast_or_unreadably_small_overlay_fails_closed(self):
+        self._write_sidecar(visual_overlay={
+            "background_panel": {"bbox": [0, 960, 1080, 1350], "fill_rgba": [5, 12, 24, 190]},
+            "items": [
+                {"text": "MARKET UPDATE", "bbox": [350, 1020, 730, 1060], "font_size_px": 42, "fill_rgb": [70, 74, 83]},
+                {"text": "$ABC", "bbox": [400, 1080, 680, 1170], "font_size_px": 18, "fill_rgb": [255, 255, 255]},
+            ],
+        })
+        result = VisualQualityEngine().validate(
+            self.image_path, draft_content=self.draft,
+            symbol=self.symbol, asset_id=self.asset_id,
+        )
+        self.assertIn("TEXT_OVERLAY_CONTRAST_INSUFFICIENT", result.reasons)
+        self.assertIn("TEXT_OVERLAY_FONT_TOO_SMALL", result.reasons)
 
 
 if __name__ == "__main__":

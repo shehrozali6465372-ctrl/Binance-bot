@@ -10,6 +10,108 @@ from typing import Any
 from PIL import Image
 
 
+def _valid_int_vector(value: Any, length: int, low: int = 0, high: int = 255) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == length
+        and all(
+            isinstance(item, int) and not isinstance(item, bool) and low <= item <= high
+            for item in value
+        )
+    )
+
+
+def _relative_luminance(rgb: tuple[int, int, int] | list[int]) -> float:
+    channels = []
+    for channel in rgb:
+        value = channel / 255.0
+        channels.append(
+            value / 12.92 if value <= 0.04045
+            else ((value + 0.055) / 1.055) ** 2.4
+        )
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+
+def _contrast_ratio(foreground: tuple[int, int, int] | list[int],
+                    background: tuple[int, int, int] | list[int]) -> float:
+    first, second = sorted(
+        (_relative_luminance(foreground), _relative_luminance(background)),
+        reverse=True,
+    )
+    return (first + 0.05) / (second + 0.05)
+
+
+def _validate_visual_overlay(
+    overlay: Any, expected_labels: tuple[str, str], width: int, height: int,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if not isinstance(overlay, dict):
+        return ("TEXT_OVERLAY_GEOMETRY_MISSING_OR_INVALID",)
+    panel = overlay.get("background_panel")
+    items = overlay.get("items")
+    if not isinstance(panel, dict) or not isinstance(items, list) or len(items) != 2:
+        return ("TEXT_OVERLAY_GEOMETRY_MISSING_OR_INVALID",)
+
+    panel_box = panel.get("bbox")
+    panel_fill = panel.get("fill_rgba")
+    if (
+        not _valid_int_vector(panel_box, 4, 0, max(width, height))
+        or panel_box[0] >= panel_box[2] or panel_box[1] >= panel_box[3]
+        or panel_box[2] > width or panel_box[3] > height
+        or not _valid_int_vector(panel_fill, 4)
+        or panel_fill[3] == 0
+    ):
+        return ("TEXT_OVERLAY_GEOMETRY_MISSING_OR_INVALID",)
+
+    alpha = panel_fill[3] / 255.0
+    # White is the brightest possible source pixel. Compositing against it
+    # gives a conservative upper bound for the background luminance.
+    worst_case_background = tuple(
+        round(panel_fill[index] * alpha + 255 * (1.0 - alpha))
+        for index in range(3)
+    )
+    boxes: list[tuple[int, int, int, int]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or item.get("text") != expected_labels[index]:
+            reasons.append("UNEXPECTED_OR_UNPROVEN_TEXT_OVERLAY")
+            continue
+        box = item.get("bbox")
+        if (
+            not _valid_int_vector(box, 4, 0, max(width, height))
+            or box[0] >= box[2] or box[1] >= box[3]
+        ):
+            reasons.append("TEXT_OVERLAY_GEOMETRY_MISSING_OR_INVALID")
+            continue
+        left, top, right, bottom = box
+        if (
+            right > width or bottom > height
+            or left < panel_box[0] or top < panel_box[1]
+            or right > panel_box[2] or bottom > panel_box[3]
+        ):
+            reasons.append("TEXT_OVERLAY_OUT_OF_BOUNDS")
+        boxes.append((left, top, right, bottom))
+
+        font_size = item.get("font_size_px")
+        if (
+            isinstance(font_size, bool) or not isinstance(font_size, int)
+            or font_size < 28
+        ):
+            reasons.append("TEXT_OVERLAY_FONT_TOO_SMALL")
+        text_fill = item.get("fill_rgb")
+        if not _valid_int_vector(text_fill, 3):
+            reasons.append("TEXT_OVERLAY_GEOMETRY_MISSING_OR_INVALID")
+        elif _contrast_ratio(text_fill, worst_case_background) < 4.5:
+            reasons.append("TEXT_OVERLAY_CONTRAST_INSUFFICIENT")
+
+    if len(boxes) == 2:
+        first, second = boxes
+        horizontal_overlap = max(first[0], second[0]) < min(first[2], second[2])
+        vertical_overlap = max(first[1], second[1]) < min(first[3], second[3])
+        if horizontal_overlap and vertical_overlap:
+            reasons.append("TEXT_OVERLAY_BOXES_OVERLAP")
+    return tuple(sorted(set(reasons)))
+
+
 @dataclass(frozen=True)
 class VisualValidationResult:
     status: str
@@ -19,7 +121,7 @@ class VisualValidationResult:
     width: int
     height: int
     byte_length: int
-    validation_version: str = "visual-quality-v1"
+    validation_version: str = "visual-quality-v2"
 
 
 class VisualQualityEngine:
@@ -100,10 +202,12 @@ class VisualQualityEngine:
                 reasons.append("IMAGE_GENERATION_PARAMETERS_INVALID")
             if tuple(metadata.get("dimensions") or ()) != self.REQUIRED_DIMENSIONS:
                 reasons.append("PROVENANCE_DIMENSIONS_MISMATCH")
-            if tuple(metadata.get("rendered_labels") or ()) != (
-                "MARKET UPDATE", "$" + symbol.upper(),
-            ):
+            expected_labels = ("MARKET UPDATE", "$" + symbol.upper())
+            if tuple(metadata.get("rendered_labels") or ()) != expected_labels:
                 reasons.append("UNEXPECTED_OR_UNPROVEN_TEXT_OVERLAY")
+            reasons.extend(_validate_visual_overlay(
+                metadata.get("visual_overlay"), expected_labels, width, height,
+            ))
             if metadata.get("chart_data_refs") not in ([], None):
                 reasons.append("UNSOURCED_CHART_DATA_REFERENCE")
             if metadata.get("numeric_overlays") not in ([], None):

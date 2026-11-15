@@ -501,16 +501,17 @@ class ImageIntelligenceEngine:
         # Draw chart background
         draw.rectangle([20, chart_top, WIDTH - 20, chart_bottom], fill=bg_chart, outline=border)
         
-        # Draw simulated candlestick chart
+        # A chart is only rendered when real price history is supplied.
+        # Never fabricate a price series from the current price and percentage change.
         if coin_history and len(coin_history) >= 5:
-            self._draw_candlestick_chart(draw, coin_history, 30, chart_top + 10, WIDTH - 60, chart_height - 20, is_bullish)
+            self._draw_candlestick_chart(
+                draw, coin_history, 30, chart_top + 10,
+                WIDTH - 60, chart_height - 20, is_bullish,
+            )
+            chart_label = "CHART ANALYSIS"
         else:
-            # Generate synthetic chart data
-            synthetic = self._synthetic_chart_data(price, change, 20)
-            self._draw_candlestick_chart(draw, synthetic, 30, chart_top + 10, WIDTH - 60, chart_height - 20, is_bullish)
-        
-        # Chart label
-        draw.text((30, chart_top + 5), "CHART ANALYSIS", fill=text_dim, font=self.font_tiny)
+            chart_label = "VERIFIED PRICE HISTORY REQUIRED"
+        draw.text((30, chart_top + 5), chart_label, fill=text_dim, font=self.font_tiny)
         
         # ---- MIDDLE SECTION: Coin Info ----
         mid_y = chart_bottom + 25
@@ -684,22 +685,6 @@ class ImageIntelligenceEngine:
         last_y = y_start + height - int((prices[-1] - min_p) / price_range * height * 0.9) - int(height * 0.05)
         draw.ellipse([last_x, last_y - 3, last_x + candle_width, last_y + 3], fill=green if is_bullish else red)
     
-    def _synthetic_chart_data(self, price: float, change: float, points: int = 20) -> List[float]:
-        """Generate realistic-looking price history."""
-        if change == 0:
-            change = 0.1
-        end_price = price
-        start_price = price / (1 + change / 100.0)
-        
-        data = []
-        for i in range(points):
-            progress = i / (points - 1)
-            base = start_price + (end_price - start_price) * progress
-            noise = base * random.uniform(-0.02, 0.02)
-            data.append(round(base + noise, 8))
-        
-        return data
-    
     def get_stats(self) -> Dict[str, Any]:
         """Get engine statistics."""
         return {
@@ -804,6 +789,7 @@ class ImageComposer:
                 symbol_font = ImageFont.load_default()
             title = "MARKET UPDATE"
             ticker = "$" + symbol
+            overlay_items = []
             for text_value, font, y, fill in (
                 (title, title_font, 1020, (170, 195, 225)),
                 (ticker, symbol_font, 1080, (255, 255, 255)),
@@ -813,6 +799,13 @@ class ImageComposer:
                 if x < 0 or y + (bounds[3] - bounds[1]) > 1350:
                     raise ValueError("deterministic overlay would exceed image bounds")
                 draw.text((x, y), text_value, font=font, fill=fill)
+                actual_bounds = draw.textbbox((x, y), text_value, font=font)
+                overlay_items.append({
+                    "text": text_value,
+                    "bbox": list(actual_bounds),
+                    "font_size_px": getattr(font, "size", 0),
+                    "fill_rgb": list(fill),
+                })
             final_path = self.images_dir / f"{symbol}_{timestamp}_workers_ai.png"
             canvas.save(final_path, format="PNG", optimize=True)
             final_bytes = final_path.read_bytes()
@@ -833,6 +826,13 @@ class ImageComposer:
                 "symbol": symbol,
                 "dimensions": [1080, 1350],
                 "rendered_labels": [title, ticker],
+                "visual_overlay": {
+                    "background_panel": {
+                        "bbox": [0, 960, 1080, 1350],
+                        "fill_rgba": [5, 12, 24, 190],
+                    },
+                    "items": overlay_items,
+                },
                 "chart_data_refs": [],
                 "numeric_overlays": [],
             }

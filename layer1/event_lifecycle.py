@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -265,16 +266,33 @@ class EventLifecycleStore:
             return self.get(event_id)
 
     @staticmethod
-    def _has_material_event_time_change(previous_payload_json: Optional[str],
-                                        evidence: AnnouncementEvidence) -> bool:
-        """Only an explicit change to the source's effective event time is material.
+    def _normalized_material_text(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
-        Content hashes, observation timestamps, and source update timestamps are
-        revision signals, not proof that the underlying event materially changed.
+    @classmethod
+    def _has_material_event_change(cls, previous_payload_json: Optional[str],
+                                   evidence: AnnouncementEvidence) -> bool:
+        """Compare source-stable event facts, not incidental revision metadata.
+
+        Title, event type and announcement body capture source-visible changes;
+        effective event time captures rescheduling. Body comparison is deliberately
+        conservative: any normalized textual change is material, without claiming
+        to understand its semantics. Content hashes, observation timestamps and
+        source update timestamps alone do not prove a material event development.
         """
         if previous_payload_json is None:
             return False
         previous = json.loads(previous_payload_json)
+        if cls._normalized_material_text(previous.get("title")) != cls._normalized_material_text(evidence.title):
+            return True
+        if cls._normalized_material_text(previous.get("event_type")) != cls._normalized_material_text(evidence.event_type):
+            return True
+        previous_body = cls._normalized_material_text(previous.get("body"))
+        current_body = cls._normalized_material_text(evidence.body)
+        if previous_body != current_body and (previous_body or current_body):
+            return True
         old_event_at = previous.get("event_at")
         new_event_at = evidence.event_at
         if old_event_at is None and new_event_at is None:
@@ -336,7 +354,7 @@ class EventLifecycleStore:
                     "WHERE e.event_id=?", (event_id,),
                 ).fetchone()
                 previous_payload_json = previous_revision[0] if previous_revision else None
-                materially_new = self._has_material_event_time_change(
+                materially_new = self._has_material_event_change(
                     previous_payload_json, single_asset,
                 )
                 output.append(self.observe(
@@ -362,6 +380,42 @@ class EventLifecycleStore:
             self._transition(event_id, record.state, "STALE", "FRESHNESS_WINDOW_EXCEEDED", (),
                              current_time.isoformat())
         return self.get(event_id)
+
+    @staticmethod
+    def index_by_asset_source(
+        records: list[EventLifecycleRecord] | tuple[EventLifecycleRecord, ...],
+    ) -> dict[str, dict[str, dict[str, dict[str, str]]]]:
+        """Index lifecycle records without collapsing distinct events for one asset."""
+        if not isinstance(records, (list, tuple)):
+            raise TypeError("event lifecycle records must be a finite list or tuple")
+        indexed: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
+        for record in records:
+            if not isinstance(record, EventLifecycleRecord):
+                raise TypeError("event lifecycle index requires EventLifecycleRecord values")
+            source_events = indexed.setdefault(record.asset_id, {}).setdefault(record.source_id, {})
+            value = {"event_id": record.event_id, "state": record.state}
+            previous = source_events.get(record.event_type)
+            if previous is not None and previous != value:
+                raise ValueError("conflicting lifecycle records share an asset/source/event type")
+            source_events[record.event_type] = value
+        return indexed
+
+    def get_for_source(self, asset_id: str, source_id: str) -> EventLifecycleRecord:
+        """Resolve one event by its exact asset/source identity; never fall back to latest."""
+        if not isinstance(asset_id, str) or not asset_id.strip():
+            raise ValueError("canonical asset_id is required")
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("exact event source_id is required")
+        rows = self.conn.execute(
+            "SELECT event_id FROM layer1_event_lifecycle WHERE asset_id=? AND source_id=? "
+            "ORDER BY event_id",
+            (asset_id, source_id),
+        ).fetchall()
+        if not rows:
+            raise KeyError("event lifecycle record not found for exact asset/source")
+        if len(rows) != 1:
+            raise ValueError("event lifecycle source identity is ambiguous for this asset")
+        return self.get(rows[0][0])
 
     def latest_for_asset(self, asset_id: str) -> Optional[EventLifecycleRecord]:
         if not isinstance(asset_id, str) or not asset_id.strip():

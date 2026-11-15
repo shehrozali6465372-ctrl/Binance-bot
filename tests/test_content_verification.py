@@ -21,7 +21,7 @@ class ContentVerificationEngineTests(unittest.TestCase):
             is_primary=True, source_status="ACCEPTED",
         )
         claim = Claim(
-            text="ABC market price is 1.25 USD", subject=self.asset_id,
+            text="$ABC market price is 1.25 USD", subject=self.asset_id,
             claim_key="market.price", value=1.25, observed_at=now(),
             evidence_ids=(evidence.evidence_id,), asset_id=self.asset_id,
             unit="USD", claim_type="CONFIRMED_FACT",
@@ -31,12 +31,71 @@ class ContentVerificationEngineTests(unittest.TestCase):
 
     def test_verified_fact_and_exact_ticker_pass(self):
         result = self.engine.validate(
-            "ABC ($ABC) is trading at $1.25. #ABC",
+            f"[[CLAIM:{self.registry.claims[0].claim_id}]]{self.registry.claims[0].text}.\n#ABC #Write2Earn",
             registry=self.registry, symbol="ABC", asset_id=self.asset_id,
             numeric_validator=lambda _: True,
         )
         self.assertEqual(result.status, "PASS")
-        self.assertEqual(len(result.approved_claim_ids), 1)
+        self.assertEqual(result.approved_claim_ids, (self.registry.claims[0].claim_id,))
+        self.assertNotIn("[[CLAIM:", result.clean_content)
+        self.assertIn(self.registry.claims[0].text, result.clean_content)
+
+    def test_factual_sentence_without_claim_attribution_is_rejected(self):
+        result = self.engine.validate(
+            "$ABC market price is 1.25 USD. #ABC #Write2Earn",
+            registry=self.registry, symbol="ABC", asset_id=self.asset_id,
+            numeric_validator=lambda _: True,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("FACTUAL_SENTENCE_MISSING_CLAIM_ATTRIBUTION", result.reasons)
+        self.assertEqual(result.approved_claim_ids, ())
+
+    def test_claim_marker_does_not_authorize_rewritten_sentence(self):
+        claim = self.registry.claims[0]
+        result = self.engine.validate(
+            f"[[CLAIM:{claim.claim_id}]]$ABC price will surge after the announcement. #ABC",
+            registry=self.registry, symbol="ABC", asset_id=self.asset_id,
+            numeric_validator=lambda _: True,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("SENTENCE_DOES_NOT_MATCH_REFERENCED_CLAIM", result.reasons)
+        self.assertEqual(result.approved_claim_ids, ())
+
+    def test_verified_claim_from_another_asset_cannot_be_referenced(self):
+        timestamp = now()
+        foreign_evidence = EvidenceRecord(
+            source_id="foreign-market-1", source_family="coingecko",
+            source_kind="PRIMARY", publisher="CoinGecko", subject="coingecko:xyz",
+            claim_key="market.price", value=2.0, published_at=timestamp,
+            observed_at=timestamp, asset_id="coingecko:xyz", unit="USD",
+            is_primary=True, source_status="ACCEPTED",
+        )
+        foreign_claim = Claim(
+            text="$ABC market price is 2.00 USD", subject="coingecko:xyz",
+            claim_key="market.price", value=2.0, observed_at=timestamp,
+            evidence_ids=(foreign_evidence.evidence_id,), asset_id="coingecko:xyz",
+            unit="USD", claim_type="CONFIRMED_FACT",
+        )
+        registry = EvidenceVerificationEngine().verify(
+            self.registry.claims + (foreign_claim,),
+            self.registry.evidence_records + (foreign_evidence,),
+        )
+        result = self.engine.validate(
+            f"[[CLAIM:{foreign_claim.claim_id}]]{foreign_claim.text}. #ABC",
+            registry=registry, symbol="ABC", asset_id=self.asset_id,
+            numeric_validator=lambda _: True,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("UNKNOWN_OR_UNVERIFIED_CLAIM_REFERENCE", result.reasons)
+
+    def test_unknown_claim_id_cannot_attribute_a_sentence(self):
+        result = self.engine.validate(
+            f"[[CLAIM:{'0' * 64}]]{self.registry.claims[0].text}. #ABC",
+            registry=self.registry, symbol="ABC", asset_id=self.asset_id,
+            numeric_validator=lambda _: True,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("UNKNOWN_OR_UNVERIFIED_CLAIM_REFERENCE", result.reasons)
 
     def test_wrong_or_multiple_cashtags_fail(self):
         result = self.engine.validate(
@@ -72,8 +131,9 @@ class ContentVerificationEngineTests(unittest.TestCase):
         evidence = self.registry.evidence_records
         registry = EvidenceVerificationEngine().verify(claims, evidence)
         result = self.engine.validate(
-            "$ABC update. #ABC", registry=registry, symbol="ABC",
-            asset_id=self.asset_id, numeric_validator=lambda _: True,
+            f"[[CLAIM:{self.registry.claims[0].claim_id}]]{self.registry.claims[0].text}. #ABC",
+            registry=registry, symbol="ABC", asset_id=self.asset_id,
+            numeric_validator=lambda _: True,
         )
         self.assertIn("UNRESOLVED_ASSET_CLAIMS_REMAIN", result.reasons)
 
@@ -87,8 +147,9 @@ class ContentVerificationEngineTests(unittest.TestCase):
             self.registry.claims + (other,), self.registry.evidence_records,
         )
         result = self.engine.validate(
-            "$ABC update. #ABC", registry=registry, symbol="ABC",
-            asset_id=self.asset_id, numeric_validator=lambda _: True,
+            f"[[CLAIM:{self.registry.claims[0].claim_id}]]{self.registry.claims[0].text}. #ABC",
+            registry=registry, symbol="ABC", asset_id=self.asset_id,
+            numeric_validator=lambda _: True,
         )
         self.assertEqual(result.status, "PASS")
 

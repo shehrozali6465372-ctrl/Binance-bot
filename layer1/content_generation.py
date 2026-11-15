@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -106,8 +107,9 @@ class DraftStore:
             raise ValueError("draft requires research package and editorial brief IDs")
         if not isinstance(approved_claim_ids, Sequence) or isinstance(approved_claim_ids, (str, bytes)):
             raise ValueError("approved claim IDs must be a sequence of claim ID strings")
-        if any(not isinstance(value, str) or not value.strip() for value in approved_claim_ids):
-            raise ValueError("draft requires verified claim references")
+        if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+               for value in approved_claim_ids):
+            raise ValueError("draft requires lowercase SHA-256 claim IDs")
         claim_ids = tuple(sorted(set(approved_claim_ids)))
         if not claim_ids:
             raise ValueError("draft requires verified claim references")
@@ -325,7 +327,7 @@ class DraftStore:
     def latest_text_validation(self, draft_hash: str) -> str | None:
         row = self.connection.execute(
             "SELECT status FROM content_draft_validation_results WHERE draft_hash=? "
-            "ORDER BY created_at DESC, validation_id DESC LIMIT 1",
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (draft_hash,),
         ).fetchone()
         return row[0] if row else None
@@ -333,7 +335,7 @@ class DraftStore:
     def visual_validation(self, draft_hash: str, image_hash: str) -> str | None:
         row = self.connection.execute(
             "SELECT status FROM visual_validation_results WHERE draft_hash=? AND image_hash=? "
-            "ORDER BY created_at DESC, validation_id DESC LIMIT 1",
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (draft_hash, image_hash),
         ).fetchone()
         return row[0] if row else None

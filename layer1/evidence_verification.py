@@ -535,6 +535,8 @@ class EvidenceVerificationEngine:
                 "is_primary": True, "source_status": "ACCEPTED", "status_value": "PUBLISHED",
             }
             output.append(EvidenceRecord(**common, claim_key="announcement.title", value=item.title))
+            if item.body.strip():
+                output.append(EvidenceRecord(**common, claim_key="announcement.body", value=item.body))
             output.append(EvidenceRecord(**common, claim_key="announcement.event_type", value=item.event_type))
             updated_time = _timestamp(item.updated_at or item.published_at)
             observed_time = _timestamp(item.observed_at)
@@ -1121,8 +1123,17 @@ class EvidenceVerificationEngine:
                     continue
 
                 if segment.startswith(("Type:", "Detail:")):
-                    field = "announcement.event_type" if segment.startswith("Type:") else "announcement.title"
                     raw_value = segment.split(":", 1)[1].strip()
+                    field = "announcement.event_type" if segment.startswith("Type:") else "announcement.title"
+                    if segment.startswith("Detail:"):
+                        body_matches = [
+                            item for item in evidence_records
+                            if item.claim_key == "announcement.body" and item.asset_id == asset_id
+                            and isinstance(item.value, str)
+                            and item.value.strip().casefold() == raw_value.casefold()
+                        ]
+                        if body_matches:
+                            field = "announcement.body"
                     if field == "announcement.event_type":
                         selected_event_type = raw_value.casefold()
                     if field == "announcement.event_type" and raw_value.casefold() == "market movement":
@@ -1282,6 +1293,75 @@ class EvidenceVerificationEngine:
         return tuple(sorted(claims, key=lambda item: item.claim_id))
 
 
+_INDEPENDENT_CLAUSE_SUBJECT = (
+    r"(?:the|this|that|these|those)\s+(?:token|asset|coin|company|exchange|price|volume|market|"
+    r"listing|announcement|pair|network|protocol|project|team|source)"
+    r"|(?:it|they|we|trading|volume|price|market)"
+    r"|(?:\$?[A-Z][A-Za-z0-9.-]*(?:\s+[A-Z][A-Za-z0-9.-]*){0,2})"
+)
+_INDEPENDENT_CLAUSE_VERB = (
+    r"(?:is|are|was|were|has|have|had|will|can|could|may|might|must|should|"
+    r"announced|confirms?|confirmed|lists?|listed|delists?|delisted|launch(?:es|ed)?|"
+    r"opens?|opened|closes?|closed|reports?|reported|files?|filed|approves?|approved|"
+    r"rejects?|rejected|reaches?|reached|records?|recorded|posts?|posted|updates?|updated|"
+    r"adds?|added|removes?|removed|began|ends?|ended|shows?|showed|saw|remains?|continues?|"
+    r"pauses?|paused|suspends?|suspended|resumes?|resumed|rises?|rose|falls?|fell|"
+    r"increases?|increased|decreases?|decreased|surges?|surged|drops?|dropped|gains?|gained|"
+    r"loses?|lost|moves?|moved|trades?|traded|holds?|held|cuts?|cut|hits?|hit)"
+)
+_INDEPENDENT_CLAUSE_START = re.compile(
+    rf"^{_INDEPENDENT_CLAUSE_SUBJECT}\s+{_INDEPENDENT_CLAUSE_VERB}\b"
+)
+_FINITE_CLAUSE_VERB = re.compile(rf"\b{_INDEPENDENT_CLAUSE_VERB}\b", re.IGNORECASE)
+_SHARED_SUBJECT_PREDICATE = re.compile(
+    rf"^({_INDEPENDENT_CLAUSE_SUBJECT})\s+({_INDEPENDENT_CLAUSE_VERB})\b(.*)$",
+    re.IGNORECASE,
+)
+_SHARED_SUBJECT_CONJUNCTION = re.compile(
+    rf"(?:\s+(?:and|but)\s+(?:(?:then|also|later|subsequently)\s+)?|"
+    rf",\s*(?:then|later|subsequently)\s+)"
+    rf"({_INDEPENDENT_CLAUSE_VERB})\b",
+    re.IGNORECASE,
+)
+
+
+def _split_shared_subject_conjuncts(clause: str) -> tuple[str, ...]:
+    """Expand a repeated predicate only when one explicit subject is recoverable."""
+    prefix = _SHARED_SUBJECT_PREDICATE.match(clause)
+    if not prefix:
+        return (clause,)
+    subject = prefix.group(1).strip()
+    for match in _SHARED_SUBJECT_CONJUNCTION.finditer(clause, prefix.end(2)):
+        left = clause[:match.start()].strip().rstrip(",; ")
+        right_tail = clause[match.end():].strip()
+        right = (subject + " " + match.group(1) + (" " + right_tail if right_tail else "")).strip()
+        if not left or not right:
+            continue
+        return (
+            _split_shared_subject_conjuncts(left)
+            + _split_shared_subject_conjuncts(right)
+        )
+    return (clause,)
+
+
+def _split_independent_conjuncts(clause: str) -> tuple[str, ...]:
+    """Split only when both sides visibly contain an independent subject/verb clause.
+
+    This deliberately leaves ambiguous elliptical constructions intact. Shared-subject
+    predicates are expanded only when a recognized finite verb makes the second
+    proposition explicit; the resulting claims still need independent evidence links.
+    """
+    for match in re.finditer(r"\s+(?:,\s*)?(?:and|but|while|whereas)\s+", clause, re.IGNORECASE):
+        left = clause[:match.start()].strip().rstrip(",; ")
+        right = clause[match.end():].strip()
+        if not left or not right or not _FINITE_CLAUSE_VERB.search(left):
+            continue
+        if not _INDEPENDENT_CLAUSE_START.match(right):
+            continue
+        return _split_independent_conjuncts(left) + _split_independent_conjuncts(right)
+    return _split_shared_subject_conjuncts(clause)
+
+
 def split_atomic_claims(text: str) -> tuple[str, ...]:
     """Deterministic sentence/clause segmentation; it does not infer evidence or truth."""
     if not isinstance(text, str) or not text.strip():
@@ -1289,7 +1369,7 @@ def split_atomic_claims(text: str) -> tuple[str, ...]:
     output = []
     protected_period = "\uE000"
     abbreviation_pattern = re.compile(
-        r"\b(?:e\.g|i\.e|etc|mr|mrs|ms|dr|prof|vs|approx|no)\.|"
+        r"\b(?:e\.g|i\.e|etc|mr|mrs|ms|dr|prof|vs|approx|no|inc|corp|ltd|plc|llc|co)\.|"
         r"\b(?:[A-Za-z]\.){2,}",
         re.IGNORECASE,
     )
@@ -1297,13 +1377,21 @@ def split_atomic_claims(text: str) -> tuple[str, ...]:
         line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
         if not line or (line.startswith("──") and line.endswith("──")):
             continue
+        # In a.m./p.m., protect only the internal period. The trailing period
+        # may still be a real sentence boundary.
+        line = re.sub(
+            r"\b([ap])\.m\.",
+            lambda match: match.group(1) + protected_period + "m.",
+            line,
+            flags=re.IGNORECASE,
+        )
         line = abbreviation_pattern.sub(
             lambda match: match.group(0).replace(".", protected_period), line,
         )
         for part in re.split(r"(?<=[.!?])\s+|;\s+", line):
             normalized = part.replace(protected_period, ".").strip(" \t\"'")
             if normalized:
-                output.append(normalized)
+                output.extend(_split_independent_conjuncts(normalized))
     return tuple(output)
 
 
@@ -1361,7 +1449,7 @@ def render_claim_registry(registry: ClaimRegistry, *, asset_id: Optional[str] = 
         attribution = "Attribute this as a source assertion." if claim.claim_type == "SOURCE_ASSERTION" else ""
         lines.append(
             f"- [{result.state}/{claim.claim_type}] {claim.text} "
-            f"(evidence IDs: {', '.join(result.supporting_evidence_ids)}) {attribution}".strip()
+            f"(claim ID: {claim.claim_id}; evidence IDs: {', '.join(result.supporting_evidence_ids)}) {attribution}".strip()
         )
     lines.append("QUALIFIED NON-FACTUAL ANALYSIS (not evidence; label explicitly as analysis/estimate):")
     if not nonfactual:

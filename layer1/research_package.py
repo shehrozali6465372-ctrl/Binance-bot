@@ -8,10 +8,14 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from layer1.evidence_verification import ClaimRegistry
+from layer1.evidence_verification import ClaimRegistry, SOURCE_KINDS
 
 
 NONFACTUAL_TYPES = {"ESTIMATE", "ANALYST_INTERPRETATION", "HYPOTHESIS"}
+EVENT_STATES = {
+    "DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED", "DEVELOPING",
+    "RESOLVED", "STALE", "WITHDRAWN", "DISPUTED", "NO_EVENT",
+}
 
 
 def _parse_time(value: str) -> datetime:
@@ -109,20 +113,37 @@ class DeepResearchEngine:
         if not isinstance(research_question, str) or not research_question.strip():
             raise ValueError("research question must be event/candidate specific")
         cutoff = _parse_time(cutoff_at)
+        if isinstance(event_states, (str, bytes)) or not isinstance(event_states, Sequence):
+            raise ValueError("event lifecycle states must be a finite sequence")
+        if any(not isinstance(value, str) or value not in EVENT_STATES for value in event_states):
+            raise ValueError("event lifecycle states contain an unsupported state")
         states = tuple(sorted(set(event_states)))
+        if isinstance(required_source_kinds, (str, bytes)) or not isinstance(required_source_kinds, Sequence):
+            raise ValueError("required source kinds must be a finite sequence")
+        if any(not isinstance(value, str) or value not in SOURCE_KINDS for value in required_source_kinds):
+            raise ValueError("required source kinds contain an unsupported source kind")
         required = tuple(sorted(set(required_source_kinds)))
-        if any(not isinstance(value, str) or not value.strip() for value in required):
-            raise ValueError("required source kinds must be non-empty strings")
 
         result_by_id = {result.claim_id: result for result in registry.results}
+        eligible_evidence = {}
+        for record in registry.evidence_records:
+            if record.asset_id not in {None, asset_id} or record.source_status != "ACCEPTED":
+                continue
+            if (_parse_time(record.published_at) > cutoff or _parse_time(record.observed_at) > cutoff
+                    or (record.updated_at and _parse_time(record.updated_at) > cutoff)):
+                continue
+            eligible_evidence[record.evidence_id] = record
+
         latest_by_scope = {}
         for claim in registry.claims:
             if claim.asset_id not in {None, asset_id}:
                 continue
+            observed = _parse_time(claim.observed_at)
+            if observed > cutoff:
+                continue
             scope = (claim.subject, claim.asset_id, claim.mapping_id, claim.claim_key, claim.timeframe)
             if claim.claim_key.startswith("announcement.") or claim.claim_key == "onchain.transaction_hash":
                 scope += (claim.event_at,)
-            observed = _parse_time(claim.observed_at)
             current = latest_by_scope.get(scope)
             pair = (claim, result_by_id.get(claim.claim_id))
             if current is None or observed > current[0]:
@@ -132,10 +153,23 @@ class DeepResearchEngine:
         selected = [pair for _, values in latest_by_scope.values() for pair in values]
         facts, inferences, disputed, unknown = [], [], [], []
         for claim, result in selected:
+            supporting_ids = tuple(result.supporting_evidence_ids) if result else ()
+            contradicting_ids = tuple(result.contradicting_evidence_ids) if result else ()
+            eligible_supporting_ids = tuple(sorted(
+                evidence_id for evidence_id in supporting_ids if evidence_id in eligible_evidence
+            ))
+            eligible_contradicting_ids = tuple(sorted(
+                evidence_id for evidence_id in contradicting_ids if evidence_id in eligible_evidence
+            ))
+            eligible_ids = (
+                eligible_contradicting_ids if result and result.state == "CONTRADICTED"
+                else eligible_supporting_ids
+            )
+            eligible_result = bool(eligible_ids)
             item = {
                 "claim_id": claim.claim_id,
                 "text": claim.text,
-                "evidence_ids": list(result.supporting_evidence_ids) if result else [],
+                "evidence_ids": list(eligible_ids),
                 "state": result.state if result else "UNVERIFIED",
                 "claim_type": claim.claim_type,
                 "claim_key": claim.claim_key,
@@ -143,23 +177,18 @@ class DeepResearchEngine:
                 "unit": claim.unit,
                 "timeframe": claim.timeframe,
             }
-            if result and result.state in {"VERIFIED", "CORROBORATED"}:
+            if result and result.state in {"VERIFIED", "CORROBORATED"} and eligible_result:
                 facts.append(item)
-            elif result and result.state == "CONTRADICTED":
+            elif result and result.state == "CONTRADICTED" and eligible_result:
                 disputed.append(item)
             elif claim.claim_type in NONFACTUAL_TYPES:
                 inferences.append(item)
             else:
+                item["state"] = "UNVERIFIED"
                 unknown.append(item)
 
         coverage_records = {}
-        for record in registry.evidence_records:
-            if record.asset_id not in {None, asset_id}:
-                continue
-            if record.source_status != "ACCEPTED":
-                continue
-            if _parse_time(record.published_at) > cutoff or _parse_time(record.observed_at) > cutoff:
-                continue
+        for record in eligible_evidence.values():
             group = coverage_records.setdefault(record.source_kind, {})
             group[record.evidence_id] = record.source_family
         source_coverage = {

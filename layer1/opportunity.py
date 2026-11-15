@@ -34,7 +34,7 @@ class OpportunityPolicy:
     max_eligibility_age_seconds: int = 300
 
     def validate(self) -> None:
-        if not self.policy_version.strip():
+        if not isinstance(self.policy_version, str) or not self.policy_version.strip():
             raise ValueError("opportunity policy version is required")
         if set(self.weights) != set(FACTOR_NAMES):
             raise ValueError("opportunity policy must define every named factor exactly once")
@@ -43,8 +43,13 @@ class OpportunityPolicy:
             raise ValueError("opportunity weights must be finite non-negative numbers")
         if not math.isclose(sum(values), 1.0, rel_tol=0, abs_tol=1e-9):
             raise ValueError("opportunity weights must sum to 1.0")
-        if not 0 <= self.defer_threshold < self.proceed_threshold <= 100:
-            raise ValueError("opportunity thresholds must satisfy 0 <= defer < proceed <= 100")
+        thresholds = (self.proceed_threshold, self.defer_threshold)
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            for value in thresholds
+        ) or not 0 <= self.defer_threshold < self.proceed_threshold <= 100:
+            raise ValueError("opportunity thresholds must be finite numbers satisfying 0 <= defer < proceed <= 100")
         if isinstance(self.max_eligibility_age_seconds, bool) or not isinstance(self.max_eligibility_age_seconds, int) or self.max_eligibility_age_seconds <= 0:
             raise ValueError("eligibility age bound must be a positive integer")
 
@@ -56,6 +61,32 @@ class OpportunityDecision:
     reasons: tuple[str, ...]
     policy_version: str
     decision_id: str
+    input_snapshot_json: str = "{}"
+
+
+def _decision_digest(
+    *, state: str, score: Optional[float], reasons: tuple[str, ...],
+    policy_version: str, input_snapshot_json: str,
+) -> str:
+    try:
+        snapshot = json.loads(input_snapshot_json)
+    except (TypeError, json.JSONDecodeError):
+        raise ValueError("opportunity decision input snapshot is invalid") from None
+    if not isinstance(snapshot, dict) or set(snapshot) != {"policy", "inputs"}:
+        raise ValueError("opportunity decision input snapshot is invalid")
+    payload = {
+        "state": state,
+        "score": score,
+        "reasons": list(reasons),
+        "policy_version": policy_version,
+        "policy": snapshot["policy"],
+        "inputs": snapshot["inputs"],
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode()
+    ).hexdigest()
 
 
 class OpportunityEvaluationEngine:
@@ -92,6 +123,14 @@ class OpportunityEvaluationEngine:
                 raise ValueError(name + " must be a boolean")
         if not isinstance(eligibility_status, str) or not isinstance(research_completeness, str) or not isinstance(event_state, str):
             raise ValueError("opportunity gate states must be strings")
+        if (
+            isinstance(eligibility_max_age_seconds, bool)
+            or not isinstance(eligibility_max_age_seconds, int)
+            or eligibility_max_age_seconds <= 0
+        ):
+            raise ValueError("eligibility age bound must be a positive integer")
+        if policy is not None:
+            policy.validate()
         current = _time(now or datetime.now(timezone.utc).isoformat())
         verified = _time(eligibility_verified_at)
         if eligibility_status != "ELIGIBLE":
@@ -158,19 +197,61 @@ class OpportunityEvaluationEngine:
                         state = "REJECT"
                         reasons.append("OPPORTUNITY_SCORE_BELOW_DEFER_THRESHOLD")
         policy_version = policy.policy_version if policy else "UNCONFIGURED"
-        payload = {
-            "state": state, "score": score, "reasons": reasons,
-            "policy_version": policy_version,
-            "eligibility_status": eligibility_status,
-            "research_completeness": research_completeness,
-            "event_state": event_state,
-        }
-        decision_id = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        factor_snapshot = {}
+        factor_keys = []
+        if isinstance(factors, Mapping):
+            factor_keys = sorted(str(key) for key in factors.keys())
+            for name in FACTOR_NAMES:
+                value = factors.get(name)
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                ):
+                    factor_snapshot[name] = {"invalid_type": type(value).__name__}
+                else:
+                    factor_snapshot[name] = float(value)
+        policy_snapshot = None
+        if policy is not None:
+            policy_snapshot = {
+                "policy_version": policy.policy_version,
+                "weights": {name: float(policy.weights[name]) for name in FACTOR_NAMES},
+                "proceed_threshold": float(policy.proceed_threshold),
+                "defer_threshold": float(policy.defer_threshold),
+                "max_eligibility_age_seconds": policy.max_eligibility_age_seconds,
+            }
+        input_snapshot_json = json.dumps(
+            {
+                "policy": policy_snapshot,
+                "inputs": {
+                    "eligibility_status": eligibility_status,
+                    "eligibility_verified_at": verified.isoformat(),
+                    "effective_eligibility_max_age_seconds": (
+                        policy.max_eligibility_age_seconds if policy is not None
+                        else eligibility_max_age_seconds
+                    ),
+                    "research_completeness": research_completeness,
+                    "event_state": event_state,
+                    "contradiction_count": contradiction_count,
+                    "unresolved_critical_count": unresolved_critical_count,
+                    "unsupported_causal_framing": unsupported_causal_framing,
+                    "duplicate_angle": duplicate_angle,
+                    "materially_new": materially_new,
+                    "factor_keys": factor_keys,
+                    "factors": factor_snapshot,
+                },
+            },
+            sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+        decision_id = _decision_digest(
+            state=state, score=score, reasons=tuple(reasons),
+            policy_version=policy_version,
+            input_snapshot_json=input_snapshot_json,
+        )
         return OpportunityDecision(
             state=state, score=score, reasons=tuple(reasons),
             policy_version=policy_version, decision_id=decision_id,
+            input_snapshot_json=input_snapshot_json,
         )
 
 
@@ -190,19 +271,86 @@ class OpportunityDecisionStore:
             score REAL,
             reasons_json TEXT NOT NULL,
             policy_version TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            input_snapshot_json TEXT NOT NULL DEFAULT '{}'
         )
         """)
+        columns = {
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(opportunity_decisions)"
+            ).fetchall()
+        }
+        if "input_snapshot_json" not in columns:
+            self.connection.execute(
+                "ALTER TABLE opportunity_decisions ADD COLUMN input_snapshot_json TEXT NOT NULL DEFAULT '{}'"
+            )
         self.connection.commit()
 
     def save(self, research_package_id: str, decision: OpportunityDecision) -> str:
-        if not research_package_id or not isinstance(decision, OpportunityDecision):
-            raise ValueError("opportunity decision requires research package provenance")
+        if (
+            not isinstance(research_package_id, str) or not research_package_id.strip()
+            or not isinstance(decision, OpportunityDecision)
+            or not isinstance(decision.decision_id, str)
+            or len(decision.decision_id) != 64
+            or any(char not in "0123456789abcdef" for char in decision.decision_id)
+        ):
+            raise ValueError("opportunity decision requires valid research package provenance and decision ID")
+        if (
+            decision.state not in {"PROCEED", "RESEARCH_MORE", "DEFER", "REJECT"}
+            or (
+                decision.score is not None
+                and (
+                    isinstance(decision.score, bool)
+                    or not isinstance(decision.score, (int, float))
+                    or not math.isfinite(decision.score)
+                    or not 0 <= decision.score <= 100
+                )
+            )
+            or not isinstance(decision.policy_version, str)
+            or not decision.policy_version.strip()
+            or not isinstance(decision.reasons, tuple)
+            or any(not isinstance(reason, str) or not reason.strip() for reason in decision.reasons)
+        ):
+            raise ValueError("opportunity decision payload is invalid")
+        try:
+            snapshot = json.loads(decision.input_snapshot_json)
+            if not isinstance(snapshot, dict) or set(snapshot) != {"policy", "inputs"}:
+                raise ValueError
+            expected_id = _decision_digest(
+                state=decision.state, score=decision.score,
+                reasons=decision.reasons, policy_version=decision.policy_version,
+                input_snapshot_json=decision.input_snapshot_json,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("opportunity decision input snapshot is invalid") from None
+        if expected_id != decision.decision_id:
+            raise ValueError("opportunity decision ID does not match its immutable input snapshot")
+        reasons_json = json.dumps(decision.reasons, separators=(",", ":"))
         with self.connection:
+            existing = self.connection.execute(
+                "SELECT research_package_id, state, score, reasons_json, policy_version, input_snapshot_json "
+                "FROM opportunity_decisions WHERE decision_id=?",
+                (decision.decision_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != research_package_id:
+                    raise ValueError("decision ID is already bound to a different research package")
+                if (
+                    existing[1] != decision.state
+                    or existing[2] != decision.score
+                    or existing[3] != reasons_json
+                    or existing[4] != decision.policy_version
+                    or existing[5] != decision.input_snapshot_json
+                ):
+                    raise ValueError("opportunity decision ID collision with different immutable payload")
+                return decision.decision_id
             self.connection.execute(
-                "INSERT OR IGNORE INTO opportunity_decisions VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO opportunity_decisions "
+                "(decision_id, research_package_id, state, score, reasons_json, "
+                "policy_version, created_at, input_snapshot_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (decision.decision_id, research_package_id, decision.state,
-                 decision.score, json.dumps(decision.reasons, separators=(",", ":")),
-                 decision.policy_version, datetime.now(timezone.utc).isoformat()),
+                 decision.score, reasons_json, decision.policy_version,
+                 datetime.now(timezone.utc).isoformat(), decision.input_snapshot_json),
             )
         return decision.decision_id

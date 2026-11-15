@@ -47,7 +47,7 @@ class PublisherSafetyTests(unittest.TestCase):
         os.chdir(self.old_cwd)
         self.tmp.cleanup()
 
-    def _authorization(self, coin, content, image_hashes=None):
+    def _authorization(self, coin, content, image_hashes=None, event_state="NO_EVENT"):
         from layer1.content_generation import DraftStore
         from layer1.publication_authorization import PublicationAuthorizationEngine
         coin = dict(coin)
@@ -58,20 +58,50 @@ class PublisherSafetyTests(unittest.TestCase):
         reservation = engine.reserve_daily_quota(symbol=symbol, daily_limit=100)
         draft_hash = main.hashlib.sha256(content.encode("utf-8")).hexdigest()
         draft_store = DraftStore(self.publisher.db.conn)
+        research_id = "research:test:" + coin["asset_id"]
+        brief_id = "brief:test:" + draft_hash
         draft_store.save_draft(
             content, asset_id=coin["asset_id"],
-            research_package_id="research:test:" + coin["asset_id"],
-            editorial_brief_id="brief:test:" + draft_hash,
-            approved_claim_ids=("claim:verified:test",),
+            research_package_id=research_id,
+            editorial_brief_id=brief_id,
+            approved_claim_ids=("a" * 64,),
         )
+        self.publisher.db.conn.execute("""
+            CREATE TABLE IF NOT EXISTS editorial_brief_versions (
+                event_id TEXT NOT NULL, angle_id TEXT NOT NULL, version INTEGER NOT NULL,
+                brief_id TEXT NOT NULL UNIQUE, research_package_id TEXT NOT NULL,
+                brief_hash TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        self.publisher.db.conn.execute(
+            "INSERT OR IGNORE INTO editorial_brief_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (("event:test" if event_state != "NO_EVENT" else "no-event:" + research_id),
+             "angle:test", 1, brief_id, research_id, "b" * 64, "{}", main.utc_now()),
+        )
+        if event_state != "NO_EVENT":
+            self.publisher.db.conn.execute("""
+                CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
+                    event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL
+                )
+            """)
+            self.publisher.db.conn.execute(
+                "INSERT OR REPLACE INTO layer1_event_lifecycle(event_id, asset_id, state) VALUES (?, ?, ?)",
+                ("event:test", coin["asset_id"], event_state),
+            )
+        self.publisher.db.conn.commit()
         draft_store.save_text_validation(
             draft_hash=draft_hash, status="PASS", reasons=(),
             validation_version="content-verification-v1",
         )
+        for image_hash in hashes:
+            draft_store.save_visual_validation(
+                draft_hash=draft_hash, image_hash=image_hash,
+                status="PASS", reasons=(), validation_version="visual-quality-v2",
+            )
         auth = engine.authorize(
             symbol=symbol, asset_id=coin["asset_id"], content=content,
             image_hashes=hashes, eligibility_snapshot_at=main.utc_now(),
-            eligibility_max_age_seconds=300, event_state="NO_EVENT",
+            eligibility_max_age_seconds=300, event_state=event_state,
             evidence_status="VERIFIED", text_validation_status="PASS",
             visual_validation_status="PASS" if hashes else "NOT_REQUIRED",
             quota_reservation_id=reservation, duplicate_policy_passed=True,
@@ -84,6 +114,128 @@ class PublisherSafetyTests(unittest.TestCase):
             coin, content, image_list=image_list,
             authorization=auth, image_hashes=hashes,
         )
+
+    def test_visual_validation_downgrade_after_authorization_blocks_before_network_post(self):
+        image_hash = "c" * 64
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "visual version-bound content",
+            image_hashes=[image_hash],
+        )
+        from layer1.content_generation import DraftStore
+        DraftStore(self.publisher.db.conn).save_visual_validation(
+            draft_hash=authorization.content_hash, image_hash=image_hash,
+            status="PASS", reasons=(), validation_version="visual-quality-v1",
+        )
+        self.publisher.db.conn.execute(
+            "UPDATE visual_validation_results SET created_at='9999-01-01T00:00:00+00:00' "
+            "WHERE draft_hash=? AND image_hash=? AND validation_version='visual-quality-v1'",
+            (authorization.content_hash, image_hash),
+        )
+        self.publisher.db.conn.commit()
+        with patch("main._open_binance_publish_no_redirect") as urlopen:
+            result = self.publisher.publish(
+                coin, "visual version-bound content",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("current visual validation version", result.error)
+        urlopen.assert_not_called()
+
+    def test_lifecycle_change_after_authorization_blocks_before_network_post(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "event-backed content", event_state="CONFIRMED",
+        )
+        original_begin = self.publisher._begin_attempt
+
+        def reserve_then_withdraw(*args, **kwargs):
+            result = original_begin(*args, **kwargs)
+            self.publisher.db.conn.execute(
+                "UPDATE layer1_event_lifecycle SET state='WITHDRAWN' WHERE event_id='event:test'"
+            )
+            self.publisher.db.conn.commit()
+            return result
+
+        with patch.object(self.publisher, "_begin_attempt", side_effect=reserve_then_withdraw):
+            with patch("main._open_binance_publish_no_redirect") as urlopen:
+                result = self.publisher.publish(
+                    coin, "event-backed content", authorization=authorization,
+                    image_hashes=hashes,
+                )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("EVENT_LIFECYCLE_CHANGED_AFTER_AUTHORIZATION", result.error)
+        urlopen.assert_not_called()
+        attempt = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE coin_symbol='BTC'"
+        ).fetchone()
+        self.assertEqual(attempt["status"], "FAILED_CONFIRMED")
+
+    def test_postgres_opt_in_publisher_uses_durable_store_and_never_sqlite_attempt_ledger(self):
+        from dataclasses import asdict
+
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "postgres opt-in publisher content",
+        )
+
+        class FakePostgresStore:
+            def __init__(self):
+                self.calls = []
+                self.payload = asdict(authorization)
+
+            def begin_authorized_attempt(self, **kwargs):
+                self.calls.append(("begin", kwargs))
+                return None
+
+            def validate_authorized_attempt_before_submit(self, **kwargs):
+                self.calls.append(("preflight", kwargs))
+
+            def finish_authorized_attempt(self, key, status, **kwargs):
+                self.calls.append(("finish", key, status, kwargs))
+
+        store = FakePostgresStore()
+        publisher = main.PostPublisher(self.config, postgres_store=store)
+        response = FakeResponse({
+            "code": "000000",
+            "data": {"id": "pg-remote-1", "shareLink": "https://example.invalid/pg-remote-1"},
+        })
+        try:
+            with patch("main._open_binance_publish_no_redirect", return_value=response) as urlopen:
+                result = publisher.publish(
+                    coin, "postgres opt-in publisher content",
+                    authorization=authorization, image_hashes=hashes,
+                )
+            self.assertEqual(result.status, "PUBLISHED_CONFIRMED")
+            self.assertEqual(result.post_id, "pg-remote-1")
+            self.assertEqual(urlopen.call_count, 1)
+            self.assertEqual([call[0] for call in store.calls],
+                             ["begin", "preflight", "finish", "finish"])
+            self.assertEqual(store.calls[-2][2], "PUBLICATION_UNKNOWN")
+            self.assertEqual(store.calls[-1][2], "PUBLISHED_CONFIRMED")
+            self.assertEqual(publisher.db.conn.execute(
+                "SELECT COUNT(*) FROM publication_attempts"
+            ).fetchone()[0], 0)
+        finally:
+            publisher.db.close()
+
+    def test_postgres_opt_in_publisher_blocks_existing_unknown_attempt_without_post(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "postgres pending attempt content",
+        )
+
+        class PendingStore:
+            def begin_authorized_attempt(self, **kwargs):
+                return {"status": "PUBLICATION_UNKNOWN", "remote_post_id": "", "share_link": ""}
+
+        publisher = main.PostPublisher(self.config, postgres_store=PendingStore())
+        try:
+            with patch("main._open_binance_publish_no_redirect") as urlopen:
+                result = publisher.publish(
+                    coin, "postgres pending attempt content",
+                    authorization=authorization, image_hashes=hashes,
+                )
+            self.assertEqual(result.status, "PUBLICATION_UNKNOWN")
+            urlopen.assert_not_called()
+        finally:
+            publisher.db.close()
 
     def test_square_publish_transport_refuses_redirects(self):
         from urllib.request import Request
@@ -350,12 +502,27 @@ class PublisherSafetyTests(unittest.TestCase):
         quota = PublicationAuthorizationEngine(self.publisher.db.conn)
         reservation = quota.reserve_daily_quota(symbol="ATOM", daily_limit=6)
         draft_hash = main.hashlib.sha256(b"pending content").hexdigest()
+        research_id = "research:test:coingecko:atom"
+        brief_id = "brief:test:" + draft_hash
         DraftStore(self.publisher.db.conn).save_draft(
             "pending content", asset_id="coingecko:atom",
-            research_package_id="research:test:coingecko:atom",
-            editorial_brief_id="brief:test:" + draft_hash,
-            approved_claim_ids=("claim:verified:test",),
+            research_package_id=research_id,
+            editorial_brief_id=brief_id,
+            approved_claim_ids=("a" * 64,),
         )
+        self.publisher.db.conn.execute("""
+            CREATE TABLE IF NOT EXISTS editorial_brief_versions (
+                event_id TEXT NOT NULL, angle_id TEXT NOT NULL, version INTEGER NOT NULL,
+                brief_id TEXT NOT NULL UNIQUE, research_package_id TEXT NOT NULL,
+                brief_hash TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        self.publisher.db.conn.execute(
+            "INSERT INTO editorial_brief_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("no-event:" + research_id, "angle:test", 1, brief_id, research_id,
+             "b" * 64, "{}", main.utc_now()),
+        )
+        self.publisher.db.conn.commit()
         DraftStore(self.publisher.db.conn).save_text_validation(
             draft_hash=draft_hash,
             status="PASS", reasons=(), validation_version="content-verification-v1",

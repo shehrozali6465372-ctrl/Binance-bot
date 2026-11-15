@@ -1162,6 +1162,7 @@ class AnnouncementEvidence:
     raw_evidence_ref: str = ""
     revision_correlation_status: str = "STABLE_PROVIDER_ID"
     revision_match_reason: str = "Provider-stable source ID is available for revision ordering."
+    body: str = ""
 
     def __post_init__(self) -> None:
         # The CMS worker's source_id is a local SHA-256 fingerprint of
@@ -1198,6 +1199,8 @@ class AnnouncementEvidence:
             raise ValueError("announcement identity/publisher/title/source URL missing")
         if self.publisher.strip().casefold() != "binance":
             raise ValueError("announcement publisher does not match the approved Binance source")
+        if not isinstance(self.body, str):
+            raise ValueError("announcement body must be text")
         parsed_url = urlparse(self.source_url)
         host = (parsed_url.hostname or "").lower()
         if (

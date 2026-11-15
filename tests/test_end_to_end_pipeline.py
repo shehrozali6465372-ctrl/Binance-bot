@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -58,6 +59,11 @@ class EndToEndPipelineTests(unittest.TestCase):
             announcement_evidence = verifier.evidence_from_announcement(announcement)
             evidence = announcement_evidence + (market,)
             claims = verifier._source_assertion_claims(evidence)
+            claims = tuple(
+                replace(item, text="$ABC market price is 1.25 USD")
+                if item.claim_key == "market.price" else item
+                for item in claims
+            )
             registry = verifier.verify(claims, evidence)
             lifecycle_store = EventLifecycleStore(db)
             lifecycle = lifecycle_store.sync_announcements([announcement], registry)
@@ -100,17 +106,22 @@ class EndToEndPipelineTests(unittest.TestCase):
             brief = brief_store.save(brief)
             self.assertEqual(brief.status, "READY")
 
-            draft = "$ABC is trading at $1.25 after Binance announced the listing. #ABC #Binance #Write2Earn"
+            price_claim = next(item for item in registry.claims if item.claim_key == "market.price")
+            draft = (
+                f"[[CLAIM:{price_claim.claim_id}]]{price_claim.text}.\n"
+                "#ABC #Binance #Write2Earn"
+            )
             content_result = ContentVerificationEngine().validate(
                 draft, registry=registry, symbol="ABC", asset_id=asset_id,
                 numeric_validator=lambda _: True,
             )
             self.assertEqual(content_result.status, "PASS")
+            draft = content_result.clean_content
             draft_store = DraftStore(db.conn)
             draft_record = draft_store.save_draft(
                 draft, asset_id=asset_id, research_package_id=research.package_id,
                 editorial_brief_id=brief.brief_id,
-                approved_claim_ids=brief.approved_claim_ids,
+                approved_claim_ids=content_result.approved_claim_ids,
             )
             draft_store.save_text_validation(
                 draft_hash=draft_record.content_hash, status="PASS", reasons=(),

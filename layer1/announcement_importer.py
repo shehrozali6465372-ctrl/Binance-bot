@@ -173,6 +173,7 @@ def import_recent_binance_announcements(
                     observed_at=_iso_utc(observed_at, "observed_at"),
                     asset_ids=asset_ids,
                     content_hash=content_hash,
+                    body=body,
                 )
                 evidence.validate()
                 store.save_announcement(evidence)

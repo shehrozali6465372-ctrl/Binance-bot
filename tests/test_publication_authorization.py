@@ -26,6 +26,9 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
 
     def authorize(self, reservation, **overrides):
         from layer1.content_generation import DraftStore
+        visual_validation_version = overrides.pop(
+            "visual_validation_version", "visual-quality-v2",
+        )
         args = {
             "symbol": "ABC", "asset_id": "coingecko:abc",
             "content": "$ABC market update. #ABC",
@@ -38,12 +41,37 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
         args.update(overrides)
         draft_hash = __import__("hashlib").sha256(args["content"].encode()).hexdigest()
         store = DraftStore(self.conn)
+        research_id = "research:test:" + args["asset_id"]
+        brief_id = "brief:test:" + draft_hash
         store.save_draft(
             args["content"], asset_id=args["asset_id"],
-            research_package_id="research:test:" + args["asset_id"],
-            editorial_brief_id="brief:test:" + draft_hash,
-            approved_claim_ids=("claim:verified:test",),
+            research_package_id=research_id,
+            editorial_brief_id=brief_id,
+            approved_claim_ids=("a" * 64,),
         )
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS editorial_brief_versions (
+                event_id TEXT NOT NULL, angle_id TEXT NOT NULL, version INTEGER NOT NULL,
+                brief_id TEXT NOT NULL UNIQUE, research_package_id TEXT NOT NULL,
+                brief_hash TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        self.conn.execute(
+            "INSERT OR IGNORE INTO editorial_brief_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("event:test", "angle:test", 1, brief_id, research_id,
+             "b" * 64, "{}", now()),
+        )
+        if args["event_state"] != "NO_EVENT":
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
+                    event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL
+                )
+            """)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO layer1_event_lifecycle(event_id, asset_id, state) VALUES (?, ?, ?)",
+                ("event:test", args["asset_id"], args["event_state"]),
+            )
+        self.conn.commit()
         store.save_text_validation(
             draft_hash=draft_hash, status=args["text_validation_status"],
             reasons=(), validation_version="content-verification-v1",
@@ -56,9 +84,48 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
             store.save_visual_validation(
                 draft_hash=draft_hash, image_hash=image_hash,
                 status=args["visual_validation_status"], reasons=(),
-                validation_version="visual-quality-v1",
+                validation_version=visual_validation_version,
             )
         return self.engine.authorize(**args)
+
+    def test_authorization_rejects_pass_from_an_obsolete_visual_validation_version(self):
+        reservation = self.reserve()
+        with self.assertRaisesRegex(ValueError, "current visual validation version"):
+            self.authorize(
+                reservation,
+                image_hashes=["c" * 64],
+                visual_validation_status="PASS",
+                visual_validation_version="visual-quality-v1",
+            )
+        self.assertEqual(self.engine.quota_status(reservation), "RESERVED")
+
+    def test_authorization_binds_exact_editorial_event_and_revalidates_current_lifecycle(self):
+        reservation = self.reserve()
+        auth = self.authorize(reservation, event_state="CONFIRMED")
+        self.assertEqual(auth.event_id, "event:test")
+        self.assertTrue(auth.verify_integrity())
+        self.assertEqual(self.engine.validate_persisted_event_binding(auth), ())
+
+        self.conn.execute(
+            "UPDATE layer1_event_lifecycle SET state='WITHDRAWN' WHERE event_id='event:test'"
+        )
+        self.conn.commit()
+        self.assertIn(
+            "EVENT_LIFECYCLE_CHANGED_AFTER_AUTHORIZATION",
+            self.engine.validate_persisted_event_binding(auth),
+        )
+
+    def test_persisted_event_asset_mismatch_invalidates_authorization(self):
+        reservation = self.reserve()
+        auth = self.authorize(reservation, event_state="CONFIRMED")
+        self.conn.execute(
+            "UPDATE layer1_event_lifecycle SET asset_id='coingecko:other' WHERE event_id='event:test'"
+        )
+        self.conn.commit()
+        self.assertIn(
+            "EVENT_ASSET_IDENTITY_CHANGED",
+            self.engine.validate_persisted_event_binding(auth),
+        )
 
     def test_authorization_is_immutable_hash_bound_to_exact_payload(self):
         reservation = self.reserve()
@@ -67,7 +134,7 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
         self.assertTrue(auth.draft_id)
         self.assertEqual(auth.research_package_id, "research:test:coingecko:abc")
         self.assertEqual(auth.editorial_brief_id, "brief:test:" + auth.content_hash)
-        self.assertEqual(auth.approved_claim_ids, ("claim:verified:test",))
+        self.assertEqual(auth.approved_claim_ids, ("a" * 64,))
         self.assertEqual(len(auth.draft_provenance_hash), 64)
         self.assertEqual(auth.validate_for_submission(
             symbol="ABC", asset_id="coingecko:abc",
