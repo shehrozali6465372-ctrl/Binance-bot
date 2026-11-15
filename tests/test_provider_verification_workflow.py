@@ -37,6 +37,7 @@ class ProviderVerificationWorkflowSafetyTests(unittest.TestCase):
 
     def test_both_provider_checks_run_before_final_failure(self):
         self.assertIn("failed = False", self.source)
+        self.assertEqual(self.source.count("sys.exit(1)"), 1)
         self.assertRegex(self.source, r"if failed:\s+sys\.exit\(1\)")
 
     def test_permissions_and_execution_are_bounded(self):
