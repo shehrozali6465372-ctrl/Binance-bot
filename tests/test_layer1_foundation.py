@@ -114,6 +114,39 @@ class Layer1FoundationTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_postgresql_runtime_routes_layer1_and_claim_registry_to_postgres_store(self):
+        class FakePostgresStore:
+            def __init__(self):
+                self.conn = sqlite3.connect(":memory:")
+                self.saved_registries = []
+                self.lifecycle_snapshots = []
+            def save_claim_registry(self, registry):
+                self.saved_registries.append(registry)
+                return "verification-id"
+            def sync_event_lifecycle_snapshot(self, connection, event_id):
+                self.lifecycle_snapshots.append((connection, event_id))
+
+        postgres_store = FakePostgresStore()
+        layer1_store = Layer1Store(self.db)
+        with patch("layer1.layer1_postgres.PostgresLayer1Store", return_value=layer1_store) as factory:
+            summary = main._persist_layer1_market_intelligence(
+                [], self.db, [], postgres_store=postgres_store,
+            )
+        factory.assert_called_once_with(postgres_store.conn)
+        self.assertEqual(len(postgres_store.saved_registries), 1)
+        self.assertEqual(postgres_store.lifecycle_snapshots, [])
+        self.assertEqual(summary["observations"], 0)
+        # PostgreSQL selection must not also create the SQLite claim snapshot table.
+        check = sqlite3.connect(self.db)
+        try:
+            table = check.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='layer1_claim_verification_runs'"
+            ).fetchone()
+            self.assertIsNone(table)
+        finally:
+            check.close()
+        postgres_store.conn.close()
+
     def test_module1_config_validation_and_run_context(self):
         with self.assertRaises(ValueError):
             AgentConfig(http_timeout_seconds=0).validate()

@@ -4234,7 +4234,10 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
             )
             if asset_id:
                 claim_registries_by_asset_id[str(asset_id)] = package_registry
-            claim_connection = sqlite3.connect(config.database_path, timeout=30)
+            claim_connection = (
+                sqlite3.connect(config.database_path, timeout=30)
+                if publisher.postgres_store is None else None
+            )
             research_rendered = ""
             try:
                 ClaimRegistryStore(
@@ -4316,7 +4319,8 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                             editorial_briefs_by_asset_id[str(asset_id)] = editorial_brief
                         research_rendered += "\n\n" + editorial_brief.render()
             finally:
-                claim_connection.close()
+                if claim_connection is not None:
+                    claim_connection.close()
             return (
                 package + "\n\n" + render_claim_registry(
                     package_registry, asset_id=coin_dict.get("asset_id"),
@@ -5076,7 +5080,15 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 or not isinstance(result, TransferAggregationResult)):
             raise ValueError("on-chain runtime injection contains an invalid canonical asset/result pair")
 
-    store = Layer1Store(database_path)
+    lifecycle_connection = None
+    if postgres_store is not None:
+        from layer1.layer1_postgres import PostgresLayer1Store
+        store = PostgresLayer1Store(postgres_store.conn)
+        # EventLifecycleStore still uses its legacy SQLite state-machine API.
+        # Its dedicated connection is opened inside the guarded runtime block below;
+        # discovery/evidence/market records themselves are PostgreSQL-authoritative.
+    else:
+        store = Layer1Store(database_path)
     summary = {
         "observations": 0, "trends": 0, "candidates": 0,
         "ready": 0, "rejected": 0, "rejected_inputs": 0,
@@ -5140,7 +5152,7 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 snapshot_usable = False
         eligibility_engine = BinanceListingEligibilityEngine(tuple(sorted(allowed_quotes)))
         candidate_engine = CandidateDiscoveryFilteringEngine()
-        # Bound public CoinGecko ticker calls per run; SQLite-cached proofs let
+        # Bound public CoinGecko ticker calls per run; backend-persisted proofs let
         # subsequent runs advance through the candidate set without retry storms.
         identity_proof_budget = max(1, min(10, CONFIG.max_daily_posts * 2))
         scoring_engine = RelevanceScoringEngine()
@@ -5447,20 +5459,28 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 entity.entity_type == "onchain_observation" for entity in event_graph.entities
             ),
         }
-        from layer1.evidence_verification import ClaimRegistryStore, EvidenceVerificationEngine
+        from layer1.evidence_verification import EvidenceVerificationEngine
         claim_registry = EvidenceVerificationEngine().rebuild_from_store(
             store, onchain_summary_refs=onchain_graph_refs,
         )
-        ClaimRegistryStore(store.conn).save(claim_registry)
         if postgres_store is not None:
-            postgres_store.save_claim_registry(claim_registry)
+            from layer1.publication_runtime import PostgresClaimRegistryStore
+            PostgresClaimRegistryStore(postgres_store).save(claim_registry)
+        else:
+            from layer1.evidence_verification import ClaimRegistryStore
+            ClaimRegistryStore(store.conn).save(claim_registry)
         from layer1.event_lifecycle import EventLifecycleStore
-        lifecycle_records = EventLifecycleStore(store).sync_announcements(
+        if postgres_store is not None:
+            lifecycle_connection = sqlite3.connect(database_path, timeout=30)
+            lifecycle_store = EventLifecycleStore(lifecycle_connection)
+        else:
+            lifecycle_store = EventLifecycleStore(store)
+        lifecycle_records = lifecycle_store.sync_announcements(
             announcement_events, claim_registry,
         )
         if postgres_store is not None:
             for lifecycle_record in lifecycle_records:
-                postgres_store.sync_event_lifecycle_snapshot(store.conn, lifecycle_record.event_id)
+                postgres_store.sync_event_lifecycle_snapshot(lifecycle_connection, lifecycle_record.event_id)
         lifecycle_states = [record.state for record in lifecycle_records]
         # Legacy compatibility projections are lossy when an asset has multiple events.
         # Event-specific decisions must use event_lifecycle_by_asset_source below.
@@ -5540,6 +5560,8 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         return summary
     finally:
         store.close()
+        if lifecycle_connection is not None:
+            lifecycle_connection.close()
 
 def run_once(config, scanner, announcement_engine, research, generator, publisher,
              posted_symbols, hot_search_engine=None, onchain_aggregation_by_asset=None) -> bool:

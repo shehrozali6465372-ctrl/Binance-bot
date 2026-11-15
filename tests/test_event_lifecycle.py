@@ -37,6 +37,15 @@ class EventLifecycleStoreTests(unittest.TestCase):
         self.db.close()
         self.tmp.cleanup()
 
+    def test_event_lifecycle_store_can_own_a_separate_sqlite_connection(self):
+        import sqlite3
+        connection = sqlite3.connect(":memory:")
+        try:
+            store = EventLifecycleStore(connection)
+            self.assertIs(store.conn, connection)
+        finally:
+            connection.close()
+
     def test_exact_source_lookup_does_not_confuse_two_events_for_same_asset(self):
         from dataclasses import replace
 

@@ -65,9 +65,14 @@ class EventLifecycleStore:
     """Append-only event transition history plus a transactionally maintained current state."""
 
     def __init__(self, layer1_store: Any):
-        connection = getattr(layer1_store, "conn", None)
+        # Event lifecycle can share the Layer1Store connection or own a dedicated
+        # SQLite connection when discovery records are stored in PostgreSQL.
+        connection = (
+            layer1_store if isinstance(layer1_store, sqlite3.Connection)
+            else getattr(layer1_store, "conn", None)
+        )
         if not isinstance(connection, sqlite3.Connection):
-            raise TypeError("EventLifecycleStore requires an existing Layer1Store connection")
+            raise TypeError("EventLifecycleStore requires an existing SQLite connection")
         self.conn = connection
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript("""
