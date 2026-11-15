@@ -617,11 +617,9 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
     @unittest.skipUnless(__import__("os").environ.get("TEST_POSTGRES_DSN"), "TEST_POSTGRES_DSN is not configured")
     def test_authorization_is_persisted_only_when_all_exact_provenance_is_present(self):
         import hashlib, json, os, uuid
-        from dataclasses import asdict
-        from datetime import datetime, timezone, timedelta
-        from layer1.content_generation import DraftRecord
-        from layer1.publication_authorization import PublicationAuthorization, _draft_provenance_digest
+        from datetime import datetime, timezone
         from layer1.publication_postgres import PostgresPublicationStore
+        from layer1.publication_runtime import PostgresPublicationAuthorizationEngine
         store = PostgresPublicationStore(os.environ["TEST_POSTGRES_DSN"])
         suffix = uuid.uuid4().hex
         research_key = "test-auth:" + suffix
@@ -643,24 +641,23 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
             brief = store.save_editorial_brief(event_id=event_id,angle_id="auth-angle",research_package_id=package["package_id"],brief_hash=brief_hash,payload=brief_payload)
             draft = store.save_draft(content,asset_id="coingecko:bitcoin",research_package_id=package["package_id"],editorial_brief_id=brief["brief_id"],approved_claim_ids=claim_ids)
             store.save_text_validation(draft_hash=content_hash,status="PASS",reasons=[],validation_version="text-v1")
-            reservation = store.reserve_daily_quota(symbol=symbol,daily_limit=1,now=now_s)
-            self.assertIsNotNone(reservation)
-            provenance = _draft_provenance_digest(draft.draft_id,"coingecko:bitcoin",content_hash,package["package_id"],brief["brief_id"],claim_ids)
-            auth = PublicationAuthorization(
-                authorization_id="",symbol=symbol,asset_id="coingecko:bitcoin",draft_id=draft.draft_id,
-                research_package_id=package["package_id"],editorial_brief_id=brief["brief_id"],event_id=event_id,
-                approved_claim_ids=claim_ids,draft_provenance_hash=provenance,content_hash=content_hash,image_hashes=(),
-                eligibility_snapshot_at=now_s,eligibility_max_age_seconds=300,event_state="NO_EVENT",evidence_status="VERIFIED",
-                text_validation_status="PASS",visual_validation_status="NOT_REQUIRED",quota_reservation_id=reservation,
-                duplicate_policy_passed=True,created_at=now_s,expires_at=(now.replace(second=now.second)+__import__('datetime').timedelta(seconds=60)).isoformat(),
+            authorization_engine = PostgresPublicationAuthorizationEngine(store)
+            reservation = authorization_engine.reserve_daily_quota(
+                symbol=symbol, daily_limit=1, now=now_s,
             )
-            payload=asdict(auth); payload.pop("authorization_id")
-            auth_id=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(",", ":")).encode()).hexdigest()
-            from dataclasses import replace
-            auth=replace(auth,authorization_id=auth_id)
-            self.assertEqual(store.save_publication_authorization(auth),auth_id)
-            self.assertEqual(store.save_publication_authorization(auth),auth_id)
-            self.assertEqual(store.load_publication_authorization(auth_id)["draft_id"],draft.draft_id)
+            self.assertIsNotNone(reservation)
+            auth = authorization_engine.authorize(
+                symbol=symbol, asset_id="coingecko:bitcoin", content=content,
+                image_hashes=[], eligibility_snapshot_at=now_s,
+                eligibility_max_age_seconds=300, event_state="NO_EVENT",
+                evidence_status="VERIFIED", text_validation_status="PASS",
+                visual_validation_status="NOT_REQUIRED",
+                quota_reservation_id=reservation, duplicate_policy_passed=True,
+                now=now_s, ttl_seconds=60,
+            )
+            auth_id = auth.authorization_id
+            self.assertEqual(store.save_publication_authorization(auth), auth_id)
+            self.assertEqual(store.load_publication_authorization(auth_id)["draft_id"], draft.draft_id)
 
             # Exercise the actual publisher against the disposable PostgreSQL ledger;
             # the Binance transport is replaced with a deterministic local response.
@@ -679,6 +676,8 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
                 config = dc_replace(main.CONFIG, database_path=str(Path(tmp) / "publisher.sqlite"),
                                     dry_run=False, square_api_key="test-key-not-real")
                 publisher = main.PostPublisher(config, postgres_store=store)
+                # The integration test exercises persistence only; do not create a local post artifact.
+                publisher._save_locally = lambda *args, **kwargs: None
                 try:
                     with patch("main._open_binance_publish_no_redirect", return_value=MockResponse()) as transport:
                         result = publisher.publish({"symbol":symbol,"asset_id":"coingecko:bitcoin"}, content, authorization=auth, image_hashes=[])
@@ -694,6 +693,10 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
                         duplicate = publisher.publish({"symbol":symbol,"asset_id":"coingecko:bitcoin"}, content, authorization=auth, image_hashes=[])
                     self.assertEqual(duplicate.status, "DUPLICATE_BLOCKED")
                     second_transport.assert_not_called()
+                    sqlite_attempt_count = publisher.db.conn.execute(
+                        "SELECT COUNT(*) FROM publication_attempts"
+                    ).fetchone()[0]
+                    self.assertEqual(sqlite_attempt_count, 0)
                 finally:
                     publisher.db.close()
         finally:
