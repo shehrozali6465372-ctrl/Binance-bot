@@ -1212,3 +1212,13 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Verified GitHub branch `layer-1/module9-onchain-continuation` still resolves to `0c0b530c6dd8f7353dc0c7ecd6d4b78ae667d7a7`; active working tree was clean and no application code changed during this continuation.
 - Remaining acceptance blocker: the located `.env` contains no DeepSeek, Cloudflare or announcement-database credentials. Earlier remote environment inspection also found those provider variables unset. Therefore authenticated DeepSeek generation, Cloudflare inference, external announcement ingestion and actual Binance media upload remain unverified. Do not trigger the scheduled GitHub workflow or any live provider/publisher path without explicit authorization.
 - Production publisher remains inactive; no real Binance Square post, production DB operation, credential/schedule/workflow modification, merge or deployment occurred.
+
+## 2026-11-16 acceptance checkpoint
+- Branch/PR #14 head verified before documentation update: `4dd006834e0d265411119fa276ff2808d0ab701f`; PR remains open, draft, and unmerged.
+- CI run `43770662317`: completed/success for the `mocked-safety-tests` job on the preceding code commit. It is mocked safety CI, not provider-backed or production acceptance.
+- Local full suite: **641 passed, 38 skipped, 0 failures**; skips are guarded PostgreSQL integration tests, not passes.
+- Disposable Neon PostgreSQL: publication integration **34/34 passed**; one semantic event-lifecycle integration **1/1 passed**. Broader PG batch was interrupted; Layer1/claim-registry/legacy batch is not accepted as passing.
+- DeepSeek and Cloudflare authenticated API checks remain NOT RUN / unverified because no corresponding credentials were found in the inspected test environment. No real Cloudflare inference, Binance media upload, external announcement ingestion, or Square publication.
+- Existing deterministic media tests verify HTTP acknowledgement and upload sequencing only with mocked network calls.
+- No production DB, publisher activation, real post, credentials/schedules/workflow changes, merge, deployment, or paid resources.
+- Outstanding next gate: safely validate provider credentials through the existing secure environment and obtain explicit authorization before any potentially billable live provider request. Then test DeepSeek and Cloudflare separately, without invoking the scheduled workflow or production publishing path.
