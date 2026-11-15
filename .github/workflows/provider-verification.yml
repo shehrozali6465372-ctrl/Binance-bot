@@ -77,13 +77,14 @@ jobs:
               )
               if result is None or result.text.strip() != "DEEPSEEK_PROVIDER_OK":
                   print("DeepSeek authenticated generation: FAIL (response validation failed)")
-                  sys.exit(1)
-              print(
-                  "DeepSeek authenticated generation: PASS"
-                  f" | model={result.model}"
-                  f" | latency_ms={result.latency_ms}"
-                  f" | total_tokens={result.total_tokens if result.total_tokens is not None else 'unreported'}"
-              )
+                  failed = True
+              else:
+                      print(
+                      "DeepSeek authenticated generation: PASS"
+                      f" | model={result.model}"
+                      f" | latency_ms={result.latency_ms}"
+                      f" | total_tokens={result.total_tokens if result.total_tokens is not None else 'unreported'}"
+                  )
           except Exception as exc:
               print(f"DeepSeek authenticated generation: FAIL ({type(exc).__name__})")
               failed = True
