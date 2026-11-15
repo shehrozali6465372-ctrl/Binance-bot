@@ -385,9 +385,17 @@ class PostgresPublicationStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_attempt(self, attempt_id: int) -> Optional[dict]:
+        if isinstance(attempt_id, bool) or not isinstance(attempt_id, int) or attempt_id < 1:
+            raise ValueError("attempt_id must be a positive integer")
+        row = self.conn.execute(
+            "SELECT * FROM publication_attempts WHERE id=%s", (attempt_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def reconcile_attempt(
         self, *, attempt_id: int, new_status: str, reconciled_by: str,
-        evidence: str, note: str, remote_post_id: str = "",
+        evidence: str, note: str, remote_post_id: str = "", share_link: str = "",
     ) -> None:
         if not isinstance(new_status, str) or new_status not in {"PUBLISHED_CONFIRMED", "FAILED_CONFIRMED"}:
             raise ValueError("reconciliation must resolve to a confirmed terminal state")
@@ -395,14 +403,12 @@ class PostgresPublicationStore:
             raise ValueError("reconciliation requires operator, evidence and note")
         if isinstance(attempt_id, bool) or not isinstance(attempt_id, int) or attempt_id < 1:
             raise ValueError("attempt_id must be a positive integer")
-        if not isinstance(remote_post_id, str):
-            raise ValueError("remote_post_id must be a string")
-        if new_status == "PUBLISHED_CONFIRMED" and not remote_post_id.strip():
-            raise ValueError("confirmed publication requires the remote post ID")
+        if not isinstance(remote_post_id, str) or not isinstance(share_link, str):
+            raise ValueError("remote_post_id and share_link must be strings")
         reconciliation_id = uuid.uuid4().hex
         with self.conn.transaction():
             attempt = self.conn.execute(
-                "SELECT id,status FROM publication_attempts WHERE id=%s FOR UPDATE",
+                "SELECT id,status,remote_post_id,share_link FROM publication_attempts WHERE id=%s FOR UPDATE",
                 (attempt_id,),
             ).fetchone()
             if attempt is None:
@@ -412,6 +418,16 @@ class PostgresPublicationStore:
                 raise ValueError("only an unresolved publication attempt can be reconciled")
             if not validate_attempt_transition(prior_status, new_status):
                 raise ValueError("illegal publication attempt reconciliation")
+            existing_remote_id = str(attempt["remote_post_id"] or "")
+            existing_share_link = str(attempt["share_link"] or "")
+            if new_status == "FAILED_CONFIRMED" and existing_remote_id:
+                raise ValueError("cannot confirm failure while a remote post ID is already recorded")
+            if existing_remote_id and remote_post_id and existing_remote_id != remote_post_id:
+                raise ValueError("supplied remote ID conflicts with the ID already stored in ledger")
+            if new_status == "PUBLISHED_CONFIRMED" and not (remote_post_id.strip() or existing_remote_id):
+                raise ValueError("confirmed publication requires the remote post ID")
+            if existing_share_link and share_link and existing_share_link != share_link:
+                raise ValueError("supplied share link conflicts with the link already stored in ledger")
             quota = self.conn.execute(
                 "SELECT reservation_id,status FROM publication_quota_reservations "
                 "WHERE attempt_id=%s FOR UPDATE",
@@ -421,9 +437,9 @@ class PostgresPublicationStore:
                 raise ValueError("matching active quota reservation is required for reconciliation")
             self.conn.execute(
                 "UPDATE publication_attempts SET status=%s,remote_post_id=COALESCE(%s,remote_post_id),"
-                "reconciliation_note=%s,reconciliation_evidence=%s,reconciled_by=%s,"
+                "share_link=COALESCE(%s,share_link),reconciliation_note=%s,reconciliation_evidence=%s,reconciled_by=%s,"
                 "reconciled_at=now(),updated_at=now() WHERE id=%s",
-                (new_status, remote_post_id or None, note, evidence, reconciled_by, attempt_id),
+                (new_status, remote_post_id or None, share_link or None, note, evidence, reconciled_by, attempt_id),
             )
             self.conn.execute(
                 "UPDATE publication_quota_reservations SET status=%s,updated_at=now() "

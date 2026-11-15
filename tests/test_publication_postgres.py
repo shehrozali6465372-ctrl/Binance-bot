@@ -250,6 +250,34 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
         self.assertEqual((audit["prior_status"], audit["new_status"]),
                          ("SUBMITTING", "FAILED_CONFIRMED"))
 
+    def test_reconciliation_rejects_conflicting_known_remote_id_without_mutation(self):
+        _, attempt_id, _ = self._new_attempt("CONFLICT")
+        existing_id = "already-known-" + uuid.uuid4().hex
+        self.store.conn.execute(
+            "UPDATE publication_attempts SET remote_post_id=%s WHERE id=%s",
+            (existing_id, attempt_id),
+        )
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            self.store.reconcile_attempt(
+                attempt_id=attempt_id, new_status="PUBLISHED_CONFIRMED",
+                reconciled_by="integration-test", evidence="test evidence",
+                note="attempt conflicting remote ID", remote_post_id="different-remote-id",
+            )
+        with self.assertRaisesRegex(ValueError, "remote post ID is already recorded"):
+            self.store.reconcile_attempt(
+                attempt_id=attempt_id, new_status="FAILED_CONFIRMED",
+                reconciled_by="integration-test", evidence="test evidence",
+                note="attempt contradictory failure confirmation",
+            )
+        attempt = self.store.get_attempt(attempt_id)
+        self.assertEqual(attempt["status"], "SUBMITTING")
+        self.assertEqual(attempt["remote_post_id"], existing_id)
+        audit = self.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM publication_reconciliation_events WHERE attempt_id=%s",
+            (attempt_id,),
+        ).fetchone()
+        self.assertEqual(audit["n"], 0)
+
     def test_unknown_attempt_reconciliation_updates_attempt_quota_and_audit_atomically(self):
         key, attempt_id, _ = self._new_attempt("RECON")
         from datetime import date, timedelta
@@ -277,15 +305,14 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
         self.assertEqual(duplicate["status"], "PUBLICATION_UNKNOWN")
 
         remote_id = "test-remote-" + uuid.uuid4().hex
+        share_link = "https://www.binance.com/square/post/" + remote_id
         self.store.reconcile_attempt(
             attempt_id=attempt_id, new_status="PUBLISHED_CONFIRMED",
             reconciled_by="integration-test", evidence="isolated test evidence",
             note="confirmed by deterministic test fixture", remote_post_id=remote_id,
+            share_link=share_link,
         )
-        attempt = self.store.conn.execute(
-            "SELECT status,remote_post_id FROM publication_attempts WHERE id=%s",
-            (attempt_id,),
-        ).fetchone()
+        attempt = self.store.get_attempt(attempt_id)
         quota = self.store.conn.execute(
             "SELECT status FROM publication_quota_reservations WHERE reservation_id=%s",
             (reservation,),
@@ -296,6 +323,7 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(attempt["status"], "PUBLISHED_CONFIRMED")
         self.assertEqual(attempt["remote_post_id"], remote_id)
+        self.assertEqual(attempt["share_link"], share_link)
         self.assertEqual(quota["status"], "PUBLISHED_CONFIRMED")
         self.assertEqual(audit["n"], 1)
 
