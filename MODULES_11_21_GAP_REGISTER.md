@@ -1192,3 +1192,9 @@ This checklist does not authorize the work to be marked done merely by checking 
 ## Module 11 one-to-one generated sentence attribution — 2026-11-16
 - Added a positive-path test proving two separate factual sentences map to two distinct verified claim IDs and both are the only approved IDs. Negative-path causal attribution remains rejected when only market-field evidence is linked.
 - Full suite: **638 tests, 0 failures, 38 skipped** (guarded PostgreSQL skips, not passes); compileall and diff-check passed.
+
+## Module 19/21 Binance media-upload acknowledgement hardening — 2026-11-16
+- Audit found `_upload_to_presigned_url()` accepted any returned HTTP status as success, despite the documented successful PUT statuses being HTTP 200/201. This could advance to image-status polling after a storage upload was not acknowledged as complete.
+- TDD: added a status-matrix regression test; before the fix, 202/204/302/400/500 all incorrectly returned success. The uploader now accepts only 200/201 and rejects all other response statuses. Existing HTTPS presigned-host allowlist and redirect refusal are unchanged.
+- Focused Cloudflare image-generation + deterministic pipeline tests: **17 passed, 0 failed**. Full repository unittest discovery: **639 tests, 0 failures, 38 skipped** (guarded PostgreSQL integration skips, not passes). `compileall` and `git diff --check` passed. No real Cloudflare request, Binance media upload, real Square post, production DB, credential/workflow/schedule modification, merge or deployment.
+- This closes only the HTTP acknowledgement handling defect. Authenticated Cloudflare inference, actual Binance media upload and full scheduled provider-backed execution remain unverified; Modules 19–21 remain **PARTIAL**.

@@ -1384,8 +1384,14 @@ class ImageUploader:
             with _open_without_redirect(req, timeout=30) as resp:
                 status = resp.status
                 LOGGER.info("Storage upload response: HTTP %d", status)
-            
-            # HTTP 200 or 201 = success
+
+            # A completed object PUT must be explicitly acknowledged. Do not
+            # treat redirects, accepted-but-pending, empty, or error responses
+            # as a successful upload; imageStatus polling must only follow a
+            # confirmed storage write.
+            if status not in (200, 201):
+                LOGGER.warning("Storage upload rejected: unexpected HTTP status %d", status)
+                return False
             LOGGER.info("Storage upload SUCCESS (HTTP %d)", status)
             return True
             

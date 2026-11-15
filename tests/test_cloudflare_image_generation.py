@@ -99,6 +99,32 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertFalse(ImageUploader._is_allowed_presigned_upload_url(value))
 
+    def test_presigned_binary_upload_accepts_only_http_200_or_201(self):
+        class UploadResponse:
+            def __init__(self, status):
+                self.status = status
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            image_path.write_bytes(png_bytes())
+            uploader = ImageUploader()
+            for status in (200, 201):
+                with self.subTest(status=status):
+                    with patch("image_engine._open_without_redirect", return_value=UploadResponse(status)):
+                        self.assertTrue(uploader._upload_to_presigned_url(
+                            image_path, "https://bucket.s3.amazonaws.com/object.png?sig=opaque",
+                        ))
+            for status in (202, 204, 302, 400, 500):
+                with self.subTest(status=status):
+                    with patch("image_engine._open_without_redirect", return_value=UploadResponse(status)):
+                        self.assertFalse(uploader._upload_to_presigned_url(
+                            image_path, "https://bucket.s3.amazonaws.com/object.png?sig=opaque",
+                        ))
+
     def test_final_media_url_must_be_binance_cdn_host(self):
         class Authorization:
             def verify_integrity(self):
