@@ -5569,6 +5569,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
             "deepseek_max_output_tokens", "min_word_count", "min_hashtags",
             "min_candidates", "repetition_hard_hours", "repetition_soft_hours",
             "save_research_packages", "max_daily_posts", "min_cap_for_safety",
+            "persistence_backend",
         )
     }
     # Only secret-presence booleans enter the immutable config fingerprint.
@@ -5577,7 +5578,16 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
     safe_runtime_config["square_api_key_configured"] = bool(config.square_api_key)
     safe_runtime_config["github_token_configured"] = bool(os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN"))
     context = ConfigurationOrchestrator(layer_config).create_context(safe_runtime_config)
-    lease = RunLease(config.database_path)
+    postgres_store = getattr(publisher, "postgres_store", None)
+    if config.persistence_backend == "postgresql":
+        if postgres_store is None:
+            raise RuntimeError("PostgreSQL runtime store is required; refusing SQLite fallback")
+        from layer1.publication_runtime import PostgresRunLease
+        lease = PostgresRunLease(postgres_store)
+    else:
+        if postgres_store is not None:
+            raise RuntimeError("PostgreSQL runtime store supplied while SQLite backend is selected")
+        lease = RunLease(config.database_path)
     status = "FAILED"
     execution_failed = False
     _LAYER1_LAST_SUMMARY = {}

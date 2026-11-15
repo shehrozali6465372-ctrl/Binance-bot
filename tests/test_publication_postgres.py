@@ -66,6 +66,16 @@ class PublicationPostgresMigrationTests(unittest.TestCase):
             self.assertIn("CREATE TABLE IF NOT EXISTS " + table, sql)
 
 
+
+    def test_additive_run_lease_migration_is_non_destructive(self):
+        path = Path(__file__).resolve().parents[1] / "layer1" / "migrations" / "publication_postgresql" / "0003_layer1_run_lease.sql"
+        self.assertTrue(path.exists(), "PostgreSQL run lease migration must be present")
+        sql = path.read_text(encoding="utf-8").upper()
+        self.assertNotIn("DROP TABLE", sql)
+        self.assertNotIn("TRUNCATE", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS LAYER1_RUNS", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS LAYER1_RUN_LEASE", sql)
+
     def test_non_string_states_are_rejected_without_type_errors(self):
         from layer1.publication_postgres import validate_quota_transition, validate_attempt_transition
 
@@ -140,6 +150,73 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
                     (self.attempt_ids,),
                 )
         self.store.close()
+
+    def test_postgres_run_lease_serializes_competing_connections(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from layer1.foundation import AgentConfig, ConfigurationOrchestrator
+        from layer1.publication_postgres import PostgresPublicationStore
+        from layer1.publication_runtime import PostgresRunLease
+        barrier = Barrier(2)
+        contexts = [
+            ConfigurationOrchestrator(AgentConfig(database_path="postgres-runtime-race.db")).create_context({"worker": i})
+            for i in range(2)
+        ]
+        def contender(context):
+            store = PostgresPublicationStore(_TEST_PUBLICATION_DSN)
+            lease = PostgresRunLease(store)
+            try:
+                barrier.wait(timeout=10)
+                lease.acquire(context)
+                return ("ACQUIRED", context.run_id)
+            except RuntimeError as exc:
+                if "lease already held" not in str(exc):
+                    raise
+                return ("BLOCKED", context.run_id)
+            finally:
+                if lease.run_id:
+                    lease.finish("INTERRUPTED", {"cleanup": True})
+                store.close()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(contender, contexts))
+        self.assertEqual(sorted(result[0] for result in results), ["ACQUIRED", "BLOCKED"])
+        self.assertIsNone(self.store.inspect_active_run_lease())
+        run_ids = [context.run_id for context in contexts]
+        with self.store.conn.transaction():
+            self.store.conn.execute("DELETE FROM layer1_run_lease WHERE run_id = ANY(%s)", (run_ids,))
+            self.store.conn.execute("DELETE FROM layer1_runs WHERE run_id = ANY(%s)", (run_ids,))
+
+    def test_postgres_run_lease_is_durable_and_fences_overlapping_runs(self):
+        from layer1.foundation import AgentConfig, ConfigurationOrchestrator
+        from layer1.publication_runtime import PostgresRunLease
+        config = AgentConfig(database_path="postgres-runtime-lease-test.db")
+        first_context = ConfigurationOrchestrator(config).create_context({"case": "first"})
+        second_context = ConfigurationOrchestrator(config).create_context({"case": "second"})
+        first = PostgresRunLease(self.store)
+        second = PostgresRunLease(self.store)
+        try:
+            first.acquire(first_context)
+            active = second.inspect_active()
+            self.assertEqual(active["run_id"], first_context.run_id)
+            self.assertEqual(active["status"], "RUNNING")
+            with self.assertRaisesRegex(RuntimeError, "lease already held"):
+                second.acquire(second_context)
+            first.finish("SUCCEEDED", {"integration": "run-lease"})
+            self.assertIsNone(second.inspect_active())
+            row = self.store.conn.execute(
+                "SELECT status,summary_json FROM layer1_runs WHERE run_id=%s",
+                (first_context.run_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "SUCCEEDED")
+            self.assertEqual(row["summary_json"]["integration"], "run-lease")
+        finally:
+            if first.run_id:
+                first.finish("INTERRUPTED", {"cleanup": True})
+            with self.store.conn.transaction():
+                self.store.conn.execute("DELETE FROM layer1_run_lease WHERE run_id = ANY(%s)",
+                                        ([first_context.run_id, second_context.run_id],))
+                self.store.conn.execute("DELETE FROM layer1_runs WHERE run_id = ANY(%s)",
+                                        ([first_context.run_id, second_context.run_id],))
 
     @staticmethod
     def _hash(label):

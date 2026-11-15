@@ -10,6 +10,7 @@ from layer1.publication_runtime import (
     PostgresOpportunityDecisionStore,
     PostgresResearchPackageStore,
     PostgresPublicationAuthorizationEngine,
+    PostgresRunLease,
 )
 
 
@@ -84,6 +85,9 @@ class FakeStore:
     def reserve_daily_quota(self, **kwargs): self.calls.append(("quota", kwargs)); return "quota"
     def mark_quota_status(self, *args): self.calls.append(("quota_status", args))
     def save_publication_authorization(self, *args): self.calls.append(("authorization", args))
+    def inspect_active_run_lease(self): self.calls.append(("inspect_run",)); return {"run_id": "run-1"}
+    def acquire_run_lease(self, context): self.calls.append(("acquire_run", context))
+    def finish_run_lease(self, run_id, status, summary): self.calls.append(("finish_run", run_id, status, summary))
 
 
 class PostgresRuntimeAdapterTests(unittest.TestCase):
@@ -129,6 +133,29 @@ class PostgresRuntimeAdapterTests(unittest.TestCase):
         adapter.mark_quota_status("quota", "RELEASED")
         with self.assertRaisesRegex(TypeError, "PostgreSQL publication store"):
             PostgresPublicationAuthorizationEngine(object())
+
+
+class PostgresRunLeaseAdapterTests(unittest.TestCase):
+    def test_run_lease_adapter_delegates_acquire_inspect_finish_and_keeps_shared_connection_open(self):
+        store = FakeStore()
+        lease = PostgresRunLease(store)
+        context = type("Context", (), {"run_id": "run-1"})()
+        lease.acquire(context)
+        self.assertEqual(lease.run_id, "run-1")
+        self.assertEqual(lease.inspect_active()["run_id"], "run-1")
+        lease.finish("SUCCEEDED", {"count": 1})
+        self.assertIsNone(lease.run_id)
+        lease.close()
+        self.assertEqual([call[0] for call in store.calls], ["acquire_run", "inspect_run", "finish_run"])
+        self.assertEqual(store.calls[2], ("finish_run", "run-1", "SUCCEEDED", {"count": 1}))
+
+    def test_run_lease_adapter_rejects_invalid_store_and_status(self):
+        with self.assertRaisesRegex(TypeError, "PostgreSQL publication store"):
+            PostgresRunLease(object())
+        lease = PostgresRunLease(FakeStore())
+        lease.run_id = "run-1"
+        with self.assertRaisesRegex(ValueError, "unsupported run status"):
+            lease.finish("UNKNOWN")
 
 
 class RuntimeBackendConfigurationTests(unittest.TestCase):

@@ -775,6 +775,40 @@ class Layer1FoundationTests(unittest.TestCase):
             active.finish("INTERRUPTED", {"reason": "test cleanup"})
             active.close()
 
+    def test_run_once_fails_closed_if_postgresql_selected_without_runtime_store(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True,
+                      persistence_backend="postgresql", postgres_dsn="postgresql://test")
+        with patch("main._run_once_impl") as runtime:
+            with self.assertRaisesRegex(RuntimeError, "PostgreSQL runtime store is required"):
+                main.run_once(cfg, None, None, None, None, None, set())
+            runtime.assert_not_called()
+        self.assertFalse(os.path.exists(self.db), "explicit PostgreSQL selection must not fall back to SQLite")
+
+    def test_run_once_selects_postgres_run_lease_when_postgres_store_is_attached(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True,
+                      persistence_backend="postgresql", postgres_dsn="postgresql://test")
+        calls = []
+        class FakePostgresLease:
+            def __init__(self, store):
+                calls.append(("init", store))
+                self.run_id = None
+            def acquire(self, context):
+                calls.append(("acquire", context.run_id))
+                self.run_id = context.run_id
+            def finish(self, status, summary):
+                calls.append(("finish", status, summary["run_id"]))
+                self.run_id = None
+            def close(self):
+                calls.append(("close",))
+        postgres_store = object()
+        publisher = type("Publisher", (), {"postgres_store": postgres_store})()
+        with patch("layer1.publication_runtime.PostgresRunLease", FakePostgresLease), \
+             patch("main._run_once_impl", return_value=True):
+            self.assertTrue(main.run_once(cfg, None, None, None, None, publisher, set()))
+        self.assertEqual([call[0] for call in calls], ["init", "acquire", "finish", "close"])
+        self.assertIs(calls[0][1], postgres_store)
+        self.assertFalse(os.path.exists(self.db), "PostgreSQL run lease must not create the SQLite lease database")
+
     def test_run_once_integrates_layer1_run_lease(self):
         cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
         previous_summary = main._LAYER1_LAST_SUMMARY

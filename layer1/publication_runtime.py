@@ -244,3 +244,35 @@ class PostgresPublicationAuthorizationEngine:
             elif event["state"] not in {"CONFIRMED", "DEVELOPING"}:
                 reasons.append("EVENT_STATE_NOT_PUBLISHABLE")
         return tuple(sorted(set(reasons)))
+
+
+class PostgresRunLease:
+    """RunLease-compatible adapter backed by the shared PostgreSQL runtime store."""
+    _ALLOWED_STATUSES = {"SUCCEEDED", "NO_CANDIDATE_OR_BLOCKED", "FAILED", "INTERRUPTED"}
+
+    def __init__(self, store):
+        required = ("inspect_active_run_lease", "acquire_run_lease", "finish_run_lease")
+        if any(not callable(getattr(store, name, None)) for name in required):
+            raise TypeError("PostgreSQL publication store is required")
+        self.store = store
+        self.run_id = None
+
+    def inspect_active(self):
+        return self.store.inspect_active_run_lease()
+
+    def acquire(self, context):
+        self.store.acquire_run_lease(context)
+        self.run_id = context.run_id
+
+    def finish(self, status, summary=None):
+        if not self.run_id:
+            return
+        if status not in self._ALLOWED_STATUSES:
+            raise ValueError(f"unsupported run status: {status}")
+        self.store.finish_run_lease(self.run_id, status, summary or {})
+        self.run_id = None
+
+    def close(self):
+        # The PostgreSQL connection belongs to the application bootstrap and is
+        # shared with publication persistence; closing this adapter must not close it.
+        return None

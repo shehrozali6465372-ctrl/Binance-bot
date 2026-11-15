@@ -857,6 +857,83 @@ class PostgresPublicationStore:
     def load_latest_editorial_brief(self, event_id: str, angle_id: str) -> Optional[dict]:
         return _load_latest_editorial_brief(self, event_id, angle_id)
 
+    def inspect_active_run_lease(self) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT l.run_id,l.acquired_at,r.started_at,r.status,r.config_hash "
+            "FROM layer1_run_lease AS l LEFT JOIN layer1_runs AS r ON r.run_id=l.run_id "
+            "WHERE l.lease_name='agent'"
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "run_id": str(row["run_id"]),
+            "acquired_at": row["acquired_at"].isoformat(),
+            "started_at": row["started_at"].isoformat(),
+            "status": str(row["status"]),
+            "config_hash": str(row["config_hash"]),
+        }
+
+    def acquire_run_lease(self, context) -> None:
+        run_id = getattr(context, "run_id", None)
+        config_hash = getattr(context, "config_hash", None)
+        started_at = getattr(context, "started_at", None)
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run context requires a non-empty run_id")
+        if not isinstance(config_hash, str) or len(config_hash) != 64 or any(c not in "0123456789abcdef" for c in config_hash):
+            raise ValueError("run context requires a lowercase SHA-256 config_hash")
+        started = _utc(started_at)
+        with self.conn.transaction():
+            # Lock the logical lease key even when no lease row exists yet.
+            self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("layer1-run-lease:agent",),
+            )
+            existing = self.conn.execute(
+                "SELECT run_id,acquired_at FROM layer1_run_lease WHERE lease_name='agent' FOR UPDATE"
+            ).fetchone()
+            if existing is not None:
+                raise RuntimeError(
+                    f"agent lease already held by run {existing['run_id']} since {existing['acquired_at']}"
+                )
+            self.conn.execute(
+                "INSERT INTO layer1_runs(run_id,started_at,status,config_hash) VALUES (%s,%s,'RUNNING',%s)",
+                (run_id, started, config_hash),
+            )
+            self.conn.execute(
+                "INSERT INTO layer1_run_lease(lease_name,run_id,acquired_at) VALUES ('agent',%s,%s)",
+                (run_id, started),
+            )
+
+    def finish_run_lease(self, run_id: str, status: str, summary=None) -> None:
+        allowed = {"SUCCEEDED", "NO_CANDIDATE_OR_BLOCKED", "FAILED", "INTERRUPTED"}
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id is required to finish a run lease")
+        if status not in allowed:
+            raise ValueError(f"unsupported run status: {status}")
+        encoded = dict(summary or {})
+        if not isinstance(encoded, dict):
+            raise ValueError("run summary must be an object")
+        try:
+            json.dumps(encoded, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError):
+            raise ValueError("run summary must contain finite JSON data") from None
+        import psycopg
+        finished_at = _utc().isoformat()
+        with self.conn.transaction():
+            updated = self.conn.execute(
+                "UPDATE layer1_runs SET finished_at=%s,status=%s,summary_json=%s "
+                "WHERE run_id=%s AND status='RUNNING' RETURNING run_id",
+                (finished_at, status, psycopg.types.json.Jsonb(encoded), run_id),
+            ).fetchone()
+            if updated is None:
+                raise RuntimeError("run record is missing or no longer RUNNING; refusing lease release")
+            deleted = self.conn.execute(
+                "DELETE FROM layer1_run_lease WHERE lease_name='agent' AND run_id=%s RETURNING run_id",
+                (run_id,),
+            ).fetchone()
+            if deleted is None:
+                raise RuntimeError("run lease ownership was lost; refusing to mark run complete")
+
     def close(self) -> None:
         self.conn.close()
 
