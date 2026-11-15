@@ -29,6 +29,16 @@ class ProviderVerificationWorkflowSafetyTests(unittest.TestCase):
         for forbidden in ("python main.py", "run_bot.yml", "published_posts", "upload-artifact", "actions/cache"):
             self.assertNotIn(forbidden, self.source)
 
+    def test_logs_never_print_credentials_or_generated_content(self):
+        self.assertNotIn("print(os.environ", self.source)
+        self.assertNotIn("print(result.text", self.source)
+        self.assertNotIn("print(artifact", self.source)
+        self.assertIn("set +x", self.source)
+
+    def test_both_provider_checks_run_before_final_failure(self):
+        self.assertIn("failed = False", self.source)
+        self.assertIn("if failed:\\n    sys.exit(1)", self.source)
+
     def test_permissions_and_execution_are_bounded(self):
         self.assertIn("permissions:\n  contents: read", self.source)
         self.assertIn("timeout-minutes: 5", self.source)
