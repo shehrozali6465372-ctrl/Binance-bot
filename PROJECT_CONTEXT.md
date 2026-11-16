@@ -15,6 +15,7 @@ This is the latest authoritative continuation state. It supersedes older "curren
 - Head branch: layer-1/module9-onchain-continuation
 - Base branch: layer-1/module9-onchain-intelligence
 - GitHub head SHA at review: 9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9
+- Documentation-only GitHub commit created by this authorized context update: 29bffcae962dd018ce86e3b784b0ffe9164e302a. PR #14 branch HEAD is now this documentation commit; the reviewed application-code snapshot remains its parent 9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9.
 - Base SHA recorded by PR metadata: 3afed37192b66c57aba2f17ba841a84a60227cda
 - Review date: 2026-11-16 (Pakistan local date, UTC+05:00).
 - Read-only review worktree: /tmp/binance-deepseek-verify on the Remote Desktop Commander host.
@@ -52,9 +53,9 @@ This is the latest authoritative continuation state. It supersedes older "curren
 
 This section is retained as historical context only. Its old branch, worktree, HEAD, device, Module 9 distributed-lease next-task and file-presence details do not describe the current PR #14 review baseline. Follow the 2026-11-16 override above.
 
-## CURRENT CONTINUATION OVERRIDE — 2026-11-12
+## HISTORICAL CONTINUATION OVERRIDE — 2026-11-12 (ARCHIVED CHECKPOINT)
 
-This section is the authoritative instruction for the next continuation. If older notes elsewhere in this file conflict with it, follow this section.
+This is an archived 2026-11-12 checkpoint only. It is superseded by the 2026-11-16 CURRENT CONTINUATION OVERRIDE at the top of this file.
 
 ### Development method
 - **Do not use Codex.** The user has explicitly confirmed that the Codex usage limit is exhausted and Codex must no longer be used for this project. Do not check its quota, wait for a reset, invoke Codex, or make Codex availability a dependency.
