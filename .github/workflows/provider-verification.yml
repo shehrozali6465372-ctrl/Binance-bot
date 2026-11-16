@@ -24,8 +24,10 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
 
     steps:
-      - name: Checkout
+      - name: Checkout provider implementation branch
         uses: actions/checkout@v4
+        with:
+          ref: layer-1/module9-onchain-continuation
 
       - name: Set up Python
         uses: actions/setup-python@v5
