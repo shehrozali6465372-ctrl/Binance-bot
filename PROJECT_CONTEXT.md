@@ -1886,5 +1886,5 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - The manual workflow was changed to accept any non-null `DeepSeekClient.chat()` result. The client itself only returns a result after validating a non-empty assistant message, model identity, response object, and normal completion. A `None` result still fails the check.
 - A regression test now guards against reintroducing the exact-string comparison.
 - Commits: workflow fix `e149e0a6fa2a44827fb8095f01545d2523fa3f1d`; regression test `ce1637e972921c6085a566155b60414341e31292`.
-- Provider smoke test has not yet been rerun on these commits. DeepSeek live acceptance remains pending; Cloudflare live acceptance was observed passing in run `43781609081`.
+- Manual provider run `43782717263` on `main` completed successfully with both real authenticated checks passing: DeepSeek `deepseek-flash` (997 ms, 30 total tokens) and Cloudflare Workers AI `@cf/black-forest-labs/flux-2-klein-4b` (JPEG 256x256, 6132 ms). This is live provider evidence, not a mocked test.
 - Credentials are not printed. Production publisher, scheduled workflow, production database, and publishing credentials remain untouched.
