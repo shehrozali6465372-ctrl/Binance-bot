@@ -1877,3 +1877,14 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - Static safety tests were added, but have not yet been executed in this environment. GitHub Actions may run the repository's existing mocked push CI due to commits on the layer-1 branch; that is separate from live provider verification.
 - **Live verification has NOT been run.** The workflow has not been manually dispatched; no provider API request has been made by this workflow. DeepSeek/Cloudflare calls may incur provider usage charges. Obtain explicit confirmation before manually running it.
 - PR #14 remains open, draft, and unmerged. No real Binance Square post, publisher activation, production DB operation, credential/schedule modification, merge, or deployment.
+
+
+## Provider verification follow-up — 2026-11-16
+
+- Latest manual provider run `43781609081` checked out the dedicated implementation branch successfully and completed the Cloudflare Workers AI 256x256 image-generation check successfully.
+- The DeepSeek step returned a failure because the workflow required the generated assistant text to equal one exact sentinel string. That is an unnecessarily strict assertion for an authenticated generation smoke test; wording can vary even when a valid completion is returned.
+- The manual workflow was changed to accept any non-null `DeepSeekClient.chat()` result. The client itself only returns a result after validating a non-empty assistant message, model identity, response object, and normal completion. A `None` result still fails the check.
+- A regression test now guards against reintroducing the exact-string comparison.
+- Commits: workflow fix `e149e0a6fa2a44827fb8095f01545d2523fa3f1d`; regression test `ce1637e972921c6085a566155b60414341e31292`.
+- Provider smoke test has not yet been rerun on these commits. DeepSeek live acceptance remains pending; Cloudflare live acceptance was observed passing in run `43781609081`.
+- Credentials are not printed. Production publisher, scheduled workflow, production database, and publishing credentials remain untouched.
