@@ -1919,3 +1919,11 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - PR #14 remains open/draft/unmerged. Continue from its current branch and HEAD; do not recreate modules or restart the project.
 - Provider connectivity is now verified. Modules 19–21 and overall production readiness must not be marked complete solely from this smoke test; remaining module-specific and end-to-end acceptance gates still need separate evidence.
 - Before further code changes, inspect current GitHub PR/branch state and existing implementation. Preserve the user's constraints: no Codex, no personal browser for this project, no production publishing, no credential exposure, and no merge/deploy without explicit approval.
+
+
+## 2026-11-16 — Scheduled workflow restoration and CI follow-up
+
+- Restored `.github/workflows/run_bot.yml` to exact base-branch content in commit `3da5c20f9d7af32e6d914bbada07d210bf6aeff4`; only that file changed in the restoration commit. The five-minute schedule and `DRY_RUN: "1"` remain as before.
+- Phase 1 run `43785915439` exposed one stale test assertion: the importer dependency test required DeepSeek/Cloudflare env entries and rejected Gemini entries. Removed those unrelated assertions in `6c04de2e021dd64618df521921720cfef5b3118b`; the importer, dry-run and announcement DB checks remain. Follow-up CI run `43786286550` must be checked for its final result.
+- Important unresolved release blocker: PR `main.py` uses DeepSeek, but restored scheduled workflow provides Gemini variables. The workflow was not changed beyond the user's explicit approval. Do not merge/deploy until a separately approved production provider configuration is aligned and verified.
+- No scheduled run, Binance post, production DB write, merge or deployment occurred.
