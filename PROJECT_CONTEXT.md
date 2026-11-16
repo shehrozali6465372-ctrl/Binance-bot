@@ -1936,3 +1936,13 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - GitHub Actions run `43786286550` passed on the current application/test code: `compileall` passed; **649 tests, 0 failures, 38 guarded PostgreSQL skips**. These skips are not passes; selected PG integrations were verified separately.
 - Existing publication PostgreSQL integration evidence remains **34/34 passed** with mocked Binance transport only.
 - The scheduled workflow compatibility blocker remains: PR `main.py` is DeepSeek-based, but the restored `run_bot.yml` still injects Gemini variables. No further workflow modification, dispatch, publishing, merge or deployment was performed.
+
+
+## 2026-11-16 — Approved scheduled-workflow provider alignment
+- User approved the limited provider mapping change in `.github/workflows/run_bot.yml`; commit `0a97bfa848c3700400120b32eb4cfb04f437ebe8`.
+- Scheduled job now maps `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL=deepseek-flash`, `CLOUDFLARE_API_TOKEN`, and `CLOUDFLARE_ACCOUNT_ID`. Existing Square, GitHub token and announcement DB mappings remain.
+- Verified five-minute cron and `DRY_RUN: "1"` unchanged; provider env diff was limited to Gemini-to-DeepSeek replacement plus Cloudflare mappings.
+- GitHub Actions run `43786947834` for the exact workflow commit completed SUCCESS (compileall and mocked publication safety test job). This does not prove scheduled runtime.
+- Existing live provider smoke run `43782717263` separately passed one authenticated DeepSeek completion and one Cloudflare image generation; no Binance media upload or Square publication was performed.
+- PR #14 remains open/draft/unmerged. No workflow dispatch, Binance POST, production DB operation, publisher activation, merge or deployment occurred.
+- Next: continue module acceptance from the current PR head without restarting or duplicating implementation. Keep dry-run and publishing controls intact. Do not claim end-to-end production readiness until Modules 11–21 remaining acceptance gates and safe runtime validation have evidence.
