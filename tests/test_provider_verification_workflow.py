@@ -33,6 +33,8 @@ class ProviderVerificationWorkflowSafetyTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.source)
 
     def test_logs_never_print_credentials_or_generated_content(self):
+        self.assertIn("logging.basicConfig(level=logging.WARNING", self.source)
+        self.assertIn("sanitized validation categories", self.source)
         self.assertNotIn("print(os.environ", self.source)
         self.assertNotIn("print(result.text", self.source)
         self.assertNotIn("print(artifact", self.source)
