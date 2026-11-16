@@ -206,6 +206,23 @@ class EvidenceVerificationTests(unittest.TestCase):
         result = self.engine.verify([candidate], [source]).results[0]
         self.assertEqual(result.state, "VERIFIED")
 
+    def test_unrelated_text_cannot_launder_under_an_announcement_body_key(self):
+        announcement = AnnouncementEvidence(
+            source_id="binance-body-launder",
+            source_url="https://www.binance.com/en/support/announcement/body-launder",
+            publisher="Binance", event_type="listing", title="ABC listing",
+            published_at=iso(-60), observed_at=iso(), asset_ids=("coingecko:abc",),
+            content_hash="8" * 64,
+            body="Binance will list ABC on 2026-12-01 at 08:00 UTC.",
+        )
+        evidence = self.engine.evidence_from_announcement(announcement)
+        body = next(item for item in evidence if item.claim_key == "announcement.body")
+        candidate = self.engine._source_assertion_claims((body,))[0]
+        candidate = Claim(**{**candidate.__dict__, "text": "ABC listing confirmed for December 1"})
+        result = self.engine.verify([candidate], evidence).results[0]
+        self.assertEqual(result.state, "UNVERIFIED")
+        self.assertIn("ANNOUNCEMENT_TEXT_EVIDENCE_MISMATCH", result.issues)
+
     def test_causal_text_cannot_launder_under_an_announcement_body_key(self):
         body = "Binance listed ABC because the project completed its review."
         source = record(
@@ -449,6 +466,29 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertIn("UNRESOLVED_COUNT: 0", rendered)
         self.assertIn("QUALIFIED_NONFACTUAL_COUNT: 1", rendered)
         self.assertIn("QUALIFIED NON-FACTUAL ANALYSIS", rendered)
+
+    def test_non_market_source_assertion_text_must_match_structured_value(self):
+        cases = (
+            (record(value=True, claim_key="binance_spot.eligible", unit=None,
+                    timeframe="spot", status_value="TRADING"), "Binance Spot: NO"),
+            (record(value=2, claim_key="publication.last_posted", unit="hours",
+                    timeframe="latest_200_posts", status_value="RECENT_RECORD"),
+             "Last posted: 12 hours ago"),
+            (record(value="listing", claim_key="announcement.event_type", unit=None,
+                    timeframe=None), "Type: delisting"),
+            (record(value="FRESH", claim_key="announcement.freshness", unit=None,
+                    timeframe=None, status_value="FRESH"), "Age: stale"),
+        )
+        for evidence, mismatched_text in cases:
+            with self.subTest(claim_key=evidence.claim_key):
+                candidate = self.engine._source_assertion_claims((evidence,))[0]
+                candidate = Claim(**{**candidate.__dict__, "text": mismatched_text})
+                result = self.engine.verify([candidate], [evidence]).results[0]
+                self.assertEqual(result.state, "UNVERIFIED")
+                self.assertTrue(any(
+                    issue.startswith("CLAIM_TEXT_STRUCTURED_VALUE_MISMATCH")
+                    for issue in result.issues
+                ))
 
     def test_market_claim_uses_exact_candidate_payload_and_does_not_cross_quote_currencies(self):
         observed = iso()
@@ -974,6 +1014,28 @@ class EvidenceVerificationTests(unittest.TestCase):
                 self.assertTrue(any(result.state == "VERIFIED" for result in registry.results))
             finally:
                 store.close()
+
+
+    def test_market_claim_text_must_match_its_structured_metric_and_value(self):
+        evidence = record(value=100.0, claim_key="market.price", unit="USD")
+        for text in (
+            "ABC price is 999 USD",
+            "ABC volume is 100 USD",
+            "ABC price is 100 EUR",
+        ):
+            with self.subTest(text=text):
+                candidate = Claim(
+                    text=text, subject=evidence.subject, asset_id=evidence.asset_id,
+                    claim_key="market.price", value=100.0, unit="USD", timeframe="spot",
+                    observed_at=iso(), claim_type="CONFIRMED_FACT", impact="MEDIUM",
+                    evidence_ids=(evidence.evidence_id,), max_age_seconds=3600,
+                )
+                result = self.engine.verify([candidate], [evidence]).results[0]
+                self.assertEqual(result.state, "UNVERIFIED")
+                self.assertTrue(any(
+                    issue.startswith("CLAIM_TEXT_STRUCTURED_VALUE_MISMATCH")
+                    for issue in result.issues
+                ))
 
 
 if __name__ == "__main__":

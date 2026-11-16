@@ -321,12 +321,136 @@ class EvidenceVerificationEngine:
             results=tuple(results), unresolved_issues=tuple(unresolved),
         )
 
+    @staticmethod
+    def _claim_text_mismatch(claim: Claim) -> Optional[str]:
+        """Bind supported rendered claim text to its structured evidence fields.
+
+        This is a bounded deterministic consistency check, not general semantic NLP.
+        Unsupported source-assertion formats fail closed; arbitrary prose is never
+        promoted to a source assertion merely because its structured fields match.
+        """
+        canonical_source_text = (
+            f"Source assertion: {claim.subject} {claim.claim_key} = "
+            f"{json.dumps(claim.value, ensure_ascii=False)}"
+        )
+        if claim.claim_type == "SOURCE_ASSERTION" and claim.text == canonical_source_text:
+            return None
+        if claim.claim_key in {"announcement.title", "announcement.body"}:
+            # Exact Detail/source-payload binding is enforced with linked records
+            # in _verify_one, where the source lineage is available.
+            return None
+
+        if claim.claim_key.startswith("market."):
+            try:
+                expected = Decimal(str(claim.value))
+            except (InvalidOperation, TypeError, ValueError):
+                return "VALUE_NOT_NUMERIC"
+            if not expected.is_finite():
+                return "VALUE_NOT_NUMERIC"
+
+            metric_patterns = {
+                "market.price": r"\bprice\b",
+                "market.price_change": r"\bprice\b",
+                "market.change_24h": r"\b(?:24h|24[- ]hour|daily)?\s*(?:change|return|performance)\b",
+                "market.volume_24h": r"\bvolume\b",
+                "market.market_cap": r"\bmarket\s+cap(?:italization)?\b",
+            }
+            metric_pattern = metric_patterns.get(claim.claim_key)
+            if metric_pattern is None or not re.search(metric_pattern, claim.text, re.IGNORECASE):
+                return "METRIC"
+
+            text = re.sub(
+                r"\b\d{4}-\d{2}-\d{2}(?:[T ][0-9:.+-]+Z?)?\b",
+                " ", claim.text,
+            )
+            number_pattern = re.compile(
+                r"(?<![A-Za-z0-9])(?P<symbol>[$€£])?\s*"
+                r"(?P<number>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
+                r"(?P<percent>\s*%)?(?![A-Za-z0-9])"
+            )
+            matches = list(number_pattern.finditer(text))
+            if not matches:
+                return "VALUE_MISSING"
+
+            precision = {
+                "market.price": 6,
+                "market.price_change": 1,
+                "market.change_24h": 1,
+                "market.volume_24h": 0,
+                "market.market_cap": 0,
+            }[claim.claim_key]
+            try:
+                expected_display = Decimal(format(float(expected), f".{precision}f"))
+            except (OverflowError, ValueError):
+                return "VALUE_NOT_NUMERIC"
+
+            expected_unit = (claim.unit or "").strip().casefold()
+            for match in matches:
+                try:
+                    actual = Decimal(match.group("number").replace(",", ""))
+                except InvalidOperation:
+                    return "VALUE_NOT_NUMERIC"
+                if actual != expected_display:
+                    return "VALUE"
+                explicit_unit = "percent" if match.group("percent") else ""
+                suffix = re.match(r"\s*([A-Z][A-Z0-9]{1,9})\b", text[match.end():])
+                if suffix:
+                    explicit_unit = suffix.group(1).casefold()
+                if match.group("symbol") and not explicit_unit:
+                    explicit_unit = "currency_symbol"
+                if explicit_unit:
+                    if explicit_unit == "currency_symbol":
+                        if expected_unit not in {"usd", "usdt"}:
+                            return "UNIT"
+                    elif explicit_unit == "percent":
+                        if expected_unit not in {"percent", "%", "pct"}:
+                            return "UNIT"
+                    elif explicit_unit != expected_unit:
+                        return "UNIT"
+            return None
+
+        if claim.claim_type not in {"SOURCE_ASSERTION", "CONFIRMED_FACT"}:
+            return None
+        if claim.claim_type == "CONFIRMED_FACT" and not claim.evidence_ids:
+            return None
+
+        expected_texts = None
+        if claim.claim_key == "announcement.event_type" and isinstance(claim.value, str):
+            expected_texts = {
+                ("Type: " + claim.value).casefold(),
+                ("Binance announced a " + claim.value).casefold(),
+            }
+        elif claim.claim_key == "announcement.freshness" and claim.value == "FRESH":
+            expected_texts = {"Age: Just announced by Binance (FRESH)".casefold()}
+        elif claim.claim_key == "binance_spot.eligible" and type(claim.value) is bool:
+            expected_texts = {
+                ("Binance Spot: YES" if claim.value else "Binance Spot: NO").casefold()
+            }
+        elif claim.claim_key == "publication.last_posted":
+            if claim.value == "NO_RECORD_IN_LATEST_200":
+                expected_texts = {"Last posted: NO RECORD IN LATEST 200 LOCAL POSTS".casefold()}
+            elif type(claim.value) is int and claim.unit == "hours":
+                expected_texts = {f"Last posted: {claim.value} hours ago".casefold()}
+        elif claim.claim_key.startswith("trend.topic:") and isinstance(claim.value, str):
+            if claim.claim_key == "trend.topic:" + _digest(claim.value.casefold())[:16]:
+                expected_texts = {("Trend topic: " + claim.value).casefold()}
+        elif claim.claim_key == "onchain.transfer_summary" and isinstance(claim.value, str):
+            if re.fullmatch(r"[0-9a-fA-F]{64}", claim.value):
+                expected_texts = {("On-chain transfer summary ID: " + claim.value).casefold()}
+
+        if expected_texts is None:
+            return "UNSUPPORTED_TEXT_FORMAT"
+        return None if claim.text.casefold() in expected_texts else "TEXT"
+
     def _verify_one(
         self,
         claim: Claim,
         evidence_by_id: Mapping[str, EvidenceRecord],
     ) -> ClaimVerificationResult:
         issues: set[str] = set()
+        claim_text_mismatch = self._claim_text_mismatch(claim)
+        if claim_text_mismatch:
+            issues.add("CLAIM_TEXT_STRUCTURED_VALUE_MISMATCH:" + claim_text_mismatch)
         linked = []
         missing = []
         for evidence_id in claim.evidence_ids:
@@ -362,7 +486,15 @@ class EvidenceVerificationEngine:
                 f"Source assertion: {exemplar.subject} {exemplar.claim_key} = "
                 f"{json.dumps(exemplar.value, ensure_ascii=False)}"
             )
-            direct_announcement_assertion = claim.text == expected_source_text
+            exact_detail_text = (
+                claim.text.casefold() == ("Detail: " + str(exemplar.value)).casefold()
+            )
+            direct_announcement_assertion = (
+                claim.text == expected_source_text or exact_detail_text
+            )
+        if (claim.claim_key in {"announcement.title", "announcement.body"}
+                and not direct_announcement_assertion):
+            issues.add("ANNOUNCEMENT_TEXT_EVIDENCE_MISMATCH")
         if (any(pattern.search(claim.text) for pattern in _CAUSAL_RELATION_PATTERNS)
                 and not direct_announcement_assertion):
             issues.add("CAUSAL_RELATION_REQUIRES_DIRECT_SOURCE_ASSERTION")
@@ -465,6 +597,8 @@ class EvidenceVerificationEngine:
         elif stale_ids and not supporting:
             state = "STALE"
         elif (not claim.evidence_ids or not supporting or missing or temporal_or_field_mismatch
+              or claim_text_mismatch is not None
+              or "ANNOUNCEMENT_TEXT_EVIDENCE_MISMATCH" in issues
               or "HIGH_IMPACT_FRESHNESS_POLICY_REQUIRED" in issues
               or "NON_FACTUAL_CLAIM_TYPE" in issues
               or "CLAIM_TYPE_UNCLASSIFIED" in issues
