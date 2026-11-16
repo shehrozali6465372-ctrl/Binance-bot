@@ -2,15 +2,15 @@
 
 ## Cross-cutting blocker #1 — scheduled persistence and daily quota (2026-11-16)
 
-- **Status: PARTIALLY FIXED / NOT CLOSED.** The PR #14 branch already contains PostgreSQL publication persistence, migrations, legacy history/analytics adapter, atomic quota reservations and PostgreSQL run leases; this fix reuses that implementation.
-- `_get_today_post_count()` no longer turns a database error into `0`. It validates the returned count and raises a sanitized error so the run stops before publication when the quota ledger is unavailable or malformed.
-- `.github/workflows/run_bot.yml` now passes `PERSISTENCE_BACKEND` from the repository variable and `POSTGRES_DSN` from a separate GitHub secret. The read-only `ANNOUNCEMENT_DATABASE_URL` is not reused as a writable publication DSN.
-- Live publishing on GitHub Actions is rejected unless PostgreSQL is selected. `DRY_RUN: "1"` remains unchanged; no production DB or publisher was activated.
-- Verification: new seven-test regression group initially reproduced the failures; full suite after implementation: **662 tests, 0 failures, 38 PostgreSQL integration skips**. `compileall` and `git diff --check` passed.
-- Remaining acceptance: owner must configure the writable `POSTGRES_DSN` secret and repository variable `PERSISTENCE_BACKEND=postgresql`; then run the guarded PostgreSQL integration/concurrency suite against the dedicated test DB. No production DSN was used or tested.
-
-This register tracks whether the locked architecture contracts are reachable and implemented in the repository at the continuation branch baseline. It is not a replacement architecture and does not declare modules complete.
-
+- **Status: IMPLEMENTATION + ISOLATED POSTGRESQL ACCEPTANCE VERIFIED; LIVE OPERATIONAL CUTOVER STILL PENDING.** Existing PostgreSQL publication persistence, migrations, legacy history/analytics adapter, atomic quota reservations and PostgreSQL run leases were reused; no duplicate subsystem was introduced.
+- `_get_today_post_count()` validates a non-negative integer and fails closed with a sanitized error on unavailable/malformed database results. It never resets the daily quota to zero after a database failure.
+- `.github/workflows/run_bot.yml` passes repository variable `PERSISTENCE_BACKEND` (default `sqlite` while dry-run) and separate secret `POSTGRES_DSN`. Read-only `ANNOUNCEMENT_DATABASE_URL` is not used as the writable publication ledger. Live GHA publishing is rejected unless PostgreSQL is selected.
+- Isolated PostgreSQL target preflight passed: `binance_onchain_test`, exact `TEST_POSTGRES_ALLOWED_HOST` match and TLS. The existing mode-0600 `/tmp/binance-deepseek-verify/.env` was parsed in-process; DSN/host values were not printed or copied.
+- Acceptance: `tests.test_scheduled_persistence_safety` + `tests.test_legacy_postgres` + `tests.test_publication_postgres`: **44 passed, 0 failed, 0 skipped**. Covered concurrent daily quota reservations, durable/fenced run leases, PostgreSQL legacy post/metrics/run persistence and daily count, idempotency/reconciliation and fail-closed scheduled configuration.
+- Actual runtime composition smoke: **PASS** with `PERSISTENCE_BACKEND=postgresql`, isolated test DSN and `DRY_RUN=1`; factory created the PostgreSQL store, publisher used `PostgresLegacyDatabase` on the shared connection, no SQLite fallback occurred, and daily quota count returned an integer from `binance_onchain_test`.
+- GitHub Actions mocked safety CI for code head `9091e036d55085ffb6525f1405dc0e5739053883`: run `43891086561`, SUCCESS. It does not prove live provider/publishing acceptance.
+- Safety: workflow `DRY_RUN: "1"` remains unchanged. No production DSN, production DB operation, secret/variable mutation, publisher activation, real Binance post, workflow dispatch, merge or deployment occurred.
+- Remaining operational acceptance: owner-controlled GitHub secret `POSTGRES_DSN` must point to an authorized writable application database and repository variable `PERSISTENCE_BACKEND=postgresql` must be set before any separately approved live scheduled publishing. Do not reuse `TEST_POSTGRES_DSN` in production. Secret values are not inspectable or documented here.
 ## 5.11 Module 11 — Evidence Verification Engine
 
 ### Latest checkpoint — 2026-11-15 (PARTIAL; supersedes older verification counts below)
