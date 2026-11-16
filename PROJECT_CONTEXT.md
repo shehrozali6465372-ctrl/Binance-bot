@@ -1927,3 +1927,12 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - Phase 1 run `43785915439` exposed one stale test assertion: the importer dependency test required DeepSeek/Cloudflare env entries and rejected Gemini entries. Removed those unrelated assertions in `6c04de2e021dd64618df521921720cfef5b3118b`; the importer, dry-run and announcement DB checks remain. Follow-up CI run `43786286550` must be checked for its final result.
 - Important unresolved release blocker: PR `main.py` uses DeepSeek, but restored scheduled workflow provides Gemini variables. The workflow was not changed beyond the user's explicit approval. Do not merge/deploy until a separately approved production provider configuration is aligned and verified.
 - No scheduled run, Binance post, production DB write, merge or deployment occurred.
+
+
+## 2026-11-16 — Current PR-head PostgreSQL acceptance results
+
+- Created a separate detached acceptance worktree at PR head `a4677d705b313e04b54e479cd2871ce1609d717f`; existing worktrees and their checked-out states were preserved.
+- Against the guarded disposable `binance_onchain_test` database, with exact host/TLS checks: claim-registry PostgreSQL tests **1/1 passed**; Layer1 PostgreSQL tests **2/2 passed**; event-lifecycle PostgreSQL tests **5/5 passed**; legacy post-history/analytics PostgreSQL tests **3/3 passed**. The destructive Module 9 `test_onchain_postgres` suite was not run.
+- GitHub Actions run `43786286550` passed on the current application/test code: `compileall` passed; **649 tests, 0 failures, 38 guarded PostgreSQL skips**. These skips are not passes; selected PG integrations were verified separately.
+- Existing publication PostgreSQL integration evidence remains **34/34 passed** with mocked Binance transport only.
+- The scheduled workflow compatibility blocker remains: PR `main.py` is DeepSeek-based, but the restored `run_bot.yml` still injects Gemini variables. No further workflow modification, dispatch, publishing, merge or deployment was performed.
