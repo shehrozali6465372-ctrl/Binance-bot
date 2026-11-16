@@ -1,5 +1,14 @@
 # Module 11–21 Implementation Gap Register
 
+## Cross-cutting blocker #1 — scheduled persistence and daily quota (2026-11-16)
+
+- **Status: PARTIALLY FIXED / NOT CLOSED.** The PR #14 branch already contains PostgreSQL publication persistence, migrations, legacy history/analytics adapter, atomic quota reservations and PostgreSQL run leases; this fix reuses that implementation.
+- `_get_today_post_count()` no longer turns a database error into `0`. It validates the returned count and raises a sanitized error so the run stops before publication when the quota ledger is unavailable or malformed.
+- `.github/workflows/run_bot.yml` now passes `PERSISTENCE_BACKEND` from the repository variable and `POSTGRES_DSN` from a separate GitHub secret. The read-only `ANNOUNCEMENT_DATABASE_URL` is not reused as a writable publication DSN.
+- Live publishing on GitHub Actions is rejected unless PostgreSQL is selected. `DRY_RUN: "1"` remains unchanged; no production DB or publisher was activated.
+- Verification: new six-test regression group initially reproduced the failures; full suite after implementation: **660 tests, 0 failures, 38 PostgreSQL integration skips**. `compileall` and `git diff --check` passed.
+- Remaining acceptance: owner must configure the writable `POSTGRES_DSN` secret and repository variable `PERSISTENCE_BACKEND=postgresql`; then run the guarded PostgreSQL integration/concurrency suite against the dedicated test DB. No production DSN was used or tested.
+
 This register tracks whether the locked architecture contracts are reachable and implemented in the repository at the continuation branch baseline. It is not a replacement architecture and does not declare modules complete.
 
 ## 5.11 Module 11 — Evidence Verification Engine

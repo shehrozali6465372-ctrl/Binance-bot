@@ -50,6 +50,10 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           # Read-only PostgreSQL role for the official CMS announcement ledger.
           ANNOUNCEMENT_DATABASE_URL: ${{ secrets.ANNOUNCEMENT_DATABASE_URL }}
+          # Durable publication ledger. Set repository variable PERSISTENCE_BACKEND=postgresql
+          # and secret POSTGRES_DSN before any scheduled live-publishing enablement.
+          PERSISTENCE_BACKEND: ${{ vars.PERSISTENCE_BACKEND || 'sqlite' }}
+          POSTGRES_DSN: ${{ secrets.POSTGRES_DSN }}
 
           DRY_RUN: "1"
           LIVE_MARKET_DATA: "1"

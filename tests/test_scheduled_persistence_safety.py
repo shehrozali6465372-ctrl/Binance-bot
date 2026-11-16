@@ -1,0 +1,64 @@
+"""Regression tests for durable scheduled-run persistence and fail-closed quota checks."""
+import os
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+import main
+
+
+class ScheduledPersistenceSafetyTests(unittest.TestCase):
+    def test_quota_count_database_failure_blocks_instead_of_resetting_to_zero(self):
+        class BrokenPostgresDatabase:
+            def get_today_post_count(self):
+                raise OSError("database unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "daily publication count unavailable"):
+            main._get_today_post_count(BrokenPostgresDatabase())
+
+    def test_sqlite_quota_count_returns_persisted_utc_analytics_count(self):
+        database = main.Database(":memory:")
+        try:
+            database.conn.execute(
+                "INSERT INTO post_analytics(coin_symbol, created_at) VALUES (?, ?)",
+                ("BTC", main.utc_now()),
+            )
+            self.assertEqual(main._get_today_post_count(database), 1)
+        finally:
+            database.close()
+
+    def test_quota_count_rejects_invalid_database_result(self):
+        class InvalidPostgresDatabase:
+            def get_today_post_count(self):
+                return -1
+
+        with self.assertRaisesRegex(RuntimeError, "daily publication count unavailable"):
+            main._get_today_post_count(InvalidPostgresDatabase())
+
+    def test_live_github_actions_run_requires_postgresql_persistence(self):
+        config = replace(
+            main.CONFIG,
+            dry_run=False,
+            persistence_backend="sqlite",
+            deepseek_api_key="configured-for-test",
+            square_api_key="configured-for-test",
+        )
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "GitHub Actions live publishing requires PostgreSQL"):
+                config.validate()
+
+    def test_dry_run_github_actions_can_remain_sqlite_without_live_publishing(self):
+        config = replace(main.CONFIG, dry_run=True, persistence_backend="sqlite")
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=False):
+            config.validate()
+
+    def test_scheduled_workflow_exposes_explicit_postgresql_backend_without_enabling_live_mode(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "run_bot.yml").read_text(encoding="utf-8")
+        self.assertIn("PERSISTENCE_BACKEND: ${{ vars.PERSISTENCE_BACKEND || 'sqlite' }}", workflow)
+        self.assertIn("POSTGRES_DSN: ${{ secrets.POSTGRES_DSN }}", workflow)
+        self.assertIn('DRY_RUN: "1"', workflow)
+
+
+if __name__ == "__main__":
+    unittest.main()

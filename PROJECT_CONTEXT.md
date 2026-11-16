@@ -1,5 +1,20 @@
 # Binance Square Write-to-Earn Agent — Canonical Project Context
 
+Last updated: 2026-11-16 (Pakistan local date, UTC+05:00) — Blocker #1 persistence/quota hardening
+
+## LATEST IMPLEMENTATION CHECKPOINT — BLOCKER #1 (2026-11-16)
+
+- Repository: `shehrozali6465372-ctrl/Binance-bot`; target branch: `layer-1/module9-onchain-continuation`; PR #14 remains OPEN, DRAFT and UNMERGED.
+- Exact clean GitHub baseline before this patch: `84d18e058459841c82da1e47b8607b2d0b2afba9`. Work was performed in a new isolated checkout `/tmp/binance-blocker1-fix`; existing worktrees and their uncommitted changes were not modified.
+- Existing PostgreSQL publication runtime, migrations, `PostgresLegacyDatabase`, atomic quota reservations and PostgreSQL run lease were already present. Do not recreate these components. The scheduled workflow did not pass the publication `PERSISTENCE_BACKEND`/`POSTGRES_DSN` settings, and `_get_today_post_count()` incorrectly converted database errors into zero, creating a fail-open quota reset.
+- Fix implemented: `_get_today_post_count()` now validates a non-negative integer count and raises a sanitized `RuntimeError` on unavailable/malformed database results; it never returns zero on database failure. This stops the cycle before candidate processing/publication.
+- GitHub Actions config now maps repository variable `PERSISTENCE_BACKEND` (default `sqlite` for current dry-run) and separate secret `POSTGRES_DSN`. This is distinct from read-only `ANNOUNCEMENT_DATABASE_URL`. Live publishing on GitHub Actions now requires `PERSISTENCE_BACKEND=postgresql`; ephemeral runner SQLite is rejected.
+- Safety preserved: scheduled workflow `DRY_RUN: "1"` remains unchanged. No publisher activation, real post, production DB connection/write, secret change, workflow dispatch, merge or deployment occurred. No secret values are stored in this file.
+- TDD: new `tests/test_scheduled_persistence_safety.py` first failed on the four expected gaps, then passed after implementation. The focused persistence/runtime batch ran 52 tests: 0 failures, 20 PostgreSQL integration skips because `TEST_POSTGRES_DSN` was not configured.
+- Full repository suite after the patch: **661 tests, 0 failures, 38 skipped**; `compileall` passed; `git diff --check` passed. PostgreSQL integration/durability was not live-verified in this patch.
+- Operational configuration remains outstanding: an authorized writable PostgreSQL DSN must be configured as GitHub secret `POSTGRES_DSN`, and repository variable `PERSISTENCE_BACKEND=postgresql` set before any live scheduled publishing. Until that is done and isolated PostgreSQL integration tests pass, Blocker #1 is **PARTIALLY FIXED / NOT CLOSED**. Current scheduled workflow remains dry-run and defaults to SQLite unless the repository variable is explicitly set.
+
+
 Last updated: 2026-11-16 (Pakistan local date, UTC+05:00) — complete Layer 1–21 deep code review and continuation-state reconciliation
 
 This is the canonical working context for continuing the Binance Square Write-to-Earn Agent project. Keep this file in this GitHub repository and update it as work progresses. Do not use ChatGPT Library or create a parallel Library copy.

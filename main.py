@@ -118,6 +118,15 @@ class Config:
             not isinstance(self.postgres_dsn, str) or not self.postgres_dsn.strip()
         ):
             raise ValueError("POSTGRES_DSN is required when PERSISTENCE_BACKEND=postgresql")
+        if (
+            os.getenv("GITHUB_ACTIONS", "").strip().lower() == "true"
+            and not self.dry_run
+            and self.persistence_backend != "postgresql"
+        ):
+            raise ValueError(
+                "GitHub Actions live publishing requires PostgreSQL persistence; "
+                "ephemeral runner SQLite is not a durable publication ledger"
+            )
         for name in ("database_path", "publish_log_path"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
@@ -1113,22 +1122,34 @@ def _extract_catalyst_for_coin(symbol: str, announcements: List[Dict[str, Any]])
 
 
 def _get_today_post_count(db) -> int:
-    """Count how many posts have been published today (UTC)."""
-    postgres_counter = getattr(db, "get_today_post_count", None)
-    if callable(postgres_counter):
-        try:
-            return int(postgres_counter())
-        except Exception:
-            return 0
-    today_before = utc_now()[:10]  # YYYY-MM-DD
+    """Count today's UTC posts; an unavailable ledger must never reset quota."""
     try:
-        rows = db.conn.execute(
-            "SELECT COUNT(*) FROM post_analytics WHERE created_at >= ?",
-            (today_before,)
-        ).fetchall()
-        return rows[0][0] if rows else 0
-    except Exception:
-        return 0
+        postgres_counter = getattr(db, "get_today_post_count", None)
+        if callable(postgres_counter):
+            count = postgres_counter()
+        else:
+            connection = getattr(db, "conn", None)
+            if connection is None or not callable(getattr(connection, "execute", None)):
+                raise RuntimeError("publication database connection is unavailable")
+            today_before = utc_now()[:10]  # YYYY-MM-DD
+            row = connection.execute(
+                "SELECT COUNT(*) FROM post_analytics WHERE created_at >= ?",
+                (today_before,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("publication count query returned no row")
+            count = row[0]
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("publication count is not a non-negative integer")
+        return count
+    except Exception as exc:
+        LOGGER.critical(
+            "Daily publication count unavailable; refusing to continue (%s)",
+            type(exc).__name__,
+        )
+        raise RuntimeError(
+            "daily publication count unavailable; refusing to continue"
+        ) from None
 
 
 
