@@ -48,6 +48,18 @@ class ScheduledPersistenceSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "GitHub Actions live publishing requires PostgreSQL"):
                 config.validate()
 
+    def test_missing_provider_credentials_remain_the_first_live_mode_error(self):
+        config = replace(
+            main.CONFIG,
+            dry_run=False,
+            persistence_backend="sqlite",
+            deepseek_api_key="",
+            square_api_key="configured-for-test",
+        )
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "DEEPSEEK_API_KEY"):
+                config.validate()
+
     def test_dry_run_github_actions_can_remain_sqlite_without_live_publishing(self):
         config = replace(main.CONFIG, dry_run=True, persistence_backend="sqlite")
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=False):

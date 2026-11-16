@@ -118,15 +118,6 @@ class Config:
             not isinstance(self.postgres_dsn, str) or not self.postgres_dsn.strip()
         ):
             raise ValueError("POSTGRES_DSN is required when PERSISTENCE_BACKEND=postgresql")
-        if (
-            os.getenv("GITHUB_ACTIONS", "").strip().lower() == "true"
-            and not self.dry_run
-            and self.persistence_backend != "postgresql"
-        ):
-            raise ValueError(
-                "GitHub Actions live publishing requires PostgreSQL persistence; "
-                "ephemeral runner SQLite is not a durable publication ledger"
-            )
         for name in ("database_path", "publish_log_path"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
@@ -170,6 +161,15 @@ class Config:
                 raise ValueError("DEEPSEEK_API_KEY is required when DRY_RUN is disabled")
             if not isinstance(self.square_api_key, str) or not self.square_api_key.strip():
                 raise ValueError("SQUARE_API_KEY is required when DRY_RUN is disabled")
+        if (
+            os.getenv("GITHUB_ACTIONS", "").strip().lower() == "true"
+            and not self.dry_run
+            and self.persistence_backend != "postgresql"
+        ):
+            raise ValueError(
+                "GitHub Actions live publishing requires PostgreSQL persistence; "
+                "ephemeral runner SQLite is not a durable publication ledger"
+            )
         if not isinstance(self.deepseek_temperature, (int, float)) or isinstance(self.deepseek_temperature, bool) or not math.isfinite(self.deepseek_temperature) or not (0.0 < self.deepseek_temperature <= 2.0):
             raise ValueError("DEEPSEEK_TEMPERATURE must be finite and between 0 and 2")
         if not isinstance(self.deepseek_top_p, (int, float)) or isinstance(self.deepseek_top_p, bool) or not math.isfinite(self.deepseek_top_p) or not (0.0 < self.deepseek_top_p <= 1.0):
