@@ -133,6 +133,26 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertEqual(result.state, "UNVERIFIED")
         self.assertIn("COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE", result.issues)
 
+    def test_comma_participial_second_action_cannot_borrow_one_market_field_evidence(self):
+        evidence = record(value=100.0)
+        for text in (
+            "ABC price rose 8%, falling 4%",
+            "ABC price gained 3%, later dropping 2%",
+            "ABC price surged 5%, closing 10% higher",
+            "ABC price rose 8% as trading volume increased 2%",
+            "ABC price rose 8%, which was 4% higher than yesterday",
+        ):
+            with self.subTest(text=text):
+                item = Claim(
+                    text=text, subject="coingecko:abc", asset_id="coingecko:abc",
+                    claim_key="market.price", value=100.0, unit="USD", timeframe="spot",
+                    observed_at=iso(), claim_type="CONFIRMED_FACT", impact="MEDIUM",
+                    evidence_ids=(evidence.evidence_id,), max_age_seconds=3600,
+                )
+                result = self.engine.verify([item], [evidence]).results[0]
+                self.assertEqual(result.state, "UNVERIFIED")
+                self.assertIn("COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE", result.issues)
+
     def test_temporal_before_after_second_action_cannot_borrow_one_market_field_evidence(self):
         market = record(value=8.0, claim_key="market.price_change", unit="%")
         for text in (

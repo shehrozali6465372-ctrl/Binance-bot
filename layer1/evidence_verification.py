@@ -38,6 +38,13 @@ _CAUSAL_RELATION_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern
 _COMPOUND_TEMPORAL_ACTION_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
     r"\b(?:before|after)\s+[a-z]+ing\b",
 ))
+_COMPOUND_PARTICIPIAL_ACTION_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    # A comma followed by a second action/interpretive predicate is not covered
+    # by the sentence splitter's finite-clause grammar. One typed field must
+    # never certify both propositions. Keep this list explicit to avoid treating
+    # non-predicate participles such as "including" as claims.
+    r",\s*(?:(?:then|later|subsequently)\s+)?(?:rising|falling|increasing|decreasing|surging|dropping|gaining|losing|moving|trading|closing|opening|launching|listing|delisting|reaching|recording|reporting|announcing|confirming|reflecting|indicating|suggesting|triggering|causing|resulting|leading)\b",
+))
 
 
 def _timestamp(value: str) -> datetime:
@@ -361,7 +368,11 @@ class EvidenceVerificationEngine:
             issues.add("CAUSAL_RELATION_REQUIRES_DIRECT_SOURCE_ASSERTION")
         has_multiple_propositions = (
             len(split_atomic_claims(claim.text)) > 1
-            or any(pattern.search(claim.text) for pattern in _COMPOUND_TEMPORAL_ACTION_PATTERNS)
+            or any(pattern.search(claim.text) for pattern in (
+                *_COMPOUND_TEMPORAL_ACTION_PATTERNS,
+                *_COMPOUND_PARTICIPIAL_ACTION_PATTERNS,
+                *_COMPOUND_RELATIVE_CLAUSE_PATTERNS,
+            ))
         )
         if has_multiple_propositions and not direct_announcement_assertion:
             issues.add("COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE")
@@ -1344,6 +1355,10 @@ _INDEPENDENT_CLAUSE_VERB = (
     r"increases?|increased|decreases?|decreased|surges?|surged|drops?|dropped|gains?|gained|"
     r"loses?|lost|moves?|moved|trades?|traded|holds?|held|cuts?|cut|hits?|hit)"
 )
+
+_COMPOUND_RELATIVE_CLAUSE_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    rf",\s*which\s+{_INDEPENDENT_CLAUSE_VERB}\b",
+))
 _INDEPENDENT_CLAUSE_START = re.compile(
     rf"^{_INDEPENDENT_CLAUSE_SUBJECT}\s+{_INDEPENDENT_CLAUSE_VERB}\b"
 )
@@ -1387,7 +1402,7 @@ def _split_independent_conjuncts(clause: str) -> tuple[str, ...]:
     predicates are expanded only when a recognized finite verb makes the second
     proposition explicit; the resulting claims still need independent evidence links.
     """
-    for match in re.finditer(r"\s+(?:,\s*)?(?:and|but|while|whereas)\s+", clause, re.IGNORECASE):
+    for match in re.finditer(r"\s+(?:,\s*)?(?:and|but|while|whereas|as)\s+", clause, re.IGNORECASE):
         left = clause[:match.start()].strip().rstrip(",; ")
         right = clause[match.end():].strip()
         if not left or not right or not _FINITE_CLAUSE_VERB.search(left):
