@@ -32,6 +32,11 @@ class ProviderVerificationWorkflowSafetyTests(unittest.TestCase):
         for forbidden in ("python main.py", "run_bot.yml", "published_posts", "upload-artifact", "actions/cache"):
             self.assertNotIn(forbidden, self.source)
 
+    def test_deepseek_verification_accepts_any_valid_completion(self):
+        self.assertIn("if result is None:", self.source)
+        self.assertNotIn('result.text.strip() != "DEEPSEEK_PROVIDER_OK"', self.source)
+        self.assertIn("Reply with a brief acknowledgment", self.source)
+
     def test_logs_never_print_credentials_or_generated_content(self):
         self.assertIn("logging.basicConfig(level=logging.WARNING", self.source)
         self.assertIn("sanitized validation categories", self.source)
