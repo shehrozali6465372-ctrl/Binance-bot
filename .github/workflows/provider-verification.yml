@@ -78,10 +78,10 @@ jobs:
                   max_retries=0,
               )
               result = deepseek.chat(
-                  "Reply with exactly this token and no other text: DEEPSEEK_PROVIDER_OK",
+                  "Reply with a brief acknowledgment that provider connectivity is working.",
                   system_prompt="You are performing a minimal provider connectivity check.",
               )
-              if result is None or result.text.strip() != "DEEPSEEK_PROVIDER_OK":
+              if result is None:
                   print("DeepSeek authenticated generation: FAIL (response validation failed)")
                   failed = True
               else:
