@@ -15,7 +15,7 @@ This is the latest authoritative continuation state. It supersedes older "curren
 - Head branch: layer-1/module9-onchain-continuation
 - Base branch: layer-1/module9-onchain-intelligence
 - GitHub head SHA at review: 9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9
-- This authorized context update was recorded in two sequential documentation-only commits: 29bffcae962dd018ce86e3b784b0ffe9164e302a and 77b073bf0b35cbfcedc9dc142713e399e074aa82. Both update only PROJECT_CONTEXT.md. PR #14 branch HEAD is now 77b073bf0b35cbfcedc9dc142713e399e074aa82; the reviewed application-code snapshot remains 9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9.
+- The review findings were written to PROJECT_CONTEXT.md through documentation-only GitHub commits. No application source, test, workflow or production files were changed by this context update. The reviewed application-code snapshot remains 9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9.
 - Base SHA recorded by PR metadata: 3afed37192b66c57aba2f17ba841a84a60227cda
 - Review date: 2026-11-16 (Pakistan local date, UTC+05:00).
 - Read-only review worktree: /tmp/binance-deepseek-verify on the Remote Desktop Commander host.
@@ -2231,7 +2231,7 @@ The repository contains substantial implementation for all 21 module areas, but 
 - Older sections describe announcement-worker/ as present on a feature branch. It is absent from the current PR #14 branch; the workflow still points to it.
 - Older test counts (329, 510, 522, 649, 650–655 and 38 skips) are historical snapshots. The exact current PR-head CI result is 655 run / 0 failures / 38 skipped in run 43854798245. The 660/38 result belongs to the local unpushed five-file follow-up.
 - The latest gap register still has older module status/checkpoint/test-count statements. Reconcile it separately after this context update; do not use it to override the current PR #14 branch facts.
-- Existing local worktree contains five uncommitted modifications, including a local PROJECT_CONTEXT.md change. This GitHub update is performed through the GitHub file API and must not be used to overwrite/reset/sync that local worktree. After these two documentation-only commits, the local branch is behind the GitHub branch by two commits; reconcile with a non-destructive fetch/rebase/merge only after checking all local diffs and preserving the five modified files.
+- Existing local worktree contains five uncommitted modifications, including a local PROJECT_CONTEXT.md change. This GitHub update is performed through the GitHub file API and must not be used to overwrite/reset/sync that local worktree. The local branch is behind the GitHub branch by documentation-only commits made after the reviewed application-code SHA. Inspect the exact remote commit count before reconciling; use a non-destructive fetch/rebase/merge only after checking all local diffs and preserving the five modified files.
 
 ### Required fix/acceptance sequence (do not mark complete prematurely)
 1. Add TDD regression for Module 21 PASS-to-VERIFIED contract mapping; verify both SQLite and PostgreSQL authorization adapters.
