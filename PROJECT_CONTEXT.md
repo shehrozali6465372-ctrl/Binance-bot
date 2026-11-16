@@ -2274,3 +2274,19 @@ The repository contains substantial implementation for all 21 module areas, but 
 - Important limitations: Module 5 source independence is content-hash based; Module 6 market snapshot candidate identity is unstable; Module 18 exact-copy-only factual sentences do not fulfil the intended analysis lane; Module 20 lacks independent background OCR/vision.
 - Review correction: Cloudflare Workers AI request is already multipart; the earlier preliminary JSON allegation was incorrect and must not be repeated.
 - No application code was modified or cleaned up by this review.
+
+## Neon branch/database audit — 2026-11-17 (read-only; no production cutover)
+
+- Rechecked the linked Neon project `Binance-bot-staging` (`orange-glade-36037611`). No dedicated production Neon project/branch was identified in the linked account inventory.
+- Branches inspected: `staging`, `module9-pg-integration-test` (`br-falling-bread-azl8rggt`), and `module9-pg-lease-fencing-disposable` (`br-falling-butterfly-az03rryi`). The latter two remain test/disposable branches; do not repurpose either as production.
+- Important correction to the initial table inventory: each branch contains two databases, `binance_bot_staging` and `binance_onchain_test`. Table inventory is database-specific:
+  - Integration branch / `binance_bot_staging`: announcement ingestion tables plus six Layer-1 on-chain ingestion tables; no publication ledger tables.
+  - Integration branch / `binance_onchain_test`: six Layer-1 on-chain ingestion tables plus `layer1_schema_migrations`; no publication attempt, quota reservation, publication authorization, or durable run lease tables.
+  - Disposable branch / `binance_bot_staging`: announcement ingestion, Layer-1 ingestion, content/research/analytics, and publication tables including `publication_attempts`, `publication_authorizations`, `publication_quota_reservations`, `publication_reconciliation_events`, and `runs`.
+  - Disposable branch / `binance_onchain_test`: broad Layer-1/content/research schema plus publication tables and `layer1_run_lease`, `layer1_runs`, and `layer1_schema_migrations`.
+- Read-only schema inspection confirmed quota reservation has a UTC day key, status check constraint, unique reservation id and unique attempt id; publication attempts enforce unique idempotency key and unique remote post id, plus constrained status/content hash; publication authorization references draft, editorial brief, research package and quota reservation; `layer1_run_lease` enforces one agent lease and references `layer1_runs`.
+- This demonstrates the disposable branch contains the richer test schema, not that it is production-ready. The integration branch's two DBs do not carry the full publication persistence schema. The staging branch inventory also does not demonstrate a complete, validated production publication ledger.
+- No row contents, credentials, DSNs, secrets, or user payloads were read. No Neon writes, branch promotions, compute setting changes, or resource provisioning occurred.
+- GitHub Actions runs `43907241840` (commit `13d38c195ad6e837d6f5465beab6433cf56b54ce`) and `43907254115` (commit `f760cad9072359f06b873618b6de2fed7f0ac13f`) both completed with conclusion `success`.
+- PR #14 remains open/draft/unmerged as of this audit; no merge, deployment, workflow dispatch, production write, credential change, schedule change, or real Binance Square publication occurred.
+- Decision: keep the production publisher disabled and `DRY_RUN=1`. Before any approved live cutover, provision/identify a dedicated production database, apply and verify the exact migrations against it, verify role grants/least privilege, TLS/host allowlist, backup/restore and retention, quota/run-lease concurrency, and only then configure production GitHub secret/variable in a separately approved change. Never use the disposable test branch as production.
