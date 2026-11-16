@@ -35,6 +35,9 @@ _CAUSAL_RELATION_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern
     r"\bas\s+a\s+result\b", r"\bon\s+account\s+of\b",
     r"\btherefore\b", r"\bconsequently\b",
 ))
+_COMPOUND_TEMPORAL_ACTION_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    r"\b(?:before|after)\s+[a-z]+ing\b",
+))
 
 
 def _timestamp(value: str) -> datetime:
@@ -356,7 +359,11 @@ class EvidenceVerificationEngine:
         if (any(pattern.search(claim.text) for pattern in _CAUSAL_RELATION_PATTERNS)
                 and not direct_announcement_assertion):
             issues.add("CAUSAL_RELATION_REQUIRES_DIRECT_SOURCE_ASSERTION")
-        if len(split_atomic_claims(claim.text)) > 1 and not direct_announcement_assertion:
+        has_multiple_propositions = (
+            len(split_atomic_claims(claim.text)) > 1
+            or any(pattern.search(claim.text) for pattern in _COMPOUND_TEMPORAL_ACTION_PATTERNS)
+        )
+        if has_multiple_propositions and not direct_announcement_assertion:
             issues.add("COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE")
 
         event_scope = claim.event_at

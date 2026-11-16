@@ -133,6 +133,32 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertEqual(result.state, "UNVERIFIED")
         self.assertIn("COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE", result.issues)
 
+    def test_temporal_before_after_second_action_cannot_borrow_one_market_field_evidence(self):
+        market = record(value=8.0, claim_key="market.price_change", unit="%")
+        for text in (
+            "ABC price rose 8% before falling 4%",
+            "ABC price gained 3% after rising 2%",
+        ):
+            with self.subTest(text=text):
+                candidate = Claim(
+                    text=text, subject=market.subject, asset_id=market.asset_id,
+                    claim_key="market.price_change", value=8.0, unit="%", timeframe="spot",
+                    observed_at=iso(), evidence_ids=(market.evidence_id,), max_age_seconds=3600,
+                )
+                result = self.engine.verify([candidate], [market]).results[0]
+                self.assertEqual(result.state, "UNVERIFIED")
+                self.assertIn("COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE", result.issues)
+
+        single_fact = Claim(
+            text="ABC price was 8% before 2026-11-20",
+            subject=market.subject, asset_id=market.asset_id,
+            claim_key="market.price_change", value=8.0, unit="%", timeframe="spot",
+            observed_at=iso(), evidence_ids=(market.evidence_id,), max_age_seconds=3600,
+        )
+        single_result = self.engine.verify([single_fact], [market]).results[0]
+        self.assertEqual(single_result.state, "VERIFIED")
+        self.assertNotIn("COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE", single_result.issues)
+
     def test_direct_primary_announcement_body_can_remain_attributed_source_assertion(self):
         body = "Binance listed ABC because the project completed its review."
         source = record(
