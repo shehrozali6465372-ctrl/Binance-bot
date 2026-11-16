@@ -1,8 +1,56 @@
 # Binance Square Write-to-Earn Agent — Canonical Project Context
 
-Last updated: 2026-11-15 (UTC) — Module 21 exact event-to-publication correlation audit
+Last updated: 2026-11-16 (Pakistan local date, UTC+05:00) — complete Layer 1–21 deep code review and continuation-state reconciliation
 
 This is the canonical working context for continuing the Binance Square Write-to-Earn Agent project. Keep this file in this GitHub repository and update it as work progresses. Do not use ChatGPT Library or create a parallel Library copy.
+
+## CURRENT CONTINUATION OVERRIDE — 2026-11-16 (COMPLETE LAYER 1–21 CODE REVIEW)
+
+This is the latest authoritative continuation state. It supersedes older "current" instructions and checkpoints below. Historical notes are retained for traceability; do not treat their branch, worktree, file-presence, test-count or next-task statements as current unless reverified.
+
+### Current GitHub target and exact baseline
+- Repository: https://github.com/shehrozali6465372-ctrl/Binance-bot
+- Active review target: PR #14 — https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/14
+- PR state at review: OPEN, DRAFT, UNMERGED.
+- Head branch: layer-1/module9-onchain-continuation
+- Base branch: layer-1/module9-onchain-intelligence
+- GitHub head SHA at review: 9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9
+- Base SHA recorded by PR metadata: 3afed37192b66c57aba2f17ba841a84a60227cda
+- Review date: 2026-11-16 (Pakistan local date, UTC+05:00).
+- Read-only review worktree: /tmp/binance-deepseek-verify on the Remote Desktop Commander host.
+- Local worktree HEAD at review: 9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9, branch layer-1/module9-onchain-continuation.
+- Five local modified files were present and must be preserved: layer1/evidence_verification.py, tests/test_evidence_verification.py, tests/test_content_verification.py, PROJECT_CONTEXT.md and MODULES_11_21_GAP_REGISTER.md. They contain the additional bounded Module 11 negation/direction/unit follow-up and test/documentation updates. They are not included in the GitHub head above and must not be discarded, overwritten, or mistaken for GitHub code.
+- Other existing worktrees, including /tmp/binance-continue-85351, were not modified or deleted by this review.
+
+### Verified CI and test evidence
+- Latest GitHub Actions run for the exact PR head: run 43854798245, commit 9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9, SUCCESS: https://github.com/shehrozali6465372-ctrl/Binance-bot/actions/runs/43854798245
+- Its actual job ran compileall and unittest discovery: 655 tests, 0 failures, 38 skipped. The 38 skips are guarded PostgreSQL integration tests requiring TEST_POSTGRES_DSN; they are not passes and do not prove PostgreSQL behavior.
+- The local follow-up worktree separately recorded 660 tests, 0 failures, 38 skipped, with 65 focused evidence-verification tests passing. These counts apply to the five-file local follow-up, not the GitHub head.
+- GitHub CI is a mocked/offline test run. It does not establish live Binance market ingestion, live announcement import, live DeepSeek inference on the scheduled workflow, current-head Cloudflare image generation, authenticated Binance media upload, real Square publishing, or production database persistence.
+- An earlier authenticated DeepSeek/Cloudflare provider smoke run (43782717263) was on main at commit d8628e109496b2d4d937ff417edd9361baa62b80, not the current PR head. Do not use it as current-head provider acceptance evidence.
+- The current PR-head image request unit tests do assert multipart/form-data, but they are mocked tests, not a live Cloudflare request.
+
+### Review safety and scope
+- The review was read-only with respect to application code. No source implementation was changed, deleted, committed, pushed, merged or deployed by the review.
+- No real Binance Square post, Binance media upload, scheduled workflow dispatch, production DB write, credential/schedule change or paid resource provisioning occurred.
+- DRY_RUN remains 1 in the scheduled workflow. Do not change it or enable the publisher during fixes or verification.
+- There is no independently enforced PUBLISHER_ENABLED kill switch in the current code. Do not treat DRY_RUN alone as an adequate production safety architecture.
+- Do not use Codex. Preserve existing local changes/worktrees. Do not use the personal browser for this project.
+- The review findings below are audit findings and fix requirements, not permission to alter production behavior. Implement in isolated, reviewed changes with TDD and explicit user approval before any code commit/push beyond the explicitly authorized documentation update, merge, deploy, publisher activation or production write.
+
+### Immediate continuation priorities
+1. Fix the confirmed Module 21 PASS-versus-VERIFIED authorization contract mismatch.
+2. Fix the confirmed Module 12 illegal event-lifecycle transition for non-material revisions of STALE/RESOLVED events; add SQLite and PostgreSQL parity tests.
+3. Fix the Git history push/retry logic and stop persisting token-bearing remote URLs in .git/config.
+4. Make scheduled-run persistence and daily quota durable before any live-publishing enablement; the current workflow only restores published_posts.jsonl and never restores agent.db.
+5. Integrate Module 9 workers with the actual runtime and PostgreSQL-compatible store interfaces; do not claim Module 9 is operational merely because provider worker classes and PostgreSQL stores exist.
+6. Correct Modules 2, 5, 6, 7 and 14–18 integration gaps documented in the 2026-11-16 review below.
+7. Obtain a current-PR-head authenticated Cloudflare and DeepSeek provider smoke test, then separately verify Binance media upload in a safe non-publishing test path. Never publish a real Square post.
+8. Reconcile this file with MODULES_11_21_GAP_REGISTER.md after the code findings are accepted; the gap register still contains older status/test checkpoints and should not override this current review.
+
+## HISTORICAL CONTINUATION OVERRIDE — 2026-11-12 (SUPERSEDED BY 2026-11-16)
+
+This section is retained as historical context only. Its old branch, worktree, HEAD, device, Module 9 distributed-lease next-task and file-presence details do not describe the current PR #14 review baseline. Follow the 2026-11-16 override above.
 
 ## CURRENT CONTINUATION OVERRIDE — 2026-11-12
 
@@ -1996,3 +2044,218 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - Latest verification: evidence-verification **61 passed**; combined evidence/content/research-package/DeepSeek-generator **103 passed**; full repository **655 tests, 0 failures, 38 skipped**. All 38 skips require TEST_POSTGRES_DSN and are not passes. compileall and git diff --check passed after the final source changes.
 - Scope remains deterministic binding for supported claim formats, not general semantic entailment. Arbitrary prose, negation, modality, directional predicates, asset-symbol mismatch in free prose, and unrecognized paraphrases are not comprehensively resolved. Module 11 remains **PARTIAL / NOT COMPLETE**.
 - Current changes remain local in detached worktree /tmp/binance-continue-85351 at base HEAD 22391cbed66f6458bf33f8accd68837cdbee6b07. Four files are modified: layer1/evidence_verification.py, tests/test_evidence_verification.py, PROJECT_CONTEXT.md, MODULES_11_21_GAP_REGISTER.md. No commit or push, merge, deployment, workflow dispatch, production DB write, live provider request, media upload or Binance Square post occurred. Other existing worktrees were left untouched.
+
+## 2026-11-16 — Complete Layer 1–21 deep code review (PR #14)
+
+### Review method and evidence boundary
+- Reviewed the PR #14 branch code in the local worktree at the exact GitHub head 9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9, including main.py, image_engine.py, layer1 modules, tests, migrations, scripts, active GitHub workflows and the 21-module locked architecture.
+- Read the canonical project context and MODULES_11_21_GAP_REGISTER.md and compared their claims against the current branch, current file inventory, runtime call sites, current CI and local worktree state.
+- Ran read-only AST/static duplicate scans, tracked-file SHA-256 comparison, call-site searches, test/reference inspection, git status and git diff --check. No exact byte-identical tracked files or duplicate top-level class/function definitions were found by those scans. This does not mean there is no duplicated business logic or obsolete path.
+- Reproduced the Module 12 lifecycle failure with a local SQLite fixture. The Module 21 status mismatch is directly visible in the caller and authorization contract. Other integration findings were established by tracing runtime call sites and adapter type checks.
+- No code was modified during this review. Findings below are classified as confirmed defects, integration gaps, design/acceptance gaps or cleanup candidates; do not treat every observation as a proven runtime crash.
+
+### Executive assessment
+The repository contains substantial implementation for all 21 module areas, but the current PR is not an accepted end-to-end production system. The most important blockers are: publication authorization status mismatch; illegal event lifecycle transition; non-durable scheduled-run state/daily quota; failed Git push recovery and credential-bearing remote URL; Module 9 workers not wired into the runtime and incompatible with the PostgreSQL store classes; and opportunity/editorial/content stages that are not currently connected as their intended policy flow. Keep DRY_RUN=1 and publishing disabled.
+
+### Module-by-module findings
+
+#### Module 1 — Foundation, configuration and orchestration
+- Core configuration, persistence and orchestration code exists; no claim is made that the entire module is missing.
+- Operational blocker: the active scheduled workflow runs on a fresh GitHub-hosted runner, restores only published_posts.jsonl, and uploads agent.db only as an artifact. It does not restore agent.db on the next run. See .github/workflows/run_bot.yml:38–42 and 70–89.
+- The main runtime defaults to the local SQLite database unless a separate PostgreSQL publication backend is explicitly configured. The active workflow maps ANNOUNCEMENT_DATABASE_URL for the read-only announcement ledger, not a durable agent-state DATABASE_URL/PERSISTENCE_BACKEND. See workflow lines 44–68 and main.py database/configuration initialization.
+- Consequence: event, market, candidate, lifecycle, draft, authorization/quota and other SQLite state can be lost between scheduled runs. The daily count helper reads post_analytics from the current DB (main.py:1115–1131); it does not count the JSONL history. If live publishing were enabled on this ephemeral workflow, MAX_DAILY_POSTS=6 could reset with a fresh DB on subsequent runs. This is a release blocker, currently contained by DRY_RUN=1.
+- The workflow cache uses the same fixed key for restore and save (run_bot.yml:38–42, 70–75). GitHub Actions cache entries are immutable for an existing key; this is not a reliable rolling-state store.
+- No destructive action was taken.
+
+#### Module 2 — Market data intelligence
+- MarketDataIntelligenceEngine is instantiated in main.py:5419–5422 with fetch_json=lambda *_: None.
+- The runtime normalizes the existing CoinGecko payload at main.py:5470–5477. The engine's fetch_binance_24h method exists at layer1/foundation.py:1005 onward, but no runtime call site invokes it; the only matches outside the method definition are tests.
+- Therefore the intended independent Binance 24-hour ticker observation/cross-provider comparison is not active in the normal pipeline. The Binance exchangeInfo eligibility snapshot is a separate product/status check and must not be misrepresented as Binance price/volume market data.
+- Module 8 market analysis can operate on persisted observations, but those observations currently derive from the CoinGecko path. Cross-provider validation is not established.
+
+#### Module 3 — Binance Spot eligibility
+- This is one of the stronger integrated areas: current runtime fetches and validates official exchangeInfo/Spot eligibility and revalidates before media work and again after media work, before authorization (main.py:4971–4980 and 5036–5045).
+- Preserve the fail-closed eligibility and canonical asset identity checks. Do not weaken them while fixing adjacent modules.
+- Remaining live-provider reliability and current-head acceptance must be tested separately; mocked tests are not live exchangeInfo acceptance.
+
+#### Module 4 — Announcement intelligence/import
+- The Python importer is a read-only consumer of the official announcement ledger; main.py:5328–5338 conditionally invokes it only when ANNOUNCEMENT_DATABASE_URL is present.
+- The active PR #14 branch does not contain the announcement-worker/ directory, while .github/workflows/announcement-worker-tests.yml:7–13 and 30–32 refer to that directory and run npm test from it. This workflow's manual dispatch/test job cannot work against this branch as checked because its working directory is absent.
+- Older context sections describe the announcement-worker as present on a separate feature branch. Treat that as historical/separate workstream, not evidence that it exists in the current PR #14 tree.
+- The importer and the source producer are separate components. A successful importer unit test does not prove that the upstream live CMS worker is running or that the database is being populated.
+
+#### Module 5 — Trending/narrative intelligence
+- layer1/foundation.py:1423–1433 defines independent_source_count by grouping distinct content_hash fingerprints (or a conservative unknown-topic fingerprint).
+- This measures distinct content fingerprints, not independently verified publisher/provider identities. Different content from the same provider can be counted as multiple independent sources. Do not describe this metric as proof of independent-source corroboration.
+- Source lineage/provider identity should be represented and validated explicitly before using this count for evidence strength.
+
+#### Module 6 — Candidate discovery and filtering
+- Candidate identity includes event cluster IDs, trend cluster IDs, or market_refs as the final fallback (layer1/foundation.py:1568–1580 and 1658–1677).
+- For market-only candidates, market_refs derive from market data hashes/endpoints (line 1574) and are used as the identity basis (lines 1658–1671). A new market snapshot can therefore create a new candidate ID even if the underlying asset/opportunity has not materially changed. This can weaken deduplication and candidate continuity.
+- Announcement/candidate identity and event-lifecycle identity use different derivation paths. The current runtime also performs source/event-type lookups when selecting lifecycle state. A single canonical event identity/correlation contract is needed across candidate, graph, research, editorial and lifecycle records.
+- Keep asset identity and eligibility validation intact; do not fix candidate continuity by merging unrelated assets/events.
+
+#### Module 7 — Relevance scoring
+- The new RelevanceScoringEngine is invoked (main.py:5604–5613), but all five inputs — event_materiality, source_credibility, freshness, audience_relevance and novelty — are passed as None. The engine therefore persists an explicit deferred score rather than inventing evidence. This is correct fail-closed behavior.
+- The actual legacy candidate-ranking path later assigns a heuristic score from absolute 24-hour price change and volume ratio when Skills Hub scoring is unavailable (main.py:4584–4598). That heuristic, not the new evidence-based relevance score, controls ranking.
+- Result: Module 7's evidence-based scorer is not the operative ranking policy. Do not activate guessed weights; either provide owner-approved evidence-backed components or keep the system in review/defer mode and make the legacy heuristic's non-authoritative status explicit.
+
+#### Module 8 — Market analysis
+- Market analysis is built from stored CoinGecko observations and available historical/peer/benchmark data (main.py:5470–5477 and 5535–5557).
+- Because Module 2 does not call the Binance ticker fetch method and scheduled SQLite history is not restored, independent-provider comparison and durable longitudinal analysis are not established in the current scheduled runtime.
+- Keep unavailable history/benchmark fields explicitly unavailable; never synthesize market history or infer a return series from a single snapshot.
+
+#### Module 9 — On-chain intelligence
+- Runtime accepts onchain_aggregation_by_asset as an optional argument with a default of None, then converts None to an empty mapping (main.py:4226–4227, 5232–5247). The public run_once/main entrypoints do not instantiate or run the provider workers and do not supply this mapping. A repository search found no non-test worker constructor call sites.
+- Consequently the normal scheduled pipeline reports onchain_aggregation_status=NOT_PROVIDED and cannot attach on-chain aggregation summaries to candidates/graph.
+- All four provider worker constructors require isinstance(mapping_store, OnChainStore) and isinstance(ingestion_store, OnChainIngestionStore): layer1/onchain_evm_worker.py:42, onchain_bitcoin_worker.py:35, onchain_solana_worker.py:31, onchain_xrpl_worker.py:35.
+- PostgresOnChainStore and PostgresOnChainIngestionStore are separate classes and are not subclasses of those SQLite classes. Verified with issubclass checks: both False. Thus the existing PostgreSQL stores cannot be passed directly to the current workers; constructors reject them.
+- Worker/provider/store implementations and migrations are not equivalent to an operational ingestion service. A real runtime runner, store abstraction/adapter and safe ownership/scheduling/monitoring are still required. Earlier context mentions onchain_evm_store.py and onchain_worker_lifecycle.py in a separate worktree; those files are absent from the current PR #14 branch and must not be assumed present here.
+- No live chain provider calls or production ingestion were made.
+
+#### Module 10 — Event intelligence graph
+- The graph is rebuilt from persisted records in main.py:5614–5629 and receives on-chain summary references from onchain_graph_refs.
+- Since Module 9 is not wired and the runtime input defaults to an empty mapping, on-chain graph entities/relationships are not produced by the normal scheduled path. The graph can still represent other stored events/claims; do not call the entire graph module absent.
+- Candidate IDs, event lifecycle IDs and graph entity IDs need an explicit shared correlation contract to prevent split or orphaned event records.
+
+#### Module 11 — Evidence verification
+- The PR head contains deterministic evidence registry, source provenance, structured metric/value/unit binding and bounded compound-claim controls. It is not general natural-language semantic entailment.
+- GitHub-head evidence-verification focused suite recorded in the preceding history: 61 passing tests for the structured source-assertion checkpoint. The current local follow-up worktree adds negation/direction/unit cases and records 65 focused tests; those additional changes are local-only and not in GitHub HEAD.
+- Remaining limitations: arbitrary paraphrases, free-prose asset-symbol mismatch, general negation/modal/conditional scope, unrecognized compound grammar, arbitrary non-market prose and complete sentence-to-evidence semantic entailment.
+- Unknown or unsupported claims must remain UNVERIFIED/UNRESOLVED. Do not promote a regex/lexical guard into a claim of complete semantic verification.
+
+#### Module 12 — Event lifecycle
+- Confirmed reproducible defect in both SQLite and PostgreSQL transition implementations.
+- Transition map: STALE and RESOLVED can reopen only through UNDER_VERIFICATION (layer1/event_lifecycle.py:20–29).
+- In observe(), the non-material-revision branch can leave a STALE/RESOLVED event in its old state, but a later VERIFIED branch includes UNDER_VERIFICATION, STALE and RESOLVED and can select CONFIRMED directly (event_lifecycle.py:224–260). That transition is illegal under the declared transition graph and raises ValueError.
+- The PostgreSQL implementation mirrors the same transition logic (layer1/event_lifecycle_postgres.py:130–167).
+- A local SQLite fixture reproduced the failure for a stale event receiving a non-material revision. The same logic exists in PostgreSQL; live PostgreSQL reproduction remains unrun because TEST_POSTGRES_DSN was not configured in the current CI/local environment.
+- Existing lifecycle tests cover material changes, old-source replay and stale handling, but do not cover the non-material revision after STALE/RESOLVED case (tests/test_event_lifecycle.py:110–128, 177–220, 392 onward).
+- Fix the state decision so a non-material revision does not reopen a stale/resolved event; add exact SQLite and isolated PostgreSQL regression tests. Preserve material-revision reopening semantics.
+
+#### Module 13 — Deep research package
+- Research package assembly checks required source kinds, unresolved claims and lifecycle states (layer1/research_package.py:194–243).
+- The source coverage report is source-kind coverage, not proof that each source independently supports each claim or that multiple source records are independent publishers. Preserve the distinction between evidence availability and evidence support.
+- Module 13 is connected into the runtime before opportunity evaluation (main.py:4425–4442), but downstream policy inputs still defer the pipeline.
+
+#### Module 14 — Opportunity evaluation
+- The runtime hardcodes unsupported_causal_framing=False and materially_new=False, computes duplicate_angle from the cooldown, and passes factors=None and policy=None (main.py:4443–4458).
+- This intentionally fails closed, but means the runtime has no calibrated evidence-backed opportunity policy and cannot legitimately produce PROCEED from this path.
+- Editorial strategy is only invoked inside the PROCEED branch (main.py:4470–4485). Therefore the current configuration blocks the intended editorial/content path rather than completing it.
+- Do not invent weights or enable PROCEED until an owner-approved policy and source-backed factor calculation are defined.
+
+#### Module 15 — DeepSeek integration
+- The dedicated client supports the configured model identifiers (layer1/deepseek_client.py:20–21), but the legacy DeepSeekGenerator in main.py remains responsible for decision and writing prompts (main.py:3326–3376).
+- Phase 1 ranking uses a free-text prompt/parser rather than a constrained structured-output contract (main.py:3341–3374 and 3594–3609). Rank completeness, uniqueness, symbol membership and candidate membership need strict deterministic validation.
+- If the model returns a symbol not found in the research packages, main.py logs the mismatch and falls back to research_packages[0] (main.py:4791–4809). This silently converts an invalid model decision into a different candidate selection. Reject the decision instead of substituting another asset.
+- Provider smoke evidence from main at d8628e1 does not verify the current PR head's scheduled runtime.
+
+#### Module 16 — Editorial strategy
+- EditorialStrategyEngine is invoked only if OpportunityEvaluationEngine returns PROCEED (main.py:4470–4485).
+- Because current runtime passes policy=None and factors=None, the normal path remains deferred and the editorial engine is not reached. Unit tests of the editorial engine do not establish runtime integration.
+- The locked architecture's editorial requirements need an explicit accepted opportunity policy and end-to-end test fixture before this module is marked complete.
+
+#### Module 17 — Content generation and draft persistence
+- Actual DeepSeek content generation is still performed by DeepSeekGenerator.generate() in main.py:3376–3403 and its prompt builder at 3613 onward. The layer1 content-generation module primarily provides draft/validation persistence rather than owning the complete model-generation lifecycle.
+- Model output metadata such as provider request ID, token usage and latency should be persisted as structured run metadata if required for reproducibility/cost monitoring; current review did not establish a complete durable audit for these fields.
+- Keep exact draft hash, approved claim IDs, research package and editorial brief provenance bindings. Do not weaken them to improve generation yield.
+
+#### Module 18 — Content verification
+- The verifier requires exactly one claim marker per factual sentence and exact normalized sentence text equality with the referenced claim (layer1/content_verification.py:105–125).
+- The writing prompt explicitly says every factual sentence must copy claim text verbatim, and says qualified non-factual analysis should be omitted unless a future explicit policy approves it (main.py:3645–3652).
+- This is conservative but does not fulfil the architecture's intended labelled interpretation/implications/alternative-explanation content. A policy-backed non-factual analysis lane is needed; do not allow unlabelled analysis to masquerade as verified facts.
+- The verifier correctly rejects unresolved claims, mismatched cashtags and trade-instruction patterns. Preserve those controls.
+
+#### Module 19 — Cloudflare image generation (IMPORTANT REVIEW CORRECTION)
+- The earlier preliminary review message incorrectly claimed that the active Cloudflare request used JSON. That claim was based on legacy JSON code elsewhere in image_engine.py and was wrong for the current Workers AI generator.
+- The actual CloudflareWorkersAIImageGenerator.generate() builds multipart/form-data at image_engine.py:130–178; tests/test_cloudflare_image_generation.py:217–242 and 255 onward explicitly exercise multipart behavior.
+- Do not record or act on the earlier JSON-versus-multipart allegation as a defect. Current request serialization is already multipart in the PR head.
+- The remaining acceptance gap is provider verification on the exact current PR head. The earlier authenticated provider smoke run was on main commit d8628e1, not 9c02c85. Mocked request tests are not a live current-head provider test.
+- Legacy GitHub image upload JSON code around image_engine.py:1076–1091 is a different path and must not be confused with the Cloudflare Workers AI request.
+
+#### Module 20 — Visual quality
+- Deterministic validation checks PNG decoding, dimensions, byte size, final-image hash against the sidecar, draft/image pairing, asset identity, approved model, prompt/generation metadata, overlay labels, geometry, contrast, overlap, chart references and numeric overlays (layer1/visual_quality.py:44–112 and 127–220).
+- It does not run OCR or an independent vision classifier over the generated background to detect unrequested text, logos, watermarks or visual hallucinations. Metadata/overlay validation cannot prove the background is text/logo-free.
+- Add an independent visual/OCR acceptance stage if the locked design requires that property. Do not claim current visual QA proves absence of background text or logos.
+
+#### Module 21 — Publication authorization and publisher
+- Confirmed contract mismatch: main.py:5098–5108 passes content_verification.status as evidence_status. ContentVerificationResult success is PASS (layer1/content_verification.py:146–151), but PublicationAuthorization.validate_for_submission requires evidence_status == VERIFIED (layer1/publication_authorization.py:107–115). The normal successful result therefore fails the evidence authorization gate if this path is reached. The PostgreSQL authorization adapter enforces the same contract.
+- main.py passes duplicate_policy_passed=True at line 5110 rather than having the authorization boundary independently validate the duplicate/cooldown evidence. The pre-generation cooldown checks remain separate controls; do not treat this hardcoded boolean as a fresh authorization proof.
+- upload_authorized_image verifies the persisted authorization and submitted image hash list (image_engine.py:1405–1438), but it does not reread the image file and recompute its SHA-256 immediately before upload. A file replacement between visual validation/authorization and upload is a time-of-check/time-of-use risk. Rehash the exact bytes immediately before network upload and bind those bytes to the authorization.
+- No independent PUBLISHER_ENABLED kill switch was found. The workflow's DRY_RUN=1 currently blocks external publishing, but a single DRY_RUN configuration change can expose the live path once the other gates are corrected. Require an independent, default-off publisher enablement control plus explicit environment/credential policy before any activation.
+- The runtime correctly revalidates exact Binance Spot eligibility before and after image work (main.py:4971–4980 and 5036–5045); preserve this.
+- The current scheduled workflow is not production-safe for live publishing until durable DB state, quota, authorization and end-to-end acceptance are complete.
+
+### Cross-cutting bugs and operational blockers
+
+#### A. Git history push/retry can report success without a remote push
+- main.py:678–695 commits the history file; if the first push fails, the retry loop tries another commit.
+- If that second commit reports "nothing to commit", the code returns True immediately at main.py:683–689 without attempting git push.
+- _retry_pending_push() checks only uncommitted files via git status at main.py:774–791. A committed-but-unpushed local HEAD is therefore not detected.
+- The recovery mechanism can silently leave published_posts.jsonl history absent from GitHub.
+- _try_git_push() sets origin to a token-bearing HTTPS URL at main.py:697–702 and does not restore the original remote URL. This leaves the token in the local .git/config for the remainder of the workspace lifetime. Use a temporary auth header/credential helper and never persist the token in remote config.
+- Add tests for push failure after commit, retry with clean worktree but ahead-of-remote HEAD, token-safe auth and restoration/absence of credential material.
+
+#### B. GitHub Actions state persistence and quota
+- Active workflow .github/workflows/run_bot.yml:38–42 restores only published_posts.jsonl; lines 70–89 save the same fixed-key cache and upload agent.db as an artifact.
+- agent.db is not restored on the next scheduled run. GitHub-hosted scheduled runners are fresh environments.
+- main.py:1115–1131 counts today's posts from post_analytics in the DB and returns zero on DB errors. It does not derive the count from the restored JSONL file.
+- Therefore SQLite state and daily quota can reset between runs if the live workflow is enabled. DRY_RUN=1 currently contains this risk; it is a hard release blocker.
+- Do not use immutable GitHub Actions cache entries as a database. Use a deliberately approved durable persistence service or keep live publishing disabled.
+
+#### C. Duplicate/obsolete implementation paths and cleanup candidates
+- SHA-256 scan found no exact byte-identical tracked files. AST scan found no duplicate top-level class/function definitions. This does not rule out semantic duplication.
+- The new evidence-based relevance scorer and the legacy heuristic ranking both exist; the latter remains the operative ranking path when Skills Hub scoring is unavailable.
+- The active publisher has a single main runtime path, but legacy publisher/image fallback code and old helpers remain. Review each by call graph before deletion.
+- github/workflows/run_bot.yml is outside GitHub's recognized .github/workflows directory. It is a stale/legacy workflow file, not an active GitHub Actions workflow. It also contains older configuration/duplicate YAML jobs keys and should be removed only after verifying no external tooling references it.
+- .github/workflows/announcement-worker-tests.yml refers to announcement-worker/, which is absent from this PR branch. Either restore that feature on its intended branch or retire/retarget this stale workflow; do not pretend it tests this PR.
+- Skills Hub BAPI is explicitly disabled in main.py:4302–4305; skills_used is hardcoded False and skills_candidates is empty. Do not report Skills Hub discovery as operational.
+- TradeSetup/EmotionEngine and other legacy helpers should be classified by actual call-site reachability before deletion. No bulk deletion was performed.
+- The review found no exact duplicate files and did not delete any code.
+
+### Security, reliability and testing gaps still open
+- Git push token is written into the local origin URL (main.py:697–702).
+- Live publisher has no independent default-off kill switch.
+- Scheduled SQLite state and quota are ephemeral.
+- PostgreSQL integration tests are skipped in GitHub CI (38 skips); no claim of current-head PostgreSQL concurrency acceptance.
+- No current-head live Binance media upload, no real Square post and no scheduled live workflow dispatch.
+- Current-head authenticated DeepSeek/Cloudflare provider smoke tests remain unverified; the older main-branch provider smoke is historical only.
+- OCR/vision background validation is missing.
+- General semantic entailment and non-factual analysis policy are incomplete.
+- No real provider response, production DB state, or production outcome may be inferred from mocked tests.
+
+### Context and repository cross-check discrepancies
+- Before this update, the file's top "CURRENT CONTINUATION OVERRIDE — 2026-11-12" still directed continuation to Module 9 distributed worker leases and a different branch/worktree. It is now relabelled historical; this 2026-11-16 override is authoritative.
+- Older sections describe layer1/onchain_evm_store.py and layer1/onchain_worker_lifecycle.py as existing in a different worktree. They are absent from the current PR #14 branch.
+- Older sections describe announcement-worker/ as present on a feature branch. It is absent from the current PR #14 branch; the workflow still points to it.
+- Older test counts (329, 510, 522, 649, 650–655 and 38 skips) are historical snapshots. The exact current PR-head CI result is 655 run / 0 failures / 38 skipped in run 43854798245. The 660/38 result belongs to the local unpushed five-file follow-up.
+- The latest gap register still has older module status/checkpoint/test-count statements. Reconcile it separately after this context update; do not use it to override the current PR #14 branch facts.
+- Existing local worktree contains five uncommitted modifications, including a local PROJECT_CONTEXT.md change. This GitHub update is performed through the GitHub file API and must not be used to overwrite/reset/sync that local worktree. After this documentation commit, the local branch will be behind the GitHub branch by the documentation commit; reconcile with a non-destructive fetch/rebase/merge only after checking all local diffs and preserving the five modified files.
+
+### Required fix/acceptance sequence (do not mark complete prematurely)
+1. Add TDD regression for Module 21 PASS-to-VERIFIED contract mapping; verify both SQLite and PostgreSQL authorization adapters.
+2. Add TDD regression for Module 12 non-material revision after STALE and RESOLVED; verify SQLite and dedicated PostgreSQL integration.
+3. Fix Git push recovery to detect ahead-of-remote commits and retry push without relying on uncommitted files; remove token-bearing remote URL persistence.
+4. Design/approve durable state for scheduled runtime and enforce daily quota across independent runs; keep DRY_RUN=1.
+5. Define store protocols/adapters for Module 9 workers and PostgreSQL, add a runner with safe worker ownership/monitoring, then test on an isolated PostgreSQL DB.
+6. Integrate Binance market ticker fetch or explicitly revise the Module 2 acceptance contract; do not infer Binance market data from exchangeInfo.
+7. Replace trend hash uniqueness with provider/source identity evidence; stabilize candidate/event identity across revisions and market snapshots.
+8. Keep Module 7 deferred until all scoring factors have evidence; prevent legacy heuristic from being represented as the evidence-based score.
+9. Define and approve opportunity factors/policy before PROCEED; only then test editorial strategy and content generation end-to-end.
+10. Introduce a structured DeepSeek ranking schema and reject unknown/duplicate/out-of-set symbols instead of fallback selection.
+11. Define a separate policy-backed labelled analysis lane for Module 18 while preserving exact factual claim attribution and trade-instruction rejection.
+12. Verify current PR-head DeepSeek and Cloudflare providers with authenticated smoke tests; verify media upload in a safe isolated path without Square publication.
+13. Add OCR/independent vision acceptance for Module 20 if required by the locked architecture.
+14. Rehash the exact image bytes immediately before upload and independently validate duplicate policy at authorization.
+15. Add tests for GitHub Actions persistence, workflow paths, stale workflow references, push failures, authorization boundaries and end-to-end failure recovery.
+16. Update MODULES_11_21_GAP_REGISTER.md after each accepted fix and maintain a single current status table.
+17. Keep all publishing disabled, no real Square posts, no production DB writes, no merge/deploy, and no paid resources unless separately approved.
+
+### Final review conclusion
+- Overall status: PARTIAL / NOT PRODUCTION-READY.
+- Modules 1–21 have code artifacts, but several module contracts are deferred, disconnected or not accepted end-to-end.
+- Confirmed defects: Module 12 illegal transition; Module 21 PASS/VERIFIED mismatch; Git push retry false-success; token-bearing origin URL persistence; scheduled workflow state/daily quota loss if publishing is enabled.
+- Confirmed integration gaps: Module 2 Binance ticker not called; Module 9 workers not run and PostgreSQL store type incompatibility; Module 14 policy/factors missing and editorial path blocked; Module 15 invalid-symbol fallback; Module 16 unreachable under current deferred policy.
+- Important limitations: Module 5 source independence is content-hash based; Module 6 market snapshot candidate identity is unstable; Module 18 exact-copy-only factual sentences do not fulfil the intended analysis lane; Module 20 lacks independent background OCR/vision.
+- Review correction: Cloudflare Workers AI request is already multipart; the earlier preliminary JSON allegation was incorrect and must not be repeated.
+- No application code was modified or cleaned up by this review.
