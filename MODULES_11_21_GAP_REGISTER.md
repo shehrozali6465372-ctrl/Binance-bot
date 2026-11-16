@@ -1329,3 +1329,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Kept the existing exact “Binance announced a listing” event-type template because a package test relies on that explicit mapping. Evidence-verification: **61 passed**; combined evidence/content/research-package/DeepSeek-generator: **103 passed**; full repository: **655 tests, 0 failures, 38 skipped**. The 38 are TEST_POSTGRES_DSN-guarded PostgreSQL tests, not passes. compileall and git diff --check passed.
 - This is structured text/value binding, not general semantic entailment. Arbitrary prose, negation, modality, directional predicates, free-prose asset-symbol mismatch and unrecognized paraphrases remain unresolved. Module 11 remains **PARTIAL / NOT COMPLETE**.
 - Local-only change in /tmp/binance-continue-85351 at PR #14 base HEAD 22391cbed66f6458bf33f8accd68837cdbee6b07. Four files modified; no commit/push, merge, deployment, workflow dispatch, production write, live provider call, media upload or Binance post. Other worktrees preserved.
+
+## Neon persistence branch audit — 2026-11-17 (read-only)
+
+- Compared both databases (`binance_bot_staging`, `binance_onchain_test`) on the integration and disposable Neon branches. The integration branch lacks publication ledger tables in both databases; its `binance_onchain_test` has only Layer-1 ingestion tables and `layer1_schema_migrations`.
+- The disposable branch contains publication attempts, authorizations, quota reservations, reconciliation events, and run persistence tables. Its `binance_onchain_test` additionally contains `layer1_run_lease`, `layer1_runs`, and schema migration ledger. Inspected key table columns, indexes, foreign keys and status checks read-only.
+- This is test-schema evidence only, not production readiness. Do not point scheduled publishing at either disposable branch. Staging branch does not yet prove full publication-ledger schema coverage.
+- GitHub Actions documentation-push runs 43907241840 and 43907254115 both completed SUCCESS.
+- No Neon writes/config changes, secret changes, workflow dispatch, merge/deploy, publisher activation, or real post occurred. Keep DRY_RUN=1 and publisher disabled. Production requires a separately identified/provisioned database and explicit cutover approval.
