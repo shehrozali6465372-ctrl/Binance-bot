@@ -1,0 +1,123 @@
+name: Manual Provider Verification (DeepSeek + Cloudflare)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-verification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-providers:
+    name: Verify DeepSeek and Cloudflare only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Credentials are injected directly into the process environment.
+      # Never echo, print, serialize, or upload these values.
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install image decoder
+        run: python -m pip install --disable-pip-version-check Pillow
+
+      - name: Run bounded authenticated provider checks
+        shell: bash
+        run: |
+          set +x
+          python - <<'PY'
+          import os
+          import sys
+          import time
+          from pathlib import Path
+
+          required = (
+              "DEEPSEEK_API_KEY",
+              "DEEPSEEK_MODEL",
+              "CLOUDFLARE_API_TOKEN",
+              "CLOUDFLARE_ACCOUNT_ID",
+          )
+          missing = [name for name in required if not os.environ.get(name, "").strip()]
+          if missing:
+              print("Provider verification blocked: required GitHub secret/variable is missing: " + ", ".join(missing))
+              sys.exit(2)
+
+          from layer1.deepseek_client import DeepSeekClient
+          from image_engine import CloudflareWorkersAIImageGenerator
+
+          # Run both providers independently so one failure does not hide the other result.
+          failed = False
+          # One short text request; no retries, no user/project content, no output text in logs.
+          try:
+              deepseek = DeepSeekClient(
+                  os.environ["DEEPSEEK_API_KEY"],
+                  model=os.environ["DEEPSEEK_MODEL"],
+                  timeout_seconds=20,
+                  max_tokens=32,
+                  temperature=0,
+                  max_retries=0,
+              )
+              result = deepseek.chat(
+                  "Reply with exactly this token and no other text: DEEPSEEK_PROVIDER_OK",
+                  system_prompt="You are performing a minimal provider connectivity check.",
+              )
+              if result is None or result.text.strip() != "DEEPSEEK_PROVIDER_OK":
+                  print("DeepSeek authenticated generation: FAIL (response validation failed)")
+                  failed = True
+              else:
+                  print(
+                      "DeepSeek authenticated generation: PASS"
+                      f" | model={result.model}"
+                      f" | latency_ms={result.latency_ms}"
+                      f" | total_tokens={result.total_tokens if result.total_tokens is not None else 'unreported'}"
+                  )
+          except Exception as exc:
+              print(f"DeepSeek authenticated generation: FAIL ({type(exc).__name__})")
+              failed = True
+
+          # One small generic image request. Output stays in /tmp and is deleted.
+          image_path = Path("/tmp/provider-verification.png")
+          try:
+              generator = CloudflareWorkersAIImageGenerator(
+                  api_token=os.environ["CLOUDFLARE_API_TOKEN"],
+                  account_id=os.environ["CLOUDFLARE_ACCOUNT_ID"],
+                  timeout_seconds=60,
+              )
+              started = time.monotonic()
+              artifact = generator.generate(
+                  "A simple abstract geometric illustration with soft blue and teal shapes; no text, logos, people, financial symbols, or brand marks.",
+                  image_path,
+                  width=256,
+                  height=256,
+              )
+              print(
+                  "Cloudflare Workers AI image generation: PASS"
+                  f" | model={artifact.model}"
+                  f" | format={artifact.format}"
+                  f" | dimensions={artifact.width}x{artifact.height}"
+                  f" | bytes={artifact.byte_length}"
+                  f" | latency_ms={round((time.monotonic() - started) * 1000)}"
+              )
+          except Exception as exc:
+              print(f"Cloudflare Workers AI image generation: FAIL ({type(exc).__name__})")
+              failed = True
+          finally:
+              image_path.unlink(missing_ok=True)
+
+          if failed:
+              sys.exit(1)
+          PY
