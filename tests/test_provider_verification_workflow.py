@@ -17,6 +17,9 @@ class ProviderVerificationWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn("\n  push:", self.source)
         self.assertNotIn("\n  pull_request:", self.source)
 
+    def test_checkout_uses_layer1_source_branch(self):
+        self.assertIn("ref: layer-1/module9-onchain-continuation", self.source)
+
     def test_only_provider_credentials_are_injected(self):
         self.assertIn("DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}", self.source)
         self.assertIn("CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}", self.source)
