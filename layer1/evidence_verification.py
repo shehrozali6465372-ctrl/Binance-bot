@@ -1354,6 +1354,7 @@ _SHARED_SUBJECT_PREDICATE = re.compile(
 )
 _SHARED_SUBJECT_CONJUNCTION = re.compile(
     rf"(?:\s+(?:and|but)\s+(?:(?:then|also|later|subsequently)\s+)?|"
+    rf"\s+(?:then|later|subsequently)\s+|"
     rf",\s*(?:then|later|subsequently)\s+)"
     rf"({_INDEPENDENT_CLAUSE_VERB})\b",
     re.IGNORECASE,
