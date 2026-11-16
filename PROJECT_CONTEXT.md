@@ -1888,3 +1888,34 @@ Continue Module 11 only: implement structured atomic-claim extraction/classifica
 - Commits: workflow fix `e149e0a6fa2a44827fb8095f01545d2523fa3f1d`; regression test `ce1637e972921c6085a566155b60414341e31292`.
 - Manual provider run `43782717263` on `main` completed successfully with both real authenticated checks passing: DeepSeek `deepseek-flash` (997 ms, 30 total tokens) and Cloudflare Workers AI `@cf/black-forest-labs/flux-2-klein-4b` (JPEG 256x256, 6132 ms). This is live provider evidence, not a mocked test.
 - Credentials are not printed. Production publisher, scheduled workflow, production database, and publishing credentials remain untouched.
+
+
+## Latest authoritative checkpoint — live provider verification passed — 2026-11-16
+
+### Verified GitHub state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Continuation branch: `layer-1/module9-onchain-continuation`.
+- PR #14: https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/14
+- PR #14 is still **OPEN / DRAFT / UNMERGED**; base branch remains `layer-1/module9-onchain-intelligence`.
+- Branch HEAD at this checkpoint: `dbe0d13cf5f3a5cfe17971f6179dd1157aa029e1`.
+- The latest Phase 1 Safety Tests run for that exact HEAD is run `43782814185`, completed **SUCCESS**. The immediately preceding documentation commit also passed in run `43782807214`.
+
+### Live DeepSeek + Cloudflare provider acceptance
+- Manual-only workflow: `.github/workflows/provider-verification.yml`.
+- Workflow is available on `main`; current workflow definition commit: `d8628e109496b2d4d937ff417edd9361baa62b80`.
+- Workflow explicitly checks out `layer-1/module9-onchain-continuation` for provider implementation code. This fixes the earlier `ModuleNotFoundError: No module named 'layer1'` caused by checking out `main` for code that existed only on the continuation branch.
+- Latest live run: `43782717263`, completed **SUCCESS** on `main`: https://github.com/shehrozali6465372-ctrl/Binance-bot/actions/runs/43782717263
+- DeepSeek authenticated generation: **PASS** — model `deepseek-flash`, latency 997 ms, 30 total tokens.
+- Cloudflare Workers AI image generation: **PASS** — model `@cf/black-forest-labs/flux-2-klein-4b`, JPEG, 256x256, 6,132 ms.
+- This is real authenticated provider acceptance, not mocked CI. It verifies one bounded request to each provider only; it does not establish long-duration reliability, rate-limit behavior, production throughput, or complete end-to-end agent acceptance.
+- DeepSeek smoke-test false negative was fixed: workflow previously required the generated response to equal one exact sentinel string. It now accepts a non-null result from `DeepSeekClient.chat()`; the client validates the response structure, non-empty assistant content, model identity, and normal completion. A `None` result still fails. Regression test added to prevent reintroducing exact-string matching.
+- Relevant commits: workflow branch fix `e149e0a6fa2a44827fb8095f01545d2523fa3f1d`; regression test `ce1637e972921c6085a566155b60414341e31292`; later documentation/status commits are recorded in GitHub history.
+- Secret-handling boundary remains unchanged: keys are read from GitHub Secrets/Variables as process environment variables; never print, echo, serialize, or upload secret values, response bodies, or generated text.
+
+### Safety boundary and remaining work
+- No real Binance Square post was made. Production publisher was not activated.
+- Existing scheduled `run_bot.yml`, production database, credentials, and schedules were not changed or triggered by this verification.
+- No PR merge, deployment, or paid infrastructure provisioning occurred.
+- PR #14 remains open/draft/unmerged. Continue from its current branch and HEAD; do not recreate modules or restart the project.
+- Provider connectivity is now verified. Modules 19–21 and overall production readiness must not be marked complete solely from this smoke test; remaining module-specific and end-to-end acceptance gates still need separate evidence.
+- Before further code changes, inspect current GitHub PR/branch state and existing implementation. Preserve the user's constraints: no Codex, no personal browser for this project, no production publishing, no credential exposure, and no merge/deploy without explicit approval.
