@@ -1264,3 +1264,14 @@ This checklist does not authorize the work to be marked done merely by checking 
 - GitHub Actions run `43786286550` on code commit `6c04de2e021dd64618df521921720cfef5b3118b` completed SUCCESS: `compileall` passed and **649 tests ran, 0 failures, 38 skipped**. The 38 skips are guarded DB tests in CI; the selected PostgreSQL suites were run separately as recorded above. Subsequent commits `a9a5dca2012910358c35534b217a28aedfbe5b17` and `a4677d705b313e04b54e479cd2871ce1609d717f` update documentation only.
 - No real Binance POST, publisher activation, production DB operation, scheduled workflow dispatch, credentials/schedule change, merge or deployment occurred.
 - Remaining blockers are unchanged: Module 11/12 bounded semantic limitations; Module 13 source-acquisition and outage/independence coverage; Modules 16–18 full semantic/originality/policy acceptance; Module 19 authenticated Binance media upload; Module 20 independent OCR/vision validation; Module 21 complete end-to-end runtime acceptance and production persistence cutover. The PR scheduled workflow provider mismatch recorded above remains a hard release blocker.
+
+
+## 2026-11-16 — DeepSeek/Cloudflare scheduled-workflow alignment
+- User explicitly approved aligning only the provider environment mappings in `.github/workflows/run_bot.yml`.
+- Commit: `0a97bfa848c3700400120b32eb4cfb04f437ebe8`.
+- Replaced `GEMINI_API_KEY` / `GEMINI_MODEL` with `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL=deepseek-flash`; added `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. Existing `SQUARE_API_KEY`, `GH_TOKEN`, and `ANNOUNCEMENT_DATABASE_URL` mappings were preserved.
+- Verified the workflow diff contains only these provider mapping changes. Five-minute cron (`*/5 * * * *`) and `DRY_RUN: "1"` are unchanged. No dispatch or scheduled run was triggered.
+- GitHub Actions run `43786947834` on the exact workflow-change commit completed SUCCESS: Python compile step passed and the full mocked publication safety test job passed. This is CI evidence, not a scheduled workflow runtime test.
+- PR #14 remains OPEN / DRAFT / UNMERGED. No production publisher activation, Binance POST, production DB operation, merge or deployment occurred.
+- Prior authenticated provider smoke evidence remains separately valid: run `43782717263` verified one DeepSeek `deepseek-flash` completion and one Cloudflare Workers AI image generation. It did not invoke the scheduled bot workflow or Binance publisher.
+- The former Gemini/DeepSeek environment mismatch is closed in the PR branch configuration. Remaining release blockers are unchanged: scheduled runtime is intentionally not dispatched; Modules 11–18 have semantic/source/policy acceptance gaps; Module 19 real Binance media upload is unverified; Module 20 independent OCR/vision acceptance is incomplete; Module 21 end-to-end runtime and production persistence cutover are incomplete. Do not mark the project production-ready.
