@@ -2484,3 +2484,91 @@ Interpretation:
 - `mocked-safety-tests` completed successfully on this latest HEAD.
 - PR remains OPEN / DRAFT / UNMERGED.
 - The manual dry-run workflow run `44146147107` tested the preceding application/config commit `cac870c589ce326764d287ad678e02c500a54d3a`; the subsequent commit only appended this context verification record.
+
+
+---
+
+## 2026-11-18 — Single-project, multi-location inventory and reconciliation
+
+### Scope and authority
+
+- This remains **one Binance Square Write-to-Earn Agent project**, not separate projects. Development, testing and deployment have been distributed across stacked GitHub branches/PRs, several local worktrees, the ChatGPT Library, Neon test branches and a Render CMS worker.
+- Canonical repository: \`shehrozali6465372-ctrl/Binance-bot\`.
+- Default branch \`main\` was at \`5c94cca52d80a9786295772c905ae1f3cdc71159\` during this audit. \`PROJECT_CONTEXT.md\` is absent from \`main\` (GitHub contents API returned 404); the active project context is on the open PR #14 head branch, not the default branch.
+- PR #14 was OPEN / DRAFT / UNMERGED at pre-audit head \`28353d311f44b448357a92aab976d7477445d536\` (93 commits, 65 changed files). This audit supersedes the older tail note below that still calls \`1362947d5a1cda645fb2f7b58936f22252369b6a\` the latest branch commit.
+- The locked architecture is a design contract, version 1.0 dated 2026-11-09. It defines 21 logical modules in one modular system; it does not describe 21 microservices and does not claim that all modules are implemented or production-ready.
+- Current PR #14 files include \`PROJECT_CONTEXT.md\`, \`Binance_Square_W2E_20x_LOCKED_Architecture.md\`, and \`MODULES_11_21_GAP_REGISTER.md\`. The current GitHub architecture blob SHA is \`8991f44b154dbb76bc86950d5a91b84541b54448\` (68,588 characters in the fetched file). The gap register's top status says cross-cutting blocker #1 has implementation and isolated PostgreSQL acceptance verified, while live operational cutover remains pending; its documented acceptance batch is 44 passed.
+
+### GitHub pull-request and branch map
+
+The repository had 14 PRs and 17 branches. PRs #4 and #5 are merged; the other 12 PRs are open. Current PR states and branch relationships:
+
+- #1 — Phase 1 publishing safety foundation: OPEN / DRAFT.
+- #2 — Isolated Binance CMS announcement listener: OPEN / DRAFT; base \`layer-1/completion-hardening\`, head \`feature/binance-cms-announcement-worker\`, SHA \`55ff3e6a409a6f2b7b944c43772140b788556223\`.
+- #3 — Isolated Binance CMS worker and scheduled ingestion: OPEN / DRAFT; base \`main\`, head \`integration/binance-cms-worker-main\`, SHA \`47e85384f2eeba2ac5bb4f2fb2cfa26ec4dc6558\`.
+- #4 — Manual CMS smoke dispatch: MERGED.
+- #5 — Neon worker TLS mode: MERGED.
+- #6 — CMS WebSocket startup error race: OPEN / DRAFT; base \`integration/binance-cms-worker-main\`, head \`fix/cms-websocket-startup-error-race\`, SHA \`1608f9f8130cc2aa7ec1142788e42c8df84e1c6c\`.
+- #7 — Module 1 orchestration hardening: OPEN.
+- #8 — Module 2 market-data hardening: OPEN.
+- #9 — Module 3 Binance Spot eligibility: OPEN.
+- #10 — Module 4 announcement intelligence: OPEN.
+- #11 — Modules 5–6 candidate/trend intelligence: OPEN.
+- #12 — Module 8 market analysis: OPEN; head SHA \`f7e6fc511e146b6bfb6f25afb0009c369d8afd4a\`.
+- #13 — Module 9 on-chain foundation: OPEN / DRAFT; head SHA \`3afed37192b66c57aba2f17ba841a84a60227cda\`.
+- #14 — Modules 11–21 continuation: OPEN / DRAFT; base is PR #13's branch.
+
+PRs #7–#14 form a stacked Layer 1 development chain. Do not treat them as independent products or merge them out of order. PRs #2, #3 and #6 are the overlapping CMS worker workstream and must be reconciled separately.
+
+### CMS worker duplication and deployed implementation
+
+- PR #2 and PR #3 touch 17 identical paths. Of those, 11 files have identical Git blob SHAs; six have different content: the two workflow files, worker README, \`announcement-worker/src/worker.js\`, scheduled-workflow tests and worker-lifecycle tests. They are parallel versions of the same CMS worker capability, not two separate products.
+- PR #6 is a follow-up to PR #3 and is 27 commits ahead of PR #3. Its startup-race fix attaches transport error/open/close listeners before awaiting the transport connection. It switches from the high-level \`Cms\` connection path to \`CmsWebsocketStreams\` / \`WebsocketStreamsBase\`, and removes the worker-managed ping/pong timers in favor of the SDK's signed-stream keepalive. This is a material transport/heartbeat change, not a trivial patch; do not merge PR #6 wholesale into PR #2 without reviewing the SDK contract and regression tests.
+- PR #2 and PR #3 have diverged from a common base; PR #2 is the more integrated feature branch and includes the Python importer and scheduled-agent wiring. PR #2 is the CMS branch deployed to Render.
+- Render service \`binance-cms-announcement-worker\` is a free-plan Node Web Service on \`feature/binance-cms-announcement-worker\`. Its latest successful deployment during this audit was commit \`55ff3e6a409a6f2b7b944c43772140b788556223\` (deployment \`dep-dbtp6nralhtc73fho520\`, 2026-11-16 23:36 UTC). This matches PR #2's current head. It is a CMS ingestion worker, not a Binance Square publisher.
+- **Deployed-branch code risk:** PR #2's \`announcement-worker/src/worker.js\` awaits \`client.websocketStreams.connect()\` before registering \`connection.on("error")\` (connect at line 180; error listener at line 276 in the fetched PR #2 file). PR #6's tests and fix target the early WebSocket error-listener race. The deployed PR #2 code therefore still has the same vulnerable listener ordering. This is a code-level risk, not proof that the live service has crashed. Reconcile/port the narrow fix after review; preserve the existing service and do not change deployment without approval.
+
+### Local worktree inventory — preserve all existing state
+
+Eight local directories are checkouts of the canonical \`Binance-bot\` repository; one additional directory is a different repository whose relationship is unverified:
+
+1. \`/tmp/binance-blocker1-fix\` — clean; branch \`layer-1/module9-onchain-continuation\`; HEAD \`28353d311f44b448357a92aab976d7477445d536\`. This is the current clean local mirror of PR #14.
+2. \`/tmp/binance-deepseek-verify\` — branch \`layer-1/module9-onchain-continuation\`; HEAD \`9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9\`; 16 modified tracked files plus untracked \`tests/test_git_sync.py\`. Contains local, uncommitted follow-up changes for publication status mapping, publisher default-off gating, duplicate-policy recomputation, lifecycle transition validation, image-byte hash revalidation and token-safe Git push/retry. These changes are not in current PR #14 and must not be overwritten or assumed accepted.
+3. \`/tmp/binance-continue-85351\` — detached HEAD \`22391cbed66f6458bf33f8accd68837cdbee6b07\`; four modified files. Its modified evidence-verification source/test files are byte-identical to current PR #14; its local context/gap-register changes remain divergent and must be preserved.
+4. \`/tmp/binance-layer1-audit\` — branch \`layer-1/module9-onchain-intelligence\`; HEAD \`3afed37192b66c57aba2f17ba841a84a60227cda\`; 15 modified tracked files and 10 untracked paths, including a pre-existing \`.venv/\`. Local-only work adds worker lease/lifecycle/store-adapter code, a PostgreSQL migration, tests and a Module 9 integration workflow. These changes are not on GitHub PR #13.
+5. \`/tmp/binance-pr14-acceptance\` — detached HEAD \`a4677d705b313e04b54e479cd2871ce1609d717f\`; clean historical snapshot, 27 commits behind current PR #14.
+6. \`/tmp/binance-runtime-fix\` — detached HEAD \`4dd006834e0d265411119fa276ff2808d0ab701f\`; clean historical snapshot, 55 commits behind current PR #14.
+7. \`/tmp/binance-bot-check\` — feature-branch checkout at \`d47466f3aa10c7695929a4be18b3dad3367ef900\`; it is 39 commits behind PR #2's current head \`55ff3e6a409a6f2b7b944c43772140b788556223\`. Its local remote-tracking ref is stale. It has untracked \`.venv/\` and \`announcement-worker/node_modules/\`; preserve both.
+8. \`/tmp/Binance-bot-gh-review-loop\` — branch \`integration/binance-cms-worker-main\`; HEAD \`47e85384f2eeba2ac5bb4f2fb2cfa26ec4dc6558\`, matching PR #3; untracked \`announcement-worker/node_modules/\`; preserve.
+9. \`/tmp/binance-square-agent\` — different origin, \`stephen20250410/binance-square-agent\`; local \`main\` is two commits ahead of its origin and has an untracked \`README.live-poster.md\`. Its relationship to canonical \`Binance-bot\` is not established. Do not import or merge it as canonical project code without provenance review.
+
+The detached PR #14 snapshots are ancestors of the current PR #14 head, not independent project branches. The local dirty changes in \`binance-deepseek-verify\` and \`binance-layer1-audit\` are separate uncommitted work and must be preserved. No reset, clean, stash, checkout, force-push or worktree deletion was performed.
+
+### Local verification performed during this audit
+
+- In \`/tmp/binance-deepseek-verify\`, the focused regression batch completed **236 tests, 0 failures, 24 skipped**. The skipped cases require a PostgreSQL test DSN. \`compileall\` and \`git diff --check\` passed. The run explicitly unset PostgreSQL DSNs and provider/publisher credentials; it did not contact providers, databases or Binance publishing endpoints. This is local follow-up evidence only, not PR #14 acceptance.
+- In \`/tmp/binance-layer1-audit\`, the focused Module 9 worker/lease/lifecycle batch completed **95 tests, 0 failures, 28 skipped** with PostgreSQL DSN and provider credentials unset. \`compileall\` and \`git diff --check\` passed. The skipped tests require PostgreSQL integration configuration. The local Module 9 document records an earlier 377-test PostgreSQL-enabled run on 2026-11-16; that historical run was not repeated in this audit.
+- The Module 9 local changes include a process-local \`OnChainWorkerRunner\`, durable scoped lease/fencing code and shared storage adapters. The current runtime still accepts on-chain aggregation as injected input; it does not construct/start the worker fleet or runner. Provider credentials and approved monitored-account seeds remain absent. Do not describe Module 9 as production-ready or runtime-integrated.
+
+### Documentation source reconciliation
+
+- Current GitHub \`PROJECT_CONTEXT.md\` on PR #14 is 2,487 lines / 367,599 characters. Its previous tail still named \`1362947d...\` as the latest commit; this 2026-11-18 inventory supersedes that statement.
+- The Library \`Binance_Square_W2E_Agent_Master_Context.md\` version 28 is a historical 2026-11-09 snapshot, not the current continuation record.
+- The Library contains eight byte-identical copies of the locked architecture document. They are identical to one another but **not equal to the current GitHub architecture file**: Library copies are 62,800 characters; the current GitHub version is 68,588 characters with blob SHA \`8991f44b154dbb76bc86950d5a91b84541b54448\`. Treat all eight Library copies as stale snapshots; do not use them to override the current GitHub architecture and do not delete them during this audit.
+- The Library's 2026-11-16 production-blocker register is historical and is not the same file/scope as the current GitHub \`MODULES_11_21_GAP_REGISTER.md\`. The latter's current top entry records blocker #1 as isolated PostgreSQL acceptance verified, with live operational cutover still pending.
+- GitHub \`ONCHAIN_INTELLIGENCE.md\` on PR #13 is the checked-in Module 9 document. The local Module 9 worktree's version is 558 lines and contains a further 87-line local-only addendum; that addendum is not on PR #13.
+
+### Neon and production boundary
+
+- The prior read-only Neon inventory found only the \`Binance-bot-staging\` project, with staging and disposable Module 9 test branches/databases. No dedicated production Neon project/branch was identified. Do not relabel or promote any staging/disposable branch as production.
+- No Neon writes, promotions, credential reads, production schema changes, provider RPC calls, publisher activation or real Binance Square publication occurred during this audit.
+- Keep \`DRY_RUN=1\`; keep the production publisher disabled. Do not merge, deploy, change schedules/credentials, provision paid infrastructure or modify production resources without separate explicit approval.
+
+### Exact continuation order
+
+1. Continue the single-project implementation registry from this inventory. Compare each source location against the current PR #14 / PR #13 code before deciding whether it is duplicate, superseded or unique.
+2. Reconcile the PR #6 WebSocket startup-race fix with deployed PR #2. Review the SDK transport/keepalive contract and port only the necessary tested behavior; do not merge PR #6 wholesale.
+3. Review the uncommitted \`binance-deepseek-verify\` follow-up patch against current PR #14, preserve all local changes, and only integrate after a complete diff/test review.
+4. Review the uncommitted Module 9 worker lease/lifecycle implementation, complete its PostgreSQL acceptance, and design runtime wiring only after the storage/lease contracts are accepted. Do not duplicate the existing worker implementations.
+5. Continue the known Layer 1 gaps from the 2026-11-16 review: Module 2 real Binance ticker acquisition; evidence-based Module 7 scoring; approved opportunity factors before Modules 14/16; structured DeepSeek ranking; policy-backed Module 18 analysis lane; independent OCR/vision checks for Module 20; and remaining Module 21 publication/recovery hardening.
+6. Keep all tests dry-run/mocked unless a separately approved isolated test target is explicitly configured. Never publish a real Binance Square post as a test.
