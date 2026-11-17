@@ -2532,7 +2532,7 @@ PRs #7–#14 form a stacked Layer 1 development chain. Do not treat them as inde
 
 Eight local directories are checkouts of the canonical \`Binance-bot\` repository; one additional directory is a different repository whose relationship is unverified:
 
-1. \`/tmp/binance-blocker1-fix\` — clean; branch \`layer-1/module9-onchain-continuation\`; HEAD \`28353d311f44b448357a92aab976d7477445d536\`. This is the current clean local mirror of PR #14.
+1. \`/tmp/binance-blocker1-fix\` — clean; branch \`layer-1/module9-onchain-continuation\`; HEAD \`28353d311f44b448357a92aab976d7477445d536\`. This was the clean pre-audit mirror of PR #14 at HEAD 28353d3; after the two documentation-only context commits below, it is now two commits behind the current PR #14 head. Its worktree remains clean.
 2. \`/tmp/binance-deepseek-verify\` — branch \`layer-1/module9-onchain-continuation\`; HEAD \`9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9\`; 16 modified tracked files plus untracked \`tests/test_git_sync.py\`. Contains local, uncommitted follow-up changes for publication status mapping, publisher default-off gating, duplicate-policy recomputation, lifecycle transition validation, image-byte hash revalidation and token-safe Git push/retry. These changes are not in current PR #14 and must not be overwritten or assumed accepted.
 3. \`/tmp/binance-continue-85351\` — detached HEAD \`22391cbed66f6458bf33f8accd68837cdbee6b07\`; four modified files. Its modified evidence-verification source/test files are byte-identical to current PR #14; its local context/gap-register changes remain divergent and must be preserved.
 4. \`/tmp/binance-layer1-audit\` — branch \`layer-1/module9-onchain-intelligence\`; HEAD \`3afed37192b66c57aba2f17ba841a84a60227cda\`; 15 modified tracked files and 10 untracked paths, including a pre-existing \`.venv/\`. Local-only work adds worker lease/lifecycle/store-adapter code, a PostgreSQL migration, tests and a Module 9 integration workflow. These changes are not on GitHub PR #13.
@@ -2552,7 +2552,7 @@ The detached PR #14 snapshots are ancestors of the current PR #14 head, not inde
 
 ### Documentation source reconciliation
 
-- Current GitHub \`PROJECT_CONTEXT.md\` on PR #14 is 2,487 lines / 367,599 characters. Its previous tail still named \`1362947d...\` as the latest commit; this 2026-11-18 inventory supersedes that statement.
+- Before the 2026-11-18 inventory append, GitHub \`PROJECT_CONTEXT.md\` on PR #14 was 2,487 lines / 367,599 characters; after the two documentation-only updates it is 2,585 lines / 383,226 characters. Its previous tail still named \`1362947d...\` as the latest commit; this 2026-11-18 inventory supersedes that statement.
 - The Library \`Binance_Square_W2E_Agent_Master_Context.md\` version 28 is a historical 2026-11-09 snapshot, not the current continuation record.
 - The Library contains eight byte-identical copies of the locked architecture document. They are identical to one another but **not equal to the current GitHub architecture file**: Library copies are 62,800 characters; the current GitHub version is 68,588 characters with blob SHA \`8991f44b154dbb76bc86950d5a91b84541b54448\`. Treat all eight Library copies as stale snapshots; do not use them to override the current GitHub architecture and do not delete them during this audit.
 - The Library's 2026-11-16 production-blocker register is historical and is not the same file/scope as the current GitHub \`MODULES_11_21_GAP_REGISTER.md\`. The latter's current top entry records blocker #1 as isolated PostgreSQL acceptance verified, with live operational cutover still pending.
@@ -2582,3 +2582,11 @@ The detached PR #14 snapshots are ancestors of the current PR #14 head, not inde
 - PR #2's worker also configures a 30-second application heartbeat and calls \`connection.pingServer()\` while waiting for PONG. Therefore the deployed PR #2 implementation runs a redundant application-level heartbeat alongside the SDK's own signed-stream keepalive. This is a code-level redundancy; no failure or provider-side rejection was observed in this audit.
 - PR #6 removes the application-level ping/pong timer and relies on the SDK keepalive, while attaching transport listeners before the initial handshake. That design is consistent with the inspected pinned SDK source. Before porting it, add explicit SDK contract assertions for the low-level \`CmsWebsocketStreams.WebsocketStreamsConnection\` and \`WebsocketStreamsBase\` exports and keepalive/reconnect behavior; PR #6's current \`sdk-contract.test.js\` directly asserts the high-level \`Cms\` constructor and URL but does not explicitly assert those low-level exports.
 - Recommended reconciliation: keep one keepalive owner (the pinned SDK), retain explicit transport health/degradation state, and register transport listeners before starting the handshake. Do not merge the PR #6 branch wholesale into deployed PR #2; port and test the minimal contract-compatible change on the deployed branch only after approval.
+
+
+### Post-audit context commit verification
+
+- Documentation-only context commits: \`44d7cd96b0392daf582b82a390fb3259e92f6443\` (inventory) and \`b8f76464d3fb97d799f8ab07d2087b5fb08c170a\` (CMS SDK keepalive/startup-race addendum).
+- Current PR #14 head after those updates: \`b8f76464d3fb97d799f8ab07d2087b5fb08c170a\`; PR remains OPEN / DRAFT / UNMERGED.
+- Both commits changed only \`PROJECT_CONTEXT.md\`. No application source, workflow, database, credential, schedule, or deployment was changed.
+- \`/tmp/binance-blocker1-fix\` remains clean at its pre-audit SHA \`28353d311f44b448357a92aab976d7477445d536\`; it has not been pulled or modified and is now two documentation-only commits behind GitHub PR #14.
