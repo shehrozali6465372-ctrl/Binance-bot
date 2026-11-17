@@ -2590,3 +2590,54 @@ The detached PR #14 snapshots are ancestors of the current PR #14 head, not inde
 - PR #14 remains OPEN / DRAFT / UNMERGED. Verify the live PR head through GitHub metadata before any future update.
 - \`/tmp/binance-blocker1-fix\` remains clean at the pre-audit SHA \`28353d311f44b448357a92aab976d7477445d536\`; it was not pulled or modified and is a historical snapshot, not the current GitHub PR #14 head.
 - These updates changed only \`PROJECT_CONTEXT.md\`. No application source, workflow, database, credential, schedule or deployment was changed.
+
+
+## FOUR-PLATFORM CANONICAL MASTER MAP — 2026-11-18
+
+**Superseding audit:** This entry records the 18 November 2026 read-only reconciliation across GitHub, Render, Neon and Remote Desktop Commander. The detailed operator map is stored in the user's Library as `/Binance_Bot_Canonical_Master_Map_2026-11-18.md` (51,441 bytes; SHA-256 `d2e9f1431eb670fabdcf2698e66d8a2257e7f979f60e676c7d63e6949897efc4`). Use that map as the current four-platform inventory and execution sequence. It does not replace the locked architecture or this context file's project history.
+
+### GitHub — current state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`; default `main` HEAD observed `5c94cca52d80a9786295772c905ae1f3cdc71159`.
+- PR #14 remains OPEN / DRAFT / UNMERGED; current branch `layer-1/module9-onchain-continuation`, HEAD `c88d4feb1a3d8b8c8d15a875557ce9cef2818976`; base PR #13 branch at `3afed37192b66c57aba2f17ba841a84a60227cda`.
+- PR #14 code baseline immediately before the documentation-only audit commits is `28353d311f44b448357a92aab976d7477445d536`. The selected clean local worktree is at this code SHA; GitHub branch then advanced to `c88d4fe...` through docs-only commits.
+- Latest PR #14 safety CI run `44195471227` for `c88d4fe...` completed SUCCESS. This is CI evidence, not production release acceptance.
+- PR #7–#14 are stacked; no merge, retarget or rebase performed. PR #2/#3/#6 remain a separate CMS reconciliation track.
+- PR #14 workflow declares `DRY_RUN: "1"`, `MAX_ITERATIONS: "1"`, and defaults persistence to SQLite unless `PERSISTENCE_BACKEND` is configured. Secret values were not read. Two 17 Nov `workflow_dispatch` runs on this branch (`44146147107`, `44141611015`) completed successfully with this workflow configuration; one earlier run (`44122320123`) failed in the agent step. No external Square publication confirmation was sought or claimed.
+
+### Render — current state
+- The only Binance Render service found is `binance-cms-announcement-worker`, service ID `srv-dbrr6ctg1s2s73dbi0cg`, in the third Render account/workspace.
+- It is a free Singapore web service connected to `shehrozali6465372-ctrl/Binance-bot` branch `feature/binance-cms-announcement-worker` (PR #2), URL `https://binance-cms-announcement-worker.onrender.com`.
+- Latest live deploy `dep-dbtp6nralhtc73fho520` uses commit `55ff3e6a409a6f2b7b944c43772140b788556223`, completed 16 Nov 2026 23:36:45 UTC. A prior attempt immediately before it failed; the subsequent build/deploy succeeded.
+- 17 Nov app log samples contain recurring CMS heartbeat pong messages. The 17–18 Nov warn/error query returned no matching logs; the retrieved log page does not certify continuous health through the full 18 Nov day.
+- No Binance publisher web service and no Render-managed PostgreSQL instance were found across the three inspected Render accounts. No Render deploy/restart/env change was made.
+
+### Neon — production-project discovery supersedes older notes
+- The current Binance Neon account exposes three Binance-named projects; therefore the prior statement “no production Neon project identified” is superseded:
+  1. `Binance-bot-production`, project `orange-glade-36037611`. Its default `production` branch DB `binance_bot_production` contains only CMS event/worker tables and read-only counts show 16 announcement events, 1 worker-state row and 1 CMS migration. This is likely the read-only announcement ledger, but the actual `ANNOUNCEMENT_DATABASE_URL` secret binding is unverified.
+  2. `Binance-bot-publisher-production`, project `withered-cherry-74978567`. Default `production` branch DB `binance_publisher_production` contains the Module 1–21/publisher schema; read-only counts show 5 Layer 1 migrations but zero posts, runs, metrics, publication attempts, authorizations, quota reservations, reconciliation events, candidates and on-chain transfer events. This is the likely publisher-ledger target, but the actual `POSTGRES_DSN` secret binding is unverified; do not claim production cutover.
+  3. `Binance-bot-production-empty-archive`, project `misty-wildflower-60247190`. Its default `production` branch has zero user tables and an idle endpoint. It is only an empty/orphan/duplicate candidate; secret references cannot be checked, so do not delete, rename or repurpose it.
+- The child branch `mcp-migration-2026-11-17T01-04-37` in the publisher project is missing `layer1_schema_migrations`, its primary key and grant relative to the current parent. Treat it as a stale schema snapshot; do not use as current migration baseline without controlled reconciliation.
+- The existing Module 9 integration/disposable branches remain test-only. A disposable `binance_onchain_test` target had 1 attempt, 1 authorization and 1 quota reservation, while posts/runs/metrics/candidates/transfers were zero. These are test records, not real publication evidence.
+- All Neon inspection was list/get/schema/SELECT only. No Neon write, migration, branch promotion, endpoint restart, credential access or deletion occurred.
+
+### Remote Desktop Commander — one active worktree
+- Device `bd830869-fbae-4825-ae7b-5044d6161090` was online. The only active worktree selected is `/tmp/binance-blocker1-fix`, branch `layer-1/module9-onchain-continuation`, clean HEAD `28353d311f44b448357a92aab976d7477445d536`; its matching origin tracking ref was observed at the same SHA.
+- This worktree is the last verified PR #14 code baseline; the latest GitHub PR #14 head `c88d4fe...` adds documentation-only commits after that code checkpoint. Reconcile its context documentation without resetting/overwriting this local tree.
+- All other known directories are frozen references, not active worktrees. In particular, `/tmp/binance-deepseek-verify` has 16 modified tracked files plus untracked `tests/test_git_sync.py`; `/tmp/binance-layer1-audit` has 15 modified tracked files plus unique untracked Module 9 lease/lifecycle code and tests; `/root/Binance-bot` has three modified CMS files. Preserve all changes and dependencies. Do not use `git clean`, hard reset, blind cherry-pick, mass sync or worktree deletion.
+- Other historical snapshots and the different-origin `/tmp/binance-square-agent` remain frozen. Do not import code from the different-origin repository without provenance.
+
+### Exact duplicate cleanup in Library
+- Library contained one canonical `Binance_Square_W2E_20x_LOCKED_Architecture.md` and seven numbered copies `(1)` through `(7)`.
+- All eight were byte-identical: 68,758 bytes each; SHA-256 `39d7474c48e92b0c476ab65290b9e0bd99369a41f6a52a8236485daf827b6d83`.
+- The seven numbered copies were moved to Library trash successfully. The unnumbered canonical architecture was retained. Post-cleanup Library listing shows one architecture file and the new canonical Master Map.
+- No GitHub source files, branches, local worktrees, Neon projects/branches/data, Render resources or deployments were deleted.
+- PR #2/#3 CMS overlap, dirty worktrees and the empty Neon archive remain non-confirmed duplicates; preserve them pending dependency review.
+
+### Current project position and continuation
+- Project remains NOT COMPLETE / NOT PRODUCTION-ACCEPTED. The 21-module matrix, blockers and strict execution order are in the Library Master Map.
+- Continue only in `/tmp/binance-blocker1-fix`. First review/compare the existing PR #14 follow-up patch donor and Module 9 worker/lifecycle donor; transfer only unique, tested improvements. Do not reimplement already completed work.
+- Next correctness priorities remain Module 21 publication state/idempotency and durable scheduled persistence; Module 12 transition matrix; Git push recovery/token-safe auth; Module 9 worker lease/lifecycle/runtime integration; Module 2 Binance ticker acquisition; approved Module 7/14 factors; strict Module 15 ranking; Module 18 policy-backed content checks; Module 20 OCR/vision and exact-byte rehash.
+- Preserve `DRY_RUN=1`; keep the publisher disabled. Never publish a real Binance Square post during tests. No production DSN binding, live publisher enablement, deployment, schedule/credential change or paid infrastructure is approved by this audit.
+- This update records verified facts and explicitly identified unknowns. It does not authorize production resource changes or a live publishing cutover.
+
+**Safety boundary:** no secrets or DSN values were read or written; no code or workflow changes were made in this audit; no local changes were cleaned; no production database was modified; no Render deploy/restart was triggered; no GitHub workflow was dispatched for this audit; no merge/deployment or real Binance Square post occurred.
