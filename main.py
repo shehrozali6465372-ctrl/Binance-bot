@@ -5867,9 +5867,9 @@ def _create_runtime_postgres_store(config):
     if config.persistence_backend == "sqlite":
         return None
     from layer1.publication_postgres import (
-        PostgresPublicationStore, apply_publication_postgres_migrations,
+        PostgresPublicationStore, verify_publication_postgres_migrations,
     )
-    apply_publication_postgres_migrations(config.postgres_dsn)
+    verify_publication_postgres_migrations(config.postgres_dsn)
     return PostgresPublicationStore(config.postgres_dsn)
 
 

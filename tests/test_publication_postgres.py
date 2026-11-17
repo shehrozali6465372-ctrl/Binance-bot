@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import call
 
 
 class PublicationPostgresStateMachineTests(unittest.TestCase):
@@ -42,6 +43,74 @@ class PublicationPostgresStateMachineTests(unittest.TestCase):
 
 
 class PublicationPostgresMigrationTests(unittest.TestCase):
+    def test_runtime_store_verifies_migrations_without_applying_them(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import main
+
+        config = SimpleNamespace(persistence_backend="postgresql", postgres_dsn="postgresql://app:secret@example.invalid/db")
+        store = object()
+        with patch("layer1.publication_postgres.verify_publication_postgres_migrations", return_value=("0001_example.sql",)) as verify:
+            with patch("layer1.publication_postgres.PostgresPublicationStore", return_value=store):
+                with patch("layer1.publication_postgres.apply_publication_postgres_migrations") as apply:
+                    self.assertIs(main._create_runtime_postgres_store(config), store)
+        verify.assert_called_once_with(config.postgres_dsn)
+        apply.assert_not_called()
+
+    def test_runtime_migration_verifier_checks_all_expected_checksums_read_only(self):
+        import hashlib
+        import tempfile
+        from unittest.mock import patch
+        from layer1.onchain_postgres import verify_postgres_migrations
+
+        with tempfile.TemporaryDirectory() as tmp:
+            migration = Path(tmp) / "0001_example.sql"
+            migration.write_text("CREATE TABLE example (id INTEGER);\n", encoding="utf-8")
+            checksum = hashlib.sha256(migration.read_bytes()).hexdigest()
+            with patch("layer1.onchain_postgres._driver") as driver:
+                driver.return_value = (driver, None)
+                connection = driver.connect.return_value.__enter__.return_value
+                connection.execute.return_value.fetchone.return_value = (checksum,)
+                self.assertEqual(
+                    verify_postgres_migrations("postgresql://app:secret@example.invalid/db", tmp),
+                    ("0001_example.sql",),
+                )
+                statements = [call.args[0] for call in connection.execute.call_args_list]
+                self.assertEqual(len(statements), 1)
+                self.assertEqual(statements[0], "SELECT checksum FROM layer1_schema_migrations WHERE version=%s")
+
+    def test_runtime_migration_verifier_rejects_a_missing_migration(self):
+        import tempfile
+        from unittest.mock import patch
+        from layer1.onchain_postgres import verify_postgres_migrations
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "0001_example.sql").write_text("SELECT 1;", encoding="utf-8")
+            with patch("layer1.onchain_postgres._driver") as driver:
+                driver.return_value = (driver, None)
+                connection = driver.connect.return_value.__enter__.return_value
+                connection.execute.return_value.fetchone.return_value = None
+                with self.assertRaisesRegex(RuntimeError, "missing applied PostgreSQL migration"):
+                    verify_postgres_migrations("postgresql://app:secret@example.invalid/db", tmp)
+                self.assertEqual(connection.execute.call_count, 1)
+                self.assertTrue(connection.execute.call_args.args[0].startswith("SELECT"))
+
+    def test_runtime_migration_verifier_rejects_checksum_drift(self):
+        import tempfile
+        from unittest.mock import patch
+        from layer1.onchain_postgres import verify_postgres_migrations
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "0001_example.sql").write_text("SELECT 2;", encoding="utf-8")
+            with patch("layer1.onchain_postgres._driver") as driver:
+                driver.return_value = (driver, None)
+                connection = driver.connect.return_value.__enter__.return_value
+                connection.execute.return_value.fetchone.return_value = ("wrong-checksum",)
+                with self.assertRaisesRegex(RuntimeError, "applied migration checksum changed"):
+                    verify_postgres_migrations("postgresql://app:secret@example.invalid/db", tmp)
+                self.assertEqual(connection.execute.call_count, 1)
+                self.assertTrue(connection.execute.call_args.args[0].startswith("SELECT"))
+
     def test_migration_is_additive_and_covers_publication_critical_records(self):
         path = Path(__file__).resolve().parents[1] / "layer1" / "migrations" / "publication_postgresql" / "0001_publication_storage.sql"
         sql = path.read_text(encoding="utf-8").upper()

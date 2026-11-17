@@ -82,6 +82,16 @@ def _utc(value: Optional[str] = None) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def verify_publication_postgres_migrations(dsn: str) -> tuple[str, ...]:
+    """Verify the isolated Module 21 migration set without issuing DDL."""
+    if not isinstance(dsn, str) or not dsn.strip():
+        raise ValueError("an explicit PostgreSQL DSN is required")
+    from .onchain_postgres import verify_postgres_migrations
+
+    directory = Path(__file__).resolve().parent / "migrations" / "publication_postgresql"
+    return verify_postgres_migrations(dsn, migrations_dir=str(directory))
+
+
 def apply_publication_postgres_migrations(dsn: str) -> tuple[str, ...]:
     """Apply the isolated Module 21 migration set using the shared checksum runner."""
     if not isinstance(dsn, str) or not dsn.strip():
