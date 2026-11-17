@@ -2290,3 +2290,57 @@ The repository contains substantial implementation for all 21 module areas, but 
 - GitHub Actions runs `43907241840` (commit `13d38c195ad6e837d6f5465beab6433cf56b54ce`) and `43907254115` (commit `f760cad9072359f06b873618b6de2fed7f0ac13f`) both completed with conclusion `success`.
 - PR #14 remains open/draft/unmerged as of this audit; no merge, deployment, workflow dispatch, production write, credential change, schedule change, or real Binance Square publication occurred.
 - Decision: keep the production publisher disabled and `DRY_RUN=1`. Before any approved live cutover, provision/identify a dedicated production database, apply and verify the exact migrations against it, verify role grants/least privilege, TLS/host allowlist, backup/restore and retention, quota/run-lease concurrency, and only then configure production GitHub secret/variable in a separately approved change. Never use the disposable test branch as production.
+
+## 2026-11-17 — PostgreSQL runtime migration fix, CI dispatch and continuation handoff
+
+### Authoritative GitHub state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- PR #14: https://github.com/shehrozali6465372-ctrl/Binance-bot/pull/14 — OPEN, Draft, not merged.
+- Branch: `layer-1/module9-onchain-continuation`.
+- Application fix commit: `0f2686421fdeb853fb83b2ea0254218a8c53f36f` (`Fix runtime PostgreSQL migration privilege handling`).
+- The PR head was verified at this exact SHA after push. The working tree was clean before this documentation-only update.
+
+### PostgreSQL startup blocker — fix pushed and exercised in GitHub Actions
+- Previous failed run #1808 / ID `44122320123` on SHA `a73188a93e375aff7a5151657453c13f5a0a7b2d` failed during runtime startup with `psycopg.errors.InsufficientPrivilege: permission denied for schema public`.
+- Root cause: application startup called publication migration DDL and attempted schema/table creation using the least-privilege application role.
+- Fix in commit `0f2686421fdeb853fb83b2ea0254218a8c53f36f`:
+  - `layer1/onchain_postgres.py`: added `verify_postgres_migrations()`; checks the migration ledger and SHA-256 checksums using SELECT-only access; missing migrations/checksum drift fail closed.
+  - `layer1/publication_postgres.py`: added `verify_publication_postgres_migrations()` wrapper for the publication migration directory.
+  - `main.py`: runtime PostgreSQL store creation now verifies migrations and does not execute DDL migrations.
+  - `tests/test_publication_postgres.py`: regression coverage for SELECT-only verification, missing migration, checksum drift and runtime not invoking the migration applier.
+- Explicit migration applier functions remain available for a separately authorized migrator/owner path. Do not grant broad schema CREATE to the application role as a workaround.
+- Local verification before push: 45 focused test cases; 26 executed and passed, 19 skipped because `TEST_POSTGRES_DSN` was not configured. Python compilation and `git diff --check` passed.
+
+### GitHub Actions run after the fix
+- Manually dispatched `Binance Square Auto Poster` (`.github/workflows/run_bot.yml`) on the PR branch and exact commit `0f2686421fdeb853fb83b2ea0254218a8c53f36f`.
+- Run #44141611015: https://github.com/shehrozali6465372-ctrl/Binance-bot/actions/runs/44141611015.
+- Final run conclusion: `success`; job `run-agent` and all steps, including `Run Binance Square Agent` and artifact upload, succeeded.
+- Sanitized log confirms `PERSISTENCE_BACKEND=postgresql`, `POSTGRES_DSN` was present (value masked), and `DRY_RUN=1`. The old schema `CREATE` privilege failure did not recur. This is runtime evidence that the SELECT-only migration verification path passed startup against the configured database; it is not a full PostgreSQL integration/concurrency test.
+- Safety settings in the workflow were `DRY_RUN=1`, `POST_INTERVAL=0`, `MAX_ITERATIONS=1`. No real Binance Square post was submitted.
+- The run reported `Binance Spot eligibility unavailable; failing closed: HTTPError`, then `Market scanner returned no candidates; no announcement-only synthetic candidates are created`. Therefore the workflow's green conclusion means the bounded dry-run process completed safely, not that a market candidate was successfully produced or that publishing works end-to-end.
+- A separate read-only HTTP GET to `https://api.binance.com/api/v3/exchangeInfo?permissions=SPOT` from the connected remote machine returned HTTP 200. This does not establish GitHub runner reachability or explain the runner's HTTPError; exact runner status is currently not logged. Do not bypass the eligibility gate or synthesize candidates.
+- `CLOUDFLARE_ACCOUNT_ID` appeared empty in the workflow environment. Image generation was not reached in this run, so impact remains unverified. Do not expose or inspect secret values.
+- Cache save emitted a non-blocking warning because another job may have reserved the same cache key. Artifact `agent-output-44141611015` uploaded successfully. Node.js 20 deprecation warnings were also emitted.
+
+### Full safety CI evidence
+- PR check `mocked-safety-tests` passed (workflow run `44141286899`, job `134244458768`).
+- Job log reports `Ran 666 tests in 6.794s` and `OK (skipped=38)`: 628 tests executed successfully; 38 skipped, including PostgreSQL integration cases requiring `TEST_POSTGRES_DSN`.
+- Do not describe this as 666 passed. No dedicated current-head live PostgreSQL integration/concurrency suite was run.
+- PR #14 remained OPEN/Draft/unmerged at the last check. The PR check list showed `mocked-safety-tests` passing.
+
+### Current blocker and next work — resume here, do not repeat completed work
+1. Diagnose the Binance Spot `HTTPError` from the GitHub runner. Add safe status-code-only diagnostics (HTTP status, allowlisted retry/rate-limit metadata, exception class; never response body, URL credentials, API keys or DSNs). Reproduce on a non-publishing test path and add regression tests. Do not weaken the official `exchangeInfo` validation, bypass the fail-closed gate, or create synthetic candidates.
+2. Verify why `CLOUDFLARE_ACCOUNT_ID` is empty by checking only whether the intended repository secret/variable name is configured; never print its value. Determine whether the current code expects a secret or variable and reconcile only with explicit user approval before changing GitHub settings.
+3. Arrange a genuinely dedicated isolated PostgreSQL integration target named `binance_onchain_test` or other exact test DB name required by the relevant suite. Current tests in `tests/test_onchain_postgres.py` explicitly require `binance_onchain_test` on localhost or an exact `TEST_POSTGRES_ALLOWED_HOST` with TLS; other PostgreSQL integration suites also use `TEST_POSTGRES_DSN`. Never point destructive integration tests at production. Do not provision paid infrastructure or alter production DB without explicit approval.
+4. Run the PostgreSQL integration suites against the isolated test DB, capture exact pass/skip/fail counts, and verify migrations, transaction behavior, concurrency and runtime SELECT-only role access. No live integration result exists yet.
+5. Continue the older full-review blockers in the required sequence above; in particular Module 12 stale/resolved non-material transition, Module 21 `PASS` versus `VERIFIED` authorization contract, Git history push retry/token persistence, durable scheduled state/quota, Module 9 worker/PostgreSQL adapter integration, Module 14 opportunity policy and downstream Module 16 reachability. The deep review findings and required sequence immediately above this checkpoint remain open unless separately proven fixed.
+6. Recheck PR #14 checks after any new push. Do not merge, deploy, activate publisher, change credentials/schedules, migrate production schema, modify production permissions, run live publication, or provision paid resources without separate explicit approval.
+
+### Non-negotiable safety and worktree constraints
+- Continue in `/tmp/binance-blocker1-fix` on `layer-1/module9-onchain-continuation`; verify branch, HEAD and `git status` before every change.
+- Preserve every other existing worktree and all uncommitted changes elsewhere. Do not reset, clean, delete, overwrite or bulk-sync worktrees.
+- No Codex. Do not use the Pinterest personal browser for this Binance project.
+- Keep `DRY_RUN=1`; never publish a real Binance Square post during testing.
+- Never print, copy into context, or expose secrets, DSNs, passwords, authorization headers or raw provider response bodies.
+- No merge, deployment, production database writes/migrations/permission changes, credential/schedule/workflow configuration changes, or paid provisioning without separate explicit approval.
+- The application fix is already pushed. This checkpoint is documentation; do not recreate or reapply the PostgreSQL verifier fix.
