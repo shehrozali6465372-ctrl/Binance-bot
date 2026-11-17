@@ -2641,3 +2641,23 @@ The detached PR #14 snapshots are ancestors of the current PR #14 head, not inde
 - This update records verified facts and explicitly identified unknowns. It does not authorize production resource changes or a live publishing cutover.
 
 **Safety boundary:** no secrets or DSN values were read or written; no code or workflow changes were made in this audit; no local changes were cleaned; no production database was modified; no Render deploy/restart was triggered; no GitHub workflow was dispatched for this audit; no merge/deployment or real Binance Square post occurred.
+
+
+## Module 12 stale/resolved non-material revision correction — 2026-11-18
+
+**Status: IMPLEMENTED IN THE SINGLE ACTIVE LOCAL WORKTREE; SQLITE AND ISOLATED NEON POSTGRESQL REGRESSION ACCEPTANCE PASSED; CODE CHANGE NOT COMMITTED OR PUSHED.**
+
+- Root cause reproduced: when a new but non-material revision with VERIFIED evidence arrived for an event already in STALE or RESOLVED, the implementation could select CONFIRMED directly. The allowed transition map requires reopening only through UNDER_VERIFICATION, so the transition raised `ValueError: illegal event lifecycle transition`.
+- TDD evidence: two new SQLite regression tests were added first and both failed RED with that exact exception before the source change.
+- Minimal correction: in both `layer1/event_lifecycle.py` and `layer1/event_lifecycle_postgres.py`, the VERIFIED-to-CONFIRMED branch now accepts only `current_state == "UNDER_VERIFICATION"`. The existing materially-new verified revision path remains unchanged and reopens STALE/RESOLVED via UNDER_VERIFICATION.
+- Added two guarded Neon PostgreSQL regression tests to `tests/test_event_lifecycle_postgres.py` covering non-material revisions after STALE and RESOLVED.
+- SQLite lifecycle suite: **25 passed, 0 failed**.
+- PostgreSQL lifecycle module: **7 passed, 0 failed, 0 skipped**, run against isolated Neon project `Binance-bot-production`, endpoint `module9-disposable-test`, branch `br-falling-butterfly-az03rryi`, database `binance_onchain_test`. Preflight confirmed exact host against `TEST_POSTGRES_ALLOWED_HOST` and TLS; the DSN and credential values were not emitted. No production/default branch was used.
+- Full local suite on the active worktree: **672 tests, 0 failed, 40 skipped** with PostgreSQL DSN unset. Skipped tests are guarded PostgreSQL integration cases; the 7-test Module 12 PostgreSQL suite was run separately and passed. The full suite used the previously installed isolated test venv `/tmp/binance-module11-test-venv`; no repo dependency file or install changed.
+- `compileall` and `git diff --check`: PASS.
+- Post-test read-only check of the disposable database: one lifecycle row, one revision row, one transition row and six schema migrations remained. No pre-test count snapshot exists, so the remaining row's ownership/age is unknown; it was preserved, not deleted.
+- Active canonical worktree remains `/tmp/binance-blocker1-fix`, branch `layer-1/module9-onchain-continuation`, baseline HEAD and origin-tracking ref `28353d311f44b448357a92aab976d7477445d536`. Exactly four modified, uncommitted files: `layer1/event_lifecycle.py`, `layer1/event_lifecycle_postgres.py`, `tests/test_event_lifecycle.py`, `tests/test_event_lifecycle_postgres.py`.
+- No code commit/push, merge, PR retarget, Render change, production database write, credential change, scheduled workflow change or real Square post was performed for this correction.
+- The Library master map `/Binance_Bot_Canonical_Master_Map_2026-11-18.md` was updated with this checkpoint and the revised next step: inspect/fix the next Module 21 authorization/duplicate/final revalidation blocker, then durable scheduled recovery and safe Git push/auth integrity. Do not repeat Module 12 work.
+
+Safety remains: keep `DRY_RUN=1`; publisher disabled; no real Square publication; no production DB changes; preserve all other worktrees and their uncommitted data.
