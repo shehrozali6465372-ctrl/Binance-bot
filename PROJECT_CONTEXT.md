@@ -2413,3 +2413,65 @@ After pushing the approved changes:
 7. Continue isolated PostgreSQL integration acceptance only after identifying and validating the dedicated non-production test database.
 
 Do not repeat the already-completed PostgreSQL runtime migration fix. Do not mark the Binance runner blocker closed until the new GitHub Actions run supplies reproducible evidence.
+
+
+## 2026-11-17 — GitHub Actions verification after safe diagnostics commit
+
+### Commit and PR verification
+
+- Approved changes committed and pushed: `cac870c589ce326764d287ad678e02c500a54d3a`.
+- Commit message: `Add safe Binance Spot HTTP diagnostics`.
+- Files committed: `main.py`, `tests/test_layer1_foundation.py`, `.github/workflows/run_bot.yml`, `PROJECT_CONTEXT.md`.
+- Remote branch SHA and local HEAD both equal `cac870c589ce326764d287ad678e02c500a54d3a`.
+- PR #14 head SHA equals the same commit; PR remains OPEN / DRAFT / UNMERGED.
+- Local working tree is clean.
+- Focused suite rerun after workflow/context changes: 104 tests passed.
+- Full suite result from this work session: 668 tests run, 630 passed, 38 skipped, 0 failures.
+- Python compilation and `git diff --check` passed.
+
+### Manual dry-run workflow execution
+
+Workflow: `Binance Square Auto Poster`
+Run ID: `44146147107`
+Run URL: `https://github.com/shehrozali6465372-ctrl/Binance-bot/actions/runs/44146147107`
+Commit tested: `cac870c589ce326764d287ad678e02c500a54d3a`
+Trigger: `workflow_dispatch` on `layer-1/module9-onchain-continuation`
+Final result: SUCCESS
+Agent job: SUCCESS
+Run Binance Square Agent step: SUCCESS
+Artifact upload: SUCCESS
+Cache save: warning/non-blocking (cache save failed); Node.js 20 deprecation and ubuntu-latest migration warnings are non-blocking.
+
+### Actual Binance Spot response
+
+The new log emitted:
+- Exception: `HTTPError`
+- HTTP status: `451`
+- Allowlisted headers: empty
+- Agent then logged: `Market scanner returned no candidates; no announcement-only synthetic candidates are created`.
+- Workflow environment confirmed `DRY_RUN=1`.
+- No Binance Square publication occurred.
+
+Interpretation:
+- The runner's exact response is now established as HTTP 451, not a generic or inferred HTTP error.
+- IETF RFC 7725 defines 451 as `Unavailable For Legal Reasons`, meaning the responding server or an intermediary is denying access due to a legal demand. This does not by itself identify which entity applied the restriction or establish the precise jurisdiction/reason.
+- No response body or non-allowlisted headers were read into logs. The exact blocking entity and policy reason therefore remain unknown.
+- Do not call this a confirmed Binance geo-block until a permitted, safe source identifies the blocking entity or reason.
+- Do not bypass the restriction with proxies/VPNs or weaken the eligibility check.
+
+### Cloudflare variable correction verification
+
+- Workflow now maps `CLOUDFLARE_ACCOUNT_ID` from `vars.CLOUDFLARE_ACCOUNT_ID`.
+- The run environment confirmed the variable was non-empty. Its value must never be copied into chat, logs, or project context.
+- The Binance scanner returned zero candidates before the image-generation path. Cloudflare image generation was therefore not reached; its operational success remains unverified.
+
+### Next exact continuation
+
+1. Preserve the verified HTTP 451 result and fail-closed behavior.
+2. Investigate only supported/official Binance API routing options and determine whether an official alternate base endpoint changes the status from the same GitHub runner. If testing alternate official endpoints, make only bounded public GET requests and log status codes only; do not log bodies, URLs with query data, or headers beyond the approved allowlist. Do not use VPNs, proxies, or evasion.
+3. Check whether RFC 7725's `Link; rel=blocked-by` signal is present only if it can be captured safely without expanding logs to arbitrary headers; otherwise keep the blocker entity unknown.
+4. Keep `DRY_RUN=1`; no live publishing.
+5. Cloudflare account ID is now mapped correctly but image generation remains untested because no candidates were produced.
+6. Recheck PR #14 checks for commit `cac870c589ce326764d287ad678e02c500a54d3a`.
+7. Continue isolated PostgreSQL integration acceptance only after verifying a dedicated non-production test DB. The latest workflow run does not prove PostgreSQL integration, concurrency or production publication readiness.
+8. Do not merge, deploy, change credentials/schedules, alter production DB, or activate publisher without separate explicit approval.
