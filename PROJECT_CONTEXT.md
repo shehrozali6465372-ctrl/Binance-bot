@@ -2344,3 +2344,72 @@ The repository contains substantial implementation for all 21 module areas, but 
 - Never print, copy into context, or expose secrets, DSNs, passwords, authorization headers or raw provider response bodies.
 - No merge, deployment, production database writes/migrations/permission changes, credential/schedule/workflow configuration changes, or paid provisioning without separate explicit approval.
 - The application fix is already pushed. This checkpoint is documentation; do not recreate or reapply the PostgreSQL verifier fix.
+
+
+## 2026-11-17 — Binance Spot HTTP diagnostics and Cloudflare workflow configuration
+
+### Approved continuation work
+
+User explicitly approved:
+1. Commit and push the safe Binance Spot HTTP diagnostic changes to PR #14.
+2. Correct the Cloudflare account ID workflow mapping to use the existing repository variable.
+
+### Binance Spot diagnostic implementation
+
+Files changed:
+- `main.py`
+- `tests/test_layer1_foundation.py`
+
+Changes:
+- Added safe HTTP diagnostic extraction for the Binance Spot eligibility failure path.
+- Log fields are restricted to exception class, HTTP status (or `unknown`) and explicitly allowlisted headers.
+- Allowlisted headers: `Retry-After`, `X-MBX-USED-WEIGHT-1M`, `X-RateLimit-Limit-Minute`, `X-RateLimit-Remaining-Minute`, `X-RateLimit-Reset`.
+- Header values are sanitized and length-limited.
+- URL, query parameters, response body, reason phrase, credentials, authorization headers and non-allowlisted headers are not logged.
+- The market HTTP adapter preserves only allowlisted rate-limit headers for handled 418/429/5xx responses.
+- Official Binance Spot `exchangeInfo?permissions=SPOT` validation and fail-closed behavior remain unchanged. No synthetic candidates or eligibility bypass were introduced.
+
+Regression coverage:
+- HTTPError 403 exposes status and allowlisted headers without leaking URL credentials, reason text, authorization values or arbitrary headers.
+- ProviderResponse 429 exposes status and allowlisted headers without leaking authorization data.
+- HTTP adapter 429 preserves rate-limit headers and excludes Authorization.
+
+Local test evidence:
+- `python -m unittest tests.test_layer1_foundation`: 104 tests passed.
+- Full `python -m unittest discover -s tests`: 668 tests run, 630 passed, 38 skipped, 0 failures.
+- Python compileall: PASS.
+- `git diff --check`: PASS.
+- The 38 skipped tests remain skipped; do not describe all 668 as executed/passed.
+
+### Cloudflare configuration finding and approved correction
+
+Read-only GitHub Actions configuration inspection established:
+- Repository variable `CLOUDFLARE_ACCOUNT_ID` exists and is non-empty (value intentionally not read or displayed).
+- Repository secret `CLOUDFLARE_ACCOUNT_ID` is absent.
+- Workflow previously referenced `secrets.CLOUDFLARE_ACCOUNT_ID`, resulting in an empty value.
+- Approved workflow correction: `CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}`.
+
+No secret or variable values were exposed or modified.
+
+### Exact state at this checkpoint
+
+- Worktree: `/tmp/binance-blocker1-fix`
+- Branch: `layer-1/module9-onchain-continuation`
+- Base HEAD before this approved diagnostic/config commit: `c63ae933ed087ca886f55ca7764af2f80c8258e9`
+- PR #14 remains OPEN / DRAFT / UNMERGED.
+- `DRY_RUN: "1"` remains unchanged.
+- No live post, production database write, credential change, schedule change, merge or deployment performed.
+- No other worktrees were modified.
+
+### Required next verification
+
+After pushing the approved changes:
+1. Confirm remote branch SHA and PR #14 head SHA match the new commit.
+2. Manually dispatch `Binance Square Auto Poster` on `layer-1/module9-onchain-continuation` (workflow has `workflow_dispatch`) and verify `DRY_RUN=1`.
+3. Inspect the new run logs for the exact Binance Spot HTTP status and only the allowlisted headers. Never copy secrets or response bodies.
+4. Confirm Spot eligibility still fails closed when provider access is denied/unavailable and no synthetic candidates are created.
+5. Verify Cloudflare account ID reaches the workflow as a non-empty environment value without printing it; verify whether image generation is reached and whether it succeeds. Do not expose the account ID.
+6. Update this context again with the exact run ID, status, diagnostics and any remaining blocker.
+7. Continue isolated PostgreSQL integration acceptance only after identifying and validating the dedicated non-production test database.
+
+Do not repeat the already-completed PostgreSQL runtime migration fix. Do not mark the Binance runner blocker closed until the new GitHub Actions run supplies reproducible evidence.

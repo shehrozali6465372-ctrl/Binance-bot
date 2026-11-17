@@ -407,12 +407,16 @@ class Layer1FoundationTests(unittest.TestCase):
     def test_market_data_http_adapter_surfaces_429_retry_after_without_retrying(self):
         error = main.urllib.error.HTTPError(
             "https://api.coingecko.com/api/v3/coins/markets", 429, "rate limited",
-            {"Retry-After": "17"}, None,
+            {"Retry-After": "17", "X-MBX-Used-Weight-1M": "1200",
+             "X-RateLimit-Limit-Minute": "6000", "Authorization": "Bearer do-not-log"}, None,
         )
         with patch("main.urllib.request.urlopen", side_effect=error) as urlopen:
             response = main.market_data_http_get("https://api.coingecko.com/api/v3/coins/markets", 5)
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.headers["Retry-After"], "17")
+        self.assertEqual(response.headers["X-MBX-Used-Weight-1M"], "1200")
+        self.assertEqual(response.headers["X-RateLimit-Limit-Minute"], "6000")
+        self.assertNotIn("Authorization", response.headers)
         urlopen.assert_called_once()
 
     def test_module2_coingecko_sparkline_freshness_is_unknown_without_its_own_timestamp(self):
@@ -787,6 +791,51 @@ class Layer1FoundationTests(unittest.TestCase):
         self.assertEqual(scanner._synthetic_history(100, 10), [])
         with patch("main._get_binance_listed", return_value={"BTC"}), patch("main.market_data_http_get", side_effect=RuntimeError("provider unavailable")):
             self.assertEqual(scanner._coingecko_universe(), [])
+
+    def test_legacy_listing_check_logs_safe_http_status_and_allowlisted_headers_only(self):
+        main._binance_listed_cache = None
+        main._binance_listed_cache_time = 0
+        main._binance_spot_provider_status = "NOT_REQUESTED"
+        secret = "authorization-token-do-not-log"
+        error = main.urllib.error.HTTPError(
+            "https://user:password@api.binance.com/api/v3/exchangeInfo?permissions=SPOT",
+            403, "Forbidden", {
+                "Retry-After": "17", "X-MBX-USED-WEIGHT-1M": "1200",
+                "Authorization": f"Bearer {secret}", "X-Unlisted-Debug": "private-value",
+            }, None,
+        )
+        with patch("main.market_data_http_get", side_effect=error), \
+             self.assertLogs("agent", level="ERROR") as captured:
+            self.assertEqual(main._get_binance_listed(), set())
+        output = "\n".join(captured.output)
+        self.assertIn("HTTPError", output)
+        self.assertIn("status=403", output)
+        self.assertIn("retry-after", output.lower())
+        self.assertIn("17", output)
+        self.assertIn("x-mbx-used-weight-1m", output.lower())
+        self.assertIn("1200", output)
+        self.assertNotIn(secret, output)
+        self.assertNotIn("password", output)
+        self.assertNotIn("private-value", output)
+        self.assertNotIn("Forbidden", output)
+
+    def test_legacy_listing_check_logs_status_from_rate_limit_response_without_body(self):
+        main._binance_listed_cache = None
+        main._binance_listed_cache_time = 0
+        main._binance_spot_provider_status = "NOT_REQUESTED"
+        response = ProviderResponse(None, 429, {
+            "Retry-After": "31", "X-MBX-USED-WEIGHT-1M": "6000",
+            "Authorization": "Bearer do-not-log",
+        })
+        with patch("main.market_data_http_get", return_value=response), \
+             self.assertLogs("agent", level="ERROR") as captured:
+            self.assertEqual(main._get_binance_listed(), set())
+        output = "\n".join(captured.output)
+        self.assertIn("status=429", output)
+        self.assertIn("retry-after", output.lower())
+        self.assertIn("31", output)
+        self.assertIn("6000", output)
+        self.assertNotIn("do-not-log", output)
 
     def test_legacy_listing_check_fails_closed_without_static_allowlist(self):
         main._binance_listed_cache = None

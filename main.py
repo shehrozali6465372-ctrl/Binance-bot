@@ -224,7 +224,10 @@ def market_data_http_get(url: str, timeout: int):
         if exc.code in {418, 429} or 500 <= exc.code <= 599:
             headers = {
                 key: value for key, value in (exc.headers.items() if exc.headers else [])
-                if key.lower() in {"retry-after", "x-ratelimit-remaining-minute", "x-ratelimit-reset"}
+                if key.lower() in {
+                    "retry-after", "x-mbx-used-weight-1m", "x-ratelimit-limit-minute",
+                    "x-ratelimit-remaining-minute", "x-ratelimit-reset",
+                }
             }
             return ProviderResponse(None, exc.code, headers)
         raise
@@ -297,6 +300,48 @@ _binance_spot_exchange_info_snapshot = None
 _binance_spot_provider_metadata = {}
 _binance_spot_provider_status = "NOT_REQUESTED"
 _LAYER1_LAST_SUMMARY = {}
+
+_MARKET_HTTP_DIAGNOSTIC_HEADERS = frozenset({
+    "retry-after",
+    "x-mbx-used-weight-1m",
+    "x-ratelimit-limit-minute",
+    "x-ratelimit-remaining-minute",
+    "x-ratelimit-reset",
+})
+
+
+def _safe_market_http_diagnostics(exc: Exception):
+    """Return only an HTTP status and explicitly allowlisted, sanitized headers."""
+    status = getattr(exc, "code", None)
+    headers = getattr(exc, "headers", None)
+    if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+        status = None
+    if status is None:
+        provider_status = _binance_spot_provider_status
+        if provider_status.startswith(("RATE_LIMITED_HTTP_", "UNAVAILABLE_HTTP_")):
+            status_text = provider_status.rsplit("_", 1)[-1]
+            if len(status_text) == 3 and status_text.isdigit():
+                status = int(status_text)
+        headers = _binance_spot_provider_metadata
+
+    safe_headers = {}
+    if headers is not None:
+        try:
+            items = headers.items()
+        except Exception:
+            items = ()
+        for name, value in items:
+            normalized_name = str(name).lower()
+            if normalized_name not in _MARKET_HTTP_DIAGNOSTIC_HEADERS:
+                continue
+            sanitized_value = "".join(
+                char if char.isalnum() or char in " .,:/_+-" else "?"
+                for char in str(value)
+            )[:64]
+            if sanitized_value:
+                safe_headers[normalized_name] = sanitized_value
+    return status, safe_headers
+
 
 def _get_binance_listed(force_refresh: bool = False) -> set:
     """Fetch and validate a complete official Binance Spot exchangeInfo snapshot."""
@@ -397,7 +442,11 @@ def _get_binance_listed(force_refresh: bool = False) -> set:
                     len(eligible), len(normalized_symbols))
         return eligible
     except Exception as exc:
-        LOGGER.error("Binance Spot eligibility unavailable; failing closed: %s", type(exc).__name__)
+        http_status, safe_headers = _safe_market_http_diagnostics(exc)
+        LOGGER.error(
+            "Binance Spot eligibility unavailable; failing closed: exception=%s status=%s allowlisted_headers=%s",
+            type(exc).__name__, http_status if http_status is not None else "unknown", safe_headers,
+        )
         _binance_listed_cache = None
         _binance_listed_cache_time = 0
         _binance_spot_pairs_cache = {}
