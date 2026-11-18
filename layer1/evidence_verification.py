@@ -1531,6 +1531,7 @@ _INDEPENDENT_CLAUSE_SUBJECT = (
     r"(?:the|this|that|these|those)\s+(?:token|asset|coin|company|exchange|price|volume|market|"
     r"listing|announcement|pair|network|protocol|project|team|source)"
     r"|(?:it|they|we|trading|volume|price|market)"
+    r"|(?:[a-z][A-Za-z0-9.-]*['’]s\s+(?:price|volume|market\s+cap))"
     r"|(?:\$?[A-Z][A-Za-z0-9.-]*(?:['’]s)?(?:\s+[A-Za-z][A-Za-z0-9.-]*){0,2})"
 )
 _INDEPENDENT_CLAUSE_VERB = (

@@ -729,6 +729,16 @@ class EvidenceVerificationTests(unittest.TestCase):
             ("Bitcoin's price rose 8%", "Ethereum's price did not change."),
         )
 
+    def test_atomic_claim_splitter_handles_lowercase_possessive_asset_subjects(self):
+        self.assertEqual(
+            split_atomic_claims("bitcoin's price rose 8% and ethereum's price fell 4%."),
+            ("bitcoin's price rose 8%", "ethereum's price fell 4%."),
+        )
+        self.assertEqual(
+            split_atomic_claims("bitcoin's price rose 8% and later fell 4%."),
+            ("bitcoin's price rose 8%", "bitcoin's price fell 4%."),
+        )
+
     def test_possessive_asset_clauses_cannot_share_one_market_evidence_link(self):
         evidence = record(
             value=8.0, claim_key="market.price_change", unit="%",
