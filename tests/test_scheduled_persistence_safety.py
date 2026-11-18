@@ -72,5 +72,87 @@ class ScheduledPersistenceSafetyTests(unittest.TestCase):
         self.assertIn('DRY_RUN: "1"', workflow)
 
 
+    def test_sqlite_crashed_run_lease_requires_explicit_operator_recovery(self):
+        from layer1.foundation import AgentConfig, ConfigurationOrchestrator, RunLease
+
+        path = str(Path(self._tmp.name) / "lease-recovery.db")
+        context = ConfigurationOrchestrator(
+            AgentConfig(database_path=path),
+        ).create_context({"case": "crash-recovery"})
+        owner = RunLease(path)
+        observer = RunLease(path)
+        try:
+            owner.acquire(context)
+            active = observer.inspect_active()
+            self.assertEqual(active["run_id"], context.run_id)
+            self.assertEqual(active["status"], "RUNNING")
+
+            with self.assertRaisesRegex(ValueError, "process termination confirmation"):
+                observer.recover_interrupted(
+                    context.run_id, process_termination_confirmed=False,
+                    evidence="scheduler job verified terminated", recovered_by="operator",
+                )
+            with self.assertRaisesRegex(ValueError, "expected run ID"):
+                observer.recover_interrupted(
+                    "another-run", process_termination_confirmed=True,
+                    evidence="scheduler job verified terminated", recovered_by="operator",
+                )
+
+            self.assertTrue(observer.recover_interrupted(
+                context.run_id, process_termination_confirmed=True,
+                evidence="scheduler job verified terminated", recovered_by="operator",
+            ))
+            self.assertIsNone(observer.inspect_active())
+            row = observer.conn.execute(
+                "SELECT status, finished_at, summary_json FROM layer1_runs WHERE run_id=?",
+                (context.run_id,),
+            ).fetchone()
+            self.assertEqual(row[0], "INTERRUPTED")
+            self.assertIsNotNone(row[1])
+            summary = __import__("json").loads(row[2])
+            self.assertEqual(summary["operator_recovery"]["recovered_by"], "operator")
+            self.assertEqual(
+                summary["operator_recovery"]["evidence"],
+                "scheduler job verified terminated",
+            )
+        finally:
+            observer.close()
+            owner.close()
+
+    def test_postgres_run_lease_recovery_requires_explicit_operator_confirmation(self):
+        from layer1.publication_runtime import PostgresRunLease
+
+        class FakeStore:
+            def __init__(self):
+                self.calls = []
+
+            def inspect_active_run_lease(self):
+                return None
+
+            def acquire_run_lease(self, context):
+                pass
+
+            def finish_run_lease(self, run_id, status, summary):
+                pass
+
+            def recover_interrupted_run_lease(self, **kwargs):
+                self.calls.append(kwargs)
+                return True
+
+        store = FakeStore()
+        lease = PostgresRunLease(store)
+        with self.assertRaisesRegex(ValueError, "process termination confirmation"):
+            lease.recover_interrupted(
+                "run-123", process_termination_confirmed=False,
+                evidence="scheduler job verified terminated", recovered_by="operator",
+            )
+        self.assertTrue(lease.recover_interrupted(
+            "run-123", process_termination_confirmed=True,
+            evidence="scheduler job verified terminated", recovered_by="operator",
+        ))
+        self.assertEqual(len(store.calls), 1)
+        self.assertEqual(store.calls[0]["expected_run_id"], "run-123")
+
+
 if __name__ == "__main__":
     unittest.main()
