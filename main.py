@@ -4230,10 +4230,28 @@ class PostPublisher:
         }
         try:
             # Re-check the persisted authorization immediately before the POST.
-            store.validate_authorized_attempt_before_submit(
-                authorization_id=authorization.authorization_id,
-                idempotency_key=key, symbol=symbol, content_hash=content_hash,
-            )
+            # A failed preflight is a known no-submit outcome: do not label it
+            # PUBLICATION_UNKNOWN, which is reserved for ambiguous network outcomes.
+            try:
+                store.validate_authorized_attempt_before_submit(
+                    authorization_id=authorization.authorization_id,
+                    idempotency_key=key, symbol=symbol, content_hash=content_hash,
+                )
+            except Exception as exc:
+                message = (
+                    "Pre-submit authorization failed; no Binance request was sent: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                try:
+                    store.finish_authorized_attempt(
+                        key, "FAILED_CONFIRMED", error=message,
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Could not persist known pre-submit PostgreSQL rejection"
+                    )
+                return PublishResult(status="FAILED_CONFIRMED", error=message)
+
             request = urllib.request.Request(
                 self.API_URL, data=json.dumps(payload).encode("utf-8"),
                 headers=headers, method="POST",
