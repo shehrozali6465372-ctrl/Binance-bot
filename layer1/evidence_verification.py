@@ -1534,14 +1534,14 @@ _INDEPENDENT_CLAUSE_SUBJECT = (
     r"|(?:\$?[A-Z][A-Za-z0-9.-]*(?:['’]s)?(?:\s+[A-Za-z][A-Za-z0-9.-]*){0,2})"
 )
 _INDEPENDENT_CLAUSE_VERB = (
-    r"(?:is|are|was|were|has|have|had|will|can|could|may|might|must|should|"
+    r"(?:is|are|was|were|has|have|had|do|does|did|will|can|could|may|might|must|should|"
     r"announced|confirms?|confirmed|lists?|listed|delists?|delisted|launch(?:es|ed)?|"
     r"opens?|opened|closes?|closed|reports?|reported|files?|filed|approves?|approved|"
     r"rejects?|rejected|reaches?|reached|records?|recorded|posts?|posted|updates?|updated|"
     r"adds?|added|removes?|removed|began|ends?|ended|shows?|showed|saw|remains?|continues?|"
     r"pauses?|paused|suspends?|suspended|resumes?|resumed|rises?|rose|falls?|fell|"
     r"increases?|increased|decreases?|decreased|surges?|surged|drops?|dropped|gains?|gained|"
-    r"loses?|lost|moves?|moved|trades?|traded|holds?|held|cuts?|cut|hits?|hit)"
+    r"loses?|lost|moves?|moved|trades?|traded|holds?|held|cuts?|cut|hits?|hit|changes?|changed)"
 )
 
 _COMPOUND_RELATIVE_CLAUSE_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (

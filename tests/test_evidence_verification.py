@@ -723,6 +723,12 @@ class EvidenceVerificationTests(unittest.TestCase):
             ("ETH's price rose 8%", "BTC's price fell 4%."),
         )
 
+    def test_atomic_claim_splitter_handles_negated_did_not_change_possessive_clause(self):
+        self.assertEqual(
+            split_atomic_claims("Bitcoin's price rose 8% and Ethereum's price did not change."),
+            ("Bitcoin's price rose 8%", "Ethereum's price did not change."),
+        )
+
     def test_possessive_asset_clauses_cannot_share_one_market_evidence_link(self):
         evidence = record(
             value=8.0, claim_key="market.price_change", unit="%",

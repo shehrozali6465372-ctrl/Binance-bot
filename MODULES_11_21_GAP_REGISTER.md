@@ -1512,3 +1512,12 @@ This checklist does not authorize the work to be marked done merely by checking 
 
 - Read `SCORING_POLICY.md`: it documents **Module 7 Relevance Scoring Policy**, not the Module 14 opportunity scoring policy. It explicitly says its audience-relevance/novelty definitions and materiality/credibility baselines need approval/calibration. It does not supply an owner-approved Module 14 policy or validated Module 14 factor inputs. Module 14 must remain fail-closed; do not repurpose Module 7 weights as Module 14 weights.
 - Active continuation worktree check confirms `TEST_POSTGRES_DSN` is absent. Existing project notes identify a disposable Neon test branch and a prior DSN file in a different worktree, but credentials must not be copied or retrieved from that location. No database test was attempted with a guessed or production DSN. Module 21 PostgreSQL integration remains unverified until an approved disposable DSN/host allowlist is supplied through the active test environment.
+
+
+## 2026-11-18 — Module 11 negated auxiliary clause segmentation
+
+- TDD found a deterministic split gap: `Bitcoin's price rose 8% and Ethereum's price did not change.` was retained as one claim because the finite-verb grammar did not recognize the auxiliary `did`.
+- Added a regression first and observed RED. Extended the bounded finite-verb vocabulary to recognize `do` / `does` / `did` and `change` / `changes` / `changed`; the independent second clause is now separated while its negation remains intact.
+- Focused evidence-verification suite: **67 tests, 0 failures**. `compileall` and `git diff --check` passed. Full repository suite: **702 tests, 0 failures, 41 skipped**. The 41 skips are PostgreSQL integration tests gated by absent `TEST_POSTGRES_DSN`; they are not passes.
+- This is deterministic segmentation only. It does not infer semantic truth or implement general semantic entailment; Module 11 remains **PARTIAL / NOT COMPLETE**.
+- Work remains local and unpushed in `/tmp/binance-w2e-continuation`; the original checkout is untouched. No DB/provider/Cloudflare/media-upload/publishing/deployment/merge actions occurred.
