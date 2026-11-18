@@ -149,6 +149,13 @@ class ScheduledPersistenceSafetyTests(unittest.TestCase):
                 "run-123", process_termination_confirmed=False,
                 evidence="scheduler job verified terminated", recovered_by="operator",
             )
+        lease.run_id = "run-123"
+        with self.assertRaisesRegex(RuntimeError, "current process cannot recover"):
+            lease.recover_interrupted(
+                "run-123", process_termination_confirmed=True,
+                evidence="scheduler job verified terminated", recovered_by="operator",
+            )
+        lease.run_id = None
         self.assertTrue(lease.recover_interrupted(
             "run-123", process_termination_confirmed=True,
             evidence="scheduler job verified terminated", recovered_by="operator",
