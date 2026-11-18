@@ -3915,14 +3915,6 @@ class PostPublisher:
                 error="publication authorization rejected: " + ",".join(reasons),
             )
         if self.postgres_store is not None:
-            from layer1.publication_runtime import PostgresPublicationAuthorizationEngine
-            duplicate_engine = PostgresPublicationAuthorizationEngine(self.postgres_store)
-            duplicate_reasons = duplicate_engine.validate_persisted_duplicate_policy(authorization)
-            if duplicate_reasons:
-                return PublishResult(
-                    status="FAILED_CONFIRMED",
-                    error="persisted duplicate policy rejected publication: " + ",".join(duplicate_reasons),
-                )
             return self._publish_postgres_authorized(
                 coin, content, images, symbol, authorization, supplied_hashes,
             )

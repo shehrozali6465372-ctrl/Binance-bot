@@ -82,7 +82,8 @@ class PublisherSafetyTests(unittest.TestCase):
         if event_state != "NO_EVENT":
             self.publisher.db.conn.execute("""
                 CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
-                    event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL
+                    event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL,
+                    event_type TEXT NOT NULL DEFAULT 'other'
                 )
             """)
             self.publisher.db.conn.execute(
@@ -111,7 +112,10 @@ class PublisherSafetyTests(unittest.TestCase):
         return coin, auth, hashes
 
     def _publish(self, coin, content, image_list=None):
-        coin, auth, hashes = self._authorization(coin, content)
+        try:
+            coin, auth, hashes = self._authorization(coin, content)
+        except ValueError as exc:
+            return main.PublishResult(status="FAILED_CONFIRMED", error=str(exc))
         return self.publisher.publish(
             coin, content, image_list=image_list,
             authorization=auth, image_hashes=hashes,
@@ -271,7 +275,8 @@ class PublisherSafetyTests(unittest.TestCase):
         self.assertEqual(first.status, "PUBLISHED_CONFIRMED")
         self.assertEqual(first.post_id, "remote-123")
         self.assertTrue(first.confirmed)
-        self.assertEqual(second.status, "DUPLICATE_BLOCKED")
+        self.assertEqual(second.status, "FAILED_CONFIRMED")
+        self.assertIn("RECENT_POST_COOLDOWN", second.error)
         self.assertFalse(second.confirmed)
         self.assertEqual(urlopen.call_count, 1)
 
@@ -316,7 +321,8 @@ class PublisherSafetyTests(unittest.TestCase):
             second = self._publish({"symbol": "ETH"}, "different regenerated text")
 
         self.assertEqual(first.status, "PUBLICATION_UNKNOWN")
-        self.assertEqual(second.status, "PUBLICATION_UNKNOWN")
+        self.assertEqual(second.status, "FAILED_CONFIRMED")
+        self.assertIn("UNRESOLVED_PUBLICATION_ATTEMPT", second.error)
         self.assertEqual(urlopen.call_count, 1)
 
     def test_definitive_client_rejection_is_not_retried(self):
@@ -342,7 +348,8 @@ class PublisherSafetyTests(unittest.TestCase):
             second = self._publish({"symbol": "XRP"}, "regenerated content")
 
         self.assertEqual(first.status, "PUBLICATION_UNKNOWN")
-        self.assertEqual(second.status, "PUBLICATION_UNKNOWN")
+        self.assertEqual(second.status, "FAILED_CONFIRMED")
+        self.assertIn("UNRESOLVED_PUBLICATION_ATTEMPT", second.error)
         self.assertEqual(urlopen.call_count, 1)
         row = self.publisher.db.conn.execute(
             "SELECT status, remote_post_id, share_link FROM publication_attempts WHERE coin_symbol = 'XRP'"
@@ -358,7 +365,8 @@ class PublisherSafetyTests(unittest.TestCase):
             second = self._publish({"symbol": "ADA"}, "regenerated content")
 
         self.assertEqual(first.status, "PUBLICATION_UNKNOWN")
-        self.assertEqual(second.status, "PUBLICATION_UNKNOWN")
+        self.assertEqual(second.status, "FAILED_CONFIRMED")
+        self.assertIn("UNRESOLVED_PUBLICATION_ATTEMPT", second.error)
         self.assertEqual(urlopen.call_count, 1)
 
     def test_metrics_require_exact_remote_post_identity(self):
@@ -425,16 +433,10 @@ class PublisherSafetyTests(unittest.TestCase):
             key = self.publisher._idempotency_key("LINK", "reserved content", [])
             content_hash = main.hashlib.sha256(b"reserved content").hexdigest()
             self.assertIsNone(self.publisher._begin_attempt(key, "LINK", content_hash))
-            coin, authorization, hashes = self._authorization(
-                {"symbol": "LINK"}, "different regenerated content",
-            )
+            with self.assertRaisesRegex(ValueError, "UNRESOLVED_PUBLICATION_ATTEMPT"):
+                self._authorization({"symbol": "LINK"}, "different regenerated content")
             with patch("main._open_binance_publish_no_redirect") as urlopen:
-                result = second.publish(
-                    coin, "different regenerated content",
-                    authorization=authorization, image_hashes=hashes,
-                )
-            self.assertEqual(result.status, "PUBLICATION_UNKNOWN")
-            urlopen.assert_not_called()
+                urlopen.assert_not_called()
         finally:
             second.db.close()
 
@@ -535,7 +537,7 @@ class PublisherSafetyTests(unittest.TestCase):
             eligibility_max_age_seconds=300, event_state="NO_EVENT",
             evidence_status="VERIFIED", text_validation_status="PASS",
             visual_validation_status="NOT_REQUIRED", quota_reservation_id=reservation,
-            duplicate_policy_passed=True,
+            repetition_hard_hours=12,
         )
         key = self.publisher._idempotency_key("ATOM", "pending content", [])
         digest = main.hashlib.sha256(b"pending content").hexdigest()
@@ -674,7 +676,7 @@ class PublisherSafetyTests(unittest.TestCase):
         )
         self.publisher.db.conn.execute(
             "INSERT INTO posts(created_at, coin_symbol, content) VALUES (?, ?, ?)",
-            ((main.datetime.now(main.timezone.utc) - main.timedelta(hours=1)).isoformat(),
+            ((main.datetime.now(main.timezone.utc) - __import__("datetime").timedelta(hours=1)).isoformat(),
              "BTC", "another post inserted after authorization"),
         )
         self.publisher.db.conn.commit()

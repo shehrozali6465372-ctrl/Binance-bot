@@ -166,7 +166,7 @@ class EndToEndPipelineTests(unittest.TestCase):
                 eligibility_snapshot_at=iso(), eligibility_max_age_seconds=300,
                 event_state=lifecycle[0].state, evidence_status="VERIFIED",
                 text_validation_status="PASS", visual_validation_status="PASS",
-                quota_reservation_id=reservation, duplicate_policy_passed=True,
+                quota_reservation_id=reservation, repetition_hard_hours=12,
             )
             self.assertTrue(authorization.verify_integrity())
             self.assertEqual(authorization.validate_for_submission(
