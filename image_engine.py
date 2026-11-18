@@ -222,6 +222,11 @@ class CloudflareWorkersAIImageGenerator:
                     raise ValueError("generated image dimensions are outside safe bounds")
         except (OSError, ValueError):
             raise ValueError("Workers AI returned bytes that are not a valid, decodable image") from None
+        expected_format = {
+            ".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP",
+        }[target.suffix.lower()]
+        if image_format != expected_format:
+            raise ValueError("generated image format does not match output extension")
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(target.name + ".tmp-" + uuid.uuid4().hex)
         try:
