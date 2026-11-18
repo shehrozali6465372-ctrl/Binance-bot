@@ -2835,3 +2835,15 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - The final event/provenance and duplicate-policy checks plus local request construction now have a dedicated pre-submit exception boundary. Any exception before transport invocation returns known `FAILED_CONFIRMED`, attempts to finalize the attempt and quota as `FAILED_CONFIRMED`, and never invokes Binance transport. If either local ledger update also fails, the attempt/reservation remains fenced and a sanitized critical log is emitted.
 - RED: run `44222317391` initially failed because the test injected the error at the earlier authorization check; the test was corrected to fail only the final revalidation. GREEN: run `44222425776` on `4303c466d7af51fd72f9e7b945144dda653038fe`: **SUCCESS**, compile passed, **691 tests, 0 failures, 41 skipped**.
 - The 41 skips are PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`; this does not prove PostgreSQL acceptance. No live Binance request/post occurred.
+
+
+
+## 2026-11-18 — Atomic SQLite publication attempt/quota finalization
+
+- Replaced separate SQLite publication-attempt and quota finalization writes with one transaction in `PostPublisher._finish_attempt`.
+- The method now enforces allowed attempt transitions and updates the linked quota reservation by `attempt_id` in the same transaction. It prevents terminal-state downgrade and inconsistent attempt/quota finalization.
+- Normal authorized publishing initializes the quota schema before attempt finalization. Legacy/private attempt-only callers without the quota table retain their existing behavior; the method detects that schema absence explicitly.
+- Removed redundant post-finalization quota writes. The pre-submit `SUBMITTING` and pre-network `RELEASED` transitions remain separate and fail closed.
+- This supersedes the prior temporary behavior where a confirmed SQLite attempt could retain a `PUBLICATION_UNKNOWN` quota reservation after a separate final quota write failed.
+- GitHub Actions run `44223021885` on `acf9d8124cf69edfc98db606ab32080a71fdd234`: **SUCCESS**, compile passed, **691 tests, 0 failures, 41 skipped**. The 41 PostgreSQL integration tests remain skipped without `TEST_POSTGRES_DSN`.
+- No live Binance request/post or production database write occurred.

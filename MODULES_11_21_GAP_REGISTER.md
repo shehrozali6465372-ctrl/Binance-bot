@@ -1429,3 +1429,12 @@ This checklist does not authorize the work to be marked done merely by checking 
 - The final SQLite event/provenance and persisted duplicate-policy checks now execute inside a dedicated pre-submit exception boundary. A database/ledger exception before transport is a known `FAILED_CONFIRMED` no-submit result, not `PUBLICATION_UNKNOWN`; no Binance HTTP call is made.
 - The attempt and quota are finalized as `FAILED_CONFIRMED` when possible. If ledger finalization itself fails, remaining `SUBMITTING`/`PUBLICATION_UNKNOWN` fences are retained and critical sanitized logs are emitted; reservations are never released in an uncertain state.
 - TDD/CI run `44222425776`: **691 tests, 0 failures, 41 skipped**, compile passed. The 41 PostgreSQL integration skips remain unverified.
+
+
+
+## 2026-11-18 — Atomic SQLite publication/quota state transition
+
+- SQLite `PostPublisher._finish_attempt` now updates the publication attempt and its linked quota reservation in a single transaction. Attempt transitions are constrained; terminal states cannot be downgraded.
+- Removed separate final quota writes that could fail after the attempt had already been confirmed. The linked reservation is now updated to the same terminal/unknown state atomically. Pre-submit reservation transitions remain separate.
+- This supersedes the earlier temporary fail-safe that left a quota reservation `PUBLICATION_UNKNOWN` after the attempt became `PUBLISHED_CONFIRMED`.
+- CI run `44223021885`: **691 tests, 0 failures, 41 skipped**; compile passed. PostgreSQL integration acceptance remains skipped pending approved disposable DSN.
