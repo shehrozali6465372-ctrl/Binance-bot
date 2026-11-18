@@ -444,6 +444,46 @@ class PublisherSafetyTests(unittest.TestCase):
         self.assertEqual(row["remote_post_id"], "sqlite-remote-history-1")
         urlopen.assert_called_once()
 
+
+    def test_sqlite_confirmed_publication_survives_quota_finalization_failure(self):
+        from layer1.publication_authorization import PublicationAuthorizationEngine
+
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "DOGE"}, "sqlite quota finalization failure content",
+        )
+        original = PublicationAuthorizationEngine.mark_quota_status
+
+        def fail_only_final_status(engine, reservation_id, status):
+            if status == "PUBLISHED_CONFIRMED":
+                raise sqlite3.OperationalError("quota ledger temporarily unavailable")
+            return original(engine, reservation_id, status)
+
+        response = FakeResponse({
+            "code": "000000",
+            "data": {"id": "sqlite-remote-quota-1", "shareLink": "https://example.invalid/sqlite-remote-quota-1"},
+        })
+        with patch.object(
+            PublicationAuthorizationEngine, "mark_quota_status",
+            new=fail_only_final_status,
+        ):
+            with patch("main._open_binance_publish_no_redirect", return_value=response) as urlopen:
+                result = self.publisher.publish(
+                    coin, "sqlite quota finalization failure content",
+                    authorization=authorization, image_hashes=hashes,
+                )
+        self.assertEqual(result.status, "PUBLISHED_CONFIRMED")
+        self.assertEqual(result.post_id, "sqlite-remote-quota-1")
+        attempt = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE coin_symbol='DOGE'"
+        ).fetchone()
+        reservation = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_quota_reservations WHERE reservation_id=?",
+            (authorization.quota_reservation_id,),
+        ).fetchone()
+        self.assertEqual(attempt["status"], "PUBLISHED_CONFIRMED")
+        self.assertEqual(reservation["status"], "SUBMITTING")
+        urlopen.assert_called_once()
+
     def test_remote_acceptance_followed_by_local_persistence_failure_is_not_retried(self):
         response = FakeResponse({
             "code": "000000",
