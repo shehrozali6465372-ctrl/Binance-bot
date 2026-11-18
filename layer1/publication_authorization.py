@@ -57,6 +57,7 @@ class PublicationAuthorization:
     text_validation_status: str
     visual_validation_status: str
     quota_reservation_id: str
+    repetition_hard_hours: int
     duplicate_policy_passed: bool
     created_at: str
     expires_at: str
@@ -115,6 +116,10 @@ class PublicationAuthorization:
             reasons.append("VISUAL_VALIDATION_FAILED")
         if not self.quota_reservation_id:
             reasons.append("QUOTA_NOT_RESERVED")
+        if (isinstance(self.repetition_hard_hours, bool)
+                or not isinstance(self.repetition_hard_hours, int)
+                or not 1 <= self.repetition_hard_hours <= 168):
+            reasons.append("DUPLICATE_POLICY_WINDOW_INVALID")
         if self.duplicate_policy_passed is not True:
             reasons.append("DUPLICATE_POLICY_FAILED")
         return tuple(sorted(set(reasons)))
@@ -198,7 +203,7 @@ class PublicationAuthorizationEngine:
         eligibility_snapshot_at: str, eligibility_max_age_seconds: int,
         event_state: str, evidence_status: str,
         text_validation_status: str, visual_validation_status: str,
-        quota_reservation_id: str, duplicate_policy_passed: bool,
+        quota_reservation_id: str, repetition_hard_hours: int = 12,
         now: Optional[str] = None, ttl_seconds: int = 60,
     ) -> PublicationAuthorization:
         current = _parse_time(now or datetime.now(timezone.utc).isoformat())
@@ -214,6 +219,8 @@ class PublicationAuthorizationEngine:
             raise ValueError("authorization TTL must be between 1 and 300 seconds")
         if isinstance(eligibility_max_age_seconds, bool) or not isinstance(eligibility_max_age_seconds, int) or not 1 <= eligibility_max_age_seconds <= 600:
             raise ValueError("eligibility freshness bound must be between 1 and 600 seconds")
+        if isinstance(repetition_hard_hours, bool) or not isinstance(repetition_hard_hours, int) or not 1 <= repetition_hard_hours <= 168:
+            raise ValueError("repetition_hard_hours must be between 1 and 168")
         image_hashes = tuple(sorted(image_hashes))
         if len(set(image_hashes)) != len(image_hashes):
             raise ValueError("image hashes must be unique")
@@ -290,6 +297,14 @@ class PublicationAuthorizationEngine:
             persisted_draft[0], asset_id, draft_hash,
             research_package_id, editorial_brief_id, approved_claim_ids,
         )
+        duplicate_reasons = self._duplicate_policy_reasons(
+            symbol=symbol.upper(), asset_id=asset_id, event_id=event_id,
+            event_state=event_state, content_hash=draft_hash,
+            quota_reservation_id=quota_reservation_id, now=current,
+            repetition_hard_hours=repetition_hard_hours,
+        )
+        if duplicate_reasons:
+            raise ValueError("publication authorization denied: " + ",".join(duplicate_reasons))
         candidate = PublicationAuthorization(
             authorization_id="", symbol=symbol.upper(), asset_id=asset_id,
             draft_id=persisted_draft[0],
@@ -305,7 +320,8 @@ class PublicationAuthorizationEngine:
             text_validation_status=text_validation_status,
             visual_validation_status=visual_validation_status,
             quota_reservation_id=quota_reservation_id,
-            duplicate_policy_passed=duplicate_policy_passed,
+            repetition_hard_hours=repetition_hard_hours,
+            duplicate_policy_passed=True,
             created_at=current.isoformat(),
             expires_at=(current + timedelta(seconds=ttl_seconds)).isoformat(),
         )
@@ -342,6 +358,101 @@ class PublicationAuthorizationEngine:
             if cursor.rowcount != 1:
                 raise ValueError("quota reservation is missing or no longer available")
         return authorized
+
+
+    @staticmethod
+    def _is_exceptional_event(event_type: str) -> bool:
+        return event_type in {"new_listing", "launchpool", "megadrop", "airdrop", "delisting"}
+
+    def _duplicate_policy_reasons(
+        self, *, symbol: str, asset_id: str, event_id: str, event_state: str,
+        content_hash: str, quota_reservation_id: str, now: datetime,
+        repetition_hard_hours: int, exclude_idempotency_key: Optional[str] = None,
+    ) -> tuple[str, ...]:
+        """Evaluate cooldown, exact duplicates, unresolved attempts and competing reservations."""
+        reasons: list[str] = []
+        exceptional = False
+        try:
+            if event_state != "NO_EVENT":
+                event = self.connection.execute(
+                    "SELECT asset_id,event_type,state FROM layer1_event_lifecycle WHERE event_id=?",
+                    (event_id,),
+                ).fetchone()
+                if event is None or event["asset_id"] != asset_id or event["state"] != event_state:
+                    reasons.append("EVENT_LIFECYCLE_CHANGED")
+                else:
+                    exceptional = (
+                        self._is_exceptional_event(str(event["event_type"] or ""))
+                        and event["state"] in {"CONFIRMED", "DEVELOPING"}
+                    )
+            cutoff = now - timedelta(hours=repetition_hard_hours)
+            posts = self.connection.execute(
+                "SELECT created_at,content FROM posts WHERE UPPER(COALESCE(coin_symbol,''))=? "
+                "ORDER BY id DESC LIMIT 100",
+                (symbol,),
+            ).fetchall()
+            attempts = self.connection.execute(
+                "SELECT idempotency_key,status,content_hash,created_at FROM publication_attempts "
+                "WHERE UPPER(coin_symbol)=? AND status IN "
+                "('SUBMITTING','PUBLICATION_UNKNOWN','PUBLISHED_CONFIRMED') ORDER BY id DESC LIMIT 100",
+                (symbol,),
+            ).fetchall()
+            reservations = self.connection.execute(
+                "SELECT reservation_id FROM publication_quota_reservations "
+                "WHERE UPPER(symbol)=? AND reservation_id<>? "
+                "AND status IN ('RESERVED','SUBMITTING','PUBLICATION_UNKNOWN')",
+                (symbol, quota_reservation_id),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return ("DUPLICATE_LEDGER_UNAVAILABLE",)
+
+        for row in posts:
+            try:
+                created = _parse_time(row["created_at"])
+            except (TypeError, ValueError):
+                reasons.append("DUPLICATE_LEDGER_TIMESTAMP_INVALID")
+                continue
+            prior_content = row["content"] if isinstance(row["content"], str) else ""
+            if hashlib.sha256(prior_content.encode("utf-8")).hexdigest() == content_hash:
+                reasons.append("DUPLICATE_CONTENT_ALREADY_PUBLISHED")
+            if not exceptional and created >= cutoff:
+                reasons.append("RECENT_POST_COOLDOWN")
+
+        for row in attempts:
+            if exclude_idempotency_key and row["idempotency_key"] == exclude_idempotency_key:
+                continue
+            if row["status"] in {"SUBMITTING", "PUBLICATION_UNKNOWN"}:
+                reasons.append("UNRESOLVED_PUBLICATION_ATTEMPT")
+                continue
+            if row["content_hash"] == content_hash:
+                reasons.append("DUPLICATE_CONTENT_ALREADY_PUBLISHED")
+            try:
+                created = _parse_time(row["created_at"])
+            except (TypeError, ValueError):
+                reasons.append("DUPLICATE_LEDGER_TIMESTAMP_INVALID")
+                continue
+            if not exceptional and created >= cutoff:
+                reasons.append("RECENT_POST_COOLDOWN")
+
+        if reservations:
+            reasons.append("COMPETING_ACTIVE_QUOTA_RESERVATION")
+        return tuple(sorted(set(reasons)))
+
+    def validate_persisted_duplicate_policy(
+        self, authorization: PublicationAuthorization, *,
+        now: Optional[str] = None, exclude_idempotency_key: Optional[str] = None,
+    ) -> tuple[str, ...]:
+        current = _parse_time(now or datetime.now(timezone.utc).isoformat())
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            return self._duplicate_policy_reasons(
+                symbol=authorization.symbol, asset_id=authorization.asset_id,
+                event_id=authorization.event_id, event_state=authorization.event_state,
+                content_hash=authorization.content_hash,
+                quota_reservation_id=authorization.quota_reservation_id,
+                now=current, repetition_hard_hours=authorization.repetition_hard_hours,
+                exclude_idempotency_key=exclude_idempotency_key,
+            )
 
     def validate_persisted_event_binding(
         self, authorization: PublicationAuthorization,

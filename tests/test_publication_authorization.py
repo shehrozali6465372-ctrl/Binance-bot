@@ -75,12 +75,13 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
         if args["event_state"] != "NO_EVENT":
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
-                    event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL
+                    event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL,
+                    event_type TEXT NOT NULL DEFAULT 'other'
                 )
             """)
             self.conn.execute(
                 "INSERT OR REPLACE INTO layer1_event_lifecycle(event_id, asset_id, state, event_type) VALUES (?, ?, ?, ?)",
-                ("event:test", args["asset_id"], args["event_state"], args.get("event_type", "other")),
+                ("event:test", args["asset_id"], args["event_state"], event_type),
             )
         self.conn.commit()
         store.save_text_validation(

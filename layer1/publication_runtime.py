@@ -139,7 +139,7 @@ class PostgresPublicationAuthorizationEngine:
                   eligibility_snapshot_at, eligibility_max_age_seconds,
                   event_state, evidence_status, text_validation_status,
                   visual_validation_status, quota_reservation_id,
-                  duplicate_policy_passed, now=None, ttl_seconds=60):
+                  repetition_hard_hours=12, now=None, ttl_seconds=60):
         import hashlib
         import json
         import re
@@ -159,6 +159,8 @@ class PostgresPublicationAuthorizationEngine:
             raise ValueError("authorization TTL must be between 1 and 300 seconds")
         if isinstance(eligibility_max_age_seconds, bool) or not isinstance(eligibility_max_age_seconds, int) or not 1 <= eligibility_max_age_seconds <= 600:
             raise ValueError("eligibility freshness bound must be between 1 and 600 seconds")
+        if isinstance(repetition_hard_hours, bool) or not isinstance(repetition_hard_hours, int) or not 1 <= repetition_hard_hours <= 168:
+            raise ValueError("repetition_hard_hours must be between 1 and 168")
         hashes = tuple(sorted(image_hashes))
         if len(set(hashes)) != len(hashes) or any(not isinstance(v, str) or not re.fullmatch(r"[0-9a-f]{64}", v) for v in hashes):
             raise ValueError("image hashes must be unique SHA-256 hex digests")
@@ -193,6 +195,14 @@ class PostgresPublicationAuthorizationEngine:
             draft["draft_id"], asset_id, draft_hash, draft["research_package_id"],
             draft["editorial_brief_id"], authorized_claims,
         )
+        duplicate_reasons = self.store.validate_persisted_duplicate_policy(
+            symbol=symbol.upper(), asset_id=asset_id, event_id=brief["event_id"],
+            event_state=event_state, content_hash=draft_hash,
+            quota_reservation_id=quota_reservation_id, now=current,
+            repetition_hard_hours=repetition_hard_hours,
+        )
+        if duplicate_reasons:
+            raise ValueError("publication authorization denied: " + ",".join(duplicate_reasons))
         candidate = PublicationAuthorization(
             authorization_id="", symbol=symbol.upper(), asset_id=asset_id,
             draft_id=draft["draft_id"], research_package_id=draft["research_package_id"],
@@ -205,7 +215,8 @@ class PostgresPublicationAuthorizationEngine:
             text_validation_status=text_validation_status,
             visual_validation_status=visual_validation_status,
             quota_reservation_id=quota_reservation_id,
-            duplicate_policy_passed=duplicate_policy_passed,
+            repetition_hard_hours=repetition_hard_hours,
+            duplicate_policy_passed=True,
             created_at=current.isoformat(),
             expires_at=(current + timedelta(seconds=ttl_seconds)).isoformat(),
         )
@@ -222,6 +233,17 @@ class PostgresPublicationAuthorizationEngine:
         authorized = PublicationAuthorization(**{**asdict(candidate), "authorization_id": authorization_id})
         self.store.save_publication_authorization(authorized)
         return authorized
+
+    def validate_persisted_duplicate_policy(self, authorization, *, now=None, exclude_idempotency_key=None):
+        return self.store.validate_persisted_duplicate_policy(
+            symbol=authorization.symbol, asset_id=authorization.asset_id,
+            event_id=authorization.event_id, event_state=authorization.event_state,
+            content_hash=authorization.content_hash,
+            quota_reservation_id=authorization.quota_reservation_id,
+            now=_parse_time(now) if now else _parse_time(authorization.created_at),
+            repetition_hard_hours=authorization.repetition_hard_hours,
+            exclude_idempotency_key=exclude_idempotency_key,
+        )
 
     def validate_persisted_event_binding(self, authorization):
         brief = self.store.conn.execute(

@@ -3915,10 +3915,25 @@ class PostPublisher:
                 error="publication authorization rejected: " + ",".join(reasons),
             )
         if self.postgres_store is not None:
+            from layer1.publication_runtime import PostgresPublicationAuthorizationEngine
+            duplicate_engine = PostgresPublicationAuthorizationEngine(self.postgres_store)
+            duplicate_reasons = duplicate_engine.validate_persisted_duplicate_policy(authorization)
+            if duplicate_reasons:
+                return PublishResult(
+                    status="FAILED_CONFIRMED",
+                    error="persisted duplicate policy rejected publication: " + ",".join(duplicate_reasons),
+                )
             return self._publish_postgres_authorized(
                 coin, content, images, symbol, authorization, supplied_hashes,
             )
         quota_engine = PublicationAuthorizationEngine(self.db.conn)
+        duplicate_reasons = quota_engine.validate_persisted_duplicate_policy(authorization)
+        if duplicate_reasons:
+            quota_engine.mark_quota_status(authorization.quota_reservation_id, "RELEASED")
+            return PublishResult(
+                status="FAILED_CONFIRMED",
+                error="persisted duplicate policy rejected publication: " + ",".join(duplicate_reasons),
+            )
         event_binding_reasons = quota_engine.validate_persisted_event_binding(authorization)
         if event_binding_reasons:
             quota_engine.mark_quota_status(authorization.quota_reservation_id, "RELEASED")
@@ -4082,6 +4097,19 @@ class PostPublisher:
                 return PublishResult(
                     status="FAILED_CONFIRMED",
                     error="event provenance changed before submission: " + ",".join(final_event_reasons),
+                )
+            duplicate_reasons = quota_engine.validate_persisted_duplicate_policy(
+                authorization, exclude_idempotency_key=key,
+            )
+            if duplicate_reasons:
+                self._finish_attempt(
+                    key, "FAILED_CONFIRMED",
+                    error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
+                )
+                mark_quota("FAILED_CONFIRMED")
+                return PublishResult(
+                    status="FAILED_CONFIRMED",
+                    error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
                 )
             request = urllib.request.Request(
                 self.API_URL,
@@ -5187,7 +5215,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                 text_validation_status=content_verification.status,
                 visual_validation_status=visual_status,
                 quota_reservation_id=reservation_id,
-                duplicate_policy_passed=True,
+                repetition_hard_hours=config.repetition_hard_hours,
                 ttl_seconds=60,
             )
         except Exception as exc:

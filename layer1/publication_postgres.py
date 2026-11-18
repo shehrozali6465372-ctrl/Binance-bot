@@ -219,6 +219,96 @@ class PostgresPublicationStore:
             self.conn.execute("UPDATE publication_quota_reservations SET status='SUBMITTING',attempt_id=%s,updated_at=now() WHERE reservation_id=%s", (attempt["id"],quota["reservation_id"]))
             return None
 
+
+    @staticmethod
+    def _exceptional_event_type(event_type: str) -> bool:
+        return event_type in {"new_listing", "launchpool", "megadrop", "airdrop", "delisting"}
+
+    def _duplicate_policy_reasons_in_transaction(
+        self, *, symbol: str, asset_id: str, event_id: str, event_state: str,
+        content_hash: str, quota_reservation_id: str, now: datetime,
+        repetition_hard_hours: int, exclude_idempotency_key: Optional[str] = None,
+    ) -> tuple[str, ...]:
+        self.conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            ("publication-symbol:" + symbol.upper(),),
+        )
+        exceptional = False
+        reasons = []
+        if event_state != "NO_EVENT":
+            event = self.conn.execute(
+                "SELECT asset_id,event_type,state FROM layer1_event_lifecycle WHERE event_id=%s FOR SHARE",
+                (event_id,),
+            ).fetchone()
+            if event is None or event["asset_id"] != asset_id or event["state"] != event_state:
+                reasons.append("EVENT_LIFECYCLE_CHANGED")
+            else:
+                exceptional = (
+                    self._exceptional_event_type(str(event["event_type"] or ""))
+                    and event["state"] in {"CONFIRMED", "DEVELOPING"}
+                )
+        cutoff = now - __import__("datetime").timedelta(hours=repetition_hard_hours)
+        posts = self.conn.execute(
+            "SELECT created_at,content FROM posts WHERE UPPER(COALESCE(coin_symbol,''))=%s "
+            "ORDER BY id DESC LIMIT 100",
+            (symbol.upper(),),
+        ).fetchall()
+        attempts = self.conn.execute(
+            "SELECT idempotency_key,status,content_hash,created_at FROM publication_attempts "
+            "WHERE UPPER(coin_symbol)=%s AND status IN "
+            "('SUBMITTING','PUBLICATION_UNKNOWN','PUBLISHED_CONFIRMED') ORDER BY id DESC LIMIT 100",
+            (symbol.upper(),),
+        ).fetchall()
+        reservations = self.conn.execute(
+            "SELECT reservation_id FROM publication_quota_reservations WHERE UPPER(symbol)=%s "
+            "AND reservation_id<>%s AND status IN ('RESERVED','SUBMITTING','PUBLICATION_UNKNOWN')",
+            (symbol.upper(), quota_reservation_id),
+        ).fetchall()
+        for row in posts:
+            created = row["created_at"]
+            if created.tzinfo is None:
+                reasons.append("DUPLICATE_LEDGER_TIMESTAMP_INVALID")
+                continue
+            if hashlib.sha256(str(row["content"]).encode("utf-8")).hexdigest() == content_hash:
+                reasons.append("DUPLICATE_CONTENT_ALREADY_PUBLISHED")
+            if not exceptional and created >= cutoff:
+                reasons.append("RECENT_POST_COOLDOWN")
+        for row in attempts:
+            if exclude_idempotency_key and row["idempotency_key"] == exclude_idempotency_key:
+                continue
+            if row["status"] in {"SUBMITTING", "PUBLICATION_UNKNOWN"}:
+                reasons.append("UNRESOLVED_PUBLICATION_ATTEMPT")
+                continue
+            if row["content_hash"] == content_hash:
+                reasons.append("DUPLICATE_CONTENT_ALREADY_PUBLISHED")
+            created = row["created_at"]
+            if created.tzinfo is None:
+                reasons.append("DUPLICATE_LEDGER_TIMESTAMP_INVALID")
+            elif not exceptional and created >= cutoff:
+                reasons.append("RECENT_POST_COOLDOWN")
+        if reservations:
+            reasons.append("COMPETING_ACTIVE_QUOTA_RESERVATION")
+        return tuple(sorted(set(reasons)))
+
+    def validate_persisted_duplicate_policy(
+        self, *, symbol: str, asset_id: str, event_id: str, event_state: str,
+        content_hash: str, quota_reservation_id: str, now: Optional[datetime] = None,
+        repetition_hard_hours: int = 12, exclude_idempotency_key: Optional[str] = None,
+    ) -> tuple[str, ...]:
+        if isinstance(repetition_hard_hours, bool) or not isinstance(repetition_hard_hours, int) or not 1 <= repetition_hard_hours <= 168:
+            raise ValueError("repetition_hard_hours must be between 1 and 168")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None or current.utcoffset() is None:
+            raise ValueError("duplicate policy clock must be timezone-aware")
+        with self.conn.transaction():
+            return self._duplicate_policy_reasons_in_transaction(
+                symbol=symbol, asset_id=asset_id, event_id=event_id,
+                event_state=event_state, content_hash=content_hash,
+                quota_reservation_id=quota_reservation_id, now=current,
+                repetition_hard_hours=repetition_hard_hours,
+                exclude_idempotency_key=exclude_idempotency_key,
+            )
+
     def validate_authorized_attempt_before_submit(
         self, *, authorization_id: str, idempotency_key: str, symbol: str, content_hash: str,
     ) -> None:
@@ -298,6 +388,16 @@ class PostgresPublicationStore:
                     or quota["authorization_id"] != authorization_id
                     or quota["attempt_id"] != attempt["id"]):
                 raise ValueError("durable quota reservation is no longer bound to this attempt")
+            duplicate_reasons = self._duplicate_policy_reasons_in_transaction(
+                symbol=normalized_symbol, asset_id=payload["asset_id"],
+                event_id=payload["event_id"], event_state=payload["event_state"],
+                content_hash=content_hash, quota_reservation_id=auth["quota_reservation_id"],
+                now=datetime.now(timezone.utc),
+                repetition_hard_hours=payload["repetition_hard_hours"],
+                exclude_idempotency_key=idempotency_key,
+            )
+            if duplicate_reasons:
+                raise ValueError("persisted duplicate policy rejected submission: " + ",".join(duplicate_reasons))
 
     def finish_authorized_attempt(self, idempotency_key: str, status: str, *, post_id: str = "", share_link: str = "", http_status: Optional[int] = None, error: str = "") -> None:
         if status not in _ATTEMPT_TRANSITIONS: raise ValueError("invalid publication attempt status")
