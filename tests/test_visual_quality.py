@@ -66,6 +66,19 @@ class VisualQualityEngineTests(unittest.TestCase):
         self.assertEqual(result.reasons, ())
         self.assertEqual((result.width, result.height), (1080, 1350))
 
+
+    def test_png_bytes_with_non_png_filename_are_rejected(self):
+        mismatched_path = Path(self.tmp.name) / "asset.jpg"
+        mismatched_sidecar = Path(str(mismatched_path) + ".json")
+        mismatched_path.write_bytes(self.image_path.read_bytes())
+        mismatched_sidecar.write_text(self.sidecar.read_text(encoding="utf-8"), encoding="utf-8")
+        result = VisualQualityEngine().validate(
+            mismatched_path, metadata_path=mismatched_sidecar,
+            draft_content=self.draft, symbol=self.symbol, asset_id=self.asset_id,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("FINAL_IMAGE_EXTENSION_MISMATCH", result.reasons)
+
     def test_changed_draft_invalidates_previous_image_approval(self):
         result = VisualQualityEngine().validate(
             self.image_path, draft_content=self.draft + " Changed.",
