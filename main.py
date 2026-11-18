@@ -4155,7 +4155,17 @@ class PostPublisher:
                 http_status=http_status,
             )
             mark_quota("PUBLISHED_CONFIRMED")
-            self._save_locally(coin, content, share_link=share_link or f"[POST-ID:{post_id}]")
+            # The SQLite publication ledger is authoritative. The Markdown
+            # history artifact is secondary and cannot downgrade confirmed state.
+            try:
+                self._save_locally(
+                    coin, content, share_link=share_link or f"[POST-ID:{post_id}]",
+                )
+            except Exception as local_history_error:
+                LOGGER.error(
+                    "Post %s is confirmed in SQLite; local history write failed (%s)",
+                    post_id, type(local_history_error).__name__,
+                )
             return PublishResult(
                 status="PUBLISHED_CONFIRMED", share_link=share_link, post_id=post_id,
                 local_post_id=local_post_id, http_status=http_status,
