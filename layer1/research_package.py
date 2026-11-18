@@ -129,6 +129,14 @@ class DeepResearchEngine:
         for record in registry.evidence_records:
             if record.asset_id not in {None, asset_id} or record.source_status != "ACCEPTED":
                 continue
+            # An unbound record whose subject explicitly names another canonical
+            # asset cannot be borrowed by this package through a loose claim link.
+            if (
+                record.asset_id is None
+                and record.subject.startswith("coingecko:")
+                and record.subject != asset_id
+            ):
+                continue
             if (_parse_time(record.published_at) > cutoff or _parse_time(record.observed_at) > cutoff
                     or (record.updated_at and _parse_time(record.updated_at) > cutoff)):
                 continue
@@ -136,7 +144,10 @@ class DeepResearchEngine:
 
         latest_by_scope = {}
         for claim in registry.claims:
-            if claim.asset_id not in {None, asset_id}:
+            if claim.asset_id is not None:
+                if claim.asset_id != asset_id:
+                    continue
+            elif claim.subject != asset_id:
                 continue
             observed = _parse_time(claim.observed_at)
             if observed > cutoff:
@@ -152,6 +163,7 @@ class DeepResearchEngine:
                 current[1].append(pair)
         selected = [pair for _, values in latest_by_scope.values() for pair in values]
         facts, inferences, disputed, unknown = [], [], [], []
+        used_evidence_ids: set[str] = set()
         for claim, result in selected:
             supporting_ids = tuple(result.supporting_evidence_ids) if result else ()
             contradicting_ids = tuple(result.contradicting_evidence_ids) if result else ()
@@ -166,6 +178,7 @@ class DeepResearchEngine:
                 else eligible_supporting_ids
             )
             eligible_result = bool(eligible_ids)
+            used_evidence_ids.update(eligible_ids)
             item = {
                 "claim_id": claim.claim_id,
                 "text": claim.text,
@@ -188,7 +201,10 @@ class DeepResearchEngine:
                 unknown.append(item)
 
         coverage_records = {}
-        for record in eligible_evidence.values():
+        for evidence_id in sorted(used_evidence_ids):
+            record = eligible_evidence.get(evidence_id)
+            if record is None:
+                continue
             group = coverage_records.setdefault(record.source_kind, {})
             group[record.evidence_id] = record.source_family
         source_coverage = {
