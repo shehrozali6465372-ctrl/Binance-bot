@@ -275,6 +275,15 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
             self.generator(lambda request, timeout: FakeResponse(payload)).generate("prompt", self.output)
         self.assertFalse(self.output.exists())
 
+
+    def test_generated_image_format_must_match_output_extension(self):
+        mismatch = Path(self.tmp.name) / "generated.jpg"
+        with self.assertRaisesRegex(ValueError, "format does not match output extension"):
+            self.generator(
+                lambda request, timeout: FakeResponse(self.image_bytes, "image/png")
+            ).generate("prompt", mismatch, width=512, height=512)
+        self.assertFalse(mismatch.exists())
+
     def test_non_json_binary_image_response_is_supported(self):
         result = self.generator(
             lambda request, timeout: FakeResponse(self.image_bytes, "image/png")
