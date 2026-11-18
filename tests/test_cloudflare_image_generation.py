@@ -63,6 +63,7 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
             authorization=auth, dry_run=False, image_path="/tmp/image.png",
             api_key="test-key", symbol="ABC", asset_id="coingecko:abc",
             content="verified content", image_hashes=["a" * 64],
+            publisher_enabled=True,
             upload_fn=lambda path, key: calls.append((path, key)) or "https://bin.bnbstatic.com/image",
         )
         self.assertEqual(url, "https://bin.bnbstatic.com/image")
@@ -164,6 +165,7 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
                 return ()
         with self.assertRaisesRegex(ValueError, "allowlisted Binance CDN"):
             upload_authorized_image(
+            publisher_enabled=True,
                 authorization=Authorization(), dry_run=False,
                 image_path="/tmp/image.png", api_key="test-key",
                 symbol="ABC", asset_id="coingecko:abc", content="verified",
@@ -179,6 +181,7 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
                 authorization=None, dry_run=False, image_path="/tmp/image.png",
                 api_key="test-key", symbol="ABC", asset_id="coingecko:abc",
                 content="content", image_hashes=["a" * 64], upload_fn=upload,
+            publisher_enabled=True,
             )
         class RejectedAuthorization:
             def verify_integrity(self):
@@ -187,6 +190,7 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
                 return ("IMAGE_ARTIFACT_CHANGED",)
         with self.assertRaisesRegex(ValueError, "IMAGE_ARTIFACT_CHANGED"):
             upload_authorized_image(
+            publisher_enabled=True,
                 authorization=RejectedAuthorization(), dry_run=False,
                 image_path="/tmp/image.png", api_key="test-key",
                 symbol="ABC", asset_id="coingecko:abc", content="content",
@@ -336,6 +340,19 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
             )
         self.assertEqual(image.size, (1080, 1350))
         draw_chart.assert_not_called()
+
+
+    def test_publisher_disabled_blocks_media_upload_before_authorization_or_network(self):
+        calls = []
+        with self.assertRaisesRegex(ValueError, "PUBLISHER_ENABLED"):
+            upload_authorized_image(
+                authorization=None, dry_run=False, publisher_enabled=False,
+                image_path="/tmp/image.png", api_key="test-key",
+                symbol="ABC", asset_id="coingecko:abc", content="content",
+                image_hashes=["a" * 64],
+                upload_fn=lambda path, key: calls.append((path, key)) or "https://bin.bnbstatic.com/image",
+            )
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

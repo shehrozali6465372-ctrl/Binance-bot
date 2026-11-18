@@ -37,6 +37,7 @@ class PublisherSafetyTests(unittest.TestCase):
             main.CONFIG,
             database_path=self.db_path,
             dry_run=False,
+            publisher_enabled=True,
             square_api_key="test-key-not-real",
             http_timeout_seconds=1,
         )
@@ -638,6 +639,28 @@ class PublisherSafetyTests(unittest.TestCase):
             self.assertEqual(record["remote_post_id"], "remote-123")
         finally:
             main._POST_HISTORY_FILE = original
+
+
+    def test_live_config_requires_explicit_publisher_enablement(self):
+        config = replace(self.config, publisher_enabled=False)
+        with self.assertRaisesRegex(ValueError, "PUBLISHER_ENABLED"):
+            config.validate()
+
+    def test_publisher_kill_switch_defaults_off(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = main.Config.from_env()
+        self.assertFalse(config.publisher_enabled)
+
+    def test_disabled_publisher_blocks_before_authorization_or_network(self):
+        config = replace(self.config, publisher_enabled=False)
+        publisher = main.PostPublisher(config)
+        try:
+            with patch("main._open_binance_publish_no_redirect") as urlopen:
+                result = publisher.publish({"symbol": "BTC"}, "must not leave the process")
+            self.assertEqual(result.status, "PUBLISHER_DISABLED")
+            urlopen.assert_not_called()
+        finally:
+            publisher.db.close()
 
 
 if __name__ == "__main__":
