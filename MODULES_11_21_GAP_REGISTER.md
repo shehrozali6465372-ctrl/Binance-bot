@@ -1438,3 +1438,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Removed separate final quota writes that could fail after the attempt had already been confirmed. The linked reservation is now updated to the same terminal/unknown state atomically. Pre-submit reservation transitions remain separate.
 - This supersedes the earlier temporary fail-safe that left a quota reservation `PUBLICATION_UNKNOWN` after the attempt became `PUBLISHED_CONFIRMED`.
 - CI run `44223021885`: **691 tests, 0 failures, 41 skipped**; compile passed. PostgreSQL integration acceptance remains skipped pending approved disposable DSN.
+
+
+
+## 2026-11-18 — PostgreSQL duplicate-ledger query failure regression
+
+- Added a non-DSN unit test that injects a query failure inside the PostgreSQL duplicate-policy transaction and verifies the exception propagates. This proves the store does not fail open when the duplicate ledger is unavailable.
+- The pre-submit publisher catches the propagated error before transport and records a known no-submit failure; no Binance request is sent.
+- CI run `44223361236`: **692 tests, 0 failures, 41 skipped**; compile passed. The 41 guarded PostgreSQL integration tests remain unverified.

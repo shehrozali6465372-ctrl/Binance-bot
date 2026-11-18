@@ -2847,3 +2847,12 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - This supersedes the prior temporary behavior where a confirmed SQLite attempt could retain a `PUBLICATION_UNKNOWN` quota reservation after a separate final quota write failed.
 - GitHub Actions run `44223021885` on `acf9d8124cf69edfc98db606ab32080a71fdd234`: **SUCCESS**, compile passed, **691 tests, 0 failures, 41 skipped**. The 41 PostgreSQL integration tests remain skipped without `TEST_POSTGRES_DSN`.
 - No live Binance request/post or production database write occurred.
+
+
+
+## 2026-11-18 — PostgreSQL duplicate-ledger fail-closed unit coverage
+
+- Added an executable unit test proving `PostgresPublicationStore.validate_persisted_duplicate_policy` propagates a duplicate-ledger query failure instead of converting it to an empty/no-block result.
+- The publisher's PostgreSQL pre-submit boundary converts this propagated exception into a known no-submit `FAILED_CONFIRMED` outcome before transport invocation.
+- GitHub Actions run `44223361236` on `81429026c96dc5a06f7ac646d35c224f19983710`: **SUCCESS**, compile passed, **692 tests, 0 failures, 41 skipped**.
+- This is a mocked unit test; the 41 PostgreSQL integration skips still require the approved disposable test DSN/host allowlist.
