@@ -288,6 +288,28 @@ class PublisherSafetyTests(unittest.TestCase):
             publisher.db.close()
 
 
+
+    def test_postgres_duplicate_ledger_query_error_propagates_fail_closed(self):
+        from contextlib import nullcontext
+
+        class FakeConnection:
+            def transaction(self):
+                return nullcontext()
+
+        store = object.__new__(main.PostgresPublicationStore)
+        store.conn = FakeConnection()
+
+        def query_failure(**kwargs):
+            raise RuntimeError("duplicate ledger query failed")
+
+        store._duplicate_policy_reasons_in_transaction = query_failure
+        with self.assertRaisesRegex(RuntimeError, "duplicate ledger query failed"):
+            store.validate_persisted_duplicate_policy(
+                symbol="BTC", asset_id="coingecko:bitcoin", event_id="none",
+                event_state="NO_EVENT", content_hash="a" * 64,
+                quota_reservation_id="quota:test",
+            )
+
     def test_postgres_pre_submit_ledger_failure_is_known_not_submitted_and_releases_quota(self):
         coin, authorization, hashes = self._authorization(
             {"symbol": "BTC"}, "postgres pre-submit ledger failure content",
