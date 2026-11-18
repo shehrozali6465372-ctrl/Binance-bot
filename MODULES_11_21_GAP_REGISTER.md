@@ -1421,3 +1421,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Official DeepSeek model-list docs currently list `deepseek-flash` and `deepseek-v4-pro`; the configured `deepseek-flash` identifier is valid. Source: https://api-docs.deepseek.com/api/list-models/
 - Official Cloudflare Workers AI docs confirm `@cf/black-forest-labs/flux-2-klein-4b`, multipart form-data input, and fixed four-step inference. The current image client uses the documented multipart path and does not send a configurable step count. Source: https://developers.cloudflare.com/workers-ai/models/flux-2-klein-4b/
 - No live authenticated DeepSeek/Cloudflare request was run. Provider runtime acceptance remains pending; image inference has published usage pricing, so do not assume it is free or run it without explicit cost approval.
+
+
+
+## 2026-11-18 — SQLite final pre-submit ledger failure correction
+
+- The final SQLite event/provenance and persisted duplicate-policy checks now execute inside a dedicated pre-submit exception boundary. A database/ledger exception before transport is a known `FAILED_CONFIRMED` no-submit result, not `PUBLICATION_UNKNOWN`; no Binance HTTP call is made.
+- The attempt and quota are finalized as `FAILED_CONFIRMED` when possible. If ledger finalization itself fails, remaining `SUBMITTING`/`PUBLICATION_UNKNOWN` fences are retained and critical sanitized logs are emitted; reservations are never released in an uncertain state.
+- TDD/CI run `44222425776`: **691 tests, 0 failures, 41 skipped**, compile passed. The 41 PostgreSQL integration skips remain unverified.

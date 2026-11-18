@@ -2826,3 +2826,12 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Verified against current official DeepSeek API model-list documentation: `deepseek-flash` is a valid API model ID; `deepseek-v4-pro` is also listed. The configured `deepseek-flash` identifier is not a guessed model name. Official source: https://api-docs.deepseek.com/api/list-models/
 - Verified against current official Cloudflare Workers AI model documentation: `@cf/black-forest-labs/flux-2-klein-4b` is a valid Workers AI text-to-image model ID. The docs specify multipart form-data requests and fixed four-step inference for this distilled model; the current implementation uses multipart and does not attempt to override steps. Official source: https://developers.cloudflare.com/workers-ai/models/flux-2-klein-4b/
 - This is documentation/model-ID verification only. No authenticated provider request or image generation was executed. Cloudflare model pricing is published per output tile; do not assume usage is free or trigger provider verification without explicit cost approval.
+
+
+
+## 2026-11-18 — SQLite final pre-submit fail-closed classification
+
+- TDD exposed that a SQLite persisted duplicate-policy query exception during the final pre-submit revalidation was falling into the broad post-request exception handler and being recorded as `PUBLICATION_UNKNOWN`, even though the HTTP POST had not begun.
+- The final event/provenance and duplicate-policy checks plus local request construction now have a dedicated pre-submit exception boundary. Any exception before transport invocation returns known `FAILED_CONFIRMED`, attempts to finalize the attempt and quota as `FAILED_CONFIRMED`, and never invokes Binance transport. If either local ledger update also fails, the attempt/reservation remains fenced and a sanitized critical log is emitted.
+- RED: run `44222317391` initially failed because the test injected the error at the earlier authorization check; the test was corrected to fail only the final revalidation. GREEN: run `44222425776` on `4303c466d7af51fd72f9e7b945144dda653038fe`: **SUCCESS**, compile passed, **691 tests, 0 failures, 41 skipped**.
+- The 41 skips are PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`; this does not prove PostgreSQL acceptance. No live Binance request/post occurred.
