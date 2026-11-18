@@ -67,6 +67,43 @@ class DeepResearchEngineTests(unittest.TestCase):
         self.assertIn("DATA CUTOFF:", package.render())
         self.assertIn("evidence_ids=", package.render())
 
+
+    def test_unbound_claims_and_evidence_for_other_asset_do_not_enter_package(self):
+        foreign_asset = "coingecko:xyz"
+        foreign_evidence = EvidenceRecord(
+            source_id="unbound-foreign-market", source_family="coingecko",
+            source_kind="MARKET", publisher="CoinGecko", subject=foreign_asset,
+            claim_key="market.price", value=9.99, unit="USD",
+            published_at=self.timestamp, observed_at=self.timestamp,
+            asset_id=None, is_primary=True, source_status="ACCEPTED",
+        )
+        foreign_claim = Claim(
+            text="XYZ market price is 9.99 USD", subject=foreign_asset,
+            claim_key="market.price", value=9.99, unit="USD",
+            observed_at=self.timestamp, evidence_ids=(foreign_evidence.evidence_id,),
+            asset_id=None,
+        )
+        registry = EvidenceVerificationEngine().verify(
+            self.registry.claims + (foreign_claim,),
+            self.registry.evidence_records + (foreign_evidence,),
+        )
+        package = self.build(registry=registry)
+        packaged_claim_ids = {
+            item["claim_id"]
+            for item in (
+                package.verified_facts + package.inferences
+                + package.disputed_claims + package.unknown_claims
+            )
+        }
+        covered_evidence_ids = {
+            evidence_id
+            for coverage in package.source_coverage.values()
+            for evidence_id in coverage["evidence_ids"]
+        }
+        self.assertNotIn(foreign_claim.claim_id, packaged_claim_ids)
+        self.assertNotIn(foreign_evidence.evidence_id, covered_evidence_ids)
+        self.assertEqual(package.source_coverage["MARKET"]["record_count"], 1)
+
     def test_missing_required_source_class_leads_to_research_more(self):
         package = self.build(required_source_kinds=("PRIMARY", "MARKET", "ONCHAIN"))
         self.assertEqual(package.completeness, "RESEARCH_MORE")
