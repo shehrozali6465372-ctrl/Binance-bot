@@ -378,12 +378,12 @@ class PublicationAuthorizationEngine:
                     "SELECT asset_id,event_type,state FROM layer1_event_lifecycle WHERE event_id=?",
                     (event_id,),
                 ).fetchone()
-                if event is None or event["asset_id"] != asset_id or event["state"] != event_state:
+                if event is None or event[0] != asset_id or event[2] != event_state:
                     reasons.append("EVENT_LIFECYCLE_CHANGED")
                 else:
                     exceptional = (
-                        self._is_exceptional_event(str(event["event_type"] or ""))
-                        and event["state"] in {"CONFIRMED", "DEVELOPING"}
+                        self._is_exceptional_event(str(event[1] or ""))
+                        and event[2] in {"CONFIRMED", "DEVELOPING"}
                     )
             cutoff = now - timedelta(hours=repetition_hard_hours)
             posts = self.connection.execute(
@@ -408,26 +408,26 @@ class PublicationAuthorizationEngine:
 
         for row in posts:
             try:
-                created = _parse_time(row["created_at"])
+                created = _parse_time(row[0])
             except (TypeError, ValueError):
                 reasons.append("DUPLICATE_LEDGER_TIMESTAMP_INVALID")
                 continue
-            prior_content = row["content"] if isinstance(row["content"], str) else ""
+            prior_content = row[1] if isinstance(row[1], str) else ""
             if hashlib.sha256(prior_content.encode("utf-8")).hexdigest() == content_hash:
                 reasons.append("DUPLICATE_CONTENT_ALREADY_PUBLISHED")
             if not exceptional and created >= cutoff:
                 reasons.append("RECENT_POST_COOLDOWN")
 
         for row in attempts:
-            if exclude_idempotency_key and row["idempotency_key"] == exclude_idempotency_key:
+            if exclude_idempotency_key and row[0] == exclude_idempotency_key:
                 continue
-            if row["status"] in {"SUBMITTING", "PUBLICATION_UNKNOWN"}:
+            if row[1] in {"SUBMITTING", "PUBLICATION_UNKNOWN"}:
                 reasons.append("UNRESOLVED_PUBLICATION_ATTEMPT")
                 continue
-            if row["content_hash"] == content_hash:
+            if row[2] == content_hash:
                 reasons.append("DUPLICATE_CONTENT_ALREADY_PUBLISHED")
             try:
-                created = _parse_time(row["created_at"])
+                created = _parse_time(row[3])
             except (TypeError, ValueError):
                 reasons.append("DUPLICATE_LEDGER_TIMESTAMP_INVALID")
                 continue
