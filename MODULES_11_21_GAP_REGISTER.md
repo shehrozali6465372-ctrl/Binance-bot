@@ -1521,3 +1521,15 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Focused evidence-verification suite: **67 tests, 0 failures**. `compileall` and `git diff --check` passed. Full repository suite: **702 tests, 0 failures, 41 skipped**. The 41 skips are PostgreSQL integration tests gated by absent `TEST_POSTGRES_DSN`; they are not passes.
 - This is deterministic segmentation only. It does not infer semantic truth or implement general semantic entailment; Module 11 remains **PARTIAL / NOT COMPLETE**.
 - Work remains local and unpushed in `/tmp/binance-w2e-continuation`; the original checkout is untouched. No DB/provider/Cloudflare/media-upload/publishing/deployment/merge actions occurred.
+
+
+## 2026-11-18 — Authoritative continuation state after Module 11 negated auxiliary fix
+
+- Current PR #14 remains OPEN / DRAFT / UNMERGED. Head branch: `layer-1/module9-onchain-continuation`; base: `layer-1/module9-onchain-intelligence`.
+- Latest pushed head: `978f04d9cd236091b5e35b9e18367f1c6035a228`; exact remote branch SHA verified with `git ls-remote`. The isolated worktree `/tmp/binance-w2e-continuation` was clean immediately after push.
+- Local verification on that exact commit: full suite **702 tests, 0 failures, 41 skipped**; focused Module 11 evidence-verification suite **67 tests, 0 failures**; `compileall` and `git diff --check` passed.
+- The 41 skipped tests are guarded PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`; they are not passes. GitHub workflow-runs and combined-status queries for this exact head returned no entries, so latest-head hosted CI is **NOT VERIFIED**.
+- Module 11 latest fix adds `do` / `does` / `did` and `change` / `changes` / `changed` to the bounded independent-clause grammar. Negation in `Bitcoin's price rose 8% and Ethereum's price did not change.` is preserved. Module 11 remains PARTIAL; no general semantic entailment claim is made.
+- Module 14 remains fail-closed pending owner-approved evidence-backed scoring policy and calibrated factors. Module 21 remains PARTIAL pending approved disposable PostgreSQL acceptance and crash/restart, quota, and unknown-publication reconciliation evidence. Live DeepSeek/Cloudflare and Binance authenticated media-upload acceptance remain unverified.
+- No real Binance post, media upload, publisher activation, production DB write, credential/schedule change, workflow dispatch, merge, or deployment occurred. `DRY_RUN=1`; `PUBLISHER_ENABLED` remains default-off.
+- This entry supersedes older status notes that described commit `978f04d` as local/unpushed or said its push was not authorized. Those statements are historical and no longer current.

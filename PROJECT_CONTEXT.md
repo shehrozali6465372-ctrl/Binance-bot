@@ -1,3 +1,39 @@
+# CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-18
+
+This section supersedes older statements below about the active worktree, RDC permission, push authorization, current test count, and latest PR state. Historical entries remain for traceability.
+
+## Verified repository state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Existing PR: #14, `layer-1/module9-onchain-continuation` → `layer-1/module9-onchain-intelligence`; GitHub metadata checked on 2026-11-18. PR is OPEN, DRAFT, UNMERGED; mergeable reported true. Do not create another PR or work on `main`.
+- Isolated worktree: `/tmp/binance-w2e-continuation`; local branch: `work/module9-continuation-local`. Original `/root/Binance-bot` checkout and its unrelated announcement-worker modifications remain untouched.
+- Latest verified commit: `978f04d9cd236091b5e35b9e18367f1c6035a228` (`fix: split negated auxiliary asset claims`). The existing PR remote branch points to this exact SHA (`git ls-remote` verified).
+- Worktree was clean at the post-push verification.
+- RDC device `localhost` (`bd830869-fbae-4825-ae7b-5044d6161090`) is the authorized execution route for this continuation.
+
+## Latest verified tests and hosted checks
+- Latest local full repository suite on the exact commit: **702 tests, 0 failures, 41 skipped**.
+- Focused Module 11 evidence-verification suite: **67 tests, 0 failures**.
+- `compileall` and `git diff --check` passed.
+- The 41 skipped tests are PostgreSQL integration tests gated by `TEST_POSTGRES_DSN`; they are not passes and do not establish live PostgreSQL acceptance.
+- GitHub Actions workflow-runs query for this exact SHA returned no runs; combined commit status returned no status entries. **Hosted CI for this SHA is not verified.** An earlier CI success on a different SHA must not be represented as latest-head CI.
+
+## Latest implementation detail — Module 11
+- `split_atomic_claims()` now recognizes `do` / `does` / `did` and `change` / `changes` / `changed` in the bounded independent-clause grammar. The regression for `Bitcoin's price rose 8% and Ethereum's price did not change.` confirms two claims are produced and the negation is preserved.
+- This is bounded deterministic segmentation and structured evidence binding, not general semantic entailment. Module 11 remains PARTIAL.
+
+## Current restrictions and unresolved acceptance
+- No real Binance Square post, authenticated media upload, publisher activation, production DB write, production credential/schedule change, workflow dispatch, merge, or deployment. `DRY_RUN=1`; `PUBLISHER_ENABLED` remains default-off.
+- Module 14 remains fail-closed pending owner-approved evidence-backed scoring policy and calibrated factors. Do not reuse Module 7 `SCORING_POLICY.md` weights.
+- Module 21 still requires approved disposable-PostgreSQL integration acceptance and end-to-end crash/restart, quota recovery, and unknown-publication reconciliation evidence. Do not copy a DSN from another worktree or use production credentials.
+- Live DeepSeek/Cloudflare provider acceptance and Binance authenticated media-upload acceptance remain unverified. Cloudflare inference may incur cost; do not call without explicit cost approval.
+- PR #12 and #13 remain separate open/unmerged stack items; do not alter or duplicate them.
+- The file `BINANCE_PRODUCTION_BLOCKERS_2026-11-16.md` was not present at the root of this isolated worktree when checked on 2026-11-18. The current blocker record available here is `MODULES_11_21_GAP_REGISTER.md`; do not claim the absent file was updated.
+
+## Continuation instruction
+Continue from this exact commit and inspect before modifying. Use TDD for behavior changes, preserve unrelated worktrees, update this context and the gap register, run focused plus full tests, and verify the exact remote SHA and GitHub PR state after every push. The user's 2026-11-18 instruction authorizes pushing completed project changes to the existing PR branch; it does not authorize merge, deployment, production writes, publisher activation, live posting, or paid provider calls.
+
+---
+
 ## Latest verified coding continuation — 2026-11-18 (persisted publication duplicate policy)
 
 - Active implementation remains PR #14 on `layer-1/module9-onchain-continuation`; draft/open/unmerged. User approved application-code commits on this existing branch. RDC remains prohibited.
