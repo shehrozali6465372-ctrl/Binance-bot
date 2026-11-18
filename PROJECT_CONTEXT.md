@@ -1,3 +1,20 @@
+## Latest verified coding continuation — 2026-11-18 (persisted publication duplicate policy)
+
+- Active implementation remains PR #14 on `layer-1/module9-onchain-continuation`; draft/open/unmerged. User approved application-code commits on this existing branch. RDC remains prohibited.
+- Removed caller-supplied `duplicate_policy_passed=True` from application authorization flow. The authorization engine now computes the duplicate-policy result from persisted ledgers; the caller cannot declare the policy passed.
+- The persisted policy checks:
+  - Recent same-symbol posts within configured `repetition_hard_hours` (1–168 hours).
+  - Exact duplicate content hashes in prior posts/confirmed attempts.
+  - Unresolved `SUBMITTING` / `PUBLICATION_UNKNOWN` attempts, which block even exceptional catalyst events.
+  - Competing active quota reservations for the same symbol.
+  - Exceptional cooldown bypass only when the persisted event lifecycle is CONFIRMED/DEVELOPING and its persisted event type is explicitly allowlisted (`new_listing`, `launchpool`, `megadrop`, `airdrop`, `delisting`). It never bypasses unresolved attempts, exact content duplicates or competing reservations.
+- SQLite authorization and pre-submit revalidation use the existing posts/attempts/quota tables and acquire an immediate write transaction. The publisher rechecks again immediately before the HTTP POST, excluding only its own idempotency key and quota reservation.
+- PostgreSQL authorization and pre-submit revalidation use the existing publication tables and symbol-scoped transaction advisory lock; the pre-submit lock is acquired before row locks to preserve lock order. The PostgreSQL store rechecks the same duplicate policy immediately before the external POST.
+- Regression coverage added for recent posts, unresolved attempts, exceptional-event non-bypass, competing reservations, revalidation after authorization, and PostgreSQL parity. Hosted CI run `44219811233` for commit `bde27012230a8c8ec695643d41e9023efcb4c792`: SUCCESS; compileall passed; **683 tests, 0 failures, 40 skipped**.
+- The 40 skipped tests include PostgreSQL integration tests because `TEST_POSTGRES_DSN` was not configured in this hosted run. The PostgreSQL duplicate-policy integration case is present but not live-verified here.
+- No real Binance post, authenticated media upload, production DB write, production credential/schedule change, workflow dispatch, publisher activation, merge or deployment.
+- Do not repeat these fixes. Next priority is to continue remaining Layer 1–21 integration gaps, especially operational Module 9 worker/runtime integration and remaining Module 11 semantic verification gaps. Do not invent monitored addresses or source configuration; require explicit configuration and fail closed when absent.
+
 ## Latest verified coding continuation — 2026-11-18 (independent publication kill switch)
 
 - Active target remains PR #14 on `layer-1/module9-onchain-continuation`; base branch remains `layer-1/module9-onchain-intelligence`. PR remains draft/open/unmerged.

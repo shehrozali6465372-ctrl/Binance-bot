@@ -1355,3 +1355,13 @@ This checklist does not authorize the work to be marked done merely by checking 
 - TDD coverage added for default-off, config validation, publisher refusal and media-upload refusal. The final CI run `44218585027` passed: compileall + 678 tests, 0 failures, 40 skipped.
 - The 40 skips include PostgreSQL integration tests without TEST_POSTGRES_DSN. No live provider/media/publishing test was run.
 - Scheduled workflow remains DRY_RUN=1 and publisher disabled. No production side effects.
+
+## 2026-11-18 — Persisted publication duplicate policy enforced
+
+- Removed the caller-supplied duplicate-policy boolean from both SQLite and PostgreSQL authorization interfaces. The authorization engines now derive the pass result from persisted records.
+- Checks recent same-symbol posts (configured hard cooldown), exact duplicate content, unresolved SUBMITTING/PUBLICATION_UNKNOWN attempts, and competing active same-symbol quota reservations.
+- Exceptional cooldown bypass is based on persisted event type and persisted CONFIRMED/DEVELOPING lifecycle only. It does not bypass unresolved attempts, exact duplicates or competing reservations.
+- SQLite checks are re-run before attempt reservation and immediately before HTTP POST. PostgreSQL uses symbol-scoped advisory transaction locks and repeats the check inside the durable pre-submit transaction.
+- Test-first red run reproduced missing caller-independent policy; follow-up CI run `44219811233` passed: compileall + 683 tests, 0 failures, 40 skipped.
+- The 40 skips include live PostgreSQL tests requiring TEST_POSTGRES_DSN. PostgreSQL duplicate-policy integration test exists but remains unexecuted in this CI run.
+- No production publication or other external side effects.
