@@ -1365,3 +1365,13 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Test-first red run reproduced missing caller-independent policy; follow-up CI run `44219811233` passed: compileall + 683 tests, 0 failures, 40 skipped.
 - The 40 skips include live PostgreSQL tests requiring TEST_POSTGRES_DSN. PostgreSQL duplicate-policy integration test exists but remains unexecuted in this CI run.
 - No production publication or other external side effects.
+
+
+
+## 2026-11-18 — Module 21 PostgreSQL pre-submit failure-state correction
+
+- TDD reproduced that a PostgreSQL pre-submit validation/duplicate-ledger exception was incorrectly classified as `PUBLICATION_UNKNOWN` even though the HTTP request had not been sent.
+- The publisher now isolates the preflight from the network call. A preflight exception records `FAILED_CONFIRMED` and returns without invoking the Binance transport. Only exceptions after entering the network submission path retain `PUBLICATION_UNKNOWN` semantics.
+- RED run: GitHub Actions `44220146035`, 684 tests, 1 failure, 40 PostgreSQL tests skipped. GREEN run: `44220220216`, **684 tests, 0 failures, 40 skipped**; compileall passed.
+- The PostgreSQL query failure remains fail-closed (exception prevents POST). The new regression uses a deterministic mocked store; it is not a substitute for live PostgreSQL integration.
+- Module 21 remains **PARTIAL / NOT COMPLETE** until the guarded PostgreSQL authorization/duplicate/recovery tests execute against the approved disposable test database and crash/restart/unknown-outcome recovery is accepted. No production DB or real publisher activity was used.

@@ -2760,3 +2760,16 @@ Safety remains: keep `DRY_RUN=1`; publisher disabled; no real Square publication
 5. Durable scheduled workflow state, quota recovery, crash recovery and full dry-run end-to-end acceptance remain outstanding.
 
 Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB writes, no credential/schedule change, no Render deployment, no paid provisioning, and all other worktrees preserved.
+
+
+
+## 2026-11-18 — PostgreSQL pre-submit rejection classification hardening
+
+- Continued from PR #14 on `layer-1/module9-onchain-continuation`; latest verified code head: `971a1a06876920408cac74c3e4d4366411459570`.
+- Audited the PostgreSQL publication path after the persisted duplicate-policy implementation. The duplicate-policy query itself fails closed: database/query errors propagate from the transaction and prevent the HTTP POST.
+- Found a state-classification defect: if the final PostgreSQL authorization/provenance/duplicate preflight failed before the network request, the publisher's broad exception handler recorded `PUBLICATION_UNKNOWN`. This was incorrect because no POST had been attempted; it also retained quota as an unresolved outcome.
+- TDD evidence: new mocked publisher regression first failed RED on commit `011d9faaaa854a959caa6076bc6a5dd169a4355f` (684 tests, 1 failure, 40 PostgreSQL skips). It asserted no HTTP call and a known `FAILED_CONFIRMED` state for a pre-submit ledger failure.
+- Minimal fix on commit `971a1a06876920408cac74c3e4d4366411459570`: pre-submit validation now has its own exception boundary. A preflight rejection records `FAILED_CONFIRMED`, returns a known no-submit result, and does not call the Binance transport. The existing post-request ambiguous network exception path still records `PUBLICATION_UNKNOWN`.
+- GitHub Actions run `44220220216`: **SUCCESS**, compile step passed, **684 tests, 0 failures, 40 skipped**. The regression passed. The 40 skips remain PostgreSQL integration tests gated by missing `TEST_POSTGRES_DSN`; this CI run does not prove direct PostgreSQL integration acceptance.
+- No live Binance request, media upload, real Square post, production DB write, workflow dispatch, deployment, credential/schedule change or publisher activation occurred. Keep `DRY_RUN=1` and `PUBLISHER_ENABLED=false`.
+- Next: continue Module 21 transaction/error/recovery audit and arrange approved disposable-branch PostgreSQL acceptance without exposing a DSN or touching production. Module 11 semantic verification, live DeepSeek/Cloudflare provider acceptance, and full production cutover remain incomplete.
