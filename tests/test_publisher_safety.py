@@ -222,6 +222,50 @@ class PublisherSafetyTests(unittest.TestCase):
         finally:
             publisher.db.close()
 
+
+    def test_postgres_confirmed_publication_is_not_downgraded_by_local_history_write_failure(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "postgres local history failure content",
+        )
+
+        class FakePostgresStore:
+            def __init__(self):
+                self.calls = []
+
+            def begin_authorized_attempt(self, **kwargs):
+                return None
+
+            def validate_authorized_attempt_before_submit(self, **kwargs):
+                self.calls.append(("preflight", kwargs))
+
+            def finish_authorized_attempt(self, key, status, **kwargs):
+                self.calls.append(("finish", key, status, kwargs))
+
+        store = FakePostgresStore()
+        publisher = main.PostPublisher(self.config, postgres_store=store)
+        publisher._save_locally = lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("local history disk unavailable")
+        )
+        response = FakeResponse({
+            "code": "000000",
+            "data": {"id": "pg-remote-history-1", "shareLink": "https://example.invalid/pg-remote-history-1"},
+        })
+        try:
+            with patch("main._open_binance_publish_no_redirect", return_value=response) as urlopen:
+                result = publisher.publish(
+                    coin, "postgres local history failure content",
+                    authorization=authorization, image_hashes=hashes,
+                )
+            self.assertEqual(result.status, "PUBLISHED_CONFIRMED")
+            self.assertEqual(result.post_id, "pg-remote-history-1")
+            self.assertEqual(
+                [call[2] for call in store.calls if call[0] == "finish"],
+                ["PUBLICATION_UNKNOWN", "PUBLISHED_CONFIRMED"],
+            )
+            urlopen.assert_called_once()
+        finally:
+            publisher.db.close()
+
     def test_postgres_opt_in_publisher_blocks_existing_unknown_attempt_without_post(self):
         coin, authorization, hashes = self._authorization(
             {"symbol": "BTC"}, "postgres pending attempt content",
