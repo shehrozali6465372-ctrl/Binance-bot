@@ -4295,7 +4295,17 @@ class PostPublisher:
                 key, "PUBLISHED_CONFIRMED", post_id=post_id, share_link=share_link,
                 http_status=http_status,
             )
-            self._save_locally(coin, content, share_link=share_link or f"[POST-ID:{post_id}]")
+            # PostgreSQL is authoritative in this backend. A secondary local
+            # history-file failure cannot undo or downgrade a confirmed remote post.
+            try:
+                self._save_locally(
+                    coin, content, share_link=share_link or f"[POST-ID:{post_id}]",
+                )
+            except Exception as local_history_error:
+                LOGGER.error(
+                    "Post %s is confirmed in PostgreSQL; local history write failed (%s)",
+                    post_id, type(local_history_error).__name__,
+                )
             return PublishResult(
                 status="PUBLISHED_CONFIRMED", share_link=share_link, post_id=post_id,
                 local_post_id=local_post_id, http_status=http_status,
