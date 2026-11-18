@@ -3264,3 +3264,11 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Post-push verification confirmed local HEAD and remote `layer-1/module9-onchain-continuation` both equal `f59a4f1d160c9e8bde830559dba95174148ec10c`; working tree was clean.
 - PR #14 remained OPEN / DRAFT / UNMERGED, with the expected head and base branches. GitHub Actions run `44340291099` for this exact SHA completed SUCCESS.
 - This hosted mocked-safety workflow success does not substitute for the 43 skipped PostgreSQL integrations or real Cloudflare/Binance provider acceptance.
+
+
+## 2026-11-18 — Cloudflare Workers AI model contract rechecked against official docs
+
+- Official Cloudflare model documentation confirms the configured model ID `@cf/black-forest-labs/flux-2-klein-4b`, multipart REST input, and Base64 image output. The official launch documentation confirms `prompt`, `width`, and `height` multipart fields and a 256–1920 range; the implementation's 1024×1024 request is within that range.
+- Official listed output price is $0.000287 per 512×512 tile. A 1024×1024 output is approximately four tiles, giving an estimated $0.001148 per output image before any account-specific billing effects. No live inference was called and no charge was incurred by this documentation check.
+- Sources: https://developers.cloudflare.com/workers-ai/models/flux-2-klein-4b/ ; https://developers.cloudflare.com/changelog/post/2026-01-15-flux-2-klein-4b-workers-ai/ ; https://developers.cloudflare.com/workers-ai/platform/pricing/ .
+- This closes only the public model-ID/request-shape/pricing-documentation check. Account entitlement, real provider response, latency/quality and actual billing remain unverified. Module 19 remains PARTIAL.
