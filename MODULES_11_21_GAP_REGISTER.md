@@ -1386,3 +1386,13 @@ This checklist does not authorize the work to be marked done merely by checking 
 - SQLite/adapter regression tests pass. A PostgreSQL integration regression was added but remains guarded by `TEST_POSTGRES_DSN`.
 - CI run `44220831869`: **687 tests, 0 failures, 41 skipped**; compile passed. The 41 skips include the PostgreSQL integration suite and are not accepted as PostgreSQL passes.
 - This closes the code-level manual run-lease recovery gap only. Module 21 remains **PARTIAL / NOT COMPLETE** pending disposable-branch PostgreSQL acceptance, unknown publication reconciliation, quota/crash recovery end-to-end and operational verification.
+
+
+
+## 2026-11-18 — Module 21 confirmed-post persistence and run-lease owner guards
+
+- Fixed a post-acceptance state bug: after PostgreSQL durably records `PUBLISHED_CONFIRMED`, a failure writing the secondary local JSONL/history file no longer downgrades the returned result to `PUBLICATION_UNKNOWN`. PostgreSQL remains authoritative; the local history failure is logged without exception text.
+- TDD regression failed RED on `4b2e61a97fcfa53ba717b4edc56c7be51b7125e3`; fix passed in the latest suite.
+- PostgreSQL run-lease adapter now refuses recovery when the current adapter instance owns that same run ID. This complements the SQLite owner guard and exact-ID/operator-confirmation checks.
+- GitHub Actions run `44221215550`: **688 tests, 0 failures, 41 skipped**; compile passed. The PostgreSQL integration cases, including the new recovery regression, remain skipped without `TEST_POSTGRES_DSN`.
+- Module 21 remains **PARTIAL / NOT COMPLETE** pending real disposable-branch PostgreSQL acceptance, unknown-publication reconciliation and full crash/restart recovery validation. No real Square post, production DB write or publisher activation.

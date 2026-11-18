@@ -2786,3 +2786,15 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - The new PostgreSQL recovery integration test is among the guarded skips because `TEST_POSTGRES_DSN` is not configured in hosted CI. Only SQLite and mocked adapter behavior are verified here.
 - No run was force-released in any connected database; no DB writes, production changes, provider calls, publisher activation, real Square post, workflow dispatch, merge or deployment were performed.
 - Remaining: run the guarded PostgreSQL recovery/authorization suite against the approved disposable test branch, validate crash/unknown-publication reconciliation end-to-end, and complete provider/semantic acceptance. Keep `DRY_RUN=1` and publisher default-off.
+
+
+
+## 2026-11-18 — Preserve PostgreSQL-confirmed publication when local history fails
+
+- Audited the post-acceptance persistence sequence in the PostgreSQL publisher. Once Binance returns a valid success response with an external post ID, the authoritative PostgreSQL attempt is first transitioned to `PUBLICATION_UNKNOWN` with the remote identity, then finalized to `PUBLISHED_CONFIRMED`.
+- Found a defect: a later secondary `_save_locally()` / JSONL history write exception was caught by the broad submission handler and the method returned `PUBLICATION_UNKNOWN`, even though PostgreSQL already held `PUBLISHED_CONFIRMED`. The follow-up attempt transition was invalid and could misreport confirmed publication.
+- TDD: regression failed RED on commit `4b2e61a97fcfa53ba717b4edc56c7be51b7125e3` (688 tests, 1 failure, 41 skipped).
+- Fix on commit `aa059d6c128d25a9388ecf4eca882fa417a3fb14`: secondary local history persistence is now best-effort after durable PostgreSQL confirmation. Failure is logged by exception class only; result remains `PUBLISHED_CONFIRMED` with the actual remote post ID. The authoritative ledger is not downgraded.
+- Additional run-lease guard: PostgreSQL adapter now refuses an active owner process attempting to recover its own lease. TDD regression was observed RED on `23b5f4e93981825bd204f00f71b28118143c0ea3`, then fixed.
+- Final GitHub Actions run `44221215550` on `d963542d2f3de46ffd8a8c1387e41d0a1d30a9e9`: **SUCCESS**, compile passed, **688 tests, 0 failures, 41 skipped**.
+- The 41 skips remain guarded PostgreSQL integration tests; no direct PostgreSQL acceptance is implied. No live Binance request or real post was made.
