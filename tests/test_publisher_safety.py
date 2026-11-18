@@ -830,7 +830,7 @@ class PublisherSafetyTests(unittest.TestCase):
         })
         with patch.object(
             PublicationAuthorizationEngine, "validate_persisted_duplicate_policy",
-            side_effect=sqlite3.OperationalError("duplicate ledger unavailable"),
+            side_effect=[(), sqlite3.OperationalError("duplicate ledger unavailable")],
         ):
             with patch("main._open_binance_publish_no_redirect", return_value=response) as urlopen:
                 result = self.publisher.publish(
