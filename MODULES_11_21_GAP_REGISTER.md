@@ -1,3 +1,24 @@
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-18 (PostgreSQL integration acceptance)
+
+This entry supersedes earlier claims below that the isolated PostgreSQL integration tests are skipped or not yet executed. Historical counts are retained for traceability.
+
+## PostgreSQL integration acceptance — PASS on disposable test database; production readiness still PARTIAL
+- Correct code worktree: `/tmp/binance-w2e-continuation`; baseline commit `df7c4f245f1f93ff137ee0a416c10e1eb4f761b3`, exactly matching GitHub `layer-1/module9-onchain-continuation` before the current test-only fix. PR #14 remains OPEN / DRAFT / UNMERGED.
+- Existing `/tmp/binance-deepseek-verify/.env` was found and read without displaying or copying secret values. It is mode `0600`, contains `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST`, and targets the dedicated `binance_onchain_test` database on the exact allowlisted host with `sslmode=require`. A read-only connection verified the database identity and client-side TLS.
+- The first DB integration run exposed a test fixture defect in `tests/test_publication_postgres.py`: missing `timedelta`, `PUBLISHER_ENABLED` left false in the mocked publisher test, mock `read()` did not accept the bounded read argument, and mock share URL did not satisfy the production Binance Square URL/remote-ID contract.
+- Test-only correction: imported `timedelta`; enabled the publisher only in that local test config; updated the mock response to implement `read(size)`; changed the fixture URL to `https://www.binance.com/square/post/pg-integration-post-1`; and attached `result.error` to the status assertion. The network transport remains patched and deterministic; no real Binance request/post was made.
+- Focused PostgreSQL authorization test after correction: **1 passed, 0 failed**. Focused operator reconciliation regressions: **5 passed, 0 failed**.
+- Full repository suite with the isolated PostgreSQL DSN enabled: **745 tests, 0 failures, 0 errors, 0 skipped**. PostgreSQL-gated tests ran rather than being skipped. `compileall` and `git diff --check` passed.
+- Tests are limited to the disposable `binance_onchain_test` database. Module 9 on-chain integration fixtures truncate their own test tables in this disposable database; never run these tests against production.
+- No production DB was used, no production config/credentials/schedules were changed, no real provider inference or media upload was made, and no real Binance post was published.
+
+### Remaining Module 21 acceptance
+- The PostgreSQL persistence adapters and their current integration tests now have live disposable-DB execution evidence. This is not a complete production cutover or an end-to-end production recovery certification.
+- Still required: complete crash/restart and operator-recovery drills across scheduled run leases, quota reservations, publication attempts, event lifecycle, research/editorial/draft/validation/image records; production DB architecture/cutover review; and explicit owner approval before any production change.
+- Module 21 remains **PARTIAL / NOT PRODUCTION-READY**. The test DB must never be reused as `POSTGRES_DSN` in production.
+
+---
+
 # Module 11–21 Implementation Gap Register
 
 ## Cross-cutting blocker #1 — scheduled persistence and daily quota (2026-11-16)

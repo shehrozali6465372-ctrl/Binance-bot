@@ -997,7 +997,7 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
     @unittest.skipUnless(__import__("os").environ.get("TEST_POSTGRES_DSN"), "TEST_POSTGRES_DSN is not configured")
     def test_authorization_is_persisted_only_when_all_exact_provenance_is_present(self):
         import hashlib, json, os, uuid
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
         from layer1.publication_postgres import PostgresPublicationStore
         from layer1.publication_runtime import PostgresPublicationAuthorizationEngine
         store = PostgresPublicationStore(os.environ["TEST_POSTGRES_DSN"])
@@ -1059,18 +1059,21 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
                 status = 200
                 def __enter__(self): return self
                 def __exit__(self, *args): return False
-                def read(self): return json.dumps({"code":"000000","data":{"id":"pg-integration-post-1","shareLink":"https://example.invalid/pg-integration-post-1"}}).encode()
+                def read(self, size=-1):
+                    body = json.dumps({"code":"000000","data":{"id":"pg-integration-post-1","shareLink":"https://www.binance.com/square/post/pg-integration-post-1"}}).encode()
+                    return body if size < 0 else body[:size]
 
             with tempfile.TemporaryDirectory() as tmp:
                 config = dc_replace(main.CONFIG, database_path=str(Path(tmp) / "publisher.sqlite"),
-                                    dry_run=False, square_api_key="test-key-not-real")
+                                    dry_run=False, publisher_enabled=True,
+                                    square_api_key="test-key-not-real")
                 publisher = main.PostPublisher(config, postgres_store=store)
                 # The integration test exercises persistence only; do not create a local post artifact.
                 publisher._save_locally = lambda *args, **kwargs: None
                 try:
                     with patch("main._open_binance_publish_no_redirect", return_value=MockResponse()) as transport:
                         result = publisher.publish({"symbol":symbol,"asset_id":"coingecko:bitcoin"}, content, authorization=auth, image_hashes=[])
-                    self.assertEqual(result.status, "PUBLISHED_CONFIRMED")
+                    self.assertEqual(result.status, "PUBLISHED_CONFIRMED", result.error)
                     self.assertEqual(result.post_id, "pg-integration-post-1")
                     self.assertIsNotNone(result.local_post_id)
                     post_row=store.conn.execute(

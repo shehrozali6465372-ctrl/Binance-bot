@@ -1,3 +1,46 @@
+# CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-18 (PostgreSQL integration acceptance)
+
+This is the latest verified checkpoint and supersedes older top-level statements below about worktree, DSN availability, PostgreSQL skips, test counts and current PR head. Older entries remain historical records and must not be used as current status.
+
+## Correct worktree and GitHub target
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Correct active worktree: `/tmp/binance-w2e-continuation`.
+- Local branch: `work/module9-continuation-local`; baseline HEAD before the current test-fixture changes: `df7c4f245f1f93ff137ee0a416c10e1eb4f761b3`.
+- `git ls-remote` and a fresh fetch verified that baseline SHA exactly matches GitHub branch `layer-1/module9-onchain-continuation`.
+- Existing PR #14 remains OPEN, DRAFT and UNMERGED; head `layer-1/module9-onchain-continuation`, base `layer-1/module9-onchain-intelligence`. No new PR, merge, deployment or `main` change.
+- `/tmp/binance-deepseek-verify` is an older, separate, dirty worktree. Do not edit, reset, stash, clean or use it as the code worktree. Its existing `.env` is used only as a read-only source of test environment variables.
+- RDC device: `localhost` (`bd830869-fbae-4825-ae7b-5044d6161090`).
+
+## Isolated PostgreSQL test configuration and safety
+- Existing file: `/tmp/binance-deepseek-verify/.env`; verified regular file, permission mode `0600`, with `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST` keys.
+- Values are parsed in-process only; do not print, copy into this repository, commit, or send them to GitHub. Do not use shell `.` to source this file: the connection string is not safe for shell parsing.
+- Sanitized policy verification: database `binance_onchain_test`; DSN hostname exactly matches `TEST_POSTGRES_ALLOWED_HOST`; `sslmode=require`; libpq client reports TLS in use. The database identity was confirmed through a read-only connection before tests.
+- The PostgreSQL tests are destructive only within the explicitly named disposable `binance_onchain_test` database (Module 9 tests truncate their own on-chain test tables). Never point this file or these tests at a production database.
+- Test runner uses `/tmp/binance-w2e-test-venv` with the already-installed `psycopg` package supplied through the isolated `/tmp/binance-module11-test-venv` site-packages path. No project dependency manifests or production environment were changed.
+
+## Latest verified test acceptance — 2026-11-18
+- The first PostgreSQL integration run executed 72 tests and exposed a broken authorization test fixture: missing `timedelta`, publisher fixture left disabled despite a mocked transport, a mock response whose `read()` did not accept a byte limit, and a non-Binance share URL rejected by the real persistence validator.
+- Corrected only `tests/test_publication_postgres.py`: import `timedelta`; explicitly enable the publisher in this test fixture only; make the mock response honor bounded `read(size)`; use a syntactically valid Binance Square URL bound to the mock remote post ID; include `result.error` in the status assertion for diagnostics.
+- Focused PostgreSQL authorization integration test: **1 passed, 0 failed** after the fixture correction. The HTTP transport is patched to a deterministic in-process mock; no real Binance request or post was made.
+- Focused publisher-reconciliation regressions: **5 passed, 0 failed**.
+- Final full repository suite, with the disposable PostgreSQL DSN enabled and repository root correctly on `PYTHONPATH`: **745 tests, 0 failures, 0 errors, 0 skipped**. This includes the PostgreSQL-gated tests that previously skipped when the DSN was absent.
+- `python -m compileall -q .` and `git diff --check` passed after the test-only fix.
+- Application/test changes are confined to `tests/test_publication_postgres.py`; the two canonical Markdown context files carry this checkpoint. No production application runtime, workflow, publisher, or deployment configuration was changed. Re-verify exact commit and PR head after pushing.
+
+## Remaining production blockers / boundaries
+- PostgreSQL integration test acceptance is now verified against the disposable database, but this does not establish production readiness or authorize a production cutover.
+- Module 21 remains PARTIAL pending complete crash/restart and operator recovery drills across all durable state, deployment/runtime configuration acceptance, and explicit production database cutover approval.
+- Module 14 remains fail-closed pending owner-approved evidence-backed scoring policy.
+- Module 11 semantic entailment/originality and Binance policy acceptance remain partial.
+- Module 19 real Cloudflare inference and Module 20 independent OCR/vision acceptance remain unverified. Do not make paid provider calls without explicit approval.
+- Authenticated Binance media upload and real publishing remain unverified. Keep `DRY_RUN=1` and `PUBLISHER_ENABLED` default-off. Never publish a real Binance Square post or Pinterest Pin during diagnostics.
+- No production database writes, production credential/schedule changes, publisher activation, real Binance post, media upload, workflow dispatch, merge or deployment occurred.
+
+## Exact continuation
+Continue only in `/tmp/binance-w2e-continuation`. Preserve the dirty old worktree and unrelated `/root/Binance-bot` checkout. Review the test-only diff, update this context and the gap register, run compile/diff checks, commit to the existing PR branch with a non-force push, then verify remote SHA, PR #14 state and GitHub Actions. Do not create a duplicate PR or merge/deploy.
+
+---
+
 # CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-18
 
 This section supersedes older statements below about the active worktree, RDC permission, push authorization, current test count, and latest PR state. Historical entries remain for traceability.
