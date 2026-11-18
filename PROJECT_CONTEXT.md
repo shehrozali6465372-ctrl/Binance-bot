@@ -2818,3 +2818,11 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - The attempt/result must remain `PUBLISHED_CONFIRMED`; the quota reservation remains `PUBLICATION_UNKNOWN` (still counted as active) if the separate final quota transition fails. A critical log records the need for operator review. No reservation is released and no retry is enabled.
 - Latest hosted GitHub Actions run `44221784199` on `d98499b206d56493393e4e9a1923e663e40ef4b8`: **SUCCESS**, compile passed, **690 tests, 0 failures, 41 skipped**.
 - The 41 skips are PostgreSQL integration tests gated by missing `TEST_POSTGRES_DSN`; they are not passes. No live Binance request, upload or real post occurred.
+
+
+
+## 2026-11-18 — Official provider model identifier audit
+
+- Verified against current official DeepSeek API model-list documentation: `deepseek-flash` is a valid API model ID; `deepseek-v4-pro` is also listed. The configured `deepseek-flash` identifier is not a guessed model name. Official source: https://api-docs.deepseek.com/api/list-models/
+- Verified against current official Cloudflare Workers AI model documentation: `@cf/black-forest-labs/flux-2-klein-4b` is a valid Workers AI text-to-image model ID. The docs specify multipart form-data requests and fixed four-step inference for this distilled model; the current implementation uses multipart and does not attempt to override steps. Official source: https://developers.cloudflare.com/workers-ai/models/flux-2-klein-4b/
+- This is documentation/model-ID verification only. No authenticated provider request or image generation was executed. Cloudflare model pricing is published per output tile; do not assume usage is free or trigger provider verification without explicit cost approval.

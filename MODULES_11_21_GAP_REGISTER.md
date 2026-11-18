@@ -1413,3 +1413,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - SQLite publisher now preserves `PUBLISHED_CONFIRMED` after remote acceptance even if the separate quota finalization update fails. The reservation remains `PUBLICATION_UNKNOWN` and active for operator review; it is never released automatically. The confirmed attempt and return status are not downgraded.
 - Regression CI `44221784199`: **690 tests, 0 failures, 41 skipped**; compile passed. A first test expectation was corrected to the actual conservative state: the reservation had already been marked `PUBLICATION_UNKNOWN` immediately after the remote acceptance response.
 - PostgreSQL integration acceptance remains skipped without the approved disposable DSN. Module 21 remains **PARTIAL / NOT COMPLETE**.
+
+
+
+## 2026-11-18 — DeepSeek and Cloudflare model ID documentation verification
+
+- Official DeepSeek model-list docs currently list `deepseek-flash` and `deepseek-v4-pro`; the configured `deepseek-flash` identifier is valid. Source: https://api-docs.deepseek.com/api/list-models/
+- Official Cloudflare Workers AI docs confirm `@cf/black-forest-labs/flux-2-klein-4b`, multipart form-data input, and fixed four-step inference. The current image client uses the documented multipart path and does not send a configurable step count. Source: https://developers.cloudflare.com/workers-ai/models/flux-2-klein-4b/
+- No live authenticated DeepSeek/Cloudflare request was run. Provider runtime acceptance remains pending; image inference has published usage pricing, so do not assume it is free or run it without explicit cost approval.
