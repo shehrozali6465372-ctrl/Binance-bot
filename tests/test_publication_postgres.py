@@ -798,10 +798,19 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
                 eligibility_max_age_seconds=300, event_state="NO_EVENT",
                 evidence_status="VERIFIED", text_validation_status="PASS",
                 visual_validation_status="NOT_REQUIRED",
-                quota_reservation_id=reservation, duplicate_policy_passed=True,
+                quota_reservation_id=reservation, repetition_hard_hours=12,
                 now=now_s, ttl_seconds=60,
             )
             auth_id = auth.authorization_id
+            store.conn.execute(
+                "INSERT INTO posts(coin_symbol,content,created_at) VALUES (%s,%s,%s)",
+                (symbol, "competing post", now - timedelta(hours=1)),
+            )
+            self.assertIn(
+                "RECENT_POST_COOLDOWN",
+                authorization_engine.validate_persisted_duplicate_policy(auth),
+            )
+            store.conn.execute("DELETE FROM posts WHERE coin_symbol=%s", (symbol,))
             self.assertEqual(store.save_publication_authorization(auth), auth_id)
             self.assertEqual(store.load_publication_authorization(auth_id)["draft_id"], draft.draft_id)
 

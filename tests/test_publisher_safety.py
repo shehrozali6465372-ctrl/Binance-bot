@@ -105,7 +105,8 @@ class PublisherSafetyTests(unittest.TestCase):
             eligibility_max_age_seconds=300, event_state=event_state,
             evidence_status="VERIFIED", text_validation_status="PASS",
             visual_validation_status="PASS" if hashes else "NOT_REQUIRED",
-            quota_reservation_id=reservation, duplicate_policy_passed=True,
+            quota_reservation_id=reservation,
+            repetition_hard_hours=self.config.repetition_hard_hours,
         )
         return coin, auth, hashes
 
@@ -665,6 +666,26 @@ class PublisherSafetyTests(unittest.TestCase):
             urlopen.assert_not_called()
         finally:
             publisher.db.close()
+
+
+    def test_recent_persisted_post_after_authorization_blocks_before_network_post(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "late duplicate policy content",
+        )
+        self.publisher.db.conn.execute(
+            "INSERT INTO posts(created_at, coin_symbol, content) VALUES (?, ?, ?)",
+            ((main.datetime.now(main.timezone.utc) - main.timedelta(hours=1)).isoformat(),
+             "BTC", "another post inserted after authorization"),
+        )
+        self.publisher.db.conn.commit()
+        with patch("main._open_binance_publish_no_redirect") as urlopen:
+            result = self.publisher.publish(
+                coin, "late duplicate policy content",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("RECENT_POST_COOLDOWN", result.error)
+        urlopen.assert_not_called()
 
 
 if __name__ == "__main__":

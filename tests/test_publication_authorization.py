@@ -16,6 +16,16 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
         self.conn.execute(
             "CREATE TABLE post_analytics (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL)"
         )
+        self.conn.execute(
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, coin_symbol TEXT, content TEXT NOT NULL)"
+        )
+        self.conn.execute("""
+            CREATE TABLE publication_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, idempotency_key TEXT NOT NULL UNIQUE,
+                coin_symbol TEXT NOT NULL, content_hash TEXT NOT NULL, status TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
         self.engine = PublicationAuthorizationEngine(self.conn)
 
     def tearDown(self):
@@ -36,8 +46,9 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
             "eligibility_snapshot_at": now(), "eligibility_max_age_seconds": 300,
             "event_state": "NO_EVENT", "evidence_status": "VERIFIED",
             "text_validation_status": "PASS", "visual_validation_status": "NOT_REQUIRED",
-            "quota_reservation_id": reservation, "duplicate_policy_passed": True,
+            "quota_reservation_id": reservation, "repetition_hard_hours": 12,
         }
+        event_type = overrides.pop("event_type", "other")
         args.update(overrides)
         draft_hash = __import__("hashlib").sha256(args["content"].encode()).hexdigest()
         store = DraftStore(self.conn)
@@ -68,8 +79,8 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
                 )
             """)
             self.conn.execute(
-                "INSERT OR REPLACE INTO layer1_event_lifecycle(event_id, asset_id, state) VALUES (?, ?, ?)",
-                ("event:test", args["asset_id"], args["event_state"]),
+                "INSERT OR REPLACE INTO layer1_event_lifecycle(event_id, asset_id, state, event_type) VALUES (?, ?, ?, ?)",
+                ("event:test", args["asset_id"], args["event_state"], args.get("event_type", "other")),
             )
         self.conn.commit()
         store.save_text_validation(
@@ -215,11 +226,13 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
             )
         self.engine.mark_quota_status(reservation, "RELEASED")
         reservation = self.reserve()
-        with self.assertRaisesRegex(ValueError, "DUPLICATE_POLICY_FAILED"):
-            self.authorize(
-                reservation, duplicate_policy_passed=False,
-                content="$ABC duplicate gate test. #ABC",
-            )
+        self.conn.execute(
+            "INSERT INTO posts(created_at, coin_symbol, content) VALUES (?, ?, ?)",
+            ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(), "ABC", "prior content"),
+        )
+        self.conn.commit()
+        with self.assertRaisesRegex(ValueError, "RECENT_POST_COOLDOWN"):
+            self.authorize(reservation, content="$ABC duplicate gate test. #ABC")
 
     def test_image_authorization_requires_visual_pass_and_exact_hash(self):
         image_hash = "a" * 64
@@ -278,6 +291,55 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
         reservation = self.reserve(symbol="XYZ")
         with self.assertRaisesRegex(ValueError, "quota reservation is missing"):
             self.authorize(reservation)
+
+
+    def test_unresolved_attempt_blocks_even_for_exceptional_event(self):
+        reservation = self.reserve()
+        self.conn.execute(
+            "INSERT INTO publication_attempts(idempotency_key,coin_symbol,content_hash,status,created_at,updated_at) "
+            "VALUES (?, ?, ?, 'PUBLICATION_UNKNOWN', ?, ?)",
+            ("prior-attempt", "ABC", "b" * 64, now(), now()),
+        )
+        self.conn.commit()
+        with self.assertRaisesRegex(ValueError, "UNRESOLVED_PUBLICATION_ATTEMPT"):
+            self.authorize(
+                reservation, event_state="CONFIRMED", event_type="new_listing",
+                content="$ABC exceptional listing update. #ABC",
+            )
+
+    def test_competing_active_quota_reservation_blocks_authorization(self):
+        first = self.reserve()
+        second = self.reserve()
+        with self.assertRaisesRegex(ValueError, "COMPETING_ACTIVE_QUOTA_RESERVATION"):
+            self.authorize(first)
+        self.assertEqual(self.engine.quota_status(first), "RESERVED")
+        self.assertEqual(self.engine.quota_status(second), "RESERVED")
+
+    def test_exceptional_event_bypasses_recent_symbol_cooldown_only(self):
+        reservation = self.reserve()
+        self.conn.execute(
+            "INSERT INTO posts(created_at, coin_symbol, content) VALUES (?, ?, ?)",
+            ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(), "ABC", "prior content"),
+        )
+        self.conn.commit()
+        auth = self.authorize(
+            reservation, event_state="CONFIRMED", event_type="new_listing",
+            content="$ABC verified new listing update. #ABC",
+        )
+        self.assertTrue(auth.duplicate_policy_passed)
+
+    def test_duplicate_policy_is_rechecked_against_new_persisted_post(self):
+        reservation = self.reserve()
+        auth = self.authorize(reservation)
+        self.conn.execute(
+            "INSERT INTO posts(created_at, coin_symbol, content) VALUES (?, ?, ?)",
+            ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(), "ABC", "later competing post"),
+        )
+        self.conn.commit()
+        self.assertIn(
+            "RECENT_POST_COOLDOWN",
+            self.engine.validate_persisted_duplicate_policy(auth),
+        )
 
 
 if __name__ == "__main__":
