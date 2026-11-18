@@ -147,6 +147,31 @@ class ContentVerificationEngineTests(unittest.TestCase):
         self.assertEqual(result.status, "REJECT")
         self.assertIn("UNKNOWN_OR_UNVERIFIED_CLAIM_REFERENCE", result.reasons)
 
+    def test_digit_leading_binance_ticker_cashtag_is_recognized(self):
+        asset_id = "coingecko:1inch"
+        timestamp = now()
+        evidence = EvidenceRecord(
+            source_id="oneinch-market-source", source_family="coingecko",
+            source_kind="PRIMARY", publisher="CoinGecko", subject=asset_id,
+            claim_key="market.price", value=1.25, published_at=timestamp,
+            observed_at=timestamp, asset_id=asset_id, unit="USD",
+            is_primary=True, source_status="ACCEPTED",
+        )
+        claim = Claim(
+            text="$1INCH market price is 1.25 USD", subject=asset_id,
+            claim_key="market.price", value=1.25, observed_at=timestamp,
+            evidence_ids=(evidence.evidence_id,), asset_id=asset_id,
+            unit="USD", claim_type="CONFIRMED_FACT",
+        )
+        registry = EvidenceVerificationEngine().verify((claim,), (evidence,))
+        result = self.engine.validate(
+            f"[[CLAIM:{claim.claim_id}]]{claim.text}. #1INCH #Write2Earn",
+            registry=registry, symbol="1INCH", asset_id=asset_id,
+            numeric_validator=lambda _: True,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.approved_claim_ids, (claim.claim_id,))
+
     def test_wrong_or_multiple_cashtags_fail(self):
         result = self.engine.validate(
             "$ABC and $XYZ are both discussed. #ABC",

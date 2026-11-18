@@ -141,7 +141,7 @@ class ContentVerificationEngine:
                for _, result in unresolved_pairs):
             reasons.add("CONTRADICTED_ASSET_CLAIM")
         cashtags = {
-            match.upper() for match in re.findall(r"\$([A-Za-z][A-Za-z0-9]{1,19})\b", content)
+            match.upper() for match in re.findall(r"\$([A-Za-z0-9]{2,20})\b", content)
         }
         if cashtags != {symbol}:
             reasons.add("CASHTAG_ASSET_IDENTITY_MISMATCH")

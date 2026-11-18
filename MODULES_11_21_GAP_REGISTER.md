@@ -1793,3 +1793,12 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Official listed output price is $0.000287 per 512×512 tile. A 1024×1024 output is approximately four tiles, giving an estimated $0.001148 per output image before any account-specific billing effects. No live inference was called and no charge was incurred by this documentation check.
 - Sources: https://developers.cloudflare.com/workers-ai/models/flux-2-klein-4b/ ; https://developers.cloudflare.com/changelog/post/2026-01-15-flux-2-klein-4b-workers-ai/ ; https://developers.cloudflare.com/workers-ai/platform/pricing/ .
 - This closes only the public model-ID/request-shape/pricing-documentation check. Account entitlement, real provider response, latency/quality and actual billing remain unverified. Module 19 remains PARTIAL.
+
+
+## 2026-11-18 — Module 18 digit-leading Binance ticker cashtag fix (TDD, local pending push)
+
+- Finding: `ContentVerificationEngine` accepted alphanumeric symbols beginning with digits in its canonical symbol input validation, but the cashtag extractor required the first cashtag character to be a letter. Valid Binance symbols such as `1INCH` were therefore rejected at the Module 18 identity gate.
+- RED: added an end-to-end content-verification regression using a verified `1INCH` claim and `$1INCH`; it failed before the fix with `CASHTAG_ASSET_IDENTITY_MISMATCH`.
+- Fix: cashtag extraction now accepts 2–20 alphanumeric characters, matching the engine's existing symbol validation contract. Exact equality with the selected canonical symbol remains mandatory; multiple or wrong cashtags still fail.
+- Focused content-verification + DeepSeek suites: **40 tests, 0 failures**. Full suite: **745 tests, 0 failures, 43 skipped**. `compileall -q .` and `git diff --check` passed.
+- The 43 skipped tests remain PostgreSQL integration tests gated by absent `TEST_POSTGRES_DSN`. No live provider request, database write, media upload, real Binance post, merge or deployment occurred. Change is local and not yet committed/pushed. Module 18 remains PARTIAL for broader semantic/originality/current-platform-policy acceptance.
