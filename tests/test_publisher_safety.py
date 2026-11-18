@@ -645,6 +645,7 @@ class PublisherSafetyTests(unittest.TestCase):
         config = replace(
             self.config, publisher_enabled=False,
             deepseek_api_key="test-deepseek-key-not-real",
+            persistence_backend="postgresql", postgres_dsn="postgresql://test.invalid/test",
         )
         with self.assertRaisesRegex(ValueError, "PUBLISHER_ENABLED"):
             config.validate()
