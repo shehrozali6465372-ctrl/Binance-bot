@@ -158,6 +158,17 @@ class EndToEndPipelineTests(unittest.TestCase):
                 status="PASS", reasons=(), validation_version=visual.validation_version,
             )
 
+            db.conn.execute(
+                "CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, coin_symbol TEXT, content TEXT NOT NULL)"
+            )
+            db.conn.execute("""
+                CREATE TABLE IF NOT EXISTS publication_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, idempotency_key TEXT NOT NULL UNIQUE,
+                    coin_symbol TEXT NOT NULL, content_hash TEXT NOT NULL, status TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                )
+            """)
+            db.conn.commit()
             authorization_engine = PublicationAuthorizationEngine(db.conn)
             reservation = authorization_engine.reserve_daily_quota(symbol="ABC", daily_limit=6)
             authorization = authorization_engine.authorize(
