@@ -2798,3 +2798,14 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Additional run-lease guard: PostgreSQL adapter now refuses an active owner process attempting to recover its own lease. TDD regression was observed RED on `23b5f4e93981825bd204f00f71b28118143c0ea3`, then fixed.
 - Final GitHub Actions run `44221215550` on `d963542d2f3de46ffd8a8c1387e41d0a1d30a9e9`: **SUCCESS**, compile passed, **688 tests, 0 failures, 41 skipped**.
 - The 41 skips remain guarded PostgreSQL integration tests; no direct PostgreSQL acceptance is implied. No live Binance request or real post was made.
+
+
+
+## 2026-11-18 — SQLite confirmed-publication finalization hardening
+
+- Mirrored the PostgreSQL post-confirmation protection into the SQLite publisher: after a valid Binance response and durable `PUBLISHED_CONFIRMED` attempt state, a secondary local Markdown/history write failure is logged but cannot downgrade the publication result.
+- Added a regression for quota finalization failure after remote confirmation. The attempt remains `PUBLISHED_CONFIRMED`; if the quota status update fails, the reservation remains `PUBLICATION_UNKNOWN` (an active conservative reservation) and a critical operator-review log is emitted. It is not released and cannot silently free daily quota.
+- The test's initial expected reservation state was corrected: the publisher had already moved the reservation to `PUBLICATION_UNKNOWN` immediately after remote acceptance, before local post persistence. That is the safe state to retain if final quota confirmation fails.
+- Final hosted GitHub Actions run `44221784199` on head `d98499b206d56493393e4e9a1923e663e40ef4b8`: **SUCCESS**, compile passed, **690 tests, 0 failures, 41 skipped**.
+- The 41 skips remain guarded PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`; they are not passed. No real Binance post or media upload was performed.
+- SQLite and PostgreSQL publishers now preserve a confirmed external post when only secondary local history persistence fails. PostgreSQL stores attempt+quota state atomically; SQLite keeps an unresolved quota reservation if its separate final quota transition fails, pending operator review.

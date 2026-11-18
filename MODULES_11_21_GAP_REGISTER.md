@@ -1396,3 +1396,12 @@ This checklist does not authorize the work to be marked done merely by checking 
 - PostgreSQL run-lease adapter now refuses recovery when the current adapter instance owns that same run ID. This complements the SQLite owner guard and exact-ID/operator-confirmation checks.
 - GitHub Actions run `44221215550`: **688 tests, 0 failures, 41 skipped**; compile passed. The PostgreSQL integration cases, including the new recovery regression, remain skipped without `TEST_POSTGRES_DSN`.
 - Module 21 remains **PARTIAL / NOT COMPLETE** pending real disposable-branch PostgreSQL acceptance, unknown-publication reconciliation and full crash/restart recovery validation. No real Square post, production DB write or publisher activation.
+
+
+
+## 2026-11-18 — Module 21 post-confirmation state consistency
+
+- Both SQLite and PostgreSQL publisher paths now treat local Markdown/JSONL history as secondary after the authoritative ledger records `PUBLISHED_CONFIRMED`. A local file failure no longer changes the confirmed result to `PUBLICATION_UNKNOWN`.
+- SQLite quota finalization failure after confirmed publication no longer downgrades the attempt/result. The reservation remains `PUBLICATION_UNKNOWN` (active, conservative) and emits an operator-review critical log; it is not released. This inconsistency requires operator reconciliation and is not claimed as fully automated.
+- TDD regression for SQLite local history and quota finalization is green. Latest CI `44221784199`: **690 tests, 0 failures, 41 skipped**, compile passed.
+- PostgreSQL integration tests remain skipped without the approved test DSN. Module 21 remains **PARTIAL / NOT COMPLETE** pending direct disposable PostgreSQL acceptance, quota-state reconciliation, unknown-publication recovery and end-to-end crash/restart verification.
