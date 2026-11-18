@@ -83,9 +83,22 @@ class DeepResearchEngineTests(unittest.TestCase):
             observed_at=self.timestamp, evidence_ids=(foreign_evidence.evidence_id,),
             asset_id=None,
         )
+        mismapped_evidence = EvidenceRecord(
+            source_id="mismapped-asset-market", source_family="coingecko",
+            source_kind="MARKET", publisher="CoinGecko", subject=foreign_asset,
+            claim_key="market.price", value=8.88, unit="USD",
+            published_at=self.timestamp, observed_at=self.timestamp,
+            asset_id=self.asset_id, is_primary=True, source_status="ACCEPTED",
+        )
+        mismapped_claim = Claim(
+            text="XYZ market price is 8.88 USD", subject=foreign_asset,
+            claim_key="market.price", value=8.88, unit="USD",
+            observed_at=self.timestamp, evidence_ids=(mismapped_evidence.evidence_id,),
+            asset_id=self.asset_id,
+        )
         registry = EvidenceVerificationEngine().verify(
-            self.registry.claims + (foreign_claim,),
-            self.registry.evidence_records + (foreign_evidence,),
+            self.registry.claims + (foreign_claim, mismapped_claim),
+            self.registry.evidence_records + (foreign_evidence, mismapped_evidence),
         )
         package = self.build(registry=registry)
         packaged_claim_ids = {
@@ -101,7 +114,9 @@ class DeepResearchEngineTests(unittest.TestCase):
             for evidence_id in coverage["evidence_ids"]
         }
         self.assertNotIn(foreign_claim.claim_id, packaged_claim_ids)
+        self.assertNotIn(mismapped_claim.claim_id, packaged_claim_ids)
         self.assertNotIn(foreign_evidence.evidence_id, covered_evidence_ids)
+        self.assertNotIn(mismapped_evidence.evidence_id, covered_evidence_ids)
         self.assertEqual(package.source_coverage["MARKET"]["record_count"], 1)
 
     def test_missing_required_source_class_leads_to_research_more(self):
