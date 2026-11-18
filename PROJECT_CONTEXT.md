@@ -2865,3 +2865,12 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - The generator now checks the decoded image format against the requested artifact extension (`.png` → PNG, `.jpg/.jpeg` → JPEG, `.webp` → WEBP) before writing. A mismatch fails closed and no target file is created.
 - TDD: RED run `44223544726`; GREEN run `44223645854` on head `50fde05c9c3576a5d16db36e39e0f7d15f249b93`: **SUCCESS**, compile passed, **693 tests, 0 failures, 41 skipped**.
 - The 41 skipped tests remain PostgreSQL integration tests gated by `TEST_POSTGRES_DSN`. No live Cloudflare inference or Binance media upload was run.
+
+
+
+## 2026-11-18 — Module 20 final image format/extension binding
+
+- Added a regression showing PNG bytes under a `.jpg` filename passed visual QA because the validator checked decoded format but not the filename extension.
+- `VisualQualityEngine` now requires both PNG-decoded content and a `.png` path for the final composite artifact. The sidecar/draft/hash checks remain unchanged.
+- TDD: RED run `44223868599`; GREEN run `44223962776` on `f501336c07fa8c28405782ec38a23569d7d9b956`: **SUCCESS**, compile passed, **694 tests, 0 failures, 41 skipped**.
+- The 41 PostgreSQL integration tests remain skipped without `TEST_POSTGRES_DSN`; no live Cloudflare inference or Binance media upload occurred.

@@ -1454,3 +1454,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Workers AI image generation now requires decoded bytes to match the requested file extension (PNG/JPEG/WEBP). Previously valid image bytes could be written under a different extension, creating a misleading artifact.
 - Added a regression; RED run `44223544726`, GREEN run `44223645854`: **693 tests, 0 failures, 41 skipped**, compile passed.
 - This is mocked response/decoder verification only; authenticated Cloudflare generation and Binance media upload remain unverified.
+
+
+
+## 2026-11-18 — Module 20 final image extension validation
+
+- Final visual QA now requires both PNG-decoded image content and a `.png` filename. This prevents a PNG payload stored as `.jpg` from passing the final artifact gate.
+- TDD regression RED `44223868599`; GREEN `44223962776`: **694 tests, 0 failures, 41 skipped**, compile passed.
+- Live Cloudflare generation and Binance media upload remain unverified; PostgreSQL integration tests remain skipped pending approved test DSN.
