@@ -164,6 +164,8 @@ class VisualQualityEngine:
                 width, height = image.size
                 if image.format != "PNG":
                     reasons.append("FINAL_IMAGE_MUST_BE_PNG")
+                if path.suffix.lower() != ".png":
+                    reasons.append("FINAL_IMAGE_EXTENSION_MISMATCH")
                 if (width, height) != self.REQUIRED_DIMENSIONS:
                     reasons.append("IMAGE_DIMENSIONS_MISMATCH")
             if not 0 < byte_length <= 10 * 1024 * 1024:
