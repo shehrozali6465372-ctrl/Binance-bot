@@ -2856,3 +2856,12 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - The publisher's PostgreSQL pre-submit boundary converts this propagated exception into a known no-submit `FAILED_CONFIRMED` outcome before transport invocation.
 - GitHub Actions run `44223361236` on `81429026c96dc5a06f7ac646d35c224f19983710`: **SUCCESS**, compile passed, **692 tests, 0 failures, 41 skipped**.
 - This is a mocked unit test; the 41 PostgreSQL integration skips still require the approved disposable test DSN/host allowlist.
+
+
+
+## 2026-11-18 — Cloudflare generated-image format/extension consistency
+
+- Added a regression showing the Workers AI image generator previously accepted valid PNG bytes for an output path ending in `.jpg`, writing a mislabeled artifact.
+- The generator now checks the decoded image format against the requested artifact extension (`.png` → PNG, `.jpg/.jpeg` → JPEG, `.webp` → WEBP) before writing. A mismatch fails closed and no target file is created.
+- TDD: RED run `44223544726`; GREEN run `44223645854` on head `50fde05c9c3576a5d16db36e39e0f7d15f249b93`: **SUCCESS**, compile passed, **693 tests, 0 failures, 41 skipped**.
+- The 41 skipped tests remain PostgreSQL integration tests gated by `TEST_POSTGRES_DSN`. No live Cloudflare inference or Binance media upload was run.

@@ -1446,3 +1446,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Added a non-DSN unit test that injects a query failure inside the PostgreSQL duplicate-policy transaction and verifies the exception propagates. This proves the store does not fail open when the duplicate ledger is unavailable.
 - The pre-submit publisher catches the propagated error before transport and records a known no-submit failure; no Binance request is sent.
 - CI run `44223361236`: **692 tests, 0 failures, 41 skipped**; compile passed. The 41 guarded PostgreSQL integration tests remain unverified.
+
+
+
+## 2026-11-18 — Module 19 image artifact format consistency
+
+- Workers AI image generation now requires decoded bytes to match the requested file extension (PNG/JPEG/WEBP). Previously valid image bytes could be written under a different extension, creating a misleading artifact.
+- Added a regression; RED run `44223544726`, GREEN run `44223645854`: **693 tests, 0 failures, 41 skipped**, compile passed.
+- This is mocked response/decoder verification only; authenticated Cloudflare generation and Binance media upload remain unverified.
