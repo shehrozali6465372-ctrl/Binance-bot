@@ -1406,7 +1406,6 @@ def upload_authorized_image(
     *,
     authorization,
     dry_run: bool,
-    publisher_enabled: bool = False,
     image_path: str | None,
     api_key: str | None,
     symbol: str,
@@ -1414,6 +1413,7 @@ def upload_authorized_image(
     content: str,
     image_hashes,
     upload_fn,
+    publisher_enabled: bool = False,
 ) -> str | None:
     """Perform Binance media upload only after exact immutable publication authorization."""
     if dry_run:
