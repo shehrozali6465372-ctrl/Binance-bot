@@ -1337,3 +1337,12 @@ This checklist does not authorize the work to be marked done merely by checking 
 - This is test-schema evidence only, not production readiness. Do not point scheduled publishing at either disposable branch. Staging branch does not yet prove full publication-ledger schema coverage.
 - GitHub Actions documentation-push runs 43907241840 and 43907254115 both completed SUCCESS.
 - No Neon writes/config changes, secret changes, workflow dispatch, merge/deploy, publisher activation, or real post occurred. Keep DRY_RUN=1 and publisher disabled. Production requires a separately identified/provisioned database and explicit cutover approval.
+
+## 2026-11-18 — Module 12 and Module 18/21 contract regressions fixed
+
+- TDD RED on commit `49d4aaec913d49af01a4e5325eba995c2c161a5a`: GitHub Actions run `44217708860` ran 674 tests, 4 expected errors, 40 skipped. Failures reproduced the absent `ContentVerificationResult.evidence_status` contract and illegal non-material STALE/RESOLVED lifecycle transitions.
+- GREEN on commit `2c45e6611779316b62be1721bfa83daf71ef4dd9`: GitHub Actions run `44217840412` SUCCESS; compileall passed; 674 tests, 0 failures, 40 skipped.
+- Module 18/21: `ContentVerificationResult.evidence_status` is VERIFIED only for PASS with approved claim IDs; otherwise UNVERIFIED. `main.py` now sends this evidence status separately from text-validation PASS/REJECT.
+- Module 12: SQLite and PostgreSQL adapters no longer try to transition a non-material verified revision directly from STALE or RESOLVED to CONFIRMED. Reopening remains restricted to materially new verified evidence through UNDER_VERIFICATION.
+- PostgreSQL parity test cases are present but skipped in the hosted CI run because TEST_POSTGRES_DSN was not configured. Live PostgreSQL parity remains NOT VERIFIED.
+- No production side effects or publisher activation.

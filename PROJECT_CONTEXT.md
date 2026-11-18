@@ -1,3 +1,17 @@
+## Latest verified coding continuation — 2026-11-18 (Module 12 lifecycle + Module 18/21 publication evidence contract)
+
+- Active target remains PR #14 on `layer-1/module9-onchain-continuation`; base branch remains `layer-1/module9-onchain-intelligence`. No merge or deployment.
+- User explicitly approved application-code commits to the existing PR branch. RDC remains prohibited; implementation and verification are performed through GitHub source commits and the repository's existing GitHub Actions CI.
+- Test-first commit: `49d4aaec913d49af01a4e5325eba995c2c161a5a`. It added regression tests for the content-evidence status contract and non-material revisions of STALE/RESOLVED events. CI run `44217708860` reproduced 4 errors across 674 tests (40 skipped): two missing evidence-status contract errors and two illegal lifecycle transition errors. This is the expected RED result.
+- Implementation commit: `2c45e6611779316b62be1721bfa83daf71ef4dd9`.
+  - `ContentVerificationResult.evidence_status` now maps only PASS with non-empty approved claim IDs to VERIFIED; all other outcomes map to UNVERIFIED.
+  - Main publication authorization now passes the evidence status separately from text-validation status. This fixes the PASS-versus-VERIFIED contract mismatch that blocked valid publication authorization.
+  - SQLite and PostgreSQL event lifecycle state machines now confirm a verified event only from UNDER_VERIFICATION. A cosmetic/non-material new revision no longer attempts the illegal STALE/RESOLVED → CONFIRMED transition. A materially new, verified revision still reopens through UNDER_VERIFICATION according to the existing transition graph.
+- GitHub Actions run `44217840412` for the exact implementation commit completed SUCCESS: `python -m compileall` passed and unittest discovery ran **674 tests, 0 failures, 40 skipped**.
+- The 40 skipped tests include PostgreSQL integration tests because `TEST_POSTGRES_DSN` was not configured in this GitHub Actions run. The SQLite regressions passed; PostgreSQL parity test cases were added but their live database execution is still pending. Do not report PostgreSQL parity as verified from this CI run.
+- No real Binance Square post, authenticated media upload, production DB write, credential/schedule change, workflow dispatch, publisher activation, merge, deployment or paid infrastructure action occurred.
+- Next: continue the remaining Layer 1–21 integration and safety gap register in priority order; do not repeat these fixes. Re-run PostgreSQL parity tests only against the exact isolated allowlisted test database, never production.
+
 # Binance Square Write-to-Earn Agent — Canonical Project Context
 
 Last updated: 2026-11-16 (Pakistan local date, UTC+05:00) — Blocker #1 isolated PostgreSQL acceptance verified
