@@ -5173,7 +5173,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                 eligibility_snapshot_at=_binance_spot_snapshot_observed_at,
                 eligibility_max_age_seconds=300,
                 event_state=event_state,
-                evidence_status=content_verification.status,
+                evidence_status=content_verification.evidence_status,
                 text_validation_status=content_verification.status,
                 visual_validation_status=visual_status,
                 quota_reservation_id=reservation_id,

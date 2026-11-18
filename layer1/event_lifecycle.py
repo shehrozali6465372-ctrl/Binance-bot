@@ -257,7 +257,7 @@ class EventLifecycleStore:
             elif withdrawn:
                 target = "WITHDRAWN"
                 reason = "EXPLICIT_VERIFIED_WITHDRAWAL"
-            elif verification_state in VERIFIED_STATES and current_state in {"UNDER_VERIFICATION", "STALE", "RESOLVED"}:
+            elif verification_state in VERIFIED_STATES and current_state == "UNDER_VERIFICATION":
                 target = "CONFIRMED"
                 reason = "EVIDENCE_VERIFIED"
             elif materially_new and verification_state in VERIFIED_STATES and current_state == "CONFIRMED":

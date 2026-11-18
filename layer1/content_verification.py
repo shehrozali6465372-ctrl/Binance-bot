@@ -28,6 +28,14 @@ class ContentVerificationResult:
     reasons: tuple[str, ...]
     clean_content: str
     validation_version: str = "content-verification-v2-claim-attribution"
+    
+    @property
+    def evidence_status(self) -> str:
+        """Map a successful, claim-attributed content gate to the publication evidence contract."""
+        if self.status == "PASS" and self.approved_claim_ids:
+            return "VERIFIED"
+        return "UNVERIFIED"
+
 
 
 class ContentVerificationEngine:

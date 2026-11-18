@@ -164,7 +164,7 @@ class PostgresEventLifecycleStore(EventLifecycleStore):
                     target,reason="RESOLVED","EXPLICIT_VERIFIED_RESOLUTION"
                 elif withdrawn:
                     target,reason="WITHDRAWN","EXPLICIT_VERIFIED_WITHDRAWAL"
-                elif verification_state in VERIFIED_STATES and current_state in {"UNDER_VERIFICATION","STALE","RESOLVED"}:
+                elif verification_state in VERIFIED_STATES and current_state=="UNDER_VERIFICATION":
                     target,reason="CONFIRMED","EVIDENCE_VERIFIED"
                 elif materially_new and verification_state in VERIFIED_STATES and current_state=="CONFIRMED":
                     target,reason="DEVELOPING","MATERIAL_NEW_EVIDENCE"
