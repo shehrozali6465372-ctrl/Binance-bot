@@ -2904,3 +2904,11 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Regression tests first failed against the previous implementation, then passed after the fix. Final isolated-worktree validation: Python `compileall` passed; full `unittest discover` suite **698 tests, 0 failures, 41 skipped**; `git diff --check` passed. The 41 skips are PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`, not successful database tests.
 - Module 11 remains PARTIAL: broad semantic entailment, all natural-language paraphrases, and ambiguous shared-subject/elliptical claim forms are not solved by this bounded deterministic fix. Module 14 remains fail-closed until an owner-approved scoring policy and calibrated factor definitions are supplied.
 - All changes remain local and uncommitted/unpushed. No changes were made to the original dirty checkout. No database/production write, provider inference, paid Cloudflare generation, Binance upload/post, publisher activation, workflow/credential/schedule change, merge or deployment occurred.
+
+## 2026-11-18 continuation update — Module 11 semicolon segmentation
+
+- Continued from the existing PR #14 continuation branch in the isolated worktree `/tmp/binance-w2e-continuation`; original `/root/Binance-bot` checkout remains untouched.
+- Fixed `split_atomic_claims()` so semicolon-delimited clauses split even when the semicolon is not followed by whitespace. The new regression was observed failing before the one-line implementation change, then passed with the existing semicolon regression.
+- Verification: focused Module 11 suite **64 passed, 0 failed**; full suite **699 tests, 0 failures, 41 skipped**. The 41 PostgreSQL integration skips are not passes and remain gated by missing `TEST_POSTGRES_DSN`.
+- Module 11 remains PARTIAL: deterministic clause splitting and structured checks do not provide general semantic entailment or cover every ambiguous natural-language form.
+- Local changes are not pushed. No DB writes, live DeepSeek/Cloudflare calls, Binance publishing, production changes, deployment or merge.

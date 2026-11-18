@@ -1627,7 +1627,7 @@ def split_atomic_claims(text: str) -> tuple[str, ...]:
         line = abbreviation_pattern.sub(
             lambda match: match.group(0).replace(".", protected_period), line,
         )
-        for part in re.split(r"(?<=[.!?])\s+|;\s+", line):
+        for part in re.split(r"(?<=[.!?])\s+|;\s*", line):
             normalized = part.replace(protected_period, ".").strip(" \t\"'")
             if normalized:
                 output.extend(_split_independent_conjuncts(normalized))

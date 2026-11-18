@@ -1490,3 +1490,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Module 14 remains fail-closed pending an owner-approved, evidence-backed opportunity scoring policy and calibrated factor definitions. No policy weights or thresholds were invented.
 - Work was performed in a new isolated worktree from PR #14 head `b399a6feaa03bceb6ce5dda48e84d4b35889e25f`; existing `/root/Binance-bot` checkout and its three pre-existing announcement-worker modifications were left untouched. Changes are local and uncommitted/unpushed.
 - No PostgreSQL test DSN was loaded, no database was written, no live DeepSeek/Cloudflare request was made, no Binance media upload/post occurred, and no publisher, production workflow, credential, deployment, merge or schedule was changed.
+
+## 2026-11-18 — Module 11 semicolon boundary hardening
+
+- Found a deterministic segmentation gap: `split_atomic_claims()` split semicolon-delimited claims only when whitespace followed the semicolon. A compact but valid input such as `BTC price is $100;ETH volume is $5m` remained one compound claim.
+- Added a regression test first; it failed RED with the two clauses incorrectly returned as one. Updated the splitter to treat a semicolon as a clause boundary whether or not whitespace follows it. Existing semicolon/sentence regression and the new no-whitespace case pass.
+- Focused Module 11 suite: **64 tests, 0 failures**. Full isolated repository suite: **699 tests, 0 failures, 41 skipped**. `compileall` and `git diff --check` passed before documentation update; PostgreSQL tests remain skipped because `TEST_POSTGRES_DSN` is not configured.
+- This is a narrow punctuation-boundary fix, not general semantic entailment. Ambiguous elliptical claims, paraphrase entailment and full natural-language semantic attribution remain unsupported; Module 11 remains **PARTIAL**.
+- Changes are local in `/tmp/binance-w2e-continuation` on the isolated continuation worktree. No production database, live provider, Cloudflare inference, publisher, Binance post, deployment, merge or original `/root/Binance-bot` checkout was touched. Not pushed pending explicit authorization for this new change.

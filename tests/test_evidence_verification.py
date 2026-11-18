@@ -719,6 +719,12 @@ class EvidenceVerificationTests(unittest.TestCase):
             ("Binance listed ABC and BNB.",),
         )
 
+    def test_atomic_claim_splitter_handles_semicolons_without_following_whitespace(self):
+        self.assertEqual(
+            split_atomic_claims("BTC price is $100;ETH volume is $5m"),
+            ("BTC price is $100", "ETH volume is $5m"),
+        )
+
     def test_atomic_claim_splitter_separates_sentences_and_semicolon_clauses(self):
         claims = split_atomic_claims(
             "BTC price is $100. Volume is $5m; Binance published a listing notice.\n- Market cap is $2b."
