@@ -1470,3 +1470,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Fixed a cross-asset contamination defect in `DeepResearchEngine`: claims without an explicit `asset_id` must now have `subject == selected asset_id`; explicitly bound claims must match the selected asset.
 - Unbound evidence explicitly naming a different canonical CoinGecko asset is excluded. Source coverage counts only cutoff-eligible evidence linked to selected-asset claims.
 - TDD RED `44224206173`; GREEN `44224293433`: **696 tests, 0 failures, 41 skipped**, compile passed. PostgreSQL integration acceptance remains pending.
+
+
+
+## 2026-11-18 — Module 13 canonical subject and asset-ID cross-check
+
+- Hardened research package isolation beyond optional asset IDs: if a claim/evidence subject explicitly names a canonical CoinGecko asset different from the selected package asset, it is rejected even when its `asset_id` field is incorrectly set to the selected asset.
+- This closes a malformed claim/evidence pair that could pass the lower-level verifier's exact subject/asset field equality while semantically naming another canonical asset.
+- TDD RED `44224711294`; GREEN `44224786514`: **696 tests, 0 failures, 41 skipped**, compile passed. PostgreSQL integration acceptance remains pending.

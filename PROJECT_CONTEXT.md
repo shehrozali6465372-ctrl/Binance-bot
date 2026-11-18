@@ -2884,3 +2884,12 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Unbound evidence records whose subject explicitly names a different canonical asset are excluded. Source coverage is now calculated only from cutoff-eligible evidence actually linked to selected-asset claims, not every accepted unbound evidence record in the registry.
 - Regression RED run `44224206173`; GREEN run `44224293433` on `6c34cc8b5ac258169bb790c4d2f4aa7fe90fb03b`: **SUCCESS**, compile passed, **696 tests, 0 failures, 41 skipped**.
 - The 41 PostgreSQL integration skips remain unverified; no live provider or publisher calls were made.
+
+
+
+## 2026-11-18 — Module 13 canonical subject/asset consistency hardening
+
+- Extended the Module 13 cross-asset fix after a second regression showed a malformed claim could carry the selected `asset_id` while its canonical `subject` named a different CoinGecko asset. Evidence Verification matched the malformed claim/evidence pair, so filtering only on `asset_id` was insufficient.
+- Research packages now reject any claim or evidence record whose subject explicitly uses a different canonical `coingecko:` identity, regardless of whether the optional `asset_id` field claims the selected asset. Unbound non-canonical event subjects remain eligible only through a selected-asset claim's evidence links.
+- Regression RED run `44224711294`; GREEN run `44224786514` on `018eb43369bcb3b3c95560ce7f0935fee2c0a7de`: **SUCCESS**, compile passed, **696 tests, 0 failures, 41 skipped**.
+- PostgreSQL integration tests remain skipped; no live provider or publishing calls.
