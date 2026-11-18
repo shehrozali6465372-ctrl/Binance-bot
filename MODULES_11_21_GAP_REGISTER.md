@@ -1533,3 +1533,12 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Module 14 remains fail-closed pending owner-approved evidence-backed scoring policy and calibrated factors. Module 21 remains PARTIAL pending approved disposable PostgreSQL acceptance and crash/restart, quota, and unknown-publication reconciliation evidence. Live DeepSeek/Cloudflare and Binance authenticated media-upload acceptance remain unverified.
 - No real Binance post, media upload, publisher activation, production DB write, credential/schedule change, workflow dispatch, merge, or deployment occurred. `DRY_RUN=1`; `PUBLISHER_ENABLED` remains default-off.
 - This entry supersedes older status notes that described commit `978f04d` as local/unpushed or said its push was not authorized. Those statements are historical and no longer current.
+
+
+## 2026-11-18 — GitHub push credential persistence defect fixed
+
+- Source audit found `_try_git_push()` was rewriting the `origin` remote to `https://x-access-token:<token>@github.com/...`. On a persistent checkout this could leave the GitHub token stored in `.git/config`.
+- Removed the token-bearing remote URL mutation. Authentication is now passed to the `git push` subprocess using process-scoped Git HTTP extra-header configuration (`GIT_CONFIG_COUNT` and indexed key/value environment variables). Existing transient Git config entries are preserved; the token is not placed in command arguments or the remote URL. Existing branch-target selection and scheduled workflow were not changed.
+- TDD regression failed against the old implementation because it called `git remote set-url`; after the fix, both focused security tests pass, including missing-token no-op behavior.
+- Full local repository suite after the fix: **704 tests, 0 failures, 41 skipped**. `compileall` and `git diff --check` passed. The 41 skips remain PostgreSQL integration tests gated by missing `TEST_POSTGRES_DSN`, not passes.
+- Code commit `626ec8fe69cbc824dc12271d0bb1fa4b210219d2` was pushed to the existing PR #14 branch and its exact remote SHA was verified. No deployment, merge, production DB operation, publisher activation or live Binance post occurred.

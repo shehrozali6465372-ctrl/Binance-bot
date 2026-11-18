@@ -6,16 +6,22 @@ This section supersedes older statements below about the active worktree, RDC pe
 - Repository: `shehrozali6465372-ctrl/Binance-bot`.
 - Existing PR: #14, `layer-1/module9-onchain-continuation` → `layer-1/module9-onchain-intelligence`; GitHub metadata checked on 2026-11-18. PR is OPEN, DRAFT, UNMERGED; mergeable reported true. Do not create another PR or work on `main`.
 - Isolated worktree: `/tmp/binance-w2e-continuation`; local branch: `work/module9-continuation-local`. Original `/root/Binance-bot` checkout and its unrelated announcement-worker modifications remain untouched.
-- Latest verified commit: `978f04d9cd236091b5e35b9e18367f1c6035a228` (`fix: split negated auxiliary asset claims`). The existing PR remote branch points to this exact SHA (`git ls-remote` verified).
+- Latest verified commit: `626ec8fe69cbc824dc12271d0bb1fa4b210219d2` (`fix: avoid persisting GitHub push credentials`). The immediately preceding documentation checkpoint is `6159cf05678c1e5d544702f8455c1fbcd8ffd04e`; the Module 11 application fix is `978f04d9cd236091b5e35b9e18367f1c6035a228`. The existing PR remote branch points to this exact SHA (`git ls-remote` verified).
 - Worktree was clean at the post-push verification.
 - RDC device `localhost` (`bd830869-fbae-4825-ae7b-5044d6161090`) is the authorized execution route for this continuation.
 
 ## Latest verified tests and hosted checks
-- Latest local full repository suite on the exact commit: **702 tests, 0 failures, 41 skipped**.
+- Latest full local repository suite after the Git credential fix: **704 tests, 0 failures, 41 skipped**. The 702-test baseline on `978f04d` plus two new Git-push security regressions was re-run in full.
 - Focused Module 11 evidence-verification suite: **67 tests, 0 failures**.
-- `compileall` and `git diff --check` passed.
+- `compileall` and `git diff --check` passed after the Git credential fix.
 - The 41 skipped tests are PostgreSQL integration tests gated by `TEST_POSTGRES_DSN`; they are not passes and do not establish live PostgreSQL acceptance.
 - GitHub Actions workflow-runs query for this exact SHA returned no runs; combined commit status returned no status entries. **Hosted CI for this SHA is not verified.** An earlier CI success on a different SHA must not be represented as latest-head CI.
+
+## Latest security fix — Git history push authentication
+- A source audit found `_try_git_push()` changed `origin` to a token-bearing HTTPS URL, which could persist a GitHub token in `.git/config`.
+- Removed the `git remote set-url` mutation. GitHub authentication is now supplied only to the `git push` subprocess through process-scoped `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` HTTP extra-header configuration. The token is not put in command arguments or the remote URL. Existing transient Git config entries are preserved by appending a new index.
+- TDD regression was observed RED against the old implementation. The focused two-test security suite passed after the fix; full suite now **704 tests, 0 failures, 41 skipped**.
+- This changes only Git history-sync authentication. The existing target-branch selection and scheduled workflow are otherwise unchanged.
 
 ## Latest implementation detail — Module 11
 - `split_atomic_claims()` now recognizes `do` / `does` / `did` and `change` / `changes` / `changed` in the bounded independent-clause grammar. The regression for `Bitcoin's price rose 8% and Ethereum's price did not change.` confirms two claims are produced and the negation is preserved.
