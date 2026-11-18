@@ -418,6 +418,32 @@ class PublisherSafetyTests(unittest.TestCase):
         self.assertEqual(second.status, "DUPLICATE_BLOCKED")
         self.assertEqual(urlopen.call_count, 1)
 
+
+    def test_sqlite_confirmed_publication_is_not_downgraded_by_local_history_write_failure(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "LTC"}, "sqlite local history failure content",
+        )
+        self.publisher._save_locally = lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("local history disk unavailable")
+        )
+        response = FakeResponse({
+            "code": "000000",
+            "data": {"id": "sqlite-remote-history-1", "shareLink": "https://example.invalid/sqlite-remote-history-1"},
+        })
+        with patch("main._open_binance_publish_no_redirect", return_value=response) as urlopen:
+            result = self.publisher.publish(
+                coin, "sqlite local history failure content",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(result.status, "PUBLISHED_CONFIRMED")
+        self.assertEqual(result.post_id, "sqlite-remote-history-1")
+        row = self.publisher.db.conn.execute(
+            "SELECT status, remote_post_id FROM publication_attempts WHERE coin_symbol='LTC'"
+        ).fetchone()
+        self.assertEqual(row["status"], "PUBLISHED_CONFIRMED")
+        self.assertEqual(row["remote_post_id"], "sqlite-remote-history-1")
+        urlopen.assert_called_once()
+
     def test_remote_acceptance_followed_by_local_persistence_failure_is_not_retried(self):
         response = FakeResponse({
             "code": "000000",
