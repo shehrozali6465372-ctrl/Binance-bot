@@ -35,6 +35,7 @@ from urllib.parse import quote
 from PIL import Image, ImageDraw, ImageFont
 
 LOGGER = logging.getLogger("agent.image_engine")
+MAX_DECODED_IMAGE_PIXELS = 16_777_216
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -222,19 +223,33 @@ class CloudflareWorkersAIImageGenerator:
                 image_bytes = base64.b64decode(encoded, validate=True)
             except (ValueError, base64.binascii.Error):
                 raise ValueError("Workers AI image payload is not valid base64") from None
+        actual_width = actual_height = 0
+        image_format = ""
+        pixel_count_exceeded = False
+        dimensions_exceeded = False
         try:
             with Image.open(BytesIO(image_bytes)) as check:
-                check.verify()
-            with Image.open(BytesIO(image_bytes)) as image:
-                image.load()
-                image_format = str(image.format or "").upper()
-                actual_width, actual_height = image.size
-                if image_format not in {"PNG", "JPEG", "WEBP"}:
-                    raise ValueError("unsupported generated image format")
-                if not (256 <= actual_width <= 4096 and 256 <= actual_height <= 4096):
-                    raise ValueError("generated image dimensions are outside safe bounds")
-        except (OSError, ValueError):
+                actual_width, actual_height = check.size
+                pixel_count_exceeded = actual_width * actual_height > MAX_DECODED_IMAGE_PIXELS
+                dimensions_exceeded = not (
+                    256 <= actual_width <= 4096 and 256 <= actual_height <= 4096
+                )
+                if not pixel_count_exceeded and not dimensions_exceeded:
+                    check.verify()
+            if not pixel_count_exceeded and not dimensions_exceeded:
+                with Image.open(BytesIO(image_bytes)) as image:
+                    image.load()
+                    image_format = str(image.format or "").upper()
+                    if image.size != (actual_width, actual_height):
+                        raise ValueError("image dimensions changed while decoding")
+                    if image_format not in {"PNG", "JPEG", "WEBP"}:
+                        raise ValueError("unsupported generated image format")
+        except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
             raise ValueError("Workers AI returned bytes that are not a valid, decodable image") from None
+        if pixel_count_exceeded:
+            raise ValueError("Workers AI image pixel count exceeds safe bounds")
+        if dimensions_exceeded:
+            raise ValueError("generated image dimensions are outside safe bounds")
         expected_format = {
             ".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP",
         }[target.suffix.lower()]

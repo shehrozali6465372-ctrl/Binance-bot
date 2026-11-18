@@ -195,6 +195,18 @@ class VisualQualityEngineTests(unittest.TestCase):
         self.assertIn("IMAGE_SIZE_OUT_OF_SAFE_BOUNDS", result.reasons)
         read_bytes.assert_not_called()
 
+    def test_image_pixel_limit_is_checked_before_decode(self):
+        with mock.patch("layer1.visual_quality.MAX_DECODED_IMAGE_PIXELS", 100, create=True), mock.patch.object(
+            Image.Image, "load", side_effect=AssertionError("pixel decode must not run"),
+        ):
+            result = VisualQualityEngine().validate(
+                self.image_path, draft_content=self.draft,
+                symbol=self.symbol, asset_id=self.asset_id,
+                metadata_path=self.sidecar,
+            )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("IMAGE_PIXEL_COUNT_OUT_OF_SAFE_BOUNDS", result.reasons)
+
     def test_decompression_bomb_image_is_rejected_without_raising(self):
         bomb_path = Path(self.tmp.name) / "bomb.png"
         Image.new("RGB", (20, 20), "black").save(bomb_path, format="PNG")

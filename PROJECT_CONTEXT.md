@@ -3246,3 +3246,13 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - After the final audit-note appends, the current measured diff is **23 modified tracked files, +1,791 / -209**. Earlier interim figures in the preceding entries were captured before all final documentation entries and are historical checkpoints, not the final diff count.
 - Latest code verification remains: **742 tests, 0 failures, 43 skipped**; `compileall -q .` PASS; `git diff --check` PASS (rechecked after the final documentation append).
 - Local HEAD and remote PR #14 continuation SHA remain `78631ecc72470d445507b4110891aa8110738256`. All 23 files remain modified and uncommitted/unpushed.
+
+
+## Latest continuation checkpoint — 2026-11-18 (Module 19/20 decoded-pixel resource bound)
+
+- PR #14 latest pushed commit at start of this continuation: `2ef2a110e7fb17049a284863523a817bcadee43b`; existing PR remained OPEN/DRAFT/UNMERGED. GitHub mocked-safety workflow for that commit completed PASS (run `44338824242`).
+- Additional TDD audit found that Cloudflare Workers AI image decoding and Module 20 visual validation checked compressed byte limits but could decode/load an excessive pixel count before checking dimensions. Added RED regressions proving both paths reached `Image.Image.load()` before a pixel bound existed.
+- Implemented a 16,777,216-pixel decoded-image ceiling in the Workers AI generator and a 2,000,000-pixel ceiling in Module 20; both reject before image verification/loading. Module 20 also checks exact required 1080×1350 dimensions before decoding. Pillow decompression-bomb classes are handled as safe rejection in the generator.
+- Focused image/visual suites: 45 passed, 0 failed. Full suite: **744 tests, 0 failures, 43 skipped**. `compileall -q .` and `git diff --check` passed. The 43 skips are PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`; they are not passes.
+- Current local worktree contains four code/test files plus this context and gap-register update. These new changes are not yet committed or pushed at this checkpoint. Continue using the existing branch/PR only; do not create a PR, merge, deploy, activate publishing, or perform real uploads/posts.
+- No live Cloudflare request, authenticated Binance upload, production DB operation, workflow dispatch or paid provider action occurred. Modules 19/20 remain PARTIAL pending real integration and independent OCR/vision semantic validation; Module 21 remains PARTIAL pending PostgreSQL and crash/recovery acceptance.

@@ -1769,3 +1769,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Supersedes earlier interim diff counts: current measured worktree diff after all audit documentation appends is **23 modified tracked files, +1,791 / -209**.
 - Full suite remains **742 passed, 0 failed, 43 skipped**; compileall passed after code changes and `git diff --check` was rechecked after the final documentation append.
 - PR #14 remote continuation SHA remains equal to local HEAD `78631ecc72470d445507b4110891aa8110738256`. No commit or push.
+## 2026-11-18 — Module 19/20 decoded-image pixel-count bounds (TDD, local pending push)
+
+- Audit finding: the Cloudflare Workers AI generator and Module 20 visual validator enforced compressed response/file byte limits but decoded image pixels only after Pillow verification/loading. A highly compressed image could therefore cause excessive decoded-memory allocation before the existing dimension checks.
+- RED evidence: added one regression to each relevant suite. Both failed against the prior implementation because `Image.Image.load()` was reached before a decoded-pixel bound was enforced.
+- Fix: the Workers AI generator now rejects decoded images above 16,777,216 pixels and dimensions outside 256–4096 before verification/loading; Pillow decompression-bomb exceptions/warnings are normalized to safe image rejection. Module 20 rejects images above 2,000,000 pixels and wrong required dimensions (1080×1350) before verification/loading. Existing byte limits, exact image/draft hashes and provenance checks remain in place.
+- Focused image + visual QA suites: **45 tests, 0 failures**. Full repository suite: **744 tests, 0 failures, 43 skipped**. `compileall -q .` and `git diff --check` passed.
+- The 43 skipped tests are PostgreSQL integration tests gated by absent `TEST_POSTGRES_DSN`; no live PostgreSQL acceptance is implied. No Cloudflare inference, authenticated Binance media upload, real post, production DB operation, publisher activation, workflow dispatch, merge or deployment occurred.
+- Changes are local and not yet committed/pushed at this checkpoint. Modules 19/20 remain PARTIAL pending real provider/media acceptance and independent OCR/vision semantic validation.

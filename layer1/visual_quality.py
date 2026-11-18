@@ -13,6 +13,7 @@ from PIL import Image
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_METADATA_BYTES = 1024 * 1024
+MAX_DECODED_IMAGE_PIXELS = 2_000_000
 
 
 def _valid_int_vector(value: Any, length: int, low: int = 0, high: int = 255) -> bool:
@@ -170,16 +171,21 @@ class VisualQualityEngine:
             else:
                 image_hash = hashlib.sha256(image_bytes).hexdigest()
                 with Image.open(BytesIO(image_bytes)) as check:
-                    check.verify()
-                with Image.open(BytesIO(image_bytes)) as image:
-                    image.load()
-                    width, height = image.size
-                    if image.format != "PNG":
-                        reasons.append("FINAL_IMAGE_MUST_BE_PNG")
-                    if path.suffix.lower() != ".png":
-                        reasons.append("FINAL_IMAGE_EXTENSION_MISMATCH")
-                    if (width, height) != self.REQUIRED_DIMENSIONS:
+                    width, height = check.size
+                    if width * height > MAX_DECODED_IMAGE_PIXELS:
+                        reasons.append("IMAGE_PIXEL_COUNT_OUT_OF_SAFE_BOUNDS")
+                    elif (width, height) != self.REQUIRED_DIMENSIONS:
                         reasons.append("IMAGE_DIMENSIONS_MISMATCH")
+                    else:
+                        check.verify()
+                        with Image.open(BytesIO(image_bytes)) as image:
+                            image.load()
+                            if image.size != (width, height):
+                                reasons.append("IMAGE_DIMENSIONS_CHANGED_DURING_DECODE")
+                            if image.format != "PNG":
+                                reasons.append("FINAL_IMAGE_MUST_BE_PNG")
+                            if path.suffix.lower() != ".png":
+                                reasons.append("FINAL_IMAGE_EXTENSION_MISMATCH")
         except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
             reasons.append("IMAGE_MISSING_OR_UNDECODABLE")
         try:

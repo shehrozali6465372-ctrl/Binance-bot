@@ -418,6 +418,16 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
         self.assertEqual(read_sizes, [20 * 1024 * 1024 + 1])
         self.assertFalse(self.output.exists())
 
+    def test_oversized_decoded_image_is_rejected_before_pixel_loading(self):
+        with patch("image_engine.MAX_DECODED_IMAGE_PIXELS", 100, create=True), patch.object(
+            Image.Image, "load", side_effect=AssertionError("pixel decode must not run"),
+        ):
+            with self.assertRaisesRegex(ValueError, "pixel count"):
+                self.generator(
+                    lambda request, timeout: FakeResponse(self.image_bytes, "image/png")
+                ).generate("prompt", self.output, width=512, height=512)
+        self.assertFalse(self.output.exists())
+
     def test_missing_credentials_fail_before_network(self):
         generator = CloudflareWorkersAIImageGenerator(api_token="", account_id="")
         with patch("image_engine.urllib.request.urlopen") as opener:
