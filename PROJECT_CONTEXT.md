@@ -2661,3 +2661,54 @@ The detached PR #14 snapshots are ancestors of the current PR #14 head, not inde
 - The Library master map `/Binance_Bot_Canonical_Master_Map_2026-11-18.md` was updated with this checkpoint and the revised next step: inspect/fix the next Module 21 authorization/duplicate/final revalidation blocker, then durable scheduled recovery and safe Git push/auth integrity. Do not repeat Module 12 work.
 
 Safety remains: keep `DRY_RUN=1`; publisher disabled; no real Square publication; no production DB changes; preserve all other worktrees and their uncommitted data.
+
+
+## 17. Module 21 publication-safety continuation — 18 November 2026
+
+**Status: LOCAL SQLITE / MOCKED ACCEPTANCE PASSED; DIRECT POSTGRESQL ACCEPTANCE BLOCKED BY MISSING TEST DSN; MODULE 21 IS NOT COMPLETE. Local code changes remain uncommitted.**
+
+### Canonical state and branch reconciliation
+
+- Active local worktree: `/tmp/binance-blocker1-fix`; branch `layer-1/module9-onchain-continuation`; HEAD `28353d311f44b448357a92aab976d7477445d536`. Local `origin/layer-1/module9-onchain-continuation` still resolves to that baseline.
+- Live PR #14 is OPEN / DRAFT / UNMERGED. Before this documentation-only update its head was `9f4d8911e3e1bee21fb8b5d690a7810da06d58f2`; base is `layer-1/module9-onchain-intelligence`.
+- GitHub compare from local HEAD to that PR head showed 6 commits ahead, 0 behind, merge base equal to local HEAD; all 6 commits touched only `PROJECT_CONTEXT.md`. No remote code-file delta exists relative to this local baseline. The live PR head differs from the older `c88d4feb...` checkpoint in prior notes. Do not use the stale local tracking ref as the live GitHub head.
+
+### Preserved local worktree delta
+
+- Exactly 16 tracked files modified, no untracked files; no reset, cleanup, code commit, code push, merge, or deployment.
+- Files: `image_engine.py`; `layer1/content_verification.py`; `layer1/event_lifecycle.py`; `layer1/event_lifecycle_postgres.py`; `layer1/publication_authorization.py`; `layer1/publication_postgres.py`; `layer1/publication_runtime.py`; `main.py`; `tests/test_cloudflare_image_generation.py`; `tests/test_content_verification.py`; `tests/test_end_to_end_pipeline.py`; `tests/test_event_lifecycle.py`; `tests/test_event_lifecycle_postgres.py`; `tests/test_publication_authorization.py`; `tests/test_publication_postgres.py`; `tests/test_publisher_safety.py`.
+- Diff summary: 769 insertions, 116 deletions. No untracked files. `git diff --check`: PASS. No active pytest/unittest process remained.
+- Module 12's four-file lifecycle correction is preserved and was not reimplemented or rerun in this focused batch.
+
+### Module 21 implementation present locally
+
+- `ContentVerificationResult.evidence_status` maps successful PASS results with approved claim IDs to VERIFIED and rejected/unapproved results to UNVERIFIED; runtime authorization wiring uses this property.
+- Removed caller-supplied `duplicate_policy_passed=True`. Authorization now carries catalyst/cooldown context and checks persisted recent posts, unresolved SUBMITTING/PUBLICATION_UNKNOWN attempts, competing active quota reservations, clock skew, and ledger availability. Exceptional catalyst cooldown exemptions do not bypass unresolved attempts.
+- SQLite/PostgreSQL publication paths resolve an existing idempotency key before new-publication cooldown checks. New attempts are checked against persisted duplicate policy and rechecked immediately before POST, alongside provenance/lifecycle validation. PostgreSQL authorization/attempt creation uses a symbol-scoped advisory transaction lock.
+- Added independent default-off `PUBLISHER_ENABLED`; omitted setting defaults false. Publisher/media side effects require DRY_RUN=false and explicit publisher enablement. Operational requirement remains `DRY_RUN=1`, publisher disabled.
+- Image upload reads the exact bytes, verifies SHA-256 against supplied and authorized hashes, then passes immutable `AuthorizedImagePayload` bytes to the uploader; the uploader does not reopen the file.
+- End-to-end test initially failed because `Layer1Store` intentionally has no posts/publication_attempts tables. Fail-closed application behavior was preserved; the disposable test fixture now creates those minimal ledger tables.
+
+### Local verification
+
+- Successful focused batch: `tests.test_content_verification`, `tests.test_publication_authorization`, `tests.test_publisher_safety`, `tests.test_publication_runtime`, `tests.test_end_to_end_pipeline`, `tests.test_cloudflare_image_generation`, `tests.test_publication_postgres`: **127 passed, 0 failed, 19 skipped**.
+- The system Python lacked Pillow; no dependency was installed. The passing run used the pre-existing `/tmp/binance-layer1-audit/.venv/bin/python` only as interpreter while executing/importing code from the canonical worktree. No other worktree was checked out or modified.
+- The 19 skips are environment-guarded PostgreSQL integration tests because `TEST_POSTGRES_DSN` is absent in the current shell. Mocked PostgreSQL publisher tests ran and passed.
+- `compileall -q main.py image_engine.py layer1 tests`: PASS. `git diff --check`: PASS. Publisher transports were mocked; no real Square post or media upload occurred.
+
+### Neon target and direct PostgreSQL blocker
+
+- Read-only Neon metadata identifies project `Binance-bot-production` (`orange-glade-36037611`), branch `module9-pg-lease-fencing-disposable` (`br-falling-butterfly-az03rryi`), database `binance_onchain_test`. Branch state READY; parent `br-falling-bread-azl8rggt`.
+- A read-only Neon MCP SELECT confirmed `current_database() = binance_onchain_test`. The connector session reported loopback `127.0.0.1/32` and `pg_stat_ssl.ssl=false`; this proxied connector session does not certify direct application-client TLS.
+- Current canonical RDC shell and login shell have neither `TEST_POSTGRES_DSN` nor `TEST_POSTGRES_ALLOWED_HOST`; no test-env file was found in the canonical worktree. No DSN/password was printed or retrieved. The previously documented endpoint host is `ep-autumn-frost-azvk3fj4.c-3.ap-southeast-1.aws.neon.tech`, but direct host-allowlist and TLS preflight cannot be repeated without the approved local DSN.
+- Therefore the PostgreSQL publication suite has **NOT** been verified green after the idempotency-ordering correction. Do not claim Module 21 complete. Do not retrieve a privileged Neon connection string as a workaround. No Neon data/schema writes or production/default-branch access occurred.
+
+### Remaining acceptance and exact next action
+
+1. Recover the approved direct test DSN and allowlist from the intended local test configuration without printing credentials; verify exact database, branch/host and TLS.
+2. Run PostgreSQL publication authorization/integration acceptance: persisted duplicate post, pending/unknown attempt fence, same-key replay, competing reservations, final pre-submit revalidation, transaction rollback/error paths and advisory-lock concurrency.
+3. Review/test PostgreSQL fail-closed behavior when a duplicate-ledger query fails inside the authorization transaction; verify deliberate rollback and RESERVED quota outcome.
+4. Reconcile SQLite/PostgreSQL behavior after integration acceptance.
+5. Durable scheduled workflow state, quota recovery, crash recovery and full dry-run end-to-end acceptance remain outstanding.
+
+Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB writes, no credential/schedule change, no Render deployment, no paid provisioning, and all other worktrees preserved.
