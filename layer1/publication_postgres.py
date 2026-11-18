@@ -1094,6 +1094,12 @@ class PostgresPublicationStore:
         import psycopg
         finished_at = _utc().isoformat()
         with self.conn.transaction():
+            # Use the same lock order as acquire/recover so a terminal finish
+            # cannot deadlock against operator recovery of the same lease.
+            self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("layer1-run-lease:agent",),
+            )
             updated = self.conn.execute(
                 "UPDATE layer1_runs SET finished_at=%s,status=%s,summary_json=%s "
                 "WHERE run_id=%s AND status='RUNNING' RETURNING run_id",
