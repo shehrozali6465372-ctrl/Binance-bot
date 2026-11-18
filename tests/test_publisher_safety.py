@@ -642,7 +642,10 @@ class PublisherSafetyTests(unittest.TestCase):
 
 
     def test_live_config_requires_explicit_publisher_enablement(self):
-        config = replace(self.config, publisher_enabled=False)
+        config = replace(
+            self.config, publisher_enabled=False,
+            deepseek_api_key="test-deepseek-key-not-real",
+        )
         with self.assertRaisesRegex(ValueError, "PUBLISHER_ENABLED"):
             config.validate()
 
