@@ -291,12 +291,13 @@ class PublisherSafetyTests(unittest.TestCase):
 
     def test_postgres_duplicate_ledger_query_error_propagates_fail_closed(self):
         from contextlib import nullcontext
+        from layer1.publication_postgres import PostgresPublicationStore
 
         class FakeConnection:
             def transaction(self):
                 return nullcontext()
 
-        store = object.__new__(main.PostgresPublicationStore)
+        store = object.__new__(PostgresPublicationStore)
         store.conn = FakeConnection()
 
         def query_failure(**kwargs):
