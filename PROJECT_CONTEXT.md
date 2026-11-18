@@ -2912,3 +2912,18 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Verification: focused Module 11 suite **64 passed, 0 failed**; full suite **699 tests, 0 failures, 41 skipped**. The 41 PostgreSQL integration skips are not passes and remain gated by missing `TEST_POSTGRES_DSN`.
 - Module 11 remains PARTIAL: deterministic clause splitting and structured checks do not provide general semantic entailment or cover every ambiguous natural-language form.
 - Pushed to the existing PR #14 continuation branch in commit `7e8cc99`; remote file content was verified. No DB writes, live DeepSeek/Cloudflare calls, Binance publishing, production changes, deployment or merge.
+
+## 2026-11-18 — Module 11 possessive-asset clause segmentation continuation
+
+- Continued in the existing isolated worktree `/tmp/binance-w2e-continuation`, starting from verified remote HEAD `b53358c33904c52ba95f06d4cb0dfc282000c967` on the existing Module 9 continuation PR branch. Original `/root/Binance-bot` checkout was not modified.
+- TDD reproduced that `Bitcoin's price rose 8% and Ethereum's price fell 4%` was retained as one clause. The bounded independent-clause subject grammar now recognizes possessive asset names and lowercase descriptor words after an explicitly capitalized entity token; the entity-leading token remains case-sensitive to avoid matching lowercase adverbs as asset names.
+- A verifier-level regression confirms a possessive multi-asset sentence cannot share one structured market evidence link and remains UNVERIFIED with `COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE`.
+- Focused Module 11 suite: **65 passed, 0 failed**. Full local suite: **701 passed, 0 failed, 41 skipped**. The 41 skipped tests require `TEST_POSTGRES_DSN`; PostgreSQL integration acceptance is still not established.
+- This is a bounded deterministic segmentation improvement, not general semantic entailment or broad natural-language paraphrase support. Module 11 remains **PARTIAL / NOT COMPLETE**.
+- Local changes are currently uncommitted and unpushed. Do not treat prior push approval as blanket approval for this new change. PR #14 remains the existing continuation PR; no duplicate PR created. No production database writes, provider requests, Cloudflare generation, media upload, Binance publication, deployment, merge, or publisher activation occurred.
+
+## 2026-11-18 — Module 14 policy source and Module 21 DSN gate rechecked
+
+- Read the repository's `SCORING_POLICY.md`: it is explicitly the **Module 7 Relevance Scoring Policy**. It does not define or approve the Module 14 opportunity scoring policy. Its own text says audience-relevance/novelty and materiality/credibility definitions need approval/calibration. Do not reuse Module 7 weights for Module 14; Module 14 remains fail-closed.
+- The active `/tmp/binance-w2e-continuation` environment does not have `TEST_POSTGRES_DSN`. Existing project notes reference a disposable Neon test branch and a DSN file in another worktree, but that credential is not copied or retrieved. PostgreSQL integration acceptance remains blocked until the approved disposable DSN and host allowlist are explicitly made available to the active test environment.
+- Latest local implementation commit is recorded in the isolated worktree only; no push was made in this continuation. PR #14 remains OPEN / DRAFT / UNMERGED at remote head `b53358c33904c52ba95f06d4cb0dfc282000c967`; combined commit status returned no status checks for that head. Its PR description still reports an older 696-test baseline and needs a post-push update after the next authorized push.

@@ -1498,3 +1498,17 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Focused Module 11 suite: **64 tests, 0 failures**. Full isolated repository suite: **699 tests, 0 failures, 41 skipped**. `compileall` and `git diff --check` passed before documentation update; PostgreSQL tests remain skipped because `TEST_POSTGRES_DSN` is not configured.
 - This is a narrow punctuation-boundary fix, not general semantic entailment. Ambiguous elliptical claims, paraphrase entailment and full natural-language semantic attribution remain unsupported; Module 11 remains **PARTIAL**.
 - Changes were pushed from the isolated worktree `/tmp/binance-w2e-continuation` to the existing PR #14 continuation branch in commit `7e8cc99`; remote file content was verified. No production database, live provider, Cloudflare inference, publisher, Binance post, deployment, merge or original `/root/Binance-bot` checkout was touched.
+
+## 2026-11-18 — Module 11 possessive-asset clause segmentation
+
+- Added a TDD regression for compound market prose using possessive asset subjects, e.g. `Bitcoin's price rose 8% and Ethereum's price fell 4%`. The pre-fix splitter returned the entire sentence as one claim, allowing one structured market-field link to appear to cover two assets/propositions.
+- Extended the bounded independent-clause subject grammar to recognize possessive asset names and lowercase descriptor words after an explicitly capitalized entity token. Kept the entity-leading token case-sensitive to avoid treating ordinary lowercase adverbs such as `later` as asset names.
+- Added a verifier-level regression proving a possessive multi-asset sentence remains `UNVERIFIED` with `COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE` when only one market evidence link is supplied.
+- Module 11 focused suite: **65 tests, 0 failures**. Full local suite: **701 tests, 0 failures, 41 skipped**. The 41 skips are PostgreSQL integration tests guarded by absent `TEST_POSTGRES_DSN`; they are not accepted as passes. No production or external provider actions were used.
+- Scope remains deterministic clause segmentation and evidence-link protection, not general semantic entailment, broad paraphrase understanding, or full natural-language attribution. Module 11 remains **PARTIAL / NOT COMPLETE**.
+- Current edits are local and uncommitted in `/tmp/binance-w2e-continuation`; no push was made in this continuation. Existing PR #14 and the remote branch remain unchanged by this local edit. Original `/root/Binance-bot` checkout remains untouched.
+
+## 2026-11-18 — Module 14 policy source check and PostgreSQL test gate
+
+- Read `SCORING_POLICY.md`: it documents **Module 7 Relevance Scoring Policy**, not the Module 14 opportunity scoring policy. It explicitly says its audience-relevance/novelty definitions and materiality/credibility baselines need approval/calibration. It does not supply an owner-approved Module 14 policy or validated Module 14 factor inputs. Module 14 must remain fail-closed; do not repurpose Module 7 weights as Module 14 weights.
+- Active continuation worktree check confirms `TEST_POSTGRES_DSN` is absent. Existing project notes identify a disposable Neon test branch and a prior DSN file in a different worktree, but credentials must not be copied or retrieved from that location. No database test was attempted with a guessed or production DSN. Module 21 PostgreSQL integration remains unverified until an approved disposable DSN/host allowlist is supplied through the active test environment.

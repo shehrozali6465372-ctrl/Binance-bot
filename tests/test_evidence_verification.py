@@ -713,6 +713,31 @@ class EvidenceVerificationTests(unittest.TestCase):
             ("ETH gained 3%", "ETH dropped 2%."),
         )
 
+    def test_atomic_claim_splitter_separates_possessive_asset_subjects(self):
+        self.assertEqual(
+            split_atomic_claims("Bitcoin's price rose 8% and Ethereum's price fell 4%."),
+            ("Bitcoin's price rose 8%", "Ethereum's price fell 4%."),
+        )
+        self.assertEqual(
+            split_atomic_claims("ETH's price rose 8% while BTC's price fell 4%."),
+            ("ETH's price rose 8%", "BTC's price fell 4%."),
+        )
+
+    def test_possessive_asset_clauses_cannot_share_one_market_evidence_link(self):
+        evidence = record(
+            value=8.0, claim_key="market.price_change", unit="%",
+        )
+        candidate = Claim(
+            text="Bitcoin's price rose 8% and Ethereum's price fell 4%.",
+            subject=evidence.subject, asset_id=evidence.asset_id,
+            claim_key="market.price_change", value=8.0, unit="%", timeframe="spot",
+            observed_at=iso(), claim_type="CONFIRMED_FACT", impact="MEDIUM",
+            evidence_ids=(evidence.evidence_id,), max_age_seconds=3600,
+        )
+        result = self.engine.verify([candidate], [evidence]).results[0]
+        self.assertEqual(result.state, "UNVERIFIED")
+        self.assertIn("COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE", result.issues)
+
     def test_atomic_claim_splitter_preserves_conjunctions_that_join_objects(self):
         self.assertEqual(
             split_atomic_claims("Binance listed ABC and BNB."),
