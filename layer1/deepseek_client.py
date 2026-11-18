@@ -21,6 +21,17 @@ DEFAULT_MODEL = "deepseek-flash"
 SUPPORTED_MODELS = frozenset({"deepseek-flash", "deepseek-v4-pro"})
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Do not forward DeepSeek bearer credentials to redirect destinations."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_without_redirect(request, *, timeout: int):
+    return urllib.request.build_opener(_NoRedirectHandler).open(request, timeout=timeout)
+
+
 @dataclass(frozen=True)
 class DeepSeekResponse:
     text: str
@@ -45,7 +56,7 @@ class DeepSeekClient:
         top_p: float = 1.0,
         max_tokens: int = 2048,
         base_url: str = DEFAULT_BASE_URL,
-        opener=urllib.request.urlopen,
+        opener=None,
         max_retries: int = 2,
         retry_backoff_seconds: float = 0.25,
     ) -> None:
@@ -91,7 +102,9 @@ class DeepSeekClient:
         self.top_p = float(top_p)
         self.max_tokens = max_tokens
         self.base_url = base_url.rstrip("/")
-        self._opener = opener
+        # API keys are bearer credentials; the default transport must reject
+        # redirects rather than forward Authorization to another origin.
+        self._opener = opener if opener is not None else _open_without_redirect
 
     def _fetch(self, request) -> tuple[int, bytes] | None:
         transient_http = {408, 429, 500, 502, 503, 504}

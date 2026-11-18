@@ -24,6 +24,11 @@ class FakeResponse:
 
 
 class DeepSeekClientTests(unittest.TestCase):
+    def test_default_transport_rejects_redirects_for_bearer_secret(self):
+        with patch("layer1.deepseek_client._open_without_redirect", create=True) as safe_open:
+            client = DeepSeekClient("test-secret")
+        self.assertIs(client._opener, safe_open)
+
     def _client(self, opener):
         return DeepSeekClient("test-secret", opener=opener)
 

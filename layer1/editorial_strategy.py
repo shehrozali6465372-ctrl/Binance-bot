@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -15,6 +16,13 @@ def _digest(payload: Any) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     ).hexdigest()
+
+
+def _render_untrusted_field(value: Any) -> str:
+    """Keep source/config text on one line and neutralize brief delimiters."""
+    text = str(value)
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    return text.replace("<<<", "‹‹‹").replace(">>>", "›››").strip()
 
 
 @dataclass(frozen=True)
@@ -45,20 +53,27 @@ class EditorialBrief:
             "EDITORIAL_BRIEF_STATUS: " + self.status,
             "EDITORIAL_BRIEF_ID: " + self.brief_id,
             "EDITORIAL_BRIEF_VERSION: " + str(self.version),
-            "EDITORIAL_FORMAT: " + self.format,
-            "EDITORIAL_ANGLE: " + self.angle,
-            "CENTRAL_QUESTION: " + self.research_question,
-            "AUDIENCE: " + self.audience,
-            "TONE: " + self.tone,
+            "EDITORIAL_FORMAT: " + _render_untrusted_field(self.format),
+            "EDITORIAL_ANGLE: " + _render_untrusted_field(self.angle),
+            "CENTRAL_QUESTION: " + _render_untrusted_field(self.research_question),
+            "AUDIENCE: " + _render_untrusted_field(self.audience),
+            "TONE: " + _render_untrusted_field(self.tone),
             f"LENGTH: {self.min_words}-{self.max_words} words",
             "OUTLINE:",
         ]
-        lines.extend(f"{index + 1}. {item}" for index, item in enumerate(self.outline))
+        lines.extend(
+            f"{index + 1}. {_render_untrusted_field(item)}"
+            for index, item in enumerate(self.outline)
+        )
         lines.append("APPROVED_CLAIM_IDS: " + ",".join(self.approved_claim_ids))
         lines.append("PROHIBITED_CLAIMS:")
-        lines.extend("- " + item for item in self.prohibited_claims) if self.prohibited_claims else lines.append("- None.")
+        lines.extend(
+            "- " + _render_untrusted_field(item) for item in self.prohibited_claims
+        ) if self.prohibited_claims else lines.append("- None.")
         lines.append("UNCERTAINTY:")
-        lines.extend("- " + item for item in self.uncertainty_notes) if self.uncertainty_notes else lines.append("- None recorded.")
+        lines.extend(
+            "- " + _render_untrusted_field(item) for item in self.uncertainty_notes
+        ) if self.uncertainty_notes else lines.append("- None recorded.")
         lines.append("BRIEF_HASH: " + self.brief_hash)
         lines.append("<<<EDITORIAL_BRIEF_END>>>")
         return "\n".join(lines)

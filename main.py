@@ -34,6 +34,14 @@ def _open_binance_publish_no_redirect(request, *, timeout: int):
     return opener.open(request, timeout=timeout)
 
 
+def _read_bounded_binance_response(response, *, max_bytes: int = 1024 * 1024) -> bytes:
+    """Bound response allocation after publication submission; overflow is ambiguous."""
+    body = response.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise ValueError(f"Binance response exceeds the {max_bytes}-byte limit")
+    return body
+
+
 # Workflow files are deployment configuration and are never self-modified by the agent.
 
 def _parse_env_bool(name: str, value: Optional[str], default: bool) -> bool:
@@ -3761,39 +3769,61 @@ class DeepSeekGenerator:
     # ──────────────────────────────────────────────
     
     def _parse_decision_response(self, response: str) -> List[Dict[str, Any]]:
-        """Parse DeepSeek's ranking response into structured data."""
+        """Parse and validate the bounded Phase 1 ranking contract."""
+        if not isinstance(response, str) or not response.strip():
+            return []
         rankings = []
-        current = {}
-        
-        for line in response.split('\n'):
+        current = None
+
+        for line in response.splitlines():
             line = line.strip()
             if not line:
                 continue
-            
-            if line.startswith('RANK:'):
-                if current and 'symbol' in current:
+
+            if line.startswith("RANK:"):
+                if current is not None:
+                    if not current["symbol"] or not current["reason"]:
+                        return []
                     rankings.append(current)
-                try:
-                    rank = int(line.split(':')[1].strip())
-                    current = {'rank': rank, 'symbol': '', 'reason': ''}
-                except (ValueError, IndexError):
-                    current = {}
-            
-            elif line.startswith('COIN:') and current:
-                sym = line.split(':')[1].strip().replace('$', '')
-                current['symbol'] = sym
-            
-            elif line.startswith('REASON:') and current:
-                reason = line.split(':', 1)[1].strip()
-                current['reason'] = reason
-        
-        # Don't forget the last one
-        if current and 'symbol' in current:
+                raw_rank = line.split(":", 1)[1].strip()
+                if not re.fullmatch(r"[1-3]", raw_rank):
+                    return []
+                current = {"rank": int(raw_rank), "symbol": "", "reason": ""}
+
+            elif line.startswith("COIN:"):
+                if current is None or current["symbol"]:
+                    return []
+                raw_symbol = line.split(":", 1)[1].strip()
+                if raw_symbol.startswith("$"):
+                    raw_symbol = raw_symbol[1:]
+                if not re.fullmatch(r"[A-Za-z0-9]{1,20}", raw_symbol):
+                    return []
+                current["symbol"] = raw_symbol.upper()
+
+            elif line.startswith("REASON:"):
+                if current is None or current["reason"]:
+                    return []
+                reason = line.split(":", 1)[1].strip()
+                if not reason:
+                    return []
+                current["reason"] = reason
+
+            else:
+                # The model is required to return only the documented ranking
+                # records; extra prose or malformed fields invalidate the batch.
+                return []
+
+        if current is not None:
+            if not current["symbol"] or not current["reason"]:
+                return []
             rankings.append(current)
-        
-        # Sort by rank
-        rankings.sort(key=lambda r: r.get('rank', 999))
-        
+
+        if not rankings or len(rankings) > 3:
+            return []
+        ranks = [item["rank"] for item in rankings]
+        symbols = [item["symbol"] for item in rankings]
+        if ranks != list(range(1, len(rankings) + 1)) or len(set(symbols)) != len(symbols):
+            return []
         return rankings
 
 @dataclass(frozen=True)
@@ -4191,7 +4221,7 @@ class PostPublisher:
                 request, timeout=self.config.http_timeout_seconds,
             ) as response:
                 http_status = response.status
-                body = response.read().decode("utf-8", errors="replace")
+                body = _read_bounded_binance_response(response).decode("utf-8", errors="replace")
             parsed = json.loads(body)
             if parsed.get("code") != "000000":
                 message = str(parsed.get("message") or parsed.get("messageDetail") or "Binance rejected request")
@@ -4311,15 +4341,28 @@ class PostPublisher:
             "clienttype": "binanceSkill",
         }
         try:
-            # Re-check the persisted authorization immediately before the POST.
-            # A failed preflight is a known no-submit outcome: do not label it
-            # PUBLICATION_UNKNOWN, which is reserved for ambiguous network outcomes.
+            # Hold the event-scoped advisory lock and provenance row locks for
+            # the complete bounded POST. This also fences NO_EVENT insertions,
+            # where SELECT FOR SHARE alone cannot lock a missing row.
+            request_started = False
             try:
-                store.validate_authorized_attempt_before_submit(
+                with store.authorized_submission_guard(
                     authorization_id=authorization.authorization_id,
                     idempotency_key=key, symbol=symbol, content_hash=content_hash,
-                )
+                ):
+                    request = urllib.request.Request(
+                        self.API_URL, data=json.dumps(payload).encode("utf-8"),
+                        headers=headers, method="POST",
+                    )
+                    request_started = True
+                    with _open_binance_publish_no_redirect(
+                        request, timeout=self.config.http_timeout_seconds,
+                    ) as response:
+                        http_status = response.status
+                        body = _read_bounded_binance_response(response).decode("utf-8", errors="replace")
             except Exception as exc:
+                if request_started:
+                    raise
                 message = (
                     "Pre-submit authorization failed; no Binance request was sent: "
                     f"{type(exc).__name__}: {exc}"
@@ -4333,16 +4376,6 @@ class PostPublisher:
                         "Could not persist known pre-submit PostgreSQL rejection"
                     )
                 return PublishResult(status="FAILED_CONFIRMED", error=message)
-
-            request = urllib.request.Request(
-                self.API_URL, data=json.dumps(payload).encode("utf-8"),
-                headers=headers, method="POST",
-            )
-            with _open_binance_publish_no_redirect(
-                request, timeout=self.config.http_timeout_seconds,
-            ) as response:
-                http_status = response.status
-                body = response.read().decode("utf-8", errors="replace")
             parsed = json.loads(body)
             if parsed.get("code") != "000000":
                 message = str(parsed.get("message") or parsed.get("messageDetail") or "Binance rejected request")
@@ -4431,6 +4464,56 @@ class PostPublisher:
         text = re.sub(r"#[A-Za-z0-9_]+", "", content)
         text = re.sub(r" +", " ", text).strip()
         return text + "\n" + " ".join(tags[:max_tags])
+
+
+def _select_research_package_for_ranking(rankings, research_packages):
+    """Resolve every model rank against the exact supplied candidate set.
+
+    Unknown, malformed, or ambiguous symbols are rejected. Never substitute a
+    different candidate for an invalid model decision.
+    """
+    if (
+        not isinstance(rankings, list) or not rankings or len(rankings) > 3
+        or not isinstance(research_packages, list) or not research_packages
+    ):
+        return None
+    candidate_map = {}
+    for item in research_packages:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            return None
+        coin, package = item
+        if not isinstance(coin, dict) or not isinstance(package, str) or not package.strip():
+            return None
+        candidate_symbol = coin.get("symbol")
+        if not isinstance(candidate_symbol, str) or not re.fullmatch(r"[A-Za-z0-9]{1,20}", candidate_symbol.strip()):
+            return None
+        key = candidate_symbol.strip().upper()
+        candidate_map.setdefault(key, []).append((coin, package))
+
+    resolved = []
+    seen_symbols = set()
+    for expected_rank, ranking in enumerate(rankings, start=1):
+        if not isinstance(ranking, dict):
+            return None
+        rank = ranking.get("rank")
+        symbol = ranking.get("symbol")
+        reason = ranking.get("reason")
+        if (
+            isinstance(rank, bool) or rank != expected_rank
+            or not isinstance(symbol, str)
+            or not re.fullmatch(r"[A-Za-z0-9]{1,20}", symbol.strip())
+            or not isinstance(reason, str) or not reason.strip()
+        ):
+            return None
+        key = symbol.strip().upper()
+        if key in seen_symbols:
+            return None
+        seen_symbols.add(key)
+        matches = candidate_map.get(key, [])
+        if len(matches) != 1:
+            return None
+        resolved.append(matches[0])
+    return resolved[0]
 
 
 def _run_once_impl(config, scanner, announcement_engine, research, generator, publisher,
@@ -5004,19 +5087,13 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
             LOGGER.warning("DeepSeek #1 pick has no symbol — skipping")
             return False
         
-        best_coin = None
-        best_package = ""
-        for coin, pkg in research_packages:
-            if coin["symbol"].upper() == best_symbol.upper():
-                best_coin = coin
-                best_package = pkg
-                break
-        
-        if not best_coin:
-            LOGGER.warning("DeepSeek recommended $%s but not found in research packages", best_symbol)
-            # Fallback: use first candidate
-            best_coin, best_package = research_packages[0]
-            LOGGER.info("Falling back to $%s", best_coin["symbol"])
+        selected_package = _select_research_package_for_ranking(rankings, research_packages)
+        if selected_package is None:
+            LOGGER.error(
+                "DeepSeek top-ranked symbol is unknown, malformed or ambiguous; no post this cycle",
+            )
+            return False
+        best_coin, best_package = selected_package
         
         decision_reason = rankings[0].get("reason", "") if rankings else ""
         catalyst_info = best_coin.get("announcement_type", "market_move")

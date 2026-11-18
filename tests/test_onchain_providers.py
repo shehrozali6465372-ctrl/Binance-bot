@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 
 from layer1.onchain_providers import (
@@ -252,6 +253,11 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual(mismatch.exception.reason_code, "NETWORK_ID_MISMATCH")
         with self.assertRaisesRegex(ValueError, "not allowed"):
             adapter._call("ethereum-mainnet", "eth_sendRawTransaction", ["0xdead"])
+
+    def test_default_json_rpc_transport_rejects_redirects_for_keyed_endpoints(self):
+        with patch("layer1.onchain_providers._open_without_redirect", create=True) as safe_open:
+            transport = ReadOnlyJsonRpcTransport("https://provider.example/v2/secret-api-key")
+        self.assertIs(transport._opener, safe_open)
 
     def test_json_rpc_transport_validates_envelope_and_redacts_endpoint_on_http_error(self):
         captured = {}

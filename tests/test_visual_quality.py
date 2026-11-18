@@ -2,6 +2,8 @@ import hashlib
 import json
 import tempfile
 import unittest
+import warnings
+from unittest import mock
 from pathlib import Path
 
 from PIL import Image
@@ -124,6 +126,15 @@ class VisualQualityEngineTests(unittest.TestCase):
         )
         self.assertIn("FINAL_IMAGE_HASH_MISMATCH", result.reasons)
 
+    def test_oversized_sidecar_fails_closed(self):
+        self._write_sidecar(unused_metadata="x" * (1024 * 1024 + 1))
+        result = VisualQualityEngine().validate(
+            self.image_path, draft_content=self.draft,
+            symbol=self.symbol, asset_id=self.asset_id,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("IMAGE_PROVENANCE_SIDECAR_MISSING_OR_INVALID", result.reasons)
+
     def test_missing_sidecar_fails_closed(self):
         self.sidecar.unlink()
         result = VisualQualityEngine().validate(
@@ -169,6 +180,46 @@ class VisualQualityEngineTests(unittest.TestCase):
             symbol=self.symbol, asset_id=self.asset_id,
         )
         self.assertIn("TEXT_OVERLAY_BOXES_OVERLAP", result.reasons)
+
+    def test_oversized_image_is_rejected_without_unbounded_file_read(self):
+        oversized_path = Path(self.tmp.name) / "oversized-file.png"
+        with oversized_path.open("wb") as handle:
+            handle.truncate(10 * 1024 * 1024 + 1)
+        with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("unbounded read attempted")) as read_bytes:
+            result = VisualQualityEngine().validate(
+                oversized_path, draft_content=self.draft,
+                symbol=self.symbol, asset_id=self.asset_id,
+                metadata_path=self.sidecar,
+            )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("IMAGE_SIZE_OUT_OF_SAFE_BOUNDS", result.reasons)
+        read_bytes.assert_not_called()
+
+    def test_decompression_bomb_image_is_rejected_without_raising(self):
+        bomb_path = Path(self.tmp.name) / "bomb.png"
+        Image.new("RGB", (20, 20), "black").save(bomb_path, format="PNG")
+        with mock.patch.object(Image, "MAX_IMAGE_PIXELS", 100):
+            result = VisualQualityEngine().validate(
+                bomb_path, draft_content=self.draft,
+                symbol=self.symbol, asset_id=self.asset_id,
+                metadata_path=self.sidecar,
+            )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("IMAGE_MISSING_OR_UNDECODABLE", result.reasons)
+
+    def test_decompression_bomb_warning_is_rejected_when_warnings_are_errors(self):
+        oversized_path = Path(self.tmp.name) / "oversized.png"
+        Image.new("RGB", (11, 10), "black").save(oversized_path, format="PNG")
+        with mock.patch.object(Image, "MAX_IMAGE_PIXELS", 100):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                result = VisualQualityEngine().validate(
+                    oversized_path, draft_content=self.draft,
+                    symbol=self.symbol, asset_id=self.asset_id,
+                    metadata_path=self.sidecar,
+                )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("IMAGE_MISSING_OR_UNDECODABLE", result.reasons)
 
     def test_low_contrast_or_unreadably_small_overlay_fails_closed(self):
         self._write_sidecar(visual_overlay={

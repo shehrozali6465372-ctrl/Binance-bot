@@ -16,7 +16,7 @@ from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from typing import Any, Callable, Optional
 
 
@@ -27,6 +27,17 @@ ALCHEMY_ENDPOINTS = {
     "bnb-smart-chain-mainnet": "https://bnb-mainnet.g.alchemy.com/v2/{api_key}",
 }
 SOLANA_MAINNET_GENESIS_HASH = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Keep API-key-bearing provider endpoints on their configured origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_without_redirect(request, *, timeout: int):
+    return build_opener(_NoRedirectHandler).open(request, timeout=timeout)
 
 
 class ProviderTransportError(RuntimeError):
@@ -100,7 +111,7 @@ class ReadOnlyJsonRpcTransport:
     """Small JSON-RPC HTTP transport that never logs endpoint URLs or bodies."""
 
     def __init__(self, endpoint: str, timeout_seconds: int = 10,
-                 request_style: str = "jsonrpc2", opener: Callable = urlopen):
+                 request_style: str = "jsonrpc2", opener: Optional[Callable] = None):
         parsed = urlparse(endpoint)
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError("provider endpoint must be an HTTPS URL")
@@ -111,7 +122,9 @@ class ReadOnlyJsonRpcTransport:
         self._endpoint = endpoint
         self._timeout_seconds = timeout_seconds
         self._request_style = request_style
-        self._opener = opener
+        # Provider credentials may be embedded in endpoint paths; never follow
+        # redirects to a different origin with those credentials in the URL.
+        self._opener = opener if opener is not None else _open_without_redirect
         self._request_id = 0
 
     def get_json(self, path: str, query: Optional[dict] = None) -> dict:

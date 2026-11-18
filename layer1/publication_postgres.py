@@ -9,8 +9,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +35,14 @@ _ATTEMPT_TRANSITIONS = {
 _ACTIVE_QUOTA_STATES = (
     "RESERVED", "SUBMITTING", "PUBLICATION_UNKNOWN", "PUBLISHED_CONFIRMED",
 )
+
+
+def _quota_usage_count(reservation_count: int, untracked_analytics_count: int) -> int:
+    """Count active reservations plus legacy analytics not mirrored by attempts."""
+    values = (reservation_count, untracked_analytics_count)
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
+        raise ValueError("quota counts must be non-negative integers")
+    return reservation_count + untracked_analytics_count
 
 
 def validate_quota_transition(current: str, target: str) -> bool:
@@ -65,6 +76,52 @@ def validate_attempt_identity(existing: dict, symbol: str, content_hash: str) ->
     normalized_symbol = symbol.upper().strip() if isinstance(symbol, str) else ""
     if existing.get("coin_symbol") != normalized_symbol or existing.get("content_hash") != content_hash:
         raise ValueError("idempotency key is already bound to different publication content")
+    return True
+
+
+def validate_attempt_completion(
+    *, current_status: str, target_status: str, existing_remote_id: str,
+    existing_share_link: str, remote_post_id: str, share_link: str,
+) -> bool:
+    """Validate publication identity across unknown and terminal transitions."""
+    if not validate_attempt_transition(current_status, target_status):
+        raise ValueError("illegal publication attempt transition")
+    values = (existing_remote_id, existing_share_link, remote_post_id, share_link)
+    if any(not isinstance(value, str) for value in values):
+        raise ValueError("publication identity fields must be strings")
+    known_id = existing_remote_id.strip()
+    supplied_id = remote_post_id.strip()
+    known_link = existing_share_link.strip()
+    supplied_link = share_link.strip()
+    if known_id and supplied_id and known_id != supplied_id:
+        raise ValueError("supplied remote post ID conflicts with the ID already recorded")
+    if known_link and supplied_link and known_link != supplied_link:
+        raise ValueError("supplied share link conflicts with the link already recorded")
+    final_id = supplied_id or known_id
+    final_link = supplied_link or known_link
+    if target_status == "PUBLISHED_CONFIRMED" and not final_id:
+        raise ValueError("confirmed publication requires a remote post ID with valid format")
+    if target_status == "FAILED_CONFIRMED":
+        if final_id:
+            raise ValueError("cannot confirm failure while a remote post ID is recorded or supplied")
+        if final_link:
+            raise ValueError("cannot attach a share link to a confirmed failed publication")
+    if target_status in {"PUBLICATION_UNKNOWN", "PUBLISHED_CONFIRMED"}:
+        if final_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", final_id):
+            raise ValueError("remote post ID has an invalid format")
+        if final_link and not final_id:
+            raise ValueError("share link cannot be recorded without a remote post ID")
+        if final_link:
+            try:
+                parsed = urlsplit(final_link)
+                match = re.fullmatch(r"/square/post/([A-Za-z0-9_-]{1,128})/?", parsed.path)
+                valid = (parsed.scheme == "https" and parsed.hostname in {"www.binance.com", "binance.com"}
+                         and parsed.port in (None, 443) and parsed.username is None and parsed.password is None
+                         and not parsed.fragment and match is not None and match.group(1) == final_id)
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise ValueError("share link must be an HTTPS Binance Square post URL matching the remote post ID")
     return True
 
 
@@ -142,11 +199,17 @@ class PostgresPublicationStore:
                 "WHERE day_utc=%s AND status = ANY(%s)",
                 (day, list(_ACTIVE_QUOTA_STATES)),
             ).fetchone()["n"]
+            # Analytics rows already represented by a durable publication attempt
+            # are counted through that attempt's quota reservation. Count only
+            # legacy/unlinked analytics here to avoid both under-counting disjoint
+            # rows and double-counting the same confirmed publication.
             analytics_count = self.conn.execute(
-                "SELECT COUNT(*) AS n FROM post_analytics WHERE created_at::date=%s",
+                "SELECT COUNT(*) AS n FROM post_analytics pa "
+                "WHERE pa.created_at::date=%s AND (pa.remote_post_id IS NULL OR NOT EXISTS ("
+                "SELECT 1 FROM publication_attempts a WHERE a.remote_post_id=pa.remote_post_id))",
                 (day,),
             ).fetchone()["n"]
-            if max(reservation_count, analytics_count) >= daily_limit:
+            if _quota_usage_count(reservation_count, analytics_count) >= daily_limit:
                 return None
             self.conn.execute(
                 "INSERT INTO publication_quota_reservations "
@@ -235,18 +298,20 @@ class PostgresPublicationStore:
         )
         exceptional = False
         reasons = []
-        if event_state != "NO_EVENT":
-            event = self.conn.execute(
-                "SELECT asset_id,event_type,state FROM layer1_event_lifecycle WHERE event_id=%s FOR SHARE",
-                (event_id,),
-            ).fetchone()
-            if event is None or event["asset_id"] != asset_id or event["state"] != event_state:
-                reasons.append("EVENT_LIFECYCLE_CHANGED")
-            else:
-                exceptional = (
-                    self._exceptional_event_type(str(event["event_type"] or ""))
-                    and event["state"] in {"CONFIRMED", "DEVELOPING"}
-                )
+        event = self.conn.execute(
+            "SELECT asset_id,event_type,state FROM layer1_event_lifecycle WHERE event_id=%s FOR SHARE",
+            (event_id,),
+        ).fetchone()
+        if event_state == "NO_EVENT":
+            if event is not None:
+                reasons.append("EVENT_LIFECYCLE_STATE_MISMATCH")
+        elif event is None or event["asset_id"] != asset_id or event["state"] != event_state:
+            reasons.append("EVENT_LIFECYCLE_CHANGED")
+        else:
+            exceptional = (
+                self._exceptional_event_type(str(event["event_type"] or ""))
+                and event["state"] in {"CONFIRMED", "DEVELOPING"}
+            )
         cutoff = now - __import__("datetime").timedelta(hours=repetition_hard_hours)
         posts = self.conn.execute(
             "SELECT created_at,content FROM posts WHERE UPPER(COALESCE(coin_symbol,''))=%s "
@@ -309,6 +374,47 @@ class PostgresPublicationStore:
                 exclude_idempotency_key=exclude_idempotency_key,
             )
 
+    @contextmanager
+    def authorized_submission_guard(
+        self, *, authorization_id: str, idempotency_key: str, symbol: str, content_hash: str,
+    ):
+        """Hold event lifecycle serialization and provenance row locks through the POST.
+
+        A row-level FOR SHARE lock cannot protect the NO_EVENT case because no row
+        exists to lock. The event-scoped advisory lock also fences concurrent event
+        insertion/update and remains held by this outer transaction while the caller
+        performs the bounded HTTP request.
+        """
+        with self.conn.transaction():
+            auth = self.conn.execute(
+                "SELECT payload_json FROM publication_authorizations WHERE authorization_id=%s",
+                (authorization_id,),
+            ).fetchone()
+            if auth is None:
+                raise ValueError("persisted publication authorization not found")
+            payload = auth["payload_json"] if isinstance(auth["payload_json"], dict) else json.loads(auth["payload_json"])
+            event_id = payload.get("event_id")
+            normalized_symbol = symbol.upper().strip() if isinstance(symbol, str) else ""
+            if not normalized_symbol:
+                raise ValueError("publication symbol is required")
+            if not isinstance(event_id, str) or not event_id.strip():
+                raise ValueError("persisted authorization event identity is invalid")
+            self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("publication-symbol:" + normalized_symbol,),
+            )
+            self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("event-lifecycle:" + event_id,),
+            )
+            # Nested psycopg transaction becomes a savepoint. Locks acquired by
+            # the validation remain held until this outer transaction exits.
+            self.validate_authorized_attempt_before_submit(
+                authorization_id=authorization_id, idempotency_key=idempotency_key,
+                symbol=symbol, content_hash=content_hash,
+            )
+            yield
+
     def validate_authorized_attempt_before_submit(
         self, *, authorization_id: str, idempotency_key: str, symbol: str, content_hash: str,
     ) -> None:
@@ -356,15 +462,30 @@ class PostgresPublicationStore:
             if isinstance(claims, str): claims = json.loads(claims)
             if sorted(claims) != sorted(payload["approved_claim_ids"]):
                 raise ValueError("approved claim provenance changed after authorization")
-            if payload["event_state"] != "NO_EVENT":
-                event = self.conn.execute(
-                    "SELECT asset_id,state FROM layer1_event_lifecycle WHERE event_id=%s FOR SHARE",
-                    (payload["event_id"],),
-                ).fetchone()
-                if (event is None or event["asset_id"] != payload["asset_id"]
-                        or event["state"] != payload["event_state"]
-                        or event["state"] not in {"CONFIRMED", "DEVELOPING"}):
-                    raise ValueError("event lifecycle changed after authorization")
+            self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("event-lifecycle:" + payload["event_id"],),
+            )
+            event = self.conn.execute(
+                "SELECT asset_id,state FROM layer1_event_lifecycle WHERE event_id=%s FOR SHARE",
+                (payload["event_id"],),
+            ).fetchone()
+            if payload["event_state"] == "NO_EVENT":
+                if event is not None:
+                    raise ValueError("event lifecycle exists for a NO_EVENT authorization")
+            elif (event is None or event["asset_id"] != payload["asset_id"]
+                    or event["state"] != payload["event_state"]
+                    or event["state"] not in {"CONFIRMED", "DEVELOPING"}):
+                raise ValueError("event lifecycle changed after authorization")
+            self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (validation_advisory_lock_key(content_hash, None),),
+            )
+            for image_hash in sorted(set(payload["image_hashes"])):
+                self.conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                    (validation_advisory_lock_key(content_hash, image_hash),),
+                )
             text = self.conn.execute(
                 "SELECT status FROM content_draft_validation_results WHERE draft_hash=%s "
                 "ORDER BY created_at DESC,validation_id DESC LIMIT 1", (content_hash,),
@@ -406,9 +527,14 @@ class PostgresPublicationStore:
     def finish_authorized_attempt(self, idempotency_key: str, status: str, *, post_id: str = "", share_link: str = "", http_status: Optional[int] = None, error: str = "") -> None:
         if status not in _ATTEMPT_TRANSITIONS: raise ValueError("invalid publication attempt status")
         with self.conn.transaction():
-            attempt = self.conn.execute("SELECT id,status FROM publication_attempts WHERE idempotency_key=%s FOR UPDATE", (idempotency_key,)).fetchone()
+            attempt = self.conn.execute("SELECT id,status,remote_post_id,share_link FROM publication_attempts WHERE idempotency_key=%s FOR UPDATE", (idempotency_key,)).fetchone()
             if attempt is None: raise ValueError("publication attempt not found")
-            if not validate_attempt_transition(attempt["status"],status): raise ValueError("illegal publication attempt transition")
+            validate_attempt_completion(
+                current_status=attempt["status"], target_status=status,
+                existing_remote_id=str(attempt["remote_post_id"] or ""),
+                existing_share_link=str(attempt["share_link"] or ""),
+                remote_post_id=post_id, share_link=share_link,
+            )
             quota = self.conn.execute("SELECT reservation_id,status FROM publication_quota_reservations WHERE attempt_id=%s FOR UPDATE", (attempt["id"],)).fetchone()
             if quota is None: raise ValueError("publication attempt has no durable quota reservation")
             if not validate_quota_transition(quota["status"],status): raise ValueError("illegal quota reservation transition")
@@ -471,14 +597,18 @@ class PostgresPublicationStore:
             raise ValueError("invalid publication attempt status")
         with self.conn.transaction():
             row = self.conn.execute(
-                "SELECT status FROM publication_attempts WHERE idempotency_key=%s FOR UPDATE",
+                "SELECT status,remote_post_id,share_link FROM publication_attempts WHERE idempotency_key=%s FOR UPDATE",
                 (idempotency_key,),
             ).fetchone()
             if row is None:
                 raise ValueError("publication attempt not found")
             current = row["status"]
-            if not validate_attempt_transition(current, status):
-                raise ValueError("illegal publication attempt transition")
+            validate_attempt_completion(
+                current_status=current, target_status=status,
+                existing_remote_id=str(row["remote_post_id"] or ""),
+                existing_share_link=str(row["share_link"] or ""),
+                remote_post_id=post_id, share_link=share_link,
+            )
             self.conn.execute(
                 "UPDATE publication_attempts SET status=%s,"
                 "remote_post_id=COALESCE(%s,remote_post_id),"
@@ -542,6 +672,11 @@ class PostgresPublicationStore:
                 raise ValueError("confirmed publication requires the remote post ID")
             if existing_share_link and share_link and existing_share_link != share_link:
                 raise ValueError("supplied share link conflicts with the link already stored in ledger")
+            validate_attempt_completion(
+                current_status=prior_status, target_status=new_status,
+                existing_remote_id=existing_remote_id, existing_share_link=existing_share_link,
+                remote_post_id=remote_post_id, share_link=share_link,
+            )
             quota = self.conn.execute(
                 "SELECT reservation_id,status FROM publication_quota_reservations "
                 "WHERE attempt_id=%s FOR UPDATE",
@@ -703,10 +838,10 @@ class PostgresPublicationStore:
                 "SELECT draft_id,asset_id,content_hash,research_package_id,editorial_brief_id,approved_claim_ids_json FROM content_draft_versions WHERE draft_id=%s FOR SHARE",
                 (authorization.draft_id,),
             ).fetchone()
-            quota = self.conn.execute(
-                "SELECT symbol,day_utc,status FROM publication_quota_reservations WHERE reservation_id=%s FOR UPDATE",
-                (authorization.quota_reservation_id,),
-            ).fetchone()
+            self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("event-lifecycle:" + authorization.event_id,),
+            )
             if brief is None or brief["event_id"] != authorization.event_id or brief["research_package_id"] != authorization.research_package_id:
                 raise ValueError("publication authorization editorial/event binding is missing or mismatched")
             if draft is None or draft["asset_id"] != authorization.asset_id or draft["content_hash"] != authorization.content_hash:
@@ -717,15 +852,26 @@ class PostgresPublicationStore:
             if isinstance(stored_claims, str): stored_claims = json.loads(stored_claims)
             if tuple(sorted(stored_claims)) != tuple(sorted(authorization.approved_claim_ids)):
                 raise ValueError("publication authorization approved-claim binding is mismatched")
-            if quota is None or quota["symbol"] != authorization.symbol or quota["day_utc"] != created_at.date() or quota["status"] != "RESERVED":
-                raise ValueError("publication authorization quota reservation is missing or unavailable")
-            if authorization.event_state != "NO_EVENT":
-                event = self.conn.execute(
-                    "SELECT asset_id,state FROM layer1_event_lifecycle WHERE event_id=%s FOR SHARE",
-                    (authorization.event_id,),
-                ).fetchone()
-                if event is None or event["asset_id"] != authorization.asset_id or event["state"] != authorization.event_state or event["state"] not in {"CONFIRMED", "DEVELOPING"}:
-                    raise ValueError("publication authorization event lifecycle binding is no longer publishable")
+            event = self.conn.execute(
+                "SELECT asset_id,state FROM layer1_event_lifecycle WHERE event_id=%s FOR SHARE",
+                (authorization.event_id,),
+            ).fetchone()
+            if authorization.event_state == "NO_EVENT":
+                if event is not None:
+                    raise ValueError("publication authorization declares NO_EVENT but a lifecycle record exists")
+            elif (event is None or event["asset_id"] != authorization.asset_id
+                    or event["state"] != authorization.event_state
+                    or event["state"] not in {"CONFIRMED", "DEVELOPING"}):
+                raise ValueError("publication authorization event lifecycle binding is no longer publishable")
+            self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (validation_advisory_lock_key(authorization.content_hash, None),),
+            )
+            for image_hash in sorted(set(authorization.image_hashes)):
+                self.conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                    (validation_advisory_lock_key(authorization.content_hash, image_hash),),
+                )
             text_validation = self.conn.execute(
                 "SELECT status FROM content_draft_validation_results WHERE draft_hash=%s ORDER BY created_at DESC,validation_id DESC LIMIT 1",
                 (authorization.content_hash,),
@@ -737,6 +883,12 @@ class PostgresPublicationStore:
                 visual = self.conn.execute("SELECT status,validation_version FROM visual_validation_results WHERE draft_hash=%s AND image_hash=%s ORDER BY created_at DESC,validation_id DESC LIMIT 1", (authorization.content_hash,image_hash)).fetchone()
                 if artifact is None or visual is None or visual["status"] != "PASS" or visual["validation_version"] != "visual-quality-v2":
                     raise ValueError("publication authorization image artifact or current visual validation is missing")
+            quota = self.conn.execute(
+                "SELECT symbol,day_utc,status FROM publication_quota_reservations WHERE reservation_id=%s FOR UPDATE",
+                (authorization.quota_reservation_id,),
+            ).fetchone()
+            if quota is None or quota["symbol"] != authorization.symbol or quota["day_utc"] != created_at.date() or quota["status"] != "RESERVED":
+                raise ValueError("publication authorization quota reservation is missing or unavailable")
             existing = self.conn.execute("SELECT payload_json FROM publication_authorizations WHERE authorization_id=%s FOR UPDATE", (authorization_id,)).fetchone()
             if existing:
                 stored = existing["payload_json"] if isinstance(existing["payload_json"], dict) else json.loads(existing["payload_json"])
@@ -1300,6 +1452,77 @@ _EVENT_TRANSITIONS = {
     "STALE": {"UNDER_VERIFICATION"}, "RESOLVED": {"UNDER_VERIFICATION"},
     "DISPUTED": {"UNDER_VERIFICATION", "RESOLVED", "WITHDRAWN"}, "WITHDRAWN": set(),
 }
+MAX_EVENT_REVISION_PAYLOAD_BYTES = 256 * 1024
+MAX_EVENT_REVISION_DEPTH = 64
+MAX_EVENT_REVISION_NODES = 10_000
+MAX_EVENT_EVIDENCE_REFS = 100
+MAX_EVENT_EVIDENCE_REF_LENGTH = 2048
+
+
+def _validate_event_payload_bounds(payload: dict) -> None:
+    pending = [(payload, 0)]
+    approximate_bytes = 2
+    visited_nodes = 0
+    while pending:
+        value, depth = pending.pop()
+        visited_nodes += 1
+        if visited_nodes > MAX_EVENT_REVISION_NODES or depth > MAX_EVENT_REVISION_DEPTH:
+            raise ValueError("event revision payload exceeds structural limits")
+        if isinstance(value, dict):
+            if len(value) > MAX_EVENT_REVISION_NODES - visited_nodes:
+                raise ValueError("event revision payload exceeds structural limits")
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    raise ValueError("event revision payload object keys must be strings")
+                if len(key) > MAX_EVENT_REVISION_PAYLOAD_BYTES:
+                    raise ValueError("event revision payload exceeds the 256 KiB limit")
+                approximate_bytes += len(key.encode("utf-8")) + 4
+                if approximate_bytes > MAX_EVENT_REVISION_PAYLOAD_BYTES:
+                    raise ValueError("event revision payload exceeds the 256 KiB limit")
+                pending.append((child, depth + 1))
+        elif isinstance(value, (list, tuple)):
+            if len(value) > MAX_EVENT_REVISION_NODES - visited_nodes:
+                raise ValueError("event revision payload exceeds structural limits")
+            approximate_bytes += len(value) * 2
+            pending.extend((child, depth + 1) for child in value)
+        elif isinstance(value, str):
+            if len(value) > MAX_EVENT_REVISION_PAYLOAD_BYTES:
+                raise ValueError("event revision payload exceeds the 256 KiB limit")
+            approximate_bytes += len(value.encode("utf-8")) + 2
+        elif value is None or isinstance(value, (bool, int, float)):
+            approximate_bytes += 32
+        else:
+            raise ValueError("event revision payload contains a non-JSON value")
+        if approximate_bytes > MAX_EVENT_REVISION_PAYLOAD_BYTES:
+            raise ValueError("event revision payload exceeds the 256 KiB limit")
+
+
+def validate_event_revision_payload(payload, evidence_refs) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        raise ValueError("event revision payload must be a JSON object")
+    if not isinstance(evidence_refs, (list, tuple)) or not evidence_refs:
+        raise ValueError("event evidence references must be a non-empty list")
+    if len(evidence_refs) > MAX_EVENT_EVIDENCE_REFS:
+        raise ValueError("event evidence references contain too many entries")
+    if any(not isinstance(ref, str) or not ref.strip() for ref in evidence_refs):
+        raise ValueError("event evidence references must be non-empty strings")
+    if any(len(ref) > MAX_EVENT_EVIDENCE_REF_LENGTH for ref in evidence_refs):
+        raise ValueError("event evidence reference is too long")
+    _validate_event_payload_bounds(payload)
+    try:
+        payload_json = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        refs_json = json.dumps(
+            sorted(set(evidence_refs)), separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError("event revision payload and evidence references must be finite JSON data") from None
+    if len(payload_json.encode("utf-8")) > MAX_EVENT_REVISION_PAYLOAD_BYTES:
+        raise ValueError("event revision payload exceeds the 256 KiB limit")
+    return payload_json, refs_json
+
 
 def validate_event_lifecycle_input(
     event_id, asset_id, source_id, event_type, revision_hash,
@@ -1334,13 +1557,7 @@ def _observe_event_lifecycle(
         first_published_at, first_observed_at, last_updated_at, effective_event_at,
         state, from_state, reason_code, evidence_refs,
     )
-    if not isinstance(payload, dict):
-        raise ValueError("event revision payload must be a JSON object")
-    try:
-        payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-        refs_json = json.dumps(sorted(set(evidence_refs)), separators=(",", ":"), allow_nan=False)
-    except (TypeError, ValueError):
-        raise ValueError("event revision payload and evidence references must be finite JSON data") from None
+    payload_json, refs_json = validate_event_revision_payload(payload, evidence_refs)
     first_published, first_observed, last_updated, effective_event = timestamps
     with store.conn.transaction():
         store.conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("event-lifecycle:" + event_id,))
@@ -1451,6 +1668,10 @@ def _save_validation(store, *, draft_hash, image_hash, status, reasons, validati
     placeholders = "%s,%s,%s,%s,%s" if image_hash is None else "%s,%s,%s,%s,%s,%s"
     with store.conn.transaction():
         store.conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (validation_advisory_lock_key(draft_hash, image_hash),),
+        )
+        store.conn.execute(
             f"INSERT INTO {table} ({columns},created_at) VALUES ({placeholders},now()) ON CONFLICT (validation_id) DO NOTHING",
             values,
         )
@@ -1491,6 +1712,18 @@ def _load_latest_validation(store, *, draft_hash, image_hash):
 
 def _is_sha256(value) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def validation_advisory_lock_key(draft_hash: str, image_hash: Optional[str]) -> str:
+    if not _is_sha256(draft_hash):
+        raise ValueError("validation lock requires a lowercase draft SHA-256")
+    if image_hash is None:
+        scope = "text"
+    elif _is_sha256(image_hash):
+        scope = image_hash
+    else:
+        raise ValueError("validation lock requires a lowercase image SHA-256")
+    return "publication-validation:" + draft_hash + ":" + scope
 
 
 def validate_opportunity_decision_input(research_package_id: str, decision) -> None:

@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -23,11 +24,23 @@ class FakeResponse:
     def __exit__(self, *args):
         return False
 
-    def read(self):
-        return self.payload
+    def read(self, size=-1):
+        return self.payload if size < 0 else self.payload[:size]
 
 
 class PublisherSafetyTests(unittest.TestCase):
+    def test_binance_publish_response_reader_is_bounded(self):
+        read_sizes = []
+
+        class OversizedResponse:
+            def read(self, size=-1):
+                read_sizes.append(size)
+                return b"x" * size
+
+        with self.assertRaisesRegex(ValueError, "Binance response exceeds the 1048576-byte limit"):
+            main._read_bounded_binance_response(OversizedResponse())
+        self.assertEqual(read_sizes, [1024 * 1024 + 1])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_cwd = os.getcwd()
@@ -79,13 +92,13 @@ class PublisherSafetyTests(unittest.TestCase):
             (("event:test" if event_state != "NO_EVENT" else "no-event:" + research_id),
              "angle:test", 1, brief_id, research_id, "b" * 64, "{}", main.utc_now()),
         )
+        self.publisher.db.conn.execute("""
+            CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
+                event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT 'other'
+            )
+        """)
         if event_state != "NO_EVENT":
-            self.publisher.db.conn.execute("""
-                CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
-                    event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL,
-                    event_type TEXT NOT NULL DEFAULT 'other'
-                )
-            """)
             self.publisher.db.conn.execute(
                 "INSERT OR REPLACE INTO layer1_event_lifecycle(event_id, asset_id, state) VALUES (?, ?, ?)",
                 ("event:test", coin["asset_id"], event_state),
@@ -120,6 +133,28 @@ class PublisherSafetyTests(unittest.TestCase):
             coin, content, image_list=image_list,
             authorization=auth, image_hashes=hashes,
         )
+
+    def test_oversized_binance_response_remains_unknown_and_non_retryable(self):
+        class OversizedResponse:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self, size=-1):
+                return b"x" * size
+
+        with patch("main._open_binance_publish_no_redirect", return_value=OversizedResponse()) as opener:
+            result = self._publish({"symbol": "BND"}, "bounded response body test")
+        self.assertEqual(result.status, "PUBLICATION_UNKNOWN")
+        opener.assert_called_once()
+        row = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE coin_symbol=?", ("BND",),
+        ).fetchone()
+        self.assertEqual(row["status"], "PUBLICATION_UNKNOWN")
+        retry = self._publish({"symbol": "BND"}, "different regenerated content")
+        self.assertNotEqual(retry.status, "PUBLISHED_CONFIRMED")
+        opener.assert_called_once()
 
     def test_visual_validation_downgrade_after_authorization_blocks_before_network_post(self):
         image_hash = "c" * 64
@@ -186,13 +221,20 @@ class PublisherSafetyTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
                 self.payload = asdict(authorization)
+                self.in_submission_guard = False
 
             def begin_authorized_attempt(self, **kwargs):
                 self.calls.append(("begin", kwargs))
                 return None
 
-            def validate_authorized_attempt_before_submit(self, **kwargs):
+            @contextmanager
+            def authorized_submission_guard(self, **kwargs):
                 self.calls.append(("preflight", kwargs))
+                self.in_submission_guard = True
+                try:
+                    yield
+                finally:
+                    self.in_submission_guard = False
 
             def finish_authorized_attempt(self, key, status, **kwargs):
                 self.calls.append(("finish", key, status, kwargs))
@@ -204,7 +246,10 @@ class PublisherSafetyTests(unittest.TestCase):
             "data": {"id": "pg-remote-1", "shareLink": "https://example.invalid/pg-remote-1"},
         })
         try:
-            with patch("main._open_binance_publish_no_redirect", return_value=response) as urlopen:
+            def guarded_open(*args, **kwargs):
+                self.assertTrue(store.in_submission_guard)
+                return response
+            with patch("main._open_binance_publish_no_redirect", side_effect=guarded_open) as urlopen:
                 result = publisher.publish(
                     coin, "postgres opt-in publisher content",
                     authorization=authorization, image_hashes=hashes,
@@ -212,6 +257,7 @@ class PublisherSafetyTests(unittest.TestCase):
             self.assertEqual(result.status, "PUBLISHED_CONFIRMED")
             self.assertEqual(result.post_id, "pg-remote-1")
             self.assertEqual(urlopen.call_count, 1)
+            self.assertFalse(store.in_submission_guard)
             self.assertEqual([call[0] for call in store.calls],
                              ["begin", "preflight", "finish", "finish"])
             self.assertEqual(store.calls[-2][2], "PUBLICATION_UNKNOWN")
@@ -235,8 +281,14 @@ class PublisherSafetyTests(unittest.TestCase):
             def begin_authorized_attempt(self, **kwargs):
                 return None
 
-            def validate_authorized_attempt_before_submit(self, **kwargs):
+            @contextmanager
+            def authorized_submission_guard(self, **kwargs):
                 self.calls.append(("preflight", kwargs))
+                self.in_submission_guard = True
+                try:
+                    yield
+                finally:
+                    self.in_submission_guard = False
 
             def finish_authorized_attempt(self, key, status, **kwargs):
                 self.calls.append(("finish", key, status, kwargs))
@@ -324,9 +376,11 @@ class PublisherSafetyTests(unittest.TestCase):
                 self.calls.append(("begin", kwargs))
                 return None
 
-            def validate_authorized_attempt_before_submit(self, **kwargs):
+            @contextmanager
+            def authorized_submission_guard(self, **kwargs):
                 self.calls.append(("preflight", kwargs))
                 raise RuntimeError("DUPLICATE_LEDGER_UNAVAILABLE")
+                yield
 
             def finish_authorized_attempt(self, key, status, **kwargs):
                 self.calls.append(("finish", key, status, kwargs))
@@ -699,6 +753,12 @@ class PublisherSafetyTests(unittest.TestCase):
             ("no-event:" + research_id, "angle:test", 1, brief_id, research_id,
              "b" * 64, "{}", main.utc_now()),
         )
+        self.publisher.db.conn.execute("""
+            CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
+                event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT 'other'
+            )
+        """)
         self.publisher.db.conn.commit()
         DraftStore(self.publisher.db.conn).save_text_validation(
             draft_hash=draft_hash,

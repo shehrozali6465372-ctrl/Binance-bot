@@ -72,13 +72,13 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
             ("event:test", "angle:test", 1, brief_id, research_id,
              "b" * 64, "{}", now()),
         )
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
+                event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT 'other'
+            )
+        """)
         if args["event_state"] != "NO_EVENT":
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
-                    event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL,
-                    event_type TEXT NOT NULL DEFAULT 'other'
-                )
-            """)
             self.conn.execute(
                 "INSERT OR REPLACE INTO layer1_event_lifecycle(event_id, asset_id, state, event_type) VALUES (?, ?, ?, ?)",
                 ("event:test", args["asset_id"], args["event_state"], event_type),
@@ -110,6 +110,35 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
                 visual_validation_version="visual-quality-v1",
             )
         self.assertEqual(self.engine.quota_status(reservation), "RESERVED")
+
+    def test_no_event_snapshot_cannot_bypass_existing_withdrawn_event(self):
+        reservation = self.reserve()
+        self.conn.execute("""
+            CREATE TABLE layer1_event_lifecycle (
+                event_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, state TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT 'other'
+            )
+        """)
+        self.conn.execute(
+            "INSERT INTO layer1_event_lifecycle(event_id, asset_id, state, event_type) VALUES (?, ?, ?, ?)",
+            ("event:test", "coingecko:abc", "WITHDRAWN", "listing"),
+        )
+        self.conn.commit()
+        with self.assertRaisesRegex(ValueError, "EVENT_LIFECYCLE_STATE_MISMATCH"):
+            self.authorize(reservation, event_state="NO_EVENT")
+
+    def test_no_event_authorization_is_invalidated_if_its_event_lifecycle_appears(self):
+        reservation = self.reserve()
+        auth = self.authorize(reservation, event_state="NO_EVENT")
+        self.conn.execute(
+            "INSERT INTO layer1_event_lifecycle(event_id, asset_id, state, event_type) VALUES (?, ?, ?, ?)",
+            ("event:test", "coingecko:abc", "WITHDRAWN", "listing"),
+        )
+        self.conn.commit()
+        self.assertIn(
+            "UNEXPECTED_PERSISTED_EVENT_FOR_NO_EVENT_AUTHORIZATION",
+            self.engine.validate_persisted_event_binding(auth),
+        )
 
     def test_authorization_binds_exact_editorial_event_and_revalidates_current_lifecycle(self):
         reservation = self.reserve()
@@ -201,6 +230,8 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "EVENT_STATE_NOT_PUBLISHABLE"):
             self.authorize(reservation, event_state="STALE")
         self.engine.mark_quota_status(reservation, "RELEASED")
+        self.conn.execute("DELETE FROM layer1_event_lifecycle WHERE event_id='event:test'")
+        self.conn.commit()
 
         reservation = self.reserve()
         auth = self.authorize(reservation, ttl_seconds=1)

@@ -24,8 +24,8 @@ class FakeResponse:
         self.body = body
         self.headers = {"Content-Type": content_type, "cf-ray": "test-ray-123"}
 
-    def read(self):
-        return self.body
+    def read(self, size=-1):
+        return self.body if size < 0 else self.body[:size]
 
     def __enter__(self):
         return self
@@ -59,17 +59,129 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
 
         calls = []
         auth = Authorization()
-        url = upload_authorized_image(
-            authorization=auth, dry_run=False, image_path="/tmp/image.png",
-            api_key="test-key", symbol="ABC", asset_id="coingecko:abc",
-            content="verified content", image_hashes=["a" * 64],
-            publisher_enabled=True,
-            upload_fn=lambda path, key: calls.append((path, key)) or "https://bin.bnbstatic.com/image",
-        )
-        self.assertEqual(url, "https://bin.bnbstatic.com/image")
-        self.assertTrue(auth.checked)
-        self.assertEqual(auth.kwargs["image_hashes"], ["a" * 64])
-        self.assertEqual(calls, [("/tmp/image.png", "test-key")])
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            image_path.write_bytes(png_bytes())
+            image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+            url = upload_authorized_image(
+                authorization=auth, dry_run=False, image_path=str(image_path),
+                api_key="test-key", symbol="ABC", asset_id="coingecko:abc",
+                content="verified content", image_hashes=[image_hash],
+                publisher_enabled=True,
+                upload_fn=lambda path, key: calls.append((Path(path).read_bytes(), key))
+                or "https://bin.bnbstatic.com/image",
+            )
+            self.assertEqual(url, "https://bin.bnbstatic.com/image")
+            self.assertTrue(auth.checked)
+            self.assertEqual(auth.kwargs["image_hashes"], [image_hash])
+            self.assertEqual(calls, [(png_bytes(), "test-key")])
+
+    def test_media_upload_uses_verified_snapshot_if_source_changes_during_upload(self):
+        class Authorization:
+            def verify_integrity(self):
+                return True
+
+            def validate_for_submission(self, **kwargs):
+                return ()
+
+        approved_bytes = b"approved-image"
+        image_hash = hashlib.sha256(approved_bytes).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            image_path.write_bytes(approved_bytes)
+            uploaded_bytes = []
+
+            def upload(snapshot_path, api_key):
+                image_path.write_bytes(b"replaced-after-check")
+                uploaded_bytes.append(Path(snapshot_path).read_bytes())
+                return "https://bin.bnbstatic.com/image"
+
+            result = upload_authorized_image(
+                authorization=Authorization(), dry_run=False,
+                publisher_enabled=True, image_path=str(image_path),
+                api_key="test-key", symbol="ABC", asset_id="coingecko:abc",
+                content="verified content", image_hashes=[image_hash], upload_fn=upload,
+            )
+            self.assertEqual(result, "https://bin.bnbstatic.com/image")
+            self.assertEqual(uploaded_bytes, [approved_bytes])
+
+    def test_media_upload_rejects_oversized_replacement_before_upload(self):
+        class Authorization:
+            def verify_integrity(self):
+                return True
+
+            def validate_for_submission(self, **kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "oversized.png"
+            with image_path.open("wb") as handle:
+                handle.truncate(10 * 1024 * 1024 + 1)
+            upload_calls = []
+            with self.assertRaisesRegex(ValueError, "authorized image file exceeds the 10 MiB limit"):
+                upload_authorized_image(
+                    authorization=Authorization(), dry_run=False,
+                    publisher_enabled=True, image_path=str(image_path),
+                    api_key="test-key", symbol="ABC", asset_id="coingecko:abc",
+                    content="verified content", image_hashes=["a" * 64],
+                    upload_fn=lambda path, key: upload_calls.append(path)
+                    or "https://bin.bnbstatic.com/image",
+                )
+            self.assertEqual(upload_calls, [])
+
+    def test_media_upload_rejects_file_replaced_after_authorization_hashing(self):
+        class Authorization:
+            image_hashes = (hashlib.sha256(b"approved-image").hexdigest(),)
+
+            def verify_integrity(self):
+                return True
+
+            def validate_for_submission(self, **kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            image_path.write_bytes(b"tampered-image")
+            upload_calls = []
+            with self.assertRaisesRegex(ValueError, "image file bytes do not match the authorized image hash"):
+                upload_authorized_image(
+                    authorization=Authorization(), dry_run=False,
+                    publisher_enabled=True, image_path=str(image_path),
+                    api_key="test-key", symbol="ABC", asset_id="coingecko:abc",
+                    content="verified content",
+                    image_hashes=[hashlib.sha256(b"approved-image").hexdigest()],
+                    upload_fn=lambda path, key: upload_calls.append(Path(path).read_bytes())
+                    or "https://bin.bnbstatic.com/image",
+                )
+            self.assertEqual(upload_calls, [])
+
+    def test_legacy_github_image_upload_uses_no_redirect_transport_for_bearer_token(self):
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as directory:
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(directory)
+                image_path = Path(directory) / "image.png"
+                image_path.write_bytes(png_bytes())
+                responses = [
+                    FakeResponse(b'{"sha":"existing-sha"}'),
+                    FakeResponse(b'{"content":{"path":"images/image.png"}}'),
+                ]
+                with patch.dict(os.environ, {
+                    "GH_TOKEN": "test-github-token",
+                    "GITHUB_REPOSITORY": "owner/repo",
+                }), patch("subprocess.run", return_value=SimpleNamespace(stdout="feature/test\n")), patch(
+                    "image_engine._open_without_redirect", side_effect=responses,
+                ) as safe_open, patch(
+                    "image_engine.urllib.request.urlopen",
+                    side_effect=AssertionError("redirect-following transport used for GitHub bearer token"),
+                ), patch.object(ImageUploader, "_verify_url", return_value=False):
+                    result = ImageUploader()._github_api_upload(image_path)
+                self.assertEqual(result, "https://raw.githubusercontent.com/owner/repo/feature/test/images/image.png")
+                self.assertEqual(safe_open.call_count, 2)
+            finally:
+                os.chdir(previous_cwd)
 
     def test_binance_media_transport_refuses_http_redirects(self):
         from urllib.request import Request
@@ -83,10 +195,12 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
     def test_binance_presigned_storage_url_allowlist_rejects_ssrf_targets(self):
         valid = (
             "https://bucket.s3.amazonaws.com/object.png?X-Amz-Signature=opaque",
+            "https://bucket.s3.ap-southeast-1.amazonaws.com/object.png?X-Amz-Signature=opaque",
             "https://storage.binance.com/object.png?signature=opaque",
         )
         invalid = (
             "http://bucket.s3.amazonaws.com/object.png?sig=x",
+            "https://attacker.amazonaws.com/object.png?sig=x",
             "https://evil.example/object.png?sig=x",
             "https://127.0.0.1/object.png?sig=x",
             "https://user:pass@bucket.s3.amazonaws.com/object.png?sig=x",
@@ -99,6 +213,18 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
         for value in invalid:
             with self.subTest(value=value):
                 self.assertFalse(ImageUploader._is_allowed_presigned_upload_url(value))
+
+    def test_presigned_binary_upload_rejects_oversized_file_before_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "oversized.png"
+            with image_path.open("wb") as handle:
+                handle.truncate(10 * 1024 * 1024 + 1)
+            uploader = ImageUploader()
+            with patch("image_engine._open_without_redirect") as opener:
+                self.assertFalse(uploader._upload_to_presigned_url(
+                    image_path, "https://bucket.s3.amazonaws.com/object.png?sig=opaque",
+                ))
+            opener.assert_not_called()
 
     def test_presigned_binary_upload_accepts_only_http_200_or_201(self):
         class UploadResponse:
@@ -163,15 +289,19 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
                 return True
             def validate_for_submission(self, **kwargs):
                 return ()
-        with self.assertRaisesRegex(ValueError, "allowlisted Binance CDN"):
-            upload_authorized_image(
-            publisher_enabled=True,
-                authorization=Authorization(), dry_run=False,
-                image_path="/tmp/image.png", api_key="test-key",
-                symbol="ABC", asset_id="coingecko:abc", content="verified",
-                image_hashes=["a" * 64],
-                upload_fn=lambda path, key: "https://evil.example/image.png",
-            )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            image_path.write_bytes(png_bytes())
+            image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(ValueError, "allowlisted Binance CDN"):
+                upload_authorized_image(
+                    publisher_enabled=True,
+                    authorization=Authorization(), dry_run=False,
+                    image_path=str(image_path), api_key="test-key",
+                    symbol="ABC", asset_id="coingecko:abc", content="verified",
+                    image_hashes=[image_hash],
+                    upload_fn=lambda path, key: "https://evil.example/image.png",
+                )
 
     def test_media_upload_fails_closed_without_authorization_or_on_hash_mismatch(self):
         calls = []
@@ -218,6 +348,16 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
             opener=opener,
         )
 
+    def test_default_workers_ai_transport_rejects_redirects(self):
+        with patch("image_engine._open_without_redirect", return_value=FakeResponse(self.image_bytes, "image/png")) as safe_open, patch(
+            "image_engine.urllib.request.urlopen", side_effect=AssertionError("redirect-following transport used"),
+        ):
+            generator = CloudflareWorkersAIImageGenerator(
+                api_token="test-token", account_id="81d020cda41d9d2ac3b1af88fbe286f4",
+            )
+            generator.generate("bounded test prompt", self.output)
+        safe_open.assert_called_once()
+
     def test_multipart_direct_workers_ai_request_and_decodable_image(self):
         captured = {}
 
@@ -247,6 +387,36 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
         self.assertIn(b'name="prompt"', captured["body"])
         self.assertIn(b'name="width"', captured["body"])
         self.assertIn(b'name="height"', captured["body"])
+
+    def test_limited_response_reader_enforces_size_before_returning_body(self):
+        from image_engine import _read_limited_response
+        read_sizes = []
+
+        class Response:
+            def read(self, size=-1):
+                read_sizes.append(size)
+                return b"x" * size
+
+        with self.assertRaisesRegex(ValueError, "response body exceeds the 16-byte limit"):
+            _read_limited_response(Response(), max_bytes=16)
+        self.assertEqual(read_sizes, [17])
+
+    def test_workers_ai_response_body_is_read_with_a_hard_size_limit(self):
+        read_sizes = []
+
+        class OversizedResponse(FakeResponse):
+            def read(self, size=-1):
+                read_sizes.append(size)
+                if size < 0:
+                    return b"x" * (20 * 1024 * 1024 + 1)
+                return b"x" * min(size, 20 * 1024 * 1024 + 1)
+
+        with self.assertRaisesRegex(ValueError, "oversized image data"):
+            self.generator(lambda request, timeout: OversizedResponse(b"unused", "image/png")).generate(
+                "prompt", self.output, width=512, height=512,
+            )
+        self.assertEqual(read_sizes, [20 * 1024 * 1024 + 1])
+        self.assertFalse(self.output.exists())
 
     def test_missing_credentials_fail_before_network(self):
         generator = CloudflareWorkersAIImageGenerator(api_token="", account_id="")

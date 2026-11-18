@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -16,6 +17,13 @@ EVENT_STATES = {
     "DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED", "DEVELOPING",
     "RESOLVED", "STALE", "WITHDRAWN", "DISPUTED", "NO_EVENT",
 }
+
+
+def _render_untrusted_field(value: Any) -> str:
+    """Keep source/config text on one line and neutralize package delimiters."""
+    text = str(value)
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    return text.replace("<<<", "‹‹‹").replace(">>>", "›››").strip()
 
 
 def _parse_time(value: str) -> datetime:
@@ -58,7 +66,7 @@ class ResearchPackage:
             "RESEARCH PACKAGE VERSION: " + str(self.version),
             "RESEARCH PACKAGE ID: " + self.package_id,
             "ASSET: $" + self.symbol + " (" + self.asset_id + ")",
-            "RESEARCH QUESTION: " + self.research_question,
+            "RESEARCH QUESTION: " + _render_untrusted_field(self.research_question),
             "DATA CUTOFF: " + self.cutoff_at,
             "COMPLETENESS: " + self.completeness,
             "EVENT STATES: " + (", ".join(self.event_states) or "NO_EVENT"),
@@ -80,12 +88,12 @@ class ResearchPackage:
                 lines.append("- None recorded.")
             for item in items:
                 lines.append(
-                    "- " + str(item["text"]) +
+                    "- " + _render_untrusted_field(item["text"]) +
                     " (claim_id=" + str(item["claim_id"]) +
                     "; evidence_ids=" + ",".join(item["evidence_ids"]) + ")"
                 )
         lines.append("RESEARCH GAPS:")
-        lines.extend("- " + gap for gap in self.gaps) if self.gaps else lines.append("- None.")
+        lines.extend("- " + _render_untrusted_field(gap) for gap in self.gaps) if self.gaps else lines.append("- None.")
         lines.append("PACKAGE HASH: " + self.package_hash)
         return "\n".join(lines)
 

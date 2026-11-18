@@ -43,6 +43,26 @@ class FakeConnection:
         return Cursor()
 
 
+class EventBindingConnection:
+    def execute(self, query, params):
+        class Cursor:
+            def fetchone(self):
+                return {"event_id": "event-1", "research_package_id": "research-1"}
+        return Cursor()
+
+
+class EventBindingStore:
+    def __init__(self, event):
+        self.conn = EventBindingConnection()
+        self.event = event
+
+    def save_publication_authorization(self, authorization):
+        return authorization.authorization_id
+
+    def load_event_lifecycle(self, event_id):
+        return self.event if event_id == "event-1" else None
+
+
 class FakeStore:
     def __init__(self):
         self.conn = FakeConnection()
@@ -126,6 +146,20 @@ class PostgresRuntimeAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.latest_text_validation("a"), "PASS")
         self.assertEqual(adapter.visual_validation("a", "b"), "PASS")
         self.assertEqual(adapter.load_latest("draft-key")["draft_id"], "draft")
+
+    def test_no_event_authorization_is_rejected_when_postgres_lifecycle_record_exists(self):
+        authorization = type("Authorization", (), {
+            "editorial_brief_id": "brief-1", "event_id": "event-1",
+            "research_package_id": "research-1", "event_state": "NO_EVENT",
+            "asset_id": "coingecko:abc",
+        })()
+        engine = PostgresPublicationAuthorizationEngine(EventBindingStore({
+            "asset_id": "coingecko:abc", "state": "WITHDRAWN",
+        }))
+        self.assertIn(
+            "UNEXPECTED_PERSISTED_EVENT_FOR_NO_EVENT_AUTHORIZATION",
+            engine.validate_persisted_event_binding(authorization),
+        )
 
     def test_authorization_adapter_delegates_quota_and_requires_postgres_store(self):
         adapter = PostgresPublicationAuthorizationEngine(self.store)

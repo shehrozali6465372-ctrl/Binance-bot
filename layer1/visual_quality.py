@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
+
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_METADATA_BYTES = 1024 * 1024
 
 
 def _valid_int_vector(value: Any, length: int, low: int = 0, high: int = 255) -> bool:
@@ -154,29 +159,38 @@ class VisualQualityEngine:
         width = height = byte_length = 0
         metadata: dict[str, Any] = {}
         try:
-            image_bytes = path.read_bytes()
+            # Read at most the configured limit plus one byte. Decode and hash
+            # this same snapshot so a replaced path cannot change the validated
+            # bytes between hashing and image inspection.
+            with path.open("rb") as image_file:
+                image_bytes = image_file.read(MAX_IMAGE_BYTES + 1)
             byte_length = len(image_bytes)
-            image_hash = hashlib.sha256(image_bytes).hexdigest()
-            with Image.open(path) as check:
-                check.verify()
-            with Image.open(path) as image:
-                image.load()
-                width, height = image.size
-                if image.format != "PNG":
-                    reasons.append("FINAL_IMAGE_MUST_BE_PNG")
-                if path.suffix.lower() != ".png":
-                    reasons.append("FINAL_IMAGE_EXTENSION_MISMATCH")
-                if (width, height) != self.REQUIRED_DIMENSIONS:
-                    reasons.append("IMAGE_DIMENSIONS_MISMATCH")
-            if not 0 < byte_length <= 10 * 1024 * 1024:
+            if not 0 < byte_length <= MAX_IMAGE_BYTES:
                 reasons.append("IMAGE_SIZE_OUT_OF_SAFE_BOUNDS")
-        except (OSError, ValueError):
+            else:
+                image_hash = hashlib.sha256(image_bytes).hexdigest()
+                with Image.open(BytesIO(image_bytes)) as check:
+                    check.verify()
+                with Image.open(BytesIO(image_bytes)) as image:
+                    image.load()
+                    width, height = image.size
+                    if image.format != "PNG":
+                        reasons.append("FINAL_IMAGE_MUST_BE_PNG")
+                    if path.suffix.lower() != ".png":
+                        reasons.append("FINAL_IMAGE_EXTENSION_MISMATCH")
+                    if (width, height) != self.REQUIRED_DIMENSIONS:
+                        reasons.append("IMAGE_DIMENSIONS_MISMATCH")
+        except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
             reasons.append("IMAGE_MISSING_OR_UNDECODABLE")
         try:
-            metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+            with sidecar.open("rb") as metadata_file:
+                metadata_bytes = metadata_file.read(MAX_METADATA_BYTES + 1)
+            if not 0 < len(metadata_bytes) <= MAX_METADATA_BYTES:
+                raise ValueError("sidecar exceeds the metadata size limit")
+            metadata = json.loads(metadata_bytes.decode("utf-8"))
             if not isinstance(metadata, dict):
                 raise ValueError("sidecar must be an object")
-        except (OSError, ValueError, json.JSONDecodeError):
+        except (OSError, ValueError, json.JSONDecodeError, RecursionError):
             reasons.append("IMAGE_PROVENANCE_SIDECAR_MISSING_OR_INVALID")
         if metadata:
             if metadata.get("final_image_hash") != image_hash:

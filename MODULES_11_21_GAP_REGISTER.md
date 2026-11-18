@@ -1550,3 +1550,222 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Added a constrained lowercase possessive subject alternative only when followed by explicit market descriptors (`price`, `volume`, `market cap`). Added coverage for two distinct lowercase asset subjects and a lowercase shared-subject continuation.
 - Focused Module 11 evidence-verification suite: **68 tests, 0 failures**. Full repository suite: **705 tests, 0 failures, 41 skipped**; `compileall` and `git diff --check` passed. The 41 PostgreSQL integration skips remain unexecuted without `TEST_POSTGRES_DSN`.
 - Code commit `08ecde578f58abcabdaae676838410e5d46ce4ad` was pushed to the existing PR #14 branch and the exact remote SHA was verified. Module 11 remains PARTIAL; no semantic-entailment claim is made.
+
+
+## 2026-11-18 — Module 15 invalid DeepSeek candidate selection correction
+
+- Code audit found the review path silently selected `research_packages[0]` when DeepSeek's top-ranked symbol did not match any supplied candidate. This could publish a different asset than the model selected.
+- Added exact candidate-set resolution. Unknown/malformed top-ranked symbols and duplicate/ambiguous candidate symbols now fail closed; the runtime stops the cycle instead of substituting the first package. Case-insensitive exact symbol matching is retained.
+- TDD focused suite: initial run failed because the resolver was absent; after implementation `tests.test_deepseek_generator` passed **20/20**. Full repository suite: **708 tests, 0 failures, 41 skipped**. PostgreSQL integration tests remain skipped without `TEST_POSTGRES_DSN`.
+- Module 15 remains PARTIAL: structured ranking completeness/uniqueness/candidate membership validation beyond the selected top symbol, live current-head DeepSeek acceptance, and durable model request/usage/latency audit are still not fully accepted. No live provider request or publisher action occurred.
+
+
+## 2026-11-18 — Module 15 strict Phase 1 ranking parser
+
+- Replaced permissive parsing with a bounded fail-closed contract: 1–3 records; contiguous ranks starting at 1; unique alphanumeric tickers; required non-empty reasons; no extra prose or malformed fields. Duplicate ranks/symbols, rank gaps/zero, malformed tickers and empty reasons now reject the entire model response.
+- The separate runtime candidate resolver also rejects unknown and ambiguous top-ranked symbols rather than substituting the first research package.
+- TDD: 7 malformed-response subcases failed against the old parser. Focused Module 15 suite after fixes: **24 passed**. Full suite: **712 tests, 0 failures, 41 skipped**. PostgreSQL integration tests remain unexecuted without `TEST_POSTGRES_DSN`.
+- Module 15 remains PARTIAL pending candidate-set validation for every returned rank, current-head live DeepSeek acceptance, and complete durable provider request/usage/latency audit.
+
+
+## 2026-11-18 — Module 15 all-ranked-candidate membership check
+
+- Candidate resolution now validates every rank against the supplied research packages, not only the top rank. Each symbol must resolve exactly once; duplicate/ambiguous candidate symbols, unknown secondary ranks, malformed ranking fields, and invalid rank sequences fail closed.
+- TDD regression: valid top-ranked symbol plus unknown secondary symbol failed before the fix and passes after. Focused Module 15 suite: **25 passed**. Full repository suite: **713 tests, 0 failures, 41 skipped**. `compileall` and `git diff --check` passed.
+- Module 15 remains PARTIAL pending live DeepSeek acceptance and durable provider audit; no inference request was made.
+
+
+## 2026-11-18 — Module 16 editorial brief delimiter-injection defect
+
+- TDD reproduced a control-record injection in `EditorialBrief.render()`: untrusted prohibited-claim text could inject nested editorial delimiters and forged `READY`/brief-ID/claim-ID fields. The actual brief was `REJECT`, but `DeepSeekGenerator._editorial_brief_allows()` selected the forged nested block and returned true.
+- Renderer now sanitizes every free-text brief field to one line and neutralizes `<<<` / `>>>` structural markers. The regression proves the same rejected brief no longer passes the gate.
+- RED observed before fix; focused Editorial Strategy + DeepSeek tests **44/44 passed** after fix; full suite **714 passed, 0 failed, 41 skipped**. PostgreSQL integration remains unexecuted without `TEST_POSTGRES_DSN`.
+- Module 16 remains PARTIAL: this closes one serialization/gate-injection defect, not general LLM prompt-injection risk or live DeepSeek acceptance.
+
+
+## 2026-11-18 — Module 13 research package delimiter-injection defect
+
+- TDD reproduced a fail-open research gate: an unresolved claim containing newlines, nested research-package delimiters and forged `READY`/package-ID fields caused `_research_package_allows()` to accept a real `RESEARCH_MORE` package because the parser selected the last matching block.
+- `ResearchPackage.render()` now sanitizes free-text research question, claim text and gap fields to one line and neutralizes structural `<<<` / `>>>` delimiters. The same incomplete package is now rejected by the gate.
+- RED reproduced before fix. Focused Module 13 + 16 + DeepSeek tests: **60 passed**. Full suite: **716 passed, 0 failed, 41 skipped**. PostgreSQL integration remains unexecuted without `TEST_POSTGRES_DSN`.
+- Module 13 and 16 remain PARTIAL. These fixes close two deterministic delimiter-injection paths only; general prompt-injection resistance and live provider acceptance remain unverified.
+
+## 2026-11-18 — Module 20 visual validator decompression-bomb handling
+- **Finding:** `VisualQualityEngine.validate()` caught only `OSError` and `ValueError` around Pillow decoding. Pillow's `Image.DecompressionBombError` and `Image.DecompressionBombWarning` (when warnings are configured as errors) escaped and could crash the validation path rather than fail closed.
+- **Evidence:** Added two TDD regressions. Both reproduced RED before implementation: one forced `DecompressionBombError` with a tiny image and low `Image.MAX_IMAGE_PIXELS`; the other promoted `DecompressionBombWarning` to an exception and reproduced an uncaught exception.
+- **Fix:** Catch the two explicit Pillow decompression-bomb classes and return the existing `IMAGE_MISSING_OR_UNDECODABLE` rejection reason. No broad exception suppression.
+- **Verification:** `tests.test_visual_quality` — 13 passed, 0 failed. Full repository `unittest discover -s tests -v` exited 0; aggregate count not recorded from the truncated tool output. PostgreSQL integration tests remain skipped without `TEST_POSTGRES_DSN`.
+- **Status:** Defect fixed locally; not committed or pushed. Module 20 remains PARTIAL for independent semantic/OCR verification of generated image backgrounds.
+
+## 2026-11-18 — Publication authorization NO_EVENT downgrade bypass
+- **Finding:** SQLite and PostgreSQL authorization paths skipped lifecycle lookup whenever the caller supplied `event_state="NO_EVENT"`, even though the immutable editorial brief still referenced a concrete `event_id`. A caller could downgrade an existing WITHDRAWN/STALE event to NO_EVENT and bypass event-state gating.
+- **RED evidence:** Added a regression that seeded a WITHDRAWN lifecycle record and requested authorization with NO_EVENT. Before the fix, authorization succeeded.
+- **Fix:** SQLite duplicate-policy and persisted-event revalidation now always query the exact event ID; NO_EVENT is valid only when that event has no lifecycle row. Applied the same invariant to PostgreSQL duplicate-policy checks, authorization persistence, immediate pre-submit revalidation, and the PostgreSQL runtime adapter. Missing lifecycle schema remains fail-closed.
+- **Verification:** `tests.test_publication_authorization`, `tests.test_publication_runtime`, and `tests.test_publication_postgres`: 69 tests, 0 failures, 20 skipped. PostgreSQL integration skips remain unverified without the approved disposable DSN.
+- **Status:** Local fix and unit/contract coverage complete; not committed or pushed. Module 21 remains PARTIAL pending approved live PostgreSQL integration and crash/restart/reconciliation acceptance.
+
+## 2026-11-18 — Final regression verification checkpoint
+- The test fixtures in `tests/test_publisher_safety.py` were updated to model the existing `layer1_event_lifecycle` table even for the NO_EVENT case. This preserves the runtime fail-closed contract while representing an empty lifecycle ledger accurately.
+- Focused publisher-safety suite: 35 passed, 0 failed. Focused publication authorization/runtime/PostgreSQL contract suite: 69 run, 0 failed, 20 skipped. Visual-quality suite: 13 passed, 0 failed.
+- Full repository suite: **721 run, 0 failed, 41 skipped**. All 41 skips are PostgreSQL integration tests requiring the absent `TEST_POSTGRES_DSN`.
+
+
+## 2026-11-18 — Module 19/21 authorized media byte-identity TOCTOU fix (local, uncommitted)
+
+- Audit finding: `upload_authorized_image()` validated the immutable authorization against the caller-provided image hash list, but did not hash the actual bytes at `image_path`. A replaced image file could be uploaded under authorization for a different image.
+- TDD RED reproduced the bypass: `test_media_upload_rejects_file_replaced_after_authorization_hashing` failed because the old implementation called the uploader without reading or hashing the file.
+- Fix: the upload boundary now requires exactly one digest for its single-image operation, hashes the file bytes and rejects missing/mismatched files before any upload callback. It writes the verified bytes to a private temporary snapshot and uploads that snapshot, closing the path-replacement race between verification and the uploader's file read.
+- Regression coverage proves pre-upload mismatch rejection, snapshot byte stability if the original source path changes during upload, and continued Binance CDN URL allowlisting.
+- Focused result: `tests.test_cloudflare_image_generation` — 22 passed, 0 failed. `git diff --check` passed.
+- Local-only and uncommitted. No provider call or media upload occurred. Module 19/20/21 remain PARTIAL; live media acceptance, PostgreSQL integration, crash/restart, quota recovery and unknown-publication reconciliation remain outstanding.
+
+
+## 2026-11-18 — Module 20 bounded image read and validation snapshot (local, uncommitted)
+
+- Audit finding: `VisualQualityEngine.validate()` read the entire image into memory before checking the 10 MiB limit.
+- TDD RED reproduced the unbounded read on a sparse file larger than 10 MiB.
+- Fix: bounded read of at most 10 MiB + 1 byte; reject out-of-bounds input before decoding; hash and decode the same in-memory snapshot to avoid path replacement between digest and image inspection.
+- Focused result: `tests.test_visual_quality` — 14 passed, 0 failed. Media-upload snapshot regression suite: 22 passed, 0 failed.
+- Local-only/uncommitted. No provider call or upload. Module 20 remains PARTIAL pending independent semantic/OCR verification and broader generated-media acceptance.
+
+
+## 2026-11-18 — Module 21 PostgreSQL daily-quota union accounting (local, uncommitted)
+
+- Defect: `max(reservation_count, analytics_count)` could undercount disjoint legacy analytics and active reservations, allowing the daily limit to be exceeded.
+- Fix: count active durable reservations plus analytics rows that are not linked by `remote_post_id` to a durable publication attempt. Added strict non-negative integer count validation.
+- TDD unit contract passes. Added a PostgreSQL integration regression for 7 legacy analytics + 1 active reservation against a limit of 8; it is skipped without the approved `TEST_POSTGRES_DSN` and remains unverified against a real database.
+- No production database access. Module 21 remains PARTIAL pending live disposable-PostgreSQL acceptance, transaction/concurrency testing and crash/restart recovery.
+
+
+## 2026-11-18 — Module 19 upload-boundary bounded read (local, uncommitted)
+
+- Follow-up audit bounded the media upload digest read to 10 MiB + 1 byte. Oversized replacement files are rejected before hashing or upload, preventing an unbounded allocation at the second (upload) boundary.
+- TDD RED reproduced the old behavior; focused image + visual suites: 37 passed, 0 failed. Local-only; no upload occurred.
+
+
+## 2026-11-18 — Combined regression checkpoint after Modules 19–21 audit fixes
+
+- Full suite: **727 passed, 0 failed, 42 skipped**. The new PostgreSQL quota integration regression is skipped without `TEST_POSTGRES_DSN`; live DB behavior remains unverified.
+- `compileall` and `git diff --check`: PASS.
+- Branch/HEAD/remote SHA unchanged: `work/module9-continuation-local` / `78631ecc72470d445507b4110891aa8110738256`; PR #14 head ref still matches.
+- 19 modified tracked files, 869 insertions / 152 deletions. No commit or push. Continue remaining audit; do not mark Modules 17–21 or project complete.
+
+
+## 2026-11-18 — Module 21 publication identity finalization hardening (local, uncommitted)
+
+- PostgreSQL finalization previously permitted `PUBLISHED_CONFIRMED` without a remote ID and same-state updates could replace a recorded remote ID/share link. `PUBLICATION_UNKNOWN` identity was also mutable. Operator reconciliation store calls lacked the CLI's URL/ID format validation.
+- Added shared `validate_attempt_completion()` and applied it to both finalization methods and reconciliation. Published requires a valid ID; failed cannot carry an ID/link; unknown can carry a validated ID and matching Binance Square link; IDs/links are immutable once recorded.
+- TDD unit contract: 2 passed. PostgreSQL integration regression added but skipped without approved `TEST_POSTGRES_DSN`.
+
+## 2026-11-18 — Module 19 Cloudflare response bounded read (local, uncommitted)
+
+- Provider inference response was read without a size bound before its 20 MiB validation. TDD regression observed unbounded `read(-1)`.
+- Changed to read at most 20 MiB + 1 byte and reject oversized response before decoding/writing.
+- Focused Cloudflare + publication identity tests: 26 passed, 0 failed. No live provider call. Module 19 remains PARTIAL.
+
+
+## 2026-11-18 — Module 19/21 transport response and upload bounds (local, uncommitted)
+
+- Bounded Cloudflare inference response reads to 20 MiB + 1 byte; Binance media presigned/status JSON responses to 1 MiB + 1 byte; presigned image file reads to 10 MiB + 1 byte. Oversize is rejected before decode/upload.
+- Bounded Binance publication API response reads to 1 MiB + 1 byte. Overflow after submission is classified `PUBLICATION_UNKNOWN` and remains non-retryable.
+- Regression coverage includes oversize provider response read size, oversize presigned upload rejected before network, and oversized publication response leaving a durable unresolved attempt without a second POST.
+- Full suite: **734 passed, 0 failed, 43 skipped**. Compileall and diff check passed. PostgreSQL integration remains skipped without approved disposable DSN.
+
+
+## 2026-11-18 — Module 21 authorization-to-submit TOCTOU fence (local, uncommitted)
+
+- Fixed the gap where pre-submit authorization locks were released before the HTTP POST. `authorized_submission_guard()` now retains the outer transaction, symbol + event advisory locks, provenance row locks, validation advisory locks, attempt and quota locks through the bounded request. This also prevents a `NO_EVENT` lifecycle row from being inserted between validation and submission.
+- Added shared per-draft text and per-draft/image validation advisory locks. Validation writers acquire them before appending; authorization and pre-submit readers acquire them before reading latest validation rows, preventing a new REJECT/NEEDS_REVISION record racing past authorization.
+- PostgreSQL publisher now sends the request only inside the guard. Preflight failure is known not-submitted; errors after request start remain UNKNOWN and fenced.
+- Lock order is consistent: symbol -> event -> sorted validation scopes -> dependent row/quota locks.
+- Focused guard/publisher/identity tests: 7 passed. Live PostgreSQL concurrency acceptance remains unverified without the approved disposable test DSN. Module 21 remains PARTIAL.
+
+
+## 2026-11-18 — Latest continuation verification checkpoint
+
+- Full local suite: **736 passed, 0 failed, 43 skipped**. PostgreSQL integration skips remain unverified due missing approved `TEST_POSTGRES_DSN`.
+- `compileall` and `git diff --check`: PASS.
+- 19 modified tracked files; diff **+1,390 / -191**. No commit/push. Local branch/HEAD and PR #14 remote head remain aligned at `78631ecc72470d445507b4110891aa8110738256`.
+- PR #14 still OPEN / DRAFT / UNMERGED. No hosted workflow runs or combined statuses found; hosted CI not verified.
+- Modules 17–21 and overall project remain PARTIAL. No production action performed.
+
+
+## 2026-11-18 — Module 20 visual provenance sidecar size bound (local, uncommitted)
+
+- Gap found: visual QA parsed provenance JSON via an unbounded `read_text()` call. A malformed or tampered sidecar could consume unbounded memory before its content was checked.
+- RED test proved the issue: a valid sidecar carrying a metadata field larger than 1 MiB was accepted as PASS.
+- Fix: cap sidecar read to 1 MiB + 1 byte; reject empty/oversized content before decode/parse; fail closed for invalid UTF-8/JSON and excessive JSON nesting.
+- Focused regression set: 3 passed. Latest full suite: **737 passed, 0 failed, 43 skipped**. Compileall and diff check passed.
+- PostgreSQL integration tests remain unverified (no `TEST_POSTGRES_DSN`). Module 20 and overall project remain PARTIAL; no production actions or Git push/commit.
+
+
+## 2026-11-18 — Module 21 event revision payload resource bounds (local, uncommitted)
+
+- Gap: event revision JSON and evidence-reference arrays had no explicit resource bounds before PostgreSQL persistence.
+- Added fail-closed limits: 256 KiB estimated JSON payload, nesting depth 64, 10,000 nodes, JSON-compatible values/string keys, 100 evidence refs maximum, 2,048 characters per ref. Structural checks run before JSON serialization and before acquiring lifecycle DB locks; JSON serialization disallows NaN/Infinity.
+- Event lifecycle writer now routes through this shared validator. Added regression cases for oversized payloads, excessive evidence references, oversized individual references and deeply nested JSON.
+- Focused state-machine suite: 6 passed. Full suite checkpoint: 738 passed, 0 failed, 43 skipped; rerun after final defensive refinements remains pending. PostgreSQL integration remains unverified without approved test DSN. Module 21 remains PARTIAL.
+
+
+## 2026-11-18 — Final verification after Module 21 event-payload hardening
+
+- Full local suite: **738 passed, 0 failed, 43 skipped**. PostgreSQL integration tests remain skipped because `TEST_POSTGRES_DSN` is absent; no live database acceptance is claimed.
+- `compileall` and `git diff --check`: PASS.
+- 19 modified tracked files; final code/doc diff at checkpoint **+1,554 / -200**. Branch `work/module9-continuation-local`; local HEAD and remote continuation branch SHA both `78631ecc72470d445507b4110891aa8110738256`.
+- No commit/push/merge/deployment or production actions. Modules 17–21 and overall project remain PARTIAL / NOT PRODUCTION READY.
+
+
+## 2026-11-18 — Module 19 Cloudflare bearer-token redirect hardening (local, uncommitted)
+
+- Gap: Workers AI requests carried a Cloudflare bearer `Authorization` header through the default `urllib.request.urlopen` transport, which follows redirects. A 3xx response could redirect the credential-bearing request to a different origin.
+- Fix: the generator's production default now uses `_open_without_redirect`; injected openers remain supported for tests. A redirect is rejected instead of followed.
+- TDD regression: default transport test added first; focused Cloudflare suite **27 passed, 0 failed**. Full suite **739 passed, 0 failed, 43 skipped**. PostgreSQL integration tests remain skipped because no approved `TEST_POSTGRES_DSN` is configured.
+- `compileall` and `git diff --check`: PASS. No live provider call or other external side effect. Module 19 remains PARTIAL pending provider acceptance and broader integration checks.
+
+
+## 2026-11-18 — Secret-bearing provider transport redirect hardening (local, uncommitted)
+
+- DeepSeek client finding: default `urlopen` followed redirects for a request carrying a bearer API key. Replaced the default with a no-redirect transport; custom injected openers remain supported.
+- Module 9 on-chain finding: Alchemy/provider credentials can be embedded in endpoint paths; default `urlopen` followed redirects. `ReadOnlyJsonRpcTransport` now rejects redirects by default.
+- TDD RED regressions confirmed both clients previously selected redirect-following transports. Focused results: DeepSeek **12 passed**; on-chain provider **44 passed**. Full suite **741 passed, 0 failed, 43 skipped**. `compileall` and `git diff --check` passed.
+- No live provider calls. PostgreSQL integration remains unverified without an approved disposable `TEST_POSTGRES_DSN`. Modules 9/19 remain PARTIAL.
+
+
+## 2026-11-18 — Legacy GitHub image-upload credential redirect gap
+
+- Audit found legacy `ImageUploader._github_api_upload()` GET/PUT requests carrying GitHub bearer credentials while using redirect-following `urlopen`.
+- Added RED regression first; it failed against the previous transport. Both requests now use `_open_without_redirect`.
+- The active orchestrator uses the Binance presigned-media method; the GitHub REST path has no production call-site in the repository search, but remains a callable legacy method and is now hardened.
+- Focused media/image suite: **28 passed, 0 failed**. Full suite and static checks pending.
+- Other remaining `urlopen` calls in current call paths are public unauthenticated market/trending/Skills Hub requests or public image HEAD checks. No credentials were found attached to those call sites.
+- No live requests, production side effects, commit, push, merge or deployment. PostgreSQL integration remains skipped pending an approved disposable DSN. Overall status remains PARTIAL / NOT PRODUCTION READY.
+
+
+## 2026-11-18 — Full-suite verification after legacy GitHub transport fix
+
+- Full suite: **742 passed, 0 failed, 43 skipped**. PostgreSQL integration tests remain skipped because `TEST_POSTGRES_DSN` is absent.
+- `compileall -q .` and `git diff --check`: PASS.
+- Working tree: 23 modified tracked files, no untracked files; diff **+1,716 / -208**. No commit or push. All live provider and production side effects remain unperformed.
+
+
+## 2026-11-18 — Narrow AWS presigned upload allowlist to S3 service endpoints
+
+- RED regression demonstrated that `attacker.amazonaws.com` passed the previous broad `*.amazonaws.com` suffix check.
+- Updated the allowlist to require an explicit `s3` or `s3-*` hostname service label under `amazonaws.com`, while retaining existing HTTPS/port/userinfo/fragment/query checks and Binance domains.
+- Focused image/media suite: **29 passed, 0 failed**.
+- Cryptographic signature validation and local expiry parsing are not claimed. Binance's real presigned URL query contract was not fetched; verify it in a separately authorized integration acceptance before enforcing provider-specific signature/expiry field assumptions.
+- Full suite/static checks pending. No live upload, production write, commit or push.
+
+
+## 2026-11-18 — Full verification after presigned AWS hostname allowlist tightening
+
+- Full suite: **742 passed, 0 failed, 43 skipped**; the 43 PostgreSQL integration tests remain skipped because `TEST_POSTGRES_DSN` is absent.
+- `compileall -q .` and `git diff --check`: PASS.
+- Working tree remains 23 modified tracked files, no untracked files; diff **+1,762 / -209**. Local HEAD and remote PR #14 branch SHA both `78631ecc72470d445507b4110891aa8110738256`. No commit/push.
+- No production DB, provider, media-upload or publication side effects. Production readiness remains PARTIAL / NOT READY.
+
+## 2026-11-18 — Final diff count correction
+
+- Supersedes earlier interim diff counts: current measured worktree diff after all audit documentation appends is **23 modified tracked files, +1,791 / -209**.
+- Full suite remains **742 passed, 0 failed, 43 skipped**; compileall passed after code changes and `git diff --check` was rechecked after the final documentation append.
+- PR #14 remote continuation SHA remains equal to local HEAD `78631ecc72470d445507b4110891aa8110738256`. No commit or push.

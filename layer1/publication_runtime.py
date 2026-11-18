@@ -258,14 +258,16 @@ class PostgresPublicationAuthorizationEngine:
             reasons.append("EDITORIAL_EVENT_IDENTITY_CHANGED")
         if brief["research_package_id"] != authorization.research_package_id:
             reasons.append("EDITORIAL_RESEARCH_PACKAGE_CHANGED")
-        if authorization.event_state != "NO_EVENT":
-            event = self.store.load_event_lifecycle(authorization.event_id)
-            if event is None:
-                reasons.append("EVENT_LIFECYCLE_RECORD_MISSING")
-            elif event["asset_id"] != authorization.asset_id or event["state"] != authorization.event_state:
-                reasons.append("EVENT_LIFECYCLE_CHANGED_AFTER_AUTHORIZATION")
-            elif event["state"] not in {"CONFIRMED", "DEVELOPING"}:
-                reasons.append("EVENT_STATE_NOT_PUBLISHABLE")
+        event = self.store.load_event_lifecycle(authorization.event_id)
+        if authorization.event_state == "NO_EVENT":
+            if event is not None:
+                reasons.append("UNEXPECTED_PERSISTED_EVENT_FOR_NO_EVENT_AUTHORIZATION")
+        elif event is None:
+            reasons.append("EVENT_LIFECYCLE_RECORD_MISSING")
+        elif event["asset_id"] != authorization.asset_id or event["state"] != authorization.event_state:
+            reasons.append("EVENT_LIFECYCLE_CHANGED_AFTER_AUTHORIZATION")
+        elif event["state"] not in {"CONFIRMED", "DEVELOPING"}:
+            reasons.append("EVENT_STATE_NOT_PUBLISHABLE")
         return tuple(sorted(set(reasons)))
 
 

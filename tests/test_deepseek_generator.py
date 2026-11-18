@@ -302,5 +302,82 @@ class DeepSeekGeneratorTests(unittest.TestCase):
         self.assertLess(guard_line, publish_line, "empty-content guard must precede publishing")
 
 
+    def test_unknown_deepseek_candidate_is_rejected_instead_of_substituting_first_package(self):
+        packages = [
+            ({"symbol": "ABC"}, "package-abc"),
+            ({"symbol": "XYZ"}, "package-xyz"),
+        ]
+        selected = main._select_research_package_for_ranking(
+            [{"rank": 1, "symbol": "NOT_IN_CANDIDATES", "reason": "model output"}],
+            packages,
+        )
+        self.assertIsNone(selected)
+
+    def test_deepseek_candidate_selection_is_case_insensitive_for_exact_symbol(self):
+        packages = [({"symbol": "ABC"}, "package-abc")]
+        selected = main._select_research_package_for_ranking(
+            [{"rank": 1, "symbol": "abc", "reason": "model output"}],
+            packages,
+        )
+        self.assertEqual(selected, packages[0])
+
+    def test_duplicate_candidate_symbols_are_rejected_as_ambiguous(self):
+        packages = [
+            ({"symbol": "ABC", "asset_id": "coingecko:abc"}, "package-1"),
+            ({"symbol": "ABC", "asset_id": "coingecko:other-abc"}, "package-2"),
+        ]
+        selected = main._select_research_package_for_ranking(
+            [{"rank": 1, "symbol": "ABC", "reason": "model output"}],
+            packages,
+        )
+        self.assertIsNone(selected)
+
+    def test_unknown_secondary_rank_is_rejected_not_just_unknown_top_rank(self):
+        packages = [
+            ({"symbol": "ABC"}, "package-abc"),
+            ({"symbol": "XYZ"}, "package-xyz"),
+        ]
+        selected = main._select_research_package_for_ranking(
+            [
+                {"rank": 1, "symbol": "ABC", "reason": "valid top"},
+                {"rank": 2, "symbol": "NOT_IN_CANDIDATES", "reason": "invalid second"},
+            ],
+            packages,
+        )
+        self.assertIsNone(selected)
+
+
+    def test_phase_one_rejects_duplicate_ranks(self):
+        response = (
+            "RANK: 1\nCOIN: $ABC\nREASON: First.\n"
+            "RANK: 1\nCOIN: $XYZ\nREASON: Second."
+        )
+        self.assertEqual(self.generator._parse_decision_response(response), [])
+
+    def test_phase_one_rejects_duplicate_symbols(self):
+        response = (
+            "RANK: 1\nCOIN: $ABC\nREASON: First.\n"
+            "RANK: 2\nCOIN: $ABC\nREASON: Second."
+        )
+        self.assertEqual(self.generator._parse_decision_response(response), [])
+
+    def test_phase_one_rejects_noncontiguous_or_nonpositive_ranks(self):
+        for response in (
+            "RANK: 0\nCOIN: $ABC\nREASON: First.",
+            "RANK: 2\nCOIN: $ABC\nREASON: First.",
+            "RANK: 1\nCOIN: $ABC\nREASON: First.\nRANK: 3\nCOIN: $XYZ\nREASON: Third.",
+        ):
+            with self.subTest(response=response):
+                self.assertEqual(self.generator._parse_decision_response(response), [])
+
+    def test_phase_one_rejects_malformed_symbol_or_missing_reason(self):
+        for response in (
+            "RANK: 1\nCOIN: $ABC/USDT\nREASON: First.",
+            "RANK: 1\nCOIN: $ABC\nREASON:",
+        ):
+            with self.subTest(response=response):
+                self.assertEqual(self.generator._parse_decision_response(response), [])
+
+
 if __name__ == "__main__":
     unittest.main()

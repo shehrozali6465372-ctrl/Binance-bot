@@ -19,6 +19,7 @@ import os
 import random
 import re
 import time
+import tempfile
 import uuid
 from dataclasses import dataclass
 from io import BytesIO
@@ -46,6 +47,16 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 def _open_without_redirect(request, *, timeout: int):
     opener = urllib.request.build_opener(_NoRedirectHandler)
     return opener.open(request, timeout=timeout)
+
+
+def _read_limited_response(response, *, max_bytes: int) -> bytes:
+    """Read an HTTP response with a strict allocation bound."""
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+        raise ValueError("response size limit must be a positive integer")
+    body = response.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise ValueError(f"response body exceeds the {max_bytes}-byte limit")
+    return body
 
 
 # Color palette (institutional dark mode)
@@ -113,7 +124,9 @@ class CloudflareWorkersAIImageGenerator:
             raise ValueError("Workers AI timeout must be between 1 and 180 seconds")
         self.model_id = model_id
         self.timeout_seconds = timeout_seconds
-        self._opener = opener or urllib.request.urlopen
+        # Cloudflare credentials are bearer secrets. Never allow urllib's default
+        # redirect handler to forward the Authorization header to a new origin.
+        self._opener = opener if opener is not None else _open_without_redirect
 
     @staticmethod
     def _response_header(response, name: str) -> str:
@@ -179,7 +192,7 @@ class CloudflareWorkersAIImageGenerator:
         try:
             with self._opener(request, timeout=self.timeout_seconds) as response:
                 status = getattr(response, "status", 200)
-                raw = response.read()
+                raw = response.read(20 * 1024 * 1024 + 1)
                 response_type = self._response_header(response, "Content-Type").split(";", 1)[0].strip().lower()
                 request_id = self._response_header(response, "cf-ray")
         except urllib.error.HTTPError as exc:
@@ -1068,7 +1081,7 @@ class ImageUploader:
                 "User-Agent": "codex-agent/1.0"
             }, method="GET")
             try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with _open_without_redirect(req, timeout=10) as resp:
                     existing = json.loads(resp.read().decode())
                     sha = existing.get("sha")
             except urllib.error.HTTPError as e:
@@ -1095,7 +1108,7 @@ class ImageUploader:
                 "User-Agent": "codex-agent/1.0"
             }, method="PUT")
             
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with _open_without_redirect(req, timeout=15) as resp:
                 response_data = json.loads(resp.read().decode())
             
             # Success! Get the raw URL (URL-encoded for safety)
@@ -1258,6 +1271,15 @@ class ImageUploader:
         try:
             parsed = urlsplit(value)
             host = (parsed.hostname or "").lower()
+            host_labels = host.split(".")
+            is_amazon_s3_host = (
+                len(host_labels) >= 3
+                and host_labels[-2:] == ["amazonaws", "com"]
+                and any(
+                    label == "s3" or label.startswith("s3-")
+                    for label in host_labels[:-2]
+                )
+            )
             return bool(
                 parsed.scheme == "https"
                 and parsed.port in (None, 443)
@@ -1266,7 +1288,7 @@ class ImageUploader:
                 and not parsed.fragment
                 and parsed.query
                 and (
-                    host.endswith(".amazonaws.com")
+                    is_amazon_s3_host
                     or host.endswith(".binance.com")
                     or host.endswith(".bnbstatic.com")
                 )
@@ -1293,7 +1315,7 @@ class ImageUploader:
             req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
             LOGGER.info("Image presignedUrl request: POST /image/presignedUrl imageName=%s", image_path.name)
             with _open_without_redirect(req, timeout=15) as resp:
-                resp_body = resp.read().decode("utf-8", errors="replace")
+                resp_body = _read_limited_response(resp, max_bytes=1024 * 1024).decode("utf-8", errors="replace")
             
             LOGGER.info("Image presignedUrl response: HTTP %d", resp.status)
             data = json.loads(resp_body)
@@ -1333,7 +1355,7 @@ class ImageUploader:
                 data_bytes = json.dumps(payload).encode("utf-8")
                 req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
                 with _open_without_redirect(req, timeout=15) as resp:
-                    resp_body = resp.read().decode("utf-8", errors="replace")
+                    resp_body = _read_limited_response(resp, max_bytes=1024 * 1024).decode("utf-8", errors="replace")
                 
                 data = json.loads(resp_body)
                 
@@ -1377,7 +1399,10 @@ class ImageUploader:
             return False
         try:
             with open(image_path, "rb") as f:
-                image_data = f.read()
+                image_data = f.read(10 * 1024 * 1024 + 1)
+            if len(image_data) > 10 * 1024 * 1024:
+                LOGGER.warning("Storage upload blocked: image exceeds the 10 MiB limit")
+                return False
             
             LOGGER.info("Storage upload: sending %d bytes to validated storage host",
                          len(image_data))
@@ -1443,7 +1468,25 @@ def upload_authorized_image(
         raise ValueError("Binance Square API key is unavailable")
     if not callable(upload_fn):
         raise ValueError("media upload function is unavailable")
-    image_url = upload_fn(image_path, api_key)
+    if not isinstance(image_hashes, (list, tuple)) or len(image_hashes) != 1:
+        raise ValueError("media upload requires exactly one authorized image hash")
+    try:
+        with Path(image_path).open("rb") as image_file:
+            authorized_image_bytes = image_file.read(10 * 1024 * 1024 + 1)
+    except OSError:
+        raise ValueError("authorized image file is unavailable") from None
+    if len(authorized_image_bytes) > 10 * 1024 * 1024:
+        raise ValueError("authorized image file exceeds the 10 MiB limit")
+    actual_image_hash = hashlib.sha256(authorized_image_bytes).hexdigest()
+    if actual_image_hash != image_hashes[0]:
+        raise ValueError("image file bytes do not match the authorized image hash")
+    # Upload a private immutable snapshot, not the mutable source path. This
+    # closes the validation-to-upload race where the source file is replaced
+    # after its authorized digest has been checked.
+    with tempfile.TemporaryDirectory(prefix="binance-authorized-media-") as snapshot_dir:
+        snapshot_path = Path(snapshot_dir) / ("authorized-image" + Path(image_path).suffix)
+        snapshot_path.write_bytes(authorized_image_bytes)
+        image_url = upload_fn(snapshot_path, api_key)
     try:
         parsed = urlsplit(image_url)
         host = (parsed.hostname or "").lower()

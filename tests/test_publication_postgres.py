@@ -4,6 +4,17 @@ from unittest.mock import call
 
 
 class PublicationPostgresStateMachineTests(unittest.TestCase):
+    def test_daily_quota_counts_unmirrored_analytics_and_reservations_additively(self):
+        from layer1.publication_postgres import _quota_usage_count
+
+        self.assertEqual(_quota_usage_count(1, 7), 8)
+        self.assertEqual(_quota_usage_count(3, 0), 3)
+        self.assertEqual(_quota_usage_count(0, 7), 7)
+        for invalid in (True, -1, 1.5, "1"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    _quota_usage_count(invalid, 0)
+
     def test_quota_state_machine_accepts_only_forward_transitions(self):
         from layer1.publication_postgres import validate_quota_transition
 
@@ -40,6 +51,27 @@ class PublicationPostgresStateMachineTests(unittest.TestCase):
         self.assertFalse(validate_quota_transition("RESERVED", "NOT_A_STATE"))
         self.assertFalse(validate_attempt_transition("NOT_A_STATE", "SUBMITTING"))
         self.assertFalse(validate_attempt_transition("SUBMITTING", "NOT_A_STATE"))
+
+    def test_event_revision_payload_and_evidence_are_bounded(self):
+        from layer1.publication_postgres import validate_event_revision_payload
+
+        payload_json, refs_json = validate_event_revision_payload(
+            {"headline": "Exchange announcement"}, ["source:announcement:123"],
+        )
+        self.assertIn("Exchange announcement", payload_json)
+        self.assertEqual(refs_json, '["source:announcement:123"]')
+        with self.assertRaisesRegex(ValueError, "payload exceeds"):
+            validate_event_revision_payload({"body": "x" * (256 * 1024)}, ["source:1"])
+        with self.assertRaisesRegex(ValueError, "too many"):
+            validate_event_revision_payload({}, [f"source:{i}" for i in range(101)])
+        with self.assertRaisesRegex(ValueError, "too long"):
+            validate_event_revision_payload({}, ["x" * 2049])
+        nested = current = {}
+        for _ in range(1200):
+            current["child"] = {}
+            current = current["child"]
+        with self.assertRaisesRegex(ValueError, "structural limits"):
+            validate_event_revision_payload(nested, ["source:1"])
 
 
 class PublicationPostgresMigrationTests(unittest.TestCase):
@@ -200,9 +232,15 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
         self.store = PostgresPublicationStore(_TEST_PUBLICATION_DSN)
         self.attempt_ids = []
         self.reservation_ids = []
+        self.analytics_ids = []
 
     def tearDown(self):
         with self.store.conn.transaction():
+            if self.analytics_ids:
+                self.store.conn.execute(
+                    "DELETE FROM post_analytics WHERE id = ANY(%s)",
+                    (self.analytics_ids,),
+                )
             if self.attempt_ids:
                 self.store.conn.execute(
                     "DELETE FROM publication_reconciliation_events WHERE attempt_id = ANY(%s)",
@@ -219,6 +257,28 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
                     (self.attempt_ids,),
                 )
         self.store.close()
+
+    def test_daily_quota_does_not_hide_unmirrored_reservations_behind_legacy_analytics(self):
+        from datetime import datetime, timezone
+
+        timestamp = datetime(2099, 1, 1, 12, 0, tzinfo=timezone.utc)
+        for index in range(7):
+            row = self.store.conn.execute(
+                "INSERT INTO post_analytics (coin_symbol,created_at,remote_post_id) "
+                "VALUES (%s,%s,NULL) RETURNING id",
+                (f"LEGACY{index}", timestamp),
+            ).fetchone()
+            self.analytics_ids.append(row["id"])
+
+        first = self.store.reserve_daily_quota(
+            symbol="BTC", daily_limit=8, now=timestamp.isoformat(),
+        )
+        self.assertIsNotNone(first)
+        self.reservation_ids.append(first)
+        second = self.store.reserve_daily_quota(
+            symbol="ETH", daily_limit=8, now=timestamp.isoformat(),
+        )
+        self.assertIsNone(second, "7 legacy analytics + 1 active reservation must exhaust an 8-post quota")
 
     def test_postgres_run_lease_serializes_competing_connections(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -344,6 +404,30 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
         ).fetchone()
         self.attempt_ids.append(row["id"])
         return key, row["id"], content_hash
+
+    def test_confirmed_publication_requires_and_preserves_remote_identity(self):
+        key, attempt_id, _ = self._new_attempt("IDENTITY")
+        with self.assertRaisesRegex(ValueError, "requires a remote post ID"):
+            self.store.finish_attempt(key, "PUBLISHED_CONFIRMED")
+        self.assertEqual(self.store.get_attempt(attempt_id)["status"], "SUBMITTING")
+
+        remote_id = "verified-post-" + uuid.uuid4().hex
+        share_link = "https://www.binance.com/square/post/" + remote_id
+        self.store.finish_attempt(
+            key, "PUBLISHED_CONFIRMED", post_id=remote_id, share_link=share_link,
+        )
+        with self.assertRaisesRegex(ValueError, "conflicts with the ID"):
+            self.store.finish_attempt(
+                key, "PUBLISHED_CONFIRMED", post_id="replacement-post-id",
+            )
+        with self.assertRaisesRegex(ValueError, "conflicts with the link"):
+            self.store.finish_attempt(
+                key, "PUBLISHED_CONFIRMED", post_id=remote_id,
+                share_link="https://www.binance.com/square/post/different-post",
+            )
+        stored = self.store.get_attempt(attempt_id)
+        self.assertEqual(stored["remote_post_id"], remote_id)
+        self.assertEqual(stored["share_link"], share_link)
 
     def test_idempotency_key_is_bound_to_exact_symbol_and_content_hash(self):
         key, _, content_hash = self._new_attempt()
@@ -518,6 +602,112 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
         self.assertEqual(audit["n"], 1)
 
 class PublicationPostgresIdentityTests(unittest.TestCase):
+    def test_validation_advisory_lock_scope_separates_text_and_image_pairs(self):
+        from layer1.publication_postgres import validation_advisory_lock_key
+
+        draft_hash = "a" * 64
+        image_hash = "b" * 64
+        self.assertEqual(
+            validation_advisory_lock_key(draft_hash, None),
+            "publication-validation:" + draft_hash + ":text",
+        )
+        self.assertEqual(
+            validation_advisory_lock_key(draft_hash, image_hash),
+            "publication-validation:" + draft_hash + ":" + image_hash,
+        )
+        self.assertNotEqual(
+            validation_advisory_lock_key(draft_hash, None),
+            validation_advisory_lock_key(draft_hash, image_hash),
+        )
+
+    def test_authorized_submission_guard_holds_event_lock_and_transaction_across_yield(self):
+        from layer1.publication_postgres import PostgresPublicationStore
+        from unittest.mock import patch
+
+        class Transaction:
+            def __init__(self, connection):
+                self.connection = connection
+            def __enter__(self):
+                self.connection.depth += 1
+            def __exit__(self, *args):
+                self.connection.depth -= 1
+
+        class Cursor:
+            def fetchone(self):
+                return {"payload_json": {"event_id": "event:guard-test"}}
+
+        class Connection:
+            depth = 0
+            def __init__(self):
+                self.statements = []
+            def transaction(self):
+                return Transaction(self)
+            def execute(self, query, params):
+                self.statements.append((query, params))
+                return Cursor()
+
+        store = object.__new__(PostgresPublicationStore)
+        store.conn = Connection()
+        with patch.object(store, "validate_authorized_attempt_before_submit") as validate:
+            with store.authorized_submission_guard(
+                authorization_id="a" * 64, idempotency_key="test-key",
+                symbol="BTC", content_hash="b" * 64,
+            ):
+                self.assertEqual(store.conn.depth, 1)
+                lock_keys = [params[0] for sql, params in store.conn.statements if "pg_advisory_xact_lock" in sql]
+                self.assertEqual(lock_keys, ["publication-symbol:BTC", "event-lifecycle:event:guard-test"])
+                validate.assert_called_once()
+            self.assertEqual(store.conn.depth, 0)
+
+    def test_attempt_completion_requires_remote_identity_and_prevents_terminal_identity_rewrite(self):
+        from layer1.publication_postgres import validate_attempt_completion
+
+        with self.assertRaisesRegex(ValueError, "requires a remote post ID"):
+            validate_attempt_completion(
+                current_status="SUBMITTING", target_status="PUBLISHED_CONFIRMED",
+                existing_remote_id="", existing_share_link="", remote_post_id="", share_link="",
+            )
+        with self.assertRaisesRegex(ValueError, "cannot confirm failure while a remote post ID"):
+            validate_attempt_completion(
+                current_status="SUBMITTING", target_status="FAILED_CONFIRMED",
+                existing_remote_id="", existing_share_link="", remote_post_id="unexpected-id", share_link="",
+            )
+        with self.assertRaisesRegex(ValueError, "conflicts with the ID"):
+            validate_attempt_completion(
+                current_status="PUBLISHED_CONFIRMED", target_status="PUBLISHED_CONFIRMED",
+                existing_remote_id="original-id", existing_share_link="", remote_post_id="replacement-id", share_link="",
+            )
+        with self.assertRaisesRegex(ValueError, "conflicts with the link"):
+            validate_attempt_completion(
+                current_status="PUBLISHED_CONFIRMED", target_status="PUBLISHED_CONFIRMED",
+                existing_remote_id="original-id", existing_share_link="https://www.binance.com/square/post/original-id",
+                remote_post_id="original-id", share_link="https://www.binance.com/square/post/other-id",
+            )
+        self.assertTrue(validate_attempt_completion(
+            current_status="SUBMITTING", target_status="PUBLISHED_CONFIRMED",
+            existing_remote_id="", existing_share_link="", remote_post_id="post-123", share_link="",
+        ))
+        self.assertTrue(validate_attempt_completion(
+            current_status="PUBLISHED_CONFIRMED", target_status="PUBLISHED_CONFIRMED",
+            existing_remote_id="post-123", existing_share_link="", remote_post_id="post-123", share_link="",
+        ))
+        with self.assertRaisesRegex(ValueError, "conflicts with the ID"):
+            validate_attempt_completion(
+                current_status="PUBLICATION_UNKNOWN", target_status="PUBLICATION_UNKNOWN",
+                existing_remote_id="accepted-id", existing_share_link="", remote_post_id="different-id", share_link="",
+            )
+        with self.assertRaisesRegex(ValueError, "share link must be an HTTPS Binance Square"):
+            validate_attempt_completion(
+                current_status="SUBMITTING", target_status="PUBLICATION_UNKNOWN",
+                existing_remote_id="", existing_share_link="", remote_post_id="accepted-id",
+                share_link="https://evil.example/square/post/accepted-id",
+            )
+        self.assertTrue(validate_attempt_completion(
+            current_status="SUBMITTING", target_status="PUBLICATION_UNKNOWN",
+            existing_remote_id="", existing_share_link="", remote_post_id="accepted-id",
+            share_link="https://www.binance.com/square/post/accepted-id",
+        ))
+
     def test_existing_idempotency_key_cannot_be_rebound_to_other_content(self):
         from layer1.publication_postgres import validate_attempt_identity
 

@@ -373,18 +373,20 @@ class PublicationAuthorizationEngine:
         reasons: list[str] = []
         exceptional = False
         try:
-            if event_state != "NO_EVENT":
-                event = self.connection.execute(
-                    "SELECT asset_id,event_type,state FROM layer1_event_lifecycle WHERE event_id=?",
-                    (event_id,),
-                ).fetchone()
-                if event is None or event[0] != asset_id or event[2] != event_state:
-                    reasons.append("EVENT_LIFECYCLE_CHANGED")
-                else:
-                    exceptional = (
-                        self._is_exceptional_event(str(event[1] or ""))
-                        and event[2] in {"CONFIRMED", "DEVELOPING"}
-                    )
+            event = self.connection.execute(
+                "SELECT asset_id,event_type,state FROM layer1_event_lifecycle WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if event_state == "NO_EVENT":
+                if event is not None:
+                    reasons.append("EVENT_LIFECYCLE_STATE_MISMATCH")
+            elif event is None or event[0] != asset_id or event[2] != event_state:
+                reasons.append("EVENT_LIFECYCLE_CHANGED")
+            else:
+                exceptional = (
+                    self._is_exceptional_event(str(event[1] or ""))
+                    and event[2] in {"CONFIRMED", "DEVELOPING"}
+                )
             cutoff = now - timedelta(hours=repetition_hard_hours)
             posts = self.connection.execute(
                 "SELECT created_at,content FROM posts WHERE UPPER(COALESCE(coin_symbol,''))=? "
@@ -472,8 +474,6 @@ class PublicationAuthorizationEngine:
             reasons.append("EDITORIAL_EVENT_IDENTITY_CHANGED")
         if brief[1] != authorization.research_package_id:
             reasons.append("EDITORIAL_RESEARCH_PACKAGE_CHANGED")
-        if authorization.event_state == "NO_EVENT":
-            return tuple(sorted(set(reasons)))
         try:
             event = self.connection.execute(
                 "SELECT asset_id, state FROM layer1_event_lifecycle WHERE event_id=?",
@@ -481,7 +481,10 @@ class PublicationAuthorizationEngine:
             ).fetchone()
         except sqlite3.OperationalError:
             return tuple(sorted(set(reasons) | {"EVENT_LIFECYCLE_LEDGER_UNAVAILABLE"}))
-        if event is None:
+        if authorization.event_state == "NO_EVENT":
+            if event is not None:
+                reasons.append("UNEXPECTED_PERSISTED_EVENT_FOR_NO_EVENT_AUTHORIZATION")
+        elif event is None:
             reasons.append("EVENT_LIFECYCLE_RECORD_MISSING")
         else:
             if event[0] != authorization.asset_id:
