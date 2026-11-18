@@ -317,6 +317,10 @@ class PostgresPublicationStore:
             raise ValueError("authorization and content digests are required")
         normalized_symbol = symbol.upper().strip() if isinstance(symbol, str) else ""
         with self.conn.transaction():
+            self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("publication-symbol:" + normalized_symbol,),
+            )
             auth = self.conn.execute(
                 "SELECT payload_json,quota_reservation_id,expires_at FROM publication_authorizations "
                 "WHERE authorization_id=%s FOR SHARE", (authorization_id,),

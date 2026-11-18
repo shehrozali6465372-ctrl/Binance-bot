@@ -170,7 +170,7 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
                 eligibility_max_age_seconds=300, event_state="NO_EVENT",
                 evidence_status="VERIFIED", text_validation_status="PASS",
                 visual_validation_status="NOT_REQUIRED",
-                quota_reservation_id=reservation, duplicate_policy_passed=True,
+                quota_reservation_id=reservation, repetition_hard_hours=12,
             )
         self.engine.mark_quota_status(reservation, "RELEASED")
 

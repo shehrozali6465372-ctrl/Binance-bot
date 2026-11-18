@@ -235,6 +235,7 @@ class PostgresPublicationAuthorizationEngine:
         return authorized
 
     def validate_persisted_duplicate_policy(self, authorization, *, now=None, exclude_idempotency_key=None):
+        from layer1.publication_authorization import _parse_time
         return self.store.validate_persisted_duplicate_policy(
             symbol=authorization.symbol, asset_id=authorization.asset_id,
             event_id=authorization.event_id, event_state=authorization.event_state,
