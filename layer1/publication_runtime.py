@@ -287,6 +287,21 @@ class PostgresRunLease:
         self.store.acquire_run_lease(context)
         self.run_id = context.run_id
 
+    def recover_interrupted(
+        self, expected_run_id, *, process_termination_confirmed, evidence, recovered_by,
+    ):
+        if process_termination_confirmed is not True:
+            raise ValueError("process termination confirmation is required")
+        recover = getattr(self.store, "recover_interrupted_run_lease", None)
+        if not callable(recover):
+            raise TypeError("PostgreSQL store does not support explicit run recovery")
+        return recover(
+            expected_run_id=expected_run_id,
+            process_termination_confirmed=True,
+            evidence=evidence,
+            recovered_by=recovered_by,
+        )
+
     def finish(self, status, summary=None):
         if not self.run_id:
             return

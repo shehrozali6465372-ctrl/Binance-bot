@@ -255,6 +255,50 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
             self.store.conn.execute("DELETE FROM layer1_run_lease WHERE run_id = ANY(%s)", (run_ids,))
             self.store.conn.execute("DELETE FROM layer1_runs WHERE run_id = ANY(%s)", (run_ids,))
 
+    def test_postgres_run_lease_requires_explicit_operator_recovery_after_crash(self):
+        from layer1.foundation import AgentConfig, ConfigurationOrchestrator
+        from layer1.publication_runtime import PostgresRunLease
+
+        context = ConfigurationOrchestrator(
+            AgentConfig(database_path="postgres-runtime-recovery.db"),
+        ).create_context({"case": "operator-crash-recovery"})
+        owner = PostgresRunLease(self.store)
+        observer = PostgresRunLease(self.store)
+        try:
+            owner.acquire(context)
+            with self.assertRaisesRegex(ValueError, "process termination confirmation"):
+                observer.recover_interrupted(
+                    context.run_id, process_termination_confirmed=False,
+                    evidence="scheduler job verified terminated", recovered_by="integration-operator",
+                )
+            with self.assertRaisesRegex(ValueError, "expected run ID"):
+                observer.recover_interrupted(
+                    "wrong-run-id", process_termination_confirmed=True,
+                    evidence="scheduler job verified terminated", recovered_by="integration-operator",
+                )
+            self.assertTrue(observer.recover_interrupted(
+                context.run_id, process_termination_confirmed=True,
+                evidence="scheduler job verified terminated", recovered_by="integration-operator",
+            ))
+            self.assertIsNone(observer.inspect_active())
+            row = self.store.conn.execute(
+                "SELECT status,summary_json FROM layer1_runs WHERE run_id=%s",
+                (context.run_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "INTERRUPTED")
+            self.assertEqual(
+                row["summary_json"]["operator_recovery"]["recovered_by"],
+                "integration-operator",
+            )
+        finally:
+            with self.store.conn.transaction():
+                self.store.conn.execute(
+                    "DELETE FROM layer1_run_lease WHERE run_id=%s", (context.run_id,),
+                )
+                self.store.conn.execute(
+                    "DELETE FROM layer1_runs WHERE run_id=%s", (context.run_id,),
+                )
+
     def test_postgres_run_lease_is_durable_and_fences_overlapping_runs(self):
         from layer1.foundation import AgentConfig, ConfigurationOrchestrator
         from layer1.publication_runtime import PostgresRunLease

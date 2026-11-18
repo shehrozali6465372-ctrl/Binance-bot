@@ -1018,6 +1018,66 @@ class PostgresPublicationStore:
                 (run_id, started),
             )
 
+    def recover_interrupted_run_lease(
+        self, *, expected_run_id: str, process_termination_confirmed: bool,
+        evidence: str, recovered_by: str,
+    ) -> bool:
+        """Operator-only recovery of a crashed run; never steals a lease by age."""
+        if process_termination_confirmed is not True:
+            raise ValueError("process termination confirmation is required")
+        if not isinstance(expected_run_id, str) or not expected_run_id.strip():
+            raise ValueError("expected run ID is required")
+        if not isinstance(evidence, str) or len(evidence.strip()) < 12:
+            raise ValueError("operator recovery evidence must be specific")
+        if not isinstance(recovered_by, str) or not recovered_by.strip():
+            raise ValueError("operator identity is required")
+        import psycopg
+        with self.conn.transaction():
+            self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("layer1-run-lease:agent",),
+            )
+            lease = self.conn.execute(
+                "SELECT run_id FROM layer1_run_lease WHERE lease_name='agent' FOR UPDATE"
+            ).fetchone()
+            if lease is None:
+                return False
+            if str(lease["run_id"]) != expected_run_id:
+                raise ValueError("active lease does not match the expected run ID")
+            run = self.conn.execute(
+                "SELECT status,summary_json FROM layer1_runs WHERE run_id=%s FOR UPDATE",
+                (expected_run_id,),
+            ).fetchone()
+            if run is None or run["status"] != "RUNNING":
+                raise RuntimeError("run record is missing or not RUNNING; refusing recovery")
+            summary = run["summary_json"]
+            if isinstance(summary, str):
+                summary = json.loads(summary) if summary else {}
+            if summary is None:
+                summary = {}
+            if not isinstance(summary, dict):
+                raise RuntimeError("existing run summary is invalid; refusing recovery")
+            summary = dict(summary)
+            summary["operator_recovery"] = {
+                "recovered_by": recovered_by.strip(),
+                "evidence": evidence.strip(),
+                "process_termination_confirmed": True,
+            }
+            updated = self.conn.execute(
+                "UPDATE layer1_runs SET finished_at=%s,status='INTERRUPTED',summary_json=%s "
+                "WHERE run_id=%s AND status='RUNNING' RETURNING run_id",
+                (_utc().isoformat(), psycopg.types.json.Jsonb(summary), expected_run_id),
+            ).fetchone()
+            if updated is None:
+                raise RuntimeError("run state changed during operator recovery")
+            deleted = self.conn.execute(
+                "DELETE FROM layer1_run_lease WHERE lease_name='agent' AND run_id=%s RETURNING run_id",
+                (expected_run_id,),
+            ).fetchone()
+            if deleted is None:
+                raise RuntimeError("run lease ownership changed during operator recovery")
+            return True
+
     def finish_run_lease(self, run_id: str, status: str, summary=None) -> None:
         allowed = {"SUCCEEDED", "NO_CANDIDATE_OR_BLOCKED", "FAILED", "INTERRUPTED"}
         if not isinstance(run_id, str) or not run_id.strip():
