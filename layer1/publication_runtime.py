@@ -292,6 +292,8 @@ class PostgresRunLease:
     ):
         if process_termination_confirmed is not True:
             raise ValueError("process termination confirmation is required")
+        if self.run_id == expected_run_id:
+            raise RuntimeError("current process cannot recover its own active run lease")
         recover = getattr(self.store, "recover_interrupted_run_lease", None)
         if not callable(recover):
             raise TypeError("PostgreSQL store does not support explicit run recovery")
