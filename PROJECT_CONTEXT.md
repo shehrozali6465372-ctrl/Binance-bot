@@ -2911,4 +2911,4 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Fixed `split_atomic_claims()` so semicolon-delimited clauses split even when the semicolon is not followed by whitespace. The new regression was observed failing before the one-line implementation change, then passed with the existing semicolon regression.
 - Verification: focused Module 11 suite **64 passed, 0 failed**; full suite **699 tests, 0 failures, 41 skipped**. The 41 PostgreSQL integration skips are not passes and remain gated by missing `TEST_POSTGRES_DSN`.
 - Module 11 remains PARTIAL: deterministic clause splitting and structured checks do not provide general semantic entailment or cover every ambiguous natural-language form.
-- Local changes are not pushed. No DB writes, live DeepSeek/Cloudflare calls, Binance publishing, production changes, deployment or merge.
+- Pushed to the existing PR #14 continuation branch in commit `7e8cc99`; remote file content was verified. No DB writes, live DeepSeek/Cloudflare calls, Binance publishing, production changes, deployment or merge.
