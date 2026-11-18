@@ -129,13 +129,9 @@ class DeepResearchEngine:
         for record in registry.evidence_records:
             if record.asset_id not in {None, asset_id} or record.source_status != "ACCEPTED":
                 continue
-            # An unbound record whose subject explicitly names another canonical
-            # asset cannot be borrowed by this package through a loose claim link.
-            if (
-                record.asset_id is None
-                and record.subject.startswith("coingecko:")
-                and record.subject != asset_id
-            ):
+            # A canonical subject naming another asset is contradictory even
+            # when a malformed record also carries this package's asset_id.
+            if record.subject.startswith("coingecko:") and record.subject != asset_id:
                 continue
             if (_parse_time(record.published_at) > cutoff or _parse_time(record.observed_at) > cutoff
                     or (record.updated_at and _parse_time(record.updated_at) > cutoff)):
@@ -144,6 +140,8 @@ class DeepResearchEngine:
 
         latest_by_scope = {}
         for claim in registry.claims:
+            if claim.subject.startswith("coingecko:") and claim.subject != asset_id:
+                continue
             if claim.asset_id is not None:
                 if claim.asset_id != asset_id:
                     continue
