@@ -157,8 +157,6 @@ class Config:
             or not isinstance(self.publisher_enabled, bool)
         ):
             raise ValueError("DRY_RUN, LIVE_MARKET_DATA, IMAGE_REQUIRED and PUBLISHER_ENABLED must be booleans")
-        if not self.dry_run and not self.publisher_enabled:
-            raise ValueError("PUBLISHER_ENABLED must be true before live publishing")
         if not isinstance(self.deepseek_model, str) or not self.deepseek_model.strip():
             raise ValueError("DEEPSEEK_MODEL must be non-empty")
         if not self.dry_run:
@@ -175,6 +173,8 @@ class Config:
                 "GitHub Actions live publishing requires PostgreSQL persistence; "
                 "ephemeral runner SQLite is not a durable publication ledger"
             )
+        if not self.dry_run and not self.publisher_enabled:
+            raise ValueError("PUBLISHER_ENABLED must be true before live publishing")
         if not isinstance(self.deepseek_temperature, (int, float)) or isinstance(self.deepseek_temperature, bool) or not math.isfinite(self.deepseek_temperature) or not (0.0 < self.deepseek_temperature <= 2.0):
             raise ValueError("DEEPSEEK_TEMPERATURE must be finite and between 0 and 2")
         if not isinstance(self.deepseek_top_p, (int, float)) or isinstance(self.deepseek_top_p, bool) or not math.isfinite(self.deepseek_top_p) or not (0.0 < self.deepseek_top_p <= 1.0):
