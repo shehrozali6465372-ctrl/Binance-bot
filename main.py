@@ -4144,7 +4144,7 @@ class PostPublisher:
                         key, "FAILED_CONFIRMED",
                         error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
                     )
-                        return PublishResult(
+                    return PublishResult(
                         status="FAILED_CONFIRMED",
                         error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
                     )
@@ -4177,7 +4177,6 @@ class PostPublisher:
             if parsed.get("code") != "000000":
                 message = str(parsed.get("message") or parsed.get("messageDetail") or "Binance rejected request")
                 self._finish_attempt(key, "FAILED_CONFIRMED", http_status=http_status, error=message)
-                mark_quota("FAILED_CONFIRMED")
                 return PublishResult(status="FAILED_CONFIRMED", http_status=http_status, error=message)
 
             data = parsed.get("data") or {}
