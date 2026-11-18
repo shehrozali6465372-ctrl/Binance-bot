@@ -1,3 +1,20 @@
+## Latest verified coding continuation — 2026-11-18 (independent publication kill switch)
+
+- Active target remains PR #14 on `layer-1/module9-onchain-continuation`; base branch remains `layer-1/module9-onchain-intelligence`. PR remains draft/open/unmerged.
+- User approved application-code commits on this existing PR branch. RDC remains prohibited. No workflow dispatch, deployment, merge, production DB write or real Binance post.
+- Added an independent, default-off `PUBLISHER_ENABLED` configuration flag:
+  - `Config.from_env()` reads strict boolean `PUBLISHER_ENABLED`, default `false`.
+  - Live configuration validation rejects `DRY_RUN=false` unless `PUBLISHER_ENABLED=true`, in addition to existing provider-credential and durable PostgreSQL requirements.
+  - `PostPublisher.publish()` returns `PUBLISHER_DISABLED` before authorization/network when the switch is off.
+  - `upload_authorized_image()` independently refuses real media upload unless the switch is explicitly true; the application passes the config flag into the upload boundary.
+  - The main runtime fingerprint includes the switch. Existing scheduled workflow remains unchanged with `DRY_RUN=1`; no `PUBLISHER_ENABLED=true` value was added. Publisher remains disabled.
+- TDD test-only commit `9a45119df7ba5410c6b44c01046b94d739809dc5` added coverage for default-off behavior, config validation, direct publisher blocking, and media-upload blocking. CI initially reproduced the missing config field and expected failures.
+- Implementation commits: `897f47e92727b0a5edba66f68ee9df0f460b6c29`, `aad1d5cdac87e6659247630e1e219f130e727810`, `e0e5f6acb6c3a3c90c40f791873173ce34310055`. Follow-up test fixture commits: `1b293a93ffbe5d5b4a1c2cffc71f71e489ba62f2`, `698860680573da989a577f76587e5f9cb6e1c23b`.
+- Final GitHub Actions run `44218585027` for exact commit `698860680573da989a577f76587e5f9cb6e1c23b`: SUCCESS; compileall passed; **678 tests, 0 failures, 40 skipped**.
+- The 40 skips still include live PostgreSQL integration tests without `TEST_POSTGRES_DSN`. No PostgreSQL parity acceptance is implied.
+- No publisher activation, real media upload, real Binance post, production database/credential/schedule changes, workflow dispatch, merge or deployment.
+- Continue the remaining Layer 1–21 gap register; the independent publisher kill switch is now implemented and must not be re-created.
+
 ## Latest verified coding continuation — 2026-11-18 (Module 12 lifecycle + Module 18/21 publication evidence contract)
 
 - Active target remains PR #14 on `layer-1/module9-onchain-continuation`; base branch remains `layer-1/module9-onchain-intelligence`. No merge or deployment.

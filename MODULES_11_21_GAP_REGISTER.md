@@ -1346,3 +1346,12 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Module 12: SQLite and PostgreSQL adapters no longer try to transition a non-material verified revision directly from STALE or RESOLVED to CONFIRMED. Reopening remains restricted to materially new verified evidence through UNDER_VERIFICATION.
 - PostgreSQL parity test cases are present but skipped in the hosted CI run because TEST_POSTGRES_DSN was not configured. Live PostgreSQL parity remains NOT VERIFIED.
 - No production side effects or publisher activation.
+
+## 2026-11-18 — Independent default-off publication kill switch
+
+- Added `PUBLISHER_ENABLED` as a strict boolean environment setting, default false.
+- Live mode requires both `DRY_RUN=false` and explicit `PUBLISHER_ENABLED=true`, while retaining provider-credential and PostgreSQL durability checks.
+- Publisher network submission and Binance media upload each enforce the switch independently; the main runtime fingerprints the setting.
+- TDD coverage added for default-off, config validation, publisher refusal and media-upload refusal. The final CI run `44218585027` passed: compileall + 678 tests, 0 failures, 40 skipped.
+- The 40 skips include PostgreSQL integration tests without TEST_POSTGRES_DSN. No live provider/media/publishing test was run.
+- Scheduled workflow remains DRY_RUN=1 and publisher disabled. No production side effects.
