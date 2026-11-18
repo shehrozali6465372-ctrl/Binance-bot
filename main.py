@@ -4077,38 +4077,62 @@ class PostPublisher:
         }
 
         try:
-            # Re-read the exact editorial/event binding immediately before the external POST.
-            # A lifecycle withdrawal or revision after authorization must stop submission.
-            final_event_reasons = quota_engine.validate_persisted_event_binding(authorization)
-            if final_event_reasons:
-                self._finish_attempt(
-                    key, "FAILED_CONFIRMED",
-                    error="event provenance changed before submission: " + ",".join(final_event_reasons),
+            # Complete every local/persisted authorization check and construct the
+            # request before entering the network-submission section. Any exception
+            # here is a known no-submit outcome, never PUBLICATION_UNKNOWN.
+            try:
+                final_event_reasons = quota_engine.validate_persisted_event_binding(authorization)
+                duplicate_reasons = quota_engine.validate_persisted_duplicate_policy(
+                    authorization, exclude_idempotency_key=key,
                 )
-                mark_quota("FAILED_CONFIRMED")
-                return PublishResult(
-                    status="FAILED_CONFIRMED",
-                    error="event provenance changed before submission: " + ",".join(final_event_reasons),
+                if final_event_reasons:
+                    self._finish_attempt(
+                        key, "FAILED_CONFIRMED",
+                        error="event provenance changed before submission: " + ",".join(final_event_reasons),
+                    )
+                    mark_quota("FAILED_CONFIRMED")
+                    return PublishResult(
+                        status="FAILED_CONFIRMED",
+                        error="event provenance changed before submission: " + ",".join(final_event_reasons),
+                    )
+                if duplicate_reasons:
+                    self._finish_attempt(
+                        key, "FAILED_CONFIRMED",
+                        error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
+                    )
+                    mark_quota("FAILED_CONFIRMED")
+                    return PublishResult(
+                        status="FAILED_CONFIRMED",
+                        error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
+                    )
+                request = urllib.request.Request(
+                    self.API_URL,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
                 )
-            duplicate_reasons = quota_engine.validate_persisted_duplicate_policy(
-                authorization, exclude_idempotency_key=key,
-            )
-            if duplicate_reasons:
-                self._finish_attempt(
-                    key, "FAILED_CONFIRMED",
-                    error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
+            except Exception as preflight_error:
+                message = (
+                    "Pre-submit authorization failed; no Binance request was sent: "
+                    f"{type(preflight_error).__name__}"
                 )
-                mark_quota("FAILED_CONFIRMED")
-                return PublishResult(
-                    status="FAILED_CONFIRMED",
-                    error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
-                )
-            request = urllib.request.Request(
-                self.API_URL,
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
+                try:
+                    self._finish_attempt(key, "FAILED_CONFIRMED", error=message)
+                except Exception as ledger_error:
+                    LOGGER.critical(
+                        "Could not persist known pre-submit rejection (%s); attempt remains fenced",
+                        type(ledger_error).__name__,
+                    )
+                try:
+                    mark_quota("FAILED_CONFIRMED")
+                except Exception as quota_error:
+                    LOGGER.critical(
+                        "Could not finalize quota after known pre-submit rejection (%s); "
+                        "reservation remains active",
+                        type(quota_error).__name__,
+                    )
+                return PublishResult(status="FAILED_CONFIRMED", error=message)
+
             with _open_binance_publish_no_redirect(
                 request, timeout=self.config.http_timeout_seconds,
             ) as response:
