@@ -84,6 +84,43 @@ class PostgresEventLifecycleIntegrationTests(unittest.TestCase):
             (self.asset_id,), revision * 64, body=body,
         )
 
+    def test_event_lifecycle_survives_fresh_process_reopen(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+        from layer1.publication_postgres import PostgresPublicationStore
+        from layer1.event_lifecycle_postgres import PostgresEventLifecycleStore
+
+        initial = self.store.observe(self._evidence("a"), verification_state="VERIFIED")
+        self.event_id = initial.event_id
+        expected_history = self.store.history(self.event_id)
+        self.owner.close()
+
+        child = "\n".join((
+            "import os, sys",
+            "from layer1.publication_postgres import PostgresPublicationStore",
+            "from layer1.event_lifecycle_postgres import PostgresEventLifecycleStore",
+            "owner = PostgresPublicationStore(os.environ['TEST_POSTGRES_DSN'])",
+            "try:",
+            "    store = PostgresEventLifecycleStore(owner)",
+            "    record = store.get(sys.argv[1])",
+            "    assert record is not None and record.state == 'CONFIRMED'",
+            "    assert [item['to_state'] for item in store.history(sys.argv[1])] == ['DISCOVERED', 'UNDER_VERIFICATION', 'CONFIRMED']",
+            "finally:",
+            "    owner.close()",
+        ))
+        result = subprocess.run(
+            [sys.executable, "-c", child, self.event_id],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.owner = PostgresPublicationStore(_EVENT_TEST_DSN)
+        self.store = PostgresEventLifecycleStore(self.owner)
+        self.assertEqual(self.store.get(self.event_id), initial)
+        self.assertEqual(self.store.history(self.event_id), expected_history)
+
     def test_bootstrap_imports_only_missing_sqlite_lifecycle_snapshots(self):
         import tempfile
         from pathlib import Path

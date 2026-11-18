@@ -23,9 +23,10 @@ This is the latest verified checkpoint and supersedes older top-level statements
 - Corrected only `tests/test_publication_postgres.py`: import `timedelta`; explicitly enable the publisher in this test fixture only; make the mock response honor bounded `read(size)`; use a syntactically valid Binance Square URL bound to the mock remote post ID; include `result.error` in the status assertion for diagnostics.
 - Focused PostgreSQL authorization integration test: **1 passed, 0 failed** after the fixture correction. The HTTP transport is patched to a deterministic in-process mock; no real Binance request or post was made.
 - Focused publisher-reconciliation regressions: **5 passed, 0 failed**.
-- Final full repository suite, with the disposable PostgreSQL DSN enabled and repository root correctly on `PYTHONPATH`: **745 tests, 0 failures, 0 errors, 0 skipped**. This includes the PostgreSQL-gated tests that previously skipped when the DSN was absent.
+- Added `test_event_lifecycle_survives_fresh_process_reopen`: closes the original PostgreSQL connection, starts a new Python process, reloads the event and transition history, then reopens the parent test store for fixture cleanup. **1 passed**. This proves cross-process persistence, not a crash-during-transaction drill.
+- Final full repository suite, with the disposable PostgreSQL DSN enabled and repository root correctly on `PYTHONPATH`: **746 tests, 0 failures, 0 errors, 0 skipped**. This includes the PostgreSQL-gated tests that previously skipped when the DSN was absent.
 - `python -m compileall -q .` and `git diff --check` passed after the test-only fix.
-- Application/test changes are confined to `tests/test_publication_postgres.py`; the two canonical Markdown context files carry this checkpoint. No production application runtime, workflow, publisher, or deployment configuration was changed. Re-verify exact commit and PR head after pushing.
+- Application/test changes are confined to `tests/test_publication_postgres.py` and `tests/test_event_lifecycle_postgres.py`; the two canonical Markdown context files carry this checkpoint. No production application runtime, workflow, publisher, or deployment configuration was changed. Re-verify exact commit and PR head after pushing.
 
 ## Remaining production blockers / boundaries
 - PostgreSQL integration test acceptance is now verified against the disposable database, but this does not establish production readiness or authorize a production cutover.
