@@ -817,6 +817,39 @@ class PublisherSafetyTests(unittest.TestCase):
             publisher.db.close()
 
 
+
+    def test_sqlite_pre_submit_duplicate_ledger_failure_is_known_not_submitted(self):
+        from layer1.publication_authorization import PublicationAuthorizationEngine
+
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "AVAX"}, "sqlite pre-submit ledger failure content",
+        )
+        response = FakeResponse({
+            "code": "000000",
+            "data": {"id": "should-never-be-submitted", "shareLink": "https://example.invalid/should-never-be-submitted"},
+        })
+        with patch.object(
+            PublicationAuthorizationEngine, "validate_persisted_duplicate_policy",
+            side_effect=sqlite3.OperationalError("duplicate ledger unavailable"),
+        ):
+            with patch("main._open_binance_publish_no_redirect", return_value=response) as urlopen:
+                result = self.publisher.publish(
+                    coin, "sqlite pre-submit ledger failure content",
+                    authorization=authorization, image_hashes=hashes,
+                )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("no Binance request was sent", result.error)
+        urlopen.assert_not_called()
+        attempt = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE coin_symbol='AVAX'"
+        ).fetchone()
+        reservation = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_quota_reservations WHERE reservation_id=?",
+            (authorization.quota_reservation_id,),
+        ).fetchone()
+        self.assertEqual(attempt["status"], "FAILED_CONFIRMED")
+        self.assertEqual(reservation["status"], "FAILED_CONFIRMED")
+
     def test_recent_persisted_post_after_authorization_blocks_before_network_post(self):
         coin, authorization, hashes = self._authorization(
             {"symbol": "BTC"}, "late duplicate policy content",
