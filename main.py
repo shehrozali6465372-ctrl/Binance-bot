@@ -1,4 +1,5 @@
 import json
+import base64
 import os
 import hashlib
 import random
@@ -757,19 +758,30 @@ def _try_git_push(max_retries: int = 3) -> bool:
                     time.sleep(_sleep)
                 continue
             
-            # Use explicit remote URL + push to main branch
-            push_url = f"https://x-access-token:{token}@github.com/{repo}"
-            _sp.run(
-                ["git", "remote", "set-url", "origin", push_url],
-                capture_output=True, timeout=10
+            # Supply authentication through process-scoped Git config. Never write
+            # the token into .git/config, a remote URL, or the Git command arguments.
+            git_env = os.environ.copy()
+            try:
+                config_index = int(git_env.get("GIT_CONFIG_COUNT", "0"))
+                if config_index < 0:
+                    raise ValueError
+            except ValueError:
+                LOGGER.warning("Git push skipped: invalid transient Git configuration")
+                return False
+            git_env["GIT_CONFIG_COUNT"] = str(config_index + 1)
+            git_env[f"GIT_CONFIG_KEY_{config_index}"] = "http.https://github.com/.extraheader"
+            git_env[f"GIT_CONFIG_VALUE_{config_index}"] = (
+                "AUTHORIZATION: basic "
+                + base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
             )
+
             # Determine target branch: use current branch if on a named branch, fallback to main
             target_branch = current_branch if current_branch not in ("unknown", "HEAD") else "main"
             LOGGER.info("Pushing commit %s on branch %s to origin/%s",
                         current_sha, current_branch, target_branch)
             push_result = _sp.run(
                 ["git", "push", "origin", f"HEAD:{target_branch}"],
-                capture_output=True, timeout=60
+                capture_output=True, timeout=60, env=git_env
             )
             if push_result.returncode == 0:
                 p_stdout = push_result.stdout.decode("utf-8", errors="replace").strip()
