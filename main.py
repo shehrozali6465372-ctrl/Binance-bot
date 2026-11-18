@@ -4154,7 +4154,16 @@ class PostPublisher:
                 key, "PUBLISHED_CONFIRMED", post_id=post_id, share_link=share_link,
                 http_status=http_status,
             )
-            mark_quota("PUBLISHED_CONFIRMED")
+            try:
+                mark_quota("PUBLISHED_CONFIRMED")
+            except Exception as quota_finalize_error:
+                # The confirmed attempt remains counted as an active reservation
+                # if quota finalization fails; never downgrade a confirmed remote post.
+                LOGGER.critical(
+                    "Post %s is confirmed in SQLite; quota finalization failed (%s); "
+                    "reservation remains active for operator review",
+                    post_id, type(quota_finalize_error).__name__,
+                )
             # The SQLite publication ledger is authoritative. The Markdown
             # history artifact is secondary and cannot downgrade confirmed state.
             try:
