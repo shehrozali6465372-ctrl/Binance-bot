@@ -3896,6 +3896,13 @@ class PostPublisher:
             # Keep the attempt and its daily-quota reservation in one transaction.
             # A later, separate quota write must not leave a confirmed post paired
             # with an older reservation state.
+            quota_table = self.db.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='publication_quota_reservations'"
+            ).fetchone()
+            if quota_table is None:
+                # Legacy/private ledger-only callers may not have initialized the
+                # authorization schema. Normal authorized publishing creates it first.
+                return
             quota = self.db.conn.execute(
                 "SELECT reservation_id,status FROM publication_quota_reservations WHERE attempt_id=?",
                 (attempt["id"],),
