@@ -1406,6 +1406,7 @@ def upload_authorized_image(
     *,
     authorization,
     dry_run: bool,
+    publisher_enabled: bool = False,
     image_path: str | None,
     api_key: str | None,
     symbol: str,
@@ -1417,6 +1418,8 @@ def upload_authorized_image(
     """Perform Binance media upload only after exact immutable publication authorization."""
     if dry_run:
         return None
+    if not publisher_enabled:
+        raise ValueError("PUBLISHER_ENABLED must be true before Binance media upload")
     if not image_path:
         return None
     if authorization is None:

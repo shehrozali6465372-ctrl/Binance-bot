@@ -77,6 +77,7 @@ class Config:
     image_required: bool = True
     persistence_backend: str = "sqlite"
     postgres_dsn: str = ""
+    publisher_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -109,6 +110,7 @@ class Config:
             image_required=_parse_env_bool("IMAGE_REQUIRED", os.getenv("IMAGE_REQUIRED"), True),
             persistence_backend=os.getenv("PERSISTENCE_BACKEND", "sqlite").strip().lower(),
             postgres_dsn=os.getenv("POSTGRES_DSN", ""),
+            publisher_enabled=_parse_env_bool("PUBLISHER_ENABLED", os.getenv("PUBLISHER_ENABLED"), False),
         )
 
     def validate(self) -> None:
@@ -152,8 +154,11 @@ class Config:
             not isinstance(self.dry_run, bool)
             or not isinstance(self.live_market_data, bool)
             or not isinstance(self.image_required, bool)
+            or not isinstance(self.publisher_enabled, bool)
         ):
-            raise ValueError("DRY_RUN, LIVE_MARKET_DATA and IMAGE_REQUIRED must be booleans")
+            raise ValueError("DRY_RUN, LIVE_MARKET_DATA, IMAGE_REQUIRED and PUBLISHER_ENABLED must be booleans")
+        if not self.dry_run and not self.publisher_enabled:
+            raise ValueError("PUBLISHER_ENABLED must be true before live publishing")
         if not isinstance(self.deepseek_model, str) or not self.deepseek_model.strip():
             raise ValueError("DEEPSEEK_MODEL must be non-empty")
         if not self.dry_run:
@@ -3885,6 +3890,11 @@ class PostPublisher:
             LOGGER.info("[DRY-RUN] Would publish post for %s; no network POST attempted", symbol)
             self._save_locally(coin, content, share_link="[DRY-RUN]")
             return PublishResult(status="DRY_RUN")
+        if not self.config.publisher_enabled:
+            return PublishResult(
+                status="PUBLISHER_DISABLED",
+                error="PUBLISHER_ENABLED is false; no network request attempted",
+            )
 
         from layer1.publication_authorization import (
             PublicationAuthorization, PublicationAuthorizationEngine,
@@ -5120,7 +5130,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
     
     publication_authorization = None
     authorized_image_hashes = []
-    if not config.dry_run:
+    if not config.dry_run and config.publisher_enabled:
         from layer1.publication_authorization import PublicationAuthorizationEngine
         from layer1.event_lifecycle import EventLifecycleStore
         if publisher.postgres_store is not None:
@@ -5190,12 +5200,13 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
 
     # Upload is a real external side effect, so it occurs only after the exact
     # draft/image hashes have a persisted publication authorization.
-    if not config.dry_run and should_upload_image(dry_run=False, image_path=img_path):
+    if not config.dry_run and config.publisher_enabled and should_upload_image(dry_run=False, image_path=img_path):
         try:
             from image_engine import upload_authorized_image
             image_url = upload_authorized_image(
                 authorization=publication_authorization,
                 dry_run=config.dry_run,
+                publisher_enabled=config.publisher_enabled,
                 image_path=img_path,
                 api_key=CONFIG.square_api_key,
                 symbol=str(best_coin.get("symbol") or ""),
@@ -5832,7 +5843,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
             "deepseek_max_output_tokens", "min_word_count", "min_hashtags",
             "min_candidates", "repetition_hard_hours", "repetition_soft_hours",
             "save_research_packages", "max_daily_posts", "min_cap_for_safety",
-            "persistence_backend",
+            "persistence_backend", "publisher_enabled",
         )
     }
     # Only secret-presence booleans enter the immutable config fingerprint.
@@ -5957,6 +5968,7 @@ def main_loop() -> None:
     LOGGER.info("Max iterations: %s", "unlimited" if max_iter <= 0 else str(max_iter))
     LOGGER.info("Live market data: %s", config.live_market_data)
     LOGGER.info("Dry run: %s", config.dry_run)
+    LOGGER.info("Publisher enabled: %s", config.publisher_enabled)
     LOGGER.info("=" * 60)
     
     while True:
