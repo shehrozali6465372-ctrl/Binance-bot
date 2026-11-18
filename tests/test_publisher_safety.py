@@ -481,7 +481,7 @@ class PublisherSafetyTests(unittest.TestCase):
             (authorization.quota_reservation_id,),
         ).fetchone()
         self.assertEqual(attempt["status"], "PUBLISHED_CONFIRMED")
-        self.assertEqual(reservation["status"], "SUBMITTING")
+        self.assertEqual(reservation["status"], "PUBLICATION_UNKNOWN")
         urlopen.assert_called_once()
 
     def test_remote_acceptance_followed_by_local_persistence_failure_is_not_retried(self):
