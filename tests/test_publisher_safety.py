@@ -243,6 +243,43 @@ class PublisherSafetyTests(unittest.TestCase):
         finally:
             publisher.db.close()
 
+
+    def test_postgres_pre_submit_ledger_failure_is_known_not_submitted_and_releases_quota(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "postgres pre-submit ledger failure content",
+        )
+
+        class RejectingPreflightStore:
+            def __init__(self):
+                self.calls = []
+
+            def begin_authorized_attempt(self, **kwargs):
+                self.calls.append(("begin", kwargs))
+                return None
+
+            def validate_authorized_attempt_before_submit(self, **kwargs):
+                self.calls.append(("preflight", kwargs))
+                raise RuntimeError("DUPLICATE_LEDGER_UNAVAILABLE")
+
+            def finish_authorized_attempt(self, key, status, **kwargs):
+                self.calls.append(("finish", key, status, kwargs))
+
+        store = RejectingPreflightStore()
+        publisher = main.PostPublisher(self.config, postgres_store=store)
+        try:
+            with patch("main._open_binance_publish_no_redirect") as urlopen:
+                result = publisher.publish(
+                    coin, "postgres pre-submit ledger failure content",
+                    authorization=authorization, image_hashes=hashes,
+                )
+            self.assertEqual(result.status, "FAILED_CONFIRMED")
+            self.assertIn("pre-submit authorization failed", result.error.lower())
+            urlopen.assert_not_called()
+            self.assertEqual([call[0] for call in store.calls], ["begin", "preflight", "finish"])
+            self.assertEqual(store.calls[-1][2], "FAILED_CONFIRMED")
+        finally:
+            publisher.db.close()
+
     def test_square_publish_transport_refuses_redirects(self):
         from urllib.request import Request
         handler = main._NoRedirectHTTPHandler()
