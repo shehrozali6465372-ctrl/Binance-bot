@@ -1375,3 +1375,14 @@ This checklist does not authorize the work to be marked done merely by checking 
 - RED run: GitHub Actions `44220146035`, 684 tests, 1 failure, 40 PostgreSQL tests skipped. GREEN run: `44220220216`, **684 tests, 0 failures, 40 skipped**; compileall passed.
 - The PostgreSQL query failure remains fail-closed (exception prevents POST). The new regression uses a deterministic mocked store; it is not a substitute for live PostgreSQL integration.
 - Module 21 remains **PARTIAL / NOT COMPLETE** until the guarded PostgreSQL authorization/duplicate/recovery tests execute against the approved disposable test database and crash/restart/unknown-outcome recovery is accepted. No production DB or real publisher activity was used.
+
+
+
+## 2026-11-18 — Module 21 explicit interrupted-run recovery
+
+- Added explicit operator-only recovery to SQLite and PostgreSQL run-lease stores. No age-based lease stealing or automatic replay is introduced.
+- Recovery requires the exact active run ID, affirmative process-termination confirmation, operator evidence and operator identity. It atomically marks the prior run `INTERRUPTED`, stores the recovery evidence in the run summary and deletes only the matching lease. A mismatched ID or inconsistent run state fails closed.
+- PostgreSQL lease acquire, finish and recovery share the same advisory transaction lock/lock order to avoid racing normal completion against operator recovery.
+- SQLite/adapter regression tests pass. A PostgreSQL integration regression was added but remains guarded by `TEST_POSTGRES_DSN`.
+- CI run `44220831869`: **687 tests, 0 failures, 41 skipped**; compile passed. The 41 skips include the PostgreSQL integration suite and are not accepted as PostgreSQL passes.
+- This closes the code-level manual run-lease recovery gap only. Module 21 remains **PARTIAL / NOT COMPLETE** pending disposable-branch PostgreSQL acceptance, unknown publication reconciliation, quota/crash recovery end-to-end and operational verification.

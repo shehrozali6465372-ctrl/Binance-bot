@@ -2773,3 +2773,16 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - GitHub Actions run `44220220216`: **SUCCESS**, compile step passed, **684 tests, 0 failures, 40 skipped**. The regression passed. The 40 skips remain PostgreSQL integration tests gated by missing `TEST_POSTGRES_DSN`; this CI run does not prove direct PostgreSQL integration acceptance.
 - No live Binance request, media upload, real Square post, production DB write, workflow dispatch, deployment, credential/schedule change or publisher activation occurred. Keep `DRY_RUN=1` and `PUBLISHER_ENABLED=false`.
 - Next: continue Module 21 transaction/error/recovery audit and arrange approved disposable-branch PostgreSQL acceptance without exposing a DSN or touching production. Module 11 semantic verification, live DeepSeek/Cloudflare provider acceptance, and full production cutover remain incomplete.
+
+
+
+## 2026-11-18 — Explicit operator recovery for interrupted run leases
+
+- Added manual recovery APIs for SQLite `RunLease` and PostgreSQL `PostgresRunLease` / `PostgresPublicationStore`.
+- Recovery is never automatic and never replays the pipeline. It requires an exact expected run ID, explicit `process_termination_confirmed=True`, non-empty operator evidence and operator identity. A mismatched lease owner, non-RUNNING record or invalid prior summary fails closed.
+- Recovery atomically marks the run `INTERRUPTED`, appends operator-recovery metadata to the run summary, and removes only the matching lease. If no lease exists it returns false.
+- PostgreSQL acquire, normal finish and manual recovery now use the same transaction-scoped advisory lock and consistent lock ordering to serialize terminal completion against recovery.
+- Added SQLite mocked/temporary-database coverage and a guarded PostgreSQL integration regression. GitHub Actions run `44220831869` on head `c1cd293046a2bf2ca15a25178ec77b97340ba7a1`: **SUCCESS**, compile passed, **687 tests, 0 failures, 41 skipped**.
+- The new PostgreSQL recovery integration test is among the guarded skips because `TEST_POSTGRES_DSN` is not configured in hosted CI. Only SQLite and mocked adapter behavior are verified here.
+- No run was force-released in any connected database; no DB writes, production changes, provider calls, publisher activation, real Square post, workflow dispatch, merge or deployment were performed.
+- Remaining: run the guarded PostgreSQL recovery/authorization suite against the approved disposable test branch, validate crash/unknown-publication reconciliation end-to-end, and complete provider/semantic acceptance. Keep `DRY_RUN=1` and publisher default-off.
