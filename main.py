@@ -3861,17 +3861,62 @@ class PostPublisher:
         self, key: str, status: str, *, post_id: str = "", share_link: str = "",
         http_status: Optional[int] = None, error: str = ""
     ) -> None:
+        allowed_transitions = {
+            "SUBMITTING": {"SUBMITTING", "FAILED_CONFIRMED", "PUBLICATION_UNKNOWN", "PUBLISHED_CONFIRMED"},
+            "PUBLICATION_UNKNOWN": {"PUBLICATION_UNKNOWN", "FAILED_CONFIRMED", "PUBLISHED_CONFIRMED"},
+            "FAILED_CONFIRMED": {"FAILED_CONFIRMED"},
+            "PUBLISHED_CONFIRMED": {"PUBLISHED_CONFIRMED"},
+        }
+        if status not in {"FAILED_CONFIRMED", "PUBLICATION_UNKNOWN", "PUBLISHED_CONFIRMED"}:
+            raise ValueError("unsupported publication attempt terminal status")
         with self.db.conn:
-            self.db.conn.execute(
+            attempt = self.db.conn.execute(
+                "SELECT id,status FROM publication_attempts WHERE idempotency_key=?",
+                (key,),
+            ).fetchone()
+            if attempt is None:
+                raise RuntimeError("publication attempt disappeared before finalization")
+            current_status = str(attempt["status"])
+            if status not in allowed_transitions.get(current_status, set()):
+                raise RuntimeError("publication attempt terminal state cannot be downgraded or overwritten")
+            now = utc_now()
+            updated = self.db.conn.execute(
                 """
                 UPDATE publication_attempts
                 SET status = ?, remote_post_id = COALESCE(?, remote_post_id),
                     share_link = COALESCE(?, share_link), http_status = COALESCE(?, http_status),
                     error = ?, updated_at = ?
-                WHERE idempotency_key = ?
+                WHERE idempotency_key = ? AND status = ?
                 """,
-                (status, post_id or None, share_link or None, http_status, error[:1000], utc_now(), key),
+                (status, post_id or None, share_link or None, http_status, error[:1000], now, key, current_status),
             )
+            if updated.rowcount != 1:
+                raise RuntimeError("publication attempt changed during finalization")
+
+            # Keep the attempt and its daily-quota reservation in one transaction.
+            # A later, separate quota write must not leave a confirmed post paired
+            # with an older reservation state.
+            quota = self.db.conn.execute(
+                "SELECT reservation_id,status FROM publication_quota_reservations WHERE attempt_id=?",
+                (attempt["id"],),
+            ).fetchone()
+            if quota is None or quota["status"] == "RELEASED" or quota["status"] == status:
+                return
+            quota_status = str(quota["status"])
+            allowed_quota_sources = {
+                "FAILED_CONFIRMED": {"RESERVED", "SUBMITTING", "PUBLICATION_UNKNOWN"},
+                "PUBLICATION_UNKNOWN": {"SUBMITTING", "PUBLICATION_UNKNOWN"},
+                "PUBLISHED_CONFIRMED": {"SUBMITTING", "PUBLICATION_UNKNOWN"},
+            }
+            if quota_status not in allowed_quota_sources[status]:
+                raise RuntimeError("quota reservation state is inconsistent with publication attempt")
+            quota_updated = self.db.conn.execute(
+                "UPDATE publication_quota_reservations SET status=?, updated_at=? "
+                "WHERE reservation_id=? AND status=?",
+                (status, now, quota["reservation_id"], quota_status),
+            )
+            if quota_updated.rowcount != 1:
+                raise RuntimeError("quota reservation changed during publication finalization")
 
     def publish(
         self, coin: Dict[str, Any], content: str,
@@ -4090,7 +4135,6 @@ class PostPublisher:
                         key, "FAILED_CONFIRMED",
                         error="event provenance changed before submission: " + ",".join(final_event_reasons),
                     )
-                    mark_quota("FAILED_CONFIRMED")
                     return PublishResult(
                         status="FAILED_CONFIRMED",
                         error="event provenance changed before submission: " + ",".join(final_event_reasons),
@@ -4100,8 +4144,7 @@ class PostPublisher:
                         key, "FAILED_CONFIRMED",
                         error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
                     )
-                    mark_quota("FAILED_CONFIRMED")
-                    return PublishResult(
+                        return PublishResult(
                         status="FAILED_CONFIRMED",
                         error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
                     )
@@ -4122,14 +4165,6 @@ class PostPublisher:
                     LOGGER.critical(
                         "Could not persist known pre-submit rejection (%s); attempt remains fenced",
                         type(ledger_error).__name__,
-                    )
-                try:
-                    mark_quota("FAILED_CONFIRMED")
-                except Exception as quota_error:
-                    LOGGER.critical(
-                        "Could not finalize quota after known pre-submit rejection (%s); "
-                        "reservation remains active",
-                        type(quota_error).__name__,
                     )
                 return PublishResult(status="FAILED_CONFIRMED", error=message)
 
@@ -4153,7 +4188,6 @@ class PostPublisher:
                     key, "PUBLICATION_UNKNOWN", http_status=http_status,
                     error="Success response did not contain a remote post ID",
                 )
-                mark_quota("PUBLICATION_UNKNOWN")
                 return PublishResult(
                     status="PUBLICATION_UNKNOWN", http_status=http_status,
                     error="Success response lacked remote post ID; no retry permitted",
@@ -4166,7 +4200,6 @@ class PostPublisher:
                 http_status=http_status,
                 error="Remote acceptance confirmed; local persistence pending",
             )
-            mark_quota("PUBLICATION_UNKNOWN")
             local_post_id = self.db.save_post({
                 "content": content,
                 "coin_symbol": symbol,
@@ -4178,16 +4211,6 @@ class PostPublisher:
                 key, "PUBLISHED_CONFIRMED", post_id=post_id, share_link=share_link,
                 http_status=http_status,
             )
-            try:
-                mark_quota("PUBLISHED_CONFIRMED")
-            except Exception as quota_finalize_error:
-                # The confirmed attempt remains counted as an active reservation
-                # if quota finalization fails; never downgrade a confirmed remote post.
-                LOGGER.critical(
-                    "Post %s is confirmed in SQLite; quota finalization failed (%s); "
-                    "reservation remains active for operator review",
-                    post_id, type(quota_finalize_error).__name__,
-                )
             # The SQLite publication ledger is authoritative. The Markdown
             # history artifact is secondary and cannot downgrade confirmed state.
             try:
@@ -4209,7 +4232,6 @@ class PostPublisher:
             status = "PUBLICATION_UNKNOWN" if exc.code in (408, 429) or exc.code >= 500 else "FAILED_CONFIRMED"
             try:
                 self._finish_attempt(key, status, http_status=exc.code, error=str(exc))
-                mark_quota(status)
             except Exception:
                 pass
             return PublishResult(status=status, http_status=exc.code, error=str(exc))
@@ -4217,7 +4239,6 @@ class PostPublisher:
             # A timeout, disconnect, or invalid response may occur after remote acceptance.
             try:
                 self._finish_attempt(key, "PUBLICATION_UNKNOWN", error=str(exc))
-                mark_quota("PUBLICATION_UNKNOWN")
             except Exception:
                 pass
             return PublishResult(

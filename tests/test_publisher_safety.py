@@ -445,16 +445,18 @@ class PublisherSafetyTests(unittest.TestCase):
         urlopen.assert_called_once()
 
 
-    def test_sqlite_confirmed_publication_survives_quota_finalization_failure(self):
+    def test_sqlite_attempt_and_quota_are_finalized_atomically_after_remote_confirmation(self):
         from layer1.publication_authorization import PublicationAuthorizationEngine
 
         coin, authorization, hashes = self._authorization(
             {"symbol": "DOGE"}, "sqlite quota finalization failure content",
         )
         original = PublicationAuthorizationEngine.mark_quota_status
+        final_status_calls = []
 
         def fail_only_final_status(engine, reservation_id, status):
             if status == "PUBLISHED_CONFIRMED":
+                final_status_calls.append(status)
                 raise sqlite3.OperationalError("quota ledger temporarily unavailable")
             return original(engine, reservation_id, status)
 
@@ -481,7 +483,8 @@ class PublisherSafetyTests(unittest.TestCase):
             (authorization.quota_reservation_id,),
         ).fetchone()
         self.assertEqual(attempt["status"], "PUBLISHED_CONFIRMED")
-        self.assertEqual(reservation["status"], "PUBLICATION_UNKNOWN")
+        self.assertEqual(reservation["status"], "PUBLISHED_CONFIRMED")
+        self.assertEqual(final_status_calls, [])
         urlopen.assert_called_once()
 
     def test_remote_acceptance_followed_by_local_persistence_failure_is_not_retried(self):
