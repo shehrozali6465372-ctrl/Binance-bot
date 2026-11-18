@@ -3256,3 +3256,11 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Focused image/visual suites: 45 passed, 0 failed. Full suite: **744 tests, 0 failures, 43 skipped**. `compileall -q .` and `git diff --check` passed. The 43 skips are PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`; they are not passes.
 - Current local worktree contains four code/test files plus this context and gap-register update. These new changes are not yet committed or pushed at this checkpoint. Continue using the existing branch/PR only; do not create a PR, merge, deploy, activate publishing, or perform real uploads/posts.
 - No live Cloudflare request, authenticated Binance upload, production DB operation, workflow dispatch or paid provider action occurred. Modules 19/20 remain PARTIAL pending real integration and independent OCR/vision semantic validation; Module 21 remains PARTIAL pending PostgreSQL and crash/recovery acceptance.
+
+
+## 2026-11-18 — Pixel-bound fix pushed and hosted CI verified
+
+- The decoded-image pixel-count hardening described above was committed as `f59a4f1d160c9e8bde830559dba95174148ec10c` (`fix: bound decoded image pixel allocations`) and pushed non-forcefully to the existing PR #14 head branch.
+- Post-push verification confirmed local HEAD and remote `layer-1/module9-onchain-continuation` both equal `f59a4f1d160c9e8bde830559dba95174148ec10c`; working tree was clean.
+- PR #14 remained OPEN / DRAFT / UNMERGED, with the expected head and base branches. GitHub Actions run `44340291099` for this exact SHA completed SUCCESS.
+- This hosted mocked-safety workflow success does not substitute for the 43 skipped PostgreSQL integrations or real Cloudflare/Binance provider acceptance.
