@@ -2874,3 +2874,13 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - `VisualQualityEngine` now requires both PNG-decoded content and a `.png` path for the final composite artifact. The sidecar/draft/hash checks remain unchanged.
 - TDD: RED run `44223868599`; GREEN run `44223962776` on `f501336c07fa8c28405782ec38a23569d7d9b956`: **SUCCESS**, compile passed, **694 tests, 0 failures, 41 skipped**.
 - The 41 PostgreSQL integration tests remain skipped without `TEST_POSTGRES_DSN`; no live Cloudflare inference or Binance media upload occurred.
+
+
+
+## 2026-11-18 — Module 13 cross-asset research package isolation
+
+- TDD found `DeepResearchEngine.build` accepted claims with `asset_id=None` even when their `subject` was another canonical CoinGecko asset, allowing a verified foreign-asset claim and evidence to enter the selected asset's research package.
+- Fixed claim scoping: explicit claim asset IDs must match the selected asset; unbound claims are eligible only when their subject equals the selected canonical asset ID.
+- Unbound evidence records whose subject explicitly names a different canonical asset are excluded. Source coverage is now calculated only from cutoff-eligible evidence actually linked to selected-asset claims, not every accepted unbound evidence record in the registry.
+- Regression RED run `44224206173`; GREEN run `44224293433` on `6c34cc8b5ac258169bb790c4d2f4aa7fe90fb03b`: **SUCCESS**, compile passed, **696 tests, 0 failures, 41 skipped**.
+- The 41 PostgreSQL integration skips remain unverified; no live provider or publisher calls were made.

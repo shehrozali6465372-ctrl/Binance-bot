@@ -1462,3 +1462,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Final visual QA now requires both PNG-decoded image content and a `.png` filename. This prevents a PNG payload stored as `.jpg` from passing the final artifact gate.
 - TDD regression RED `44223868599`; GREEN `44223962776`: **694 tests, 0 failures, 41 skipped**, compile passed.
 - Live Cloudflare generation and Binance media upload remain unverified; PostgreSQL integration tests remain skipped pending approved test DSN.
+
+
+
+## 2026-11-18 — Module 13 foreign-asset research isolation
+
+- Fixed a cross-asset contamination defect in `DeepResearchEngine`: claims without an explicit `asset_id` must now have `subject == selected asset_id`; explicitly bound claims must match the selected asset.
+- Unbound evidence explicitly naming a different canonical CoinGecko asset is excluded. Source coverage counts only cutoff-eligible evidence linked to selected-asset claims.
+- TDD RED `44224206173`; GREEN `44224293433`: **696 tests, 0 failures, 41 skipped**, compile passed. PostgreSQL integration acceptance remains pending.
