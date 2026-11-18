@@ -2809,3 +2809,12 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Final hosted GitHub Actions run `44221784199` on head `d98499b206d56493393e4e9a1923e663e40ef4b8`: **SUCCESS**, compile passed, **690 tests, 0 failures, 41 skipped**.
 - The 41 skips remain guarded PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`; they are not passed. No real Binance post or media upload was performed.
 - SQLite and PostgreSQL publishers now preserve a confirmed external post when only secondary local history persistence fails. PostgreSQL stores attempt+quota state atomically; SQLite keeps an unresolved quota reservation if its separate final quota transition fails, pending operator review.
+
+
+
+## 2026-11-18 — SQLite quota-finalization failure remains safely reserved
+
+- Added a deterministic regression for a quota status write failing after the SQLite publisher has already persisted the attempt as `PUBLISHED_CONFIRMED`.
+- The attempt/result must remain `PUBLISHED_CONFIRMED`; the quota reservation remains `PUBLICATION_UNKNOWN` (still counted as active) if the separate final quota transition fails. A critical log records the need for operator review. No reservation is released and no retry is enabled.
+- Latest hosted GitHub Actions run `44221784199` on `d98499b206d56493393e4e9a1923e663e40ef4b8`: **SUCCESS**, compile passed, **690 tests, 0 failures, 41 skipped**.
+- The 41 skips are PostgreSQL integration tests gated by missing `TEST_POSTGRES_DSN`; they are not passes. No live Binance request, upload or real post occurred.

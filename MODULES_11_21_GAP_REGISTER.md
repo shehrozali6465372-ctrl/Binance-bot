@@ -1405,3 +1405,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - SQLite quota finalization failure after confirmed publication no longer downgrades the attempt/result. The reservation remains `PUBLICATION_UNKNOWN` (active, conservative) and emits an operator-review critical log; it is not released. This inconsistency requires operator reconciliation and is not claimed as fully automated.
 - TDD regression for SQLite local history and quota finalization is green. Latest CI `44221784199`: **690 tests, 0 failures, 41 skipped**, compile passed.
 - PostgreSQL integration tests remain skipped without the approved test DSN. Module 21 remains **PARTIAL / NOT COMPLETE** pending direct disposable PostgreSQL acceptance, quota-state reconciliation, unknown-publication recovery and end-to-end crash/restart verification.
+
+
+
+## 2026-11-18 — SQLite quota finalization fail-safe
+
+- SQLite publisher now preserves `PUBLISHED_CONFIRMED` after remote acceptance even if the separate quota finalization update fails. The reservation remains `PUBLICATION_UNKNOWN` and active for operator review; it is never released automatically. The confirmed attempt and return status are not downgraded.
+- Regression CI `44221784199`: **690 tests, 0 failures, 41 skipped**; compile passed. A first test expectation was corrected to the actual conservative state: the reservation had already been marked `PUBLICATION_UNKNOWN` immediately after the remote acceptance response.
+- PostgreSQL integration acceptance remains skipped without the approved disposable DSN. Module 21 remains **PARTIAL / NOT COMPLETE**.
