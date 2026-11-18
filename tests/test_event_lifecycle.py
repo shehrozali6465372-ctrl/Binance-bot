@@ -458,5 +458,41 @@ class EventLifecycleStoreTests(unittest.TestCase):
         self.assertNotEqual(a.event_id, b.event_id)
 
 
+    def test_non_material_revision_does_not_reopen_stale_event(self):
+        from dataclasses import replace
+
+        initial = self.store.observe(evidence("a"), verification_state="VERIFIED")
+        stale = self.store.mark_stale(initial.event_id, now=iso(10), max_age_seconds=1)
+        revised = replace(evidence("b"), observed_at=iso(30))
+        result = self.store.observe(
+            revised, verification_state="VERIFIED", materially_new=False,
+        )
+        self.assertEqual(stale.state, "STALE")
+        self.assertEqual(result.state, "STALE")
+        self.assertEqual(
+            [row["to_state"] for row in self.store.history(initial.event_id)],
+            ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED", "STALE"],
+        )
+
+    def test_non_material_revision_does_not_reopen_resolved_event(self):
+        from dataclasses import replace
+
+        initial = self.store.observe(evidence("a"), verification_state="VERIFIED")
+        resolved = self.store.observe(
+            evidence("b"), verification_state="VERIFIED", resolved=True,
+            resolution_evidence_id="evidence:explicit-resolution",
+        )
+        revised = replace(evidence("c"), observed_at=iso(30))
+        result = self.store.observe(
+            revised, verification_state="VERIFIED", materially_new=False,
+        )
+        self.assertEqual(resolved.state, "RESOLVED")
+        self.assertEqual(result.state, "RESOLVED")
+        self.assertEqual(
+            [row["to_state"] for row in self.store.history(initial.event_id)],
+            ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED", "RESOLVED"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

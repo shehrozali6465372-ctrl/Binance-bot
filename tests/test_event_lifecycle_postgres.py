@@ -165,5 +165,42 @@ class PostgresEventLifecycleIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.store.history(record.event_id)), 4)
 
 
+    def test_postgres_non_material_revision_does_not_reopen_stale_event(self):
+        initial = self.store.observe(self._evidence("a"), verification_state="VERIFIED")
+        self.event_id = initial.event_id
+        stale = self.store.mark_stale(
+            initial.event_id, now=(datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat(),
+            max_age_seconds=1,
+        )
+        revised = self._evidence("b", observed_delta=30)
+        result = self.store.observe(
+            revised, verification_state="VERIFIED", materially_new=False,
+        )
+        self.assertEqual(stale.state, "STALE")
+        self.assertEqual(result.state, "STALE")
+        self.assertEqual(
+            [item["to_state"] for item in self.store.history(initial.event_id)],
+            ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED", "STALE"],
+        )
+
+    def test_postgres_non_material_revision_does_not_reopen_resolved_event(self):
+        initial = self.store.observe(self._evidence("a"), verification_state="VERIFIED")
+        self.event_id = initial.event_id
+        resolved = self.store.observe(
+            self._evidence("b"), verification_state="VERIFIED", resolved=True,
+            resolution_evidence_id="evidence:explicit-resolution",
+        )
+        revised = self._evidence("c", observed_delta=30)
+        result = self.store.observe(
+            revised, verification_state="VERIFIED", materially_new=False,
+        )
+        self.assertEqual(resolved.state, "RESOLVED")
+        self.assertEqual(result.state, "RESOLVED")
+        self.assertEqual(
+            [item["to_state"] for item in self.store.history(initial.event_id)],
+            ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED", "RESOLVED"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

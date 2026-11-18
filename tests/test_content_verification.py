@@ -204,5 +204,25 @@ class ContentVerificationEngineTests(unittest.TestCase):
         self.assertEqual(result.status, "PASS")
 
 
+    def test_successful_content_gate_exposes_verified_evidence_status_for_publication(self):
+        claim = self.registry.claims[0]
+        result = self.engine.validate(
+            f"[[CLAIM:{claim.claim_id}]]{claim.text}. #ABC #Write2Earn",
+            registry=self.registry, symbol="ABC", asset_id=self.asset_id,
+            numeric_validator=lambda _: True,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.evidence_status, "VERIFIED")
+
+    def test_rejected_content_gate_never_exposes_verified_evidence_status(self):
+        result = self.engine.validate(
+            "$ABC market price is 1.25 USD. #ABC #Write2Earn",
+            registry=self.registry, symbol="ABC", asset_id=self.asset_id,
+            numeric_validator=lambda _: True,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertEqual(result.evidence_status, "UNVERIFIED")
+
+
 if __name__ == "__main__":
     unittest.main()
