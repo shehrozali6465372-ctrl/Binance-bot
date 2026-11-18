@@ -358,6 +358,19 @@ class EvidenceVerificationEngine:
             metric_pattern = metric_patterns.get(claim.claim_key)
             if metric_pattern is None or not re.search(metric_pattern, claim.text, re.IGNORECASE):
                 return "METRIC"
+            if re.search(
+                r"\b(?:not|never|no\s+longer|isn't|wasn't|aren't|weren't|doesn't|"
+                r"didn't|don't|cannot|can't|won't|wouldn't|hasn't|haven't|hadn't)\b",
+                claim.text, re.IGNORECASE,
+            ):
+                return "NEGATED"
+            if re.search(
+                r"\b(?:may|might|could|would|possibly|perhaps|potentially|likely|"
+                r"unlikely|expected\s+to|projected\s+to|forecast\s+to|reportedly|"
+                r"allegedly|apparently|seems\s+to|appears\s+to)\b",
+                claim.text, re.IGNORECASE,
+            ):
+                return "MODAL_OR_UNCERTAIN"
 
             text = re.sub(
                 r"\b\d{4}-\d{2}-\d{2}(?:[T ][0-9:.+-]+Z?)?\b",
@@ -385,11 +398,52 @@ class EvidenceVerificationEngine:
                 return "VALUE_NOT_NUMERIC"
 
             expected_unit = (claim.unit or "").strip().casefold()
+            direction = None
+            if claim.claim_key in {"market.price_change", "market.change_24h"}:
+                positive_direction = re.search(
+                    r"\b(?:up|rise|rises|rose|rising|increase|increases|increased|increasing|"
+                    r"gain|gains|gained|gaining|higher|grew|growth|positive|surge|surged|"
+                    r"surging|climb|climbed|rally|rallied|advance|advanced)\b",
+                    claim.text, re.IGNORECASE,
+                )
+                negative_direction = re.search(
+                    r"\b(?:down|fall|falls|fell|falling|decrease|decreases|decreased|"
+                    r"decreasing|loss|lost|lower|drop|drops|dropped|dropping|decline|"
+                    r"declines|declined|declining|negative|sink|sinks|sank|slip|slips|"
+                    r"slipped|slide|slides|slid|dipped|dip|weakened|weakening)\b",
+                    claim.text, re.IGNORECASE,
+                )
+                neutral_direction = re.search(
+                    r"\b(?:flat|unchanged|no\s+change|remained\s+stable|stayed\s+stable)\b",
+                    claim.text, re.IGNORECASE,
+                )
+                if neutral_direction and (positive_direction or negative_direction):
+                    return "DIRECTION_AMBIGUOUS"
+                if positive_direction:
+                    direction = 1
+                elif negative_direction:
+                    direction = -1
+                elif neutral_direction:
+                    direction = 0
+                if direction == 0 and expected != 0:
+                    return "DIRECTION"
+                if direction in {-1, 1} and (
+                    expected == 0 or (1 if expected > 0 else -1) != direction
+                ):
+                    return "DIRECTION"
+
             for match in matches:
+                raw_number = match.group("number").replace(",", "")
                 try:
-                    actual = Decimal(match.group("number").replace(",", ""))
+                    actual = Decimal(raw_number)
                 except InvalidOperation:
                     return "VALUE_NOT_NUMERIC"
+                if direction is not None:
+                    explicit_sign = raw_number.startswith(("+", "-"))
+                    if explicit_sign and (1 if actual > 0 else -1 if actual < 0 else 0) != direction:
+                        return "DIRECTION"
+                    if not explicit_sign and direction in {-1, 1}:
+                        actual = abs(actual) * direction
                 if actual != expected_display:
                     return "VALUE"
                 explicit_unit = "percent" if match.group("percent") else ""

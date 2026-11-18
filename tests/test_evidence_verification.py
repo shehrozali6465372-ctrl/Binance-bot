@@ -1038,5 +1038,62 @@ class EvidenceVerificationTests(unittest.TestCase):
                 ))
 
 
+    def test_market_change_direction_must_match_signed_evidence(self):
+        cases = (
+            (5.0, "ABC 24h change is down 5%", "UNVERIFIED"),
+            (-5.0, "ABC 24h change is down 5%", "VERIFIED"),
+            (-5.0, "ABC 24h change is up 5%", "UNVERIFIED"),
+            (5.0, "ABC 24h change is +5% down", "UNVERIFIED"),
+            (5.0, "ABC 24h change is up 5%", "VERIFIED"),
+            (0.0, "ABC 24h change is flat at 0%", "VERIFIED"),
+            (5.0, "ABC 24h change is unchanged at 5%", "UNVERIFIED"),
+            (0.0, "ABC 24h change is up 0%", "UNVERIFIED"),
+        )
+        for value, text, expected_state in cases:
+            with self.subTest(value=value, text=text):
+                evidence = record(
+                    value=value, claim_key="market.change_24h",
+                    unit="percent", timeframe="24h",
+                )
+                candidate = Claim(
+                    text=text, subject=evidence.subject, asset_id=evidence.asset_id,
+                    claim_key="market.change_24h", value=value, unit="percent",
+                    timeframe="24h", observed_at=iso(),
+                    evidence_ids=(evidence.evidence_id,), max_age_seconds=3600,
+                )
+                result = self.engine.verify([candidate], [evidence]).results[0]
+                self.assertEqual(result.state, expected_state)
+                if expected_state == "UNVERIFIED":
+                    self.assertTrue(any(
+                        issue.startswith("CLAIM_TEXT_STRUCTURED_VALUE_MISMATCH")
+                        for issue in result.issues
+                    ))
+
+    def test_negated_or_modal_market_claim_cannot_verify_as_fact(self):
+        cases = (
+            ("ABC price is not 100 USD", "market.price", 100.0, "USD", "spot"),
+            ("ABC price may be 100 USD", "market.price", 100.0, "USD", "spot"),
+            ("ABC 24h change could rise 5%", "market.change_24h", 5.0, "percent", "24h"),
+            ("ABC 24h change is not down 5%", "market.change_24h", -5.0, "percent", "24h"),
+        )
+        for text, claim_key, value, unit, timeframe in cases:
+            with self.subTest(text=text):
+                evidence = record(
+                    value=value, claim_key=claim_key, unit=unit, timeframe=timeframe,
+                )
+                candidate = Claim(
+                    text=text, subject=evidence.subject, asset_id=evidence.asset_id,
+                    claim_key=claim_key, value=value, unit=unit, timeframe=timeframe,
+                    observed_at=iso(), evidence_ids=(evidence.evidence_id,),
+                    max_age_seconds=3600,
+                )
+                result = self.engine.verify([candidate], [evidence]).results[0]
+                self.assertEqual(result.state, "UNVERIFIED")
+                self.assertTrue(any(
+                    issue.startswith("CLAIM_TEXT_STRUCTURED_VALUE_MISMATCH")
+                    for issue in result.issues
+                ))
+
+
 if __name__ == "__main__":
     unittest.main()

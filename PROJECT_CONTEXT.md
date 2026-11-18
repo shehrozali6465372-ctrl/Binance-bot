@@ -2893,3 +2893,14 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Research packages now reject any claim or evidence record whose subject explicitly uses a different canonical `coingecko:` identity, regardless of whether the optional `asset_id` field claims the selected asset. Unbound non-canonical event subjects remain eligible only through a selected-asset claim's evidence links.
 - Regression RED run `44224711294`; GREEN run `44224786514` on `018eb43369bcb3b3c95560ce7f0935fee2c0a7de`: **SUCCESS**, compile passed, **696 tests, 0 failures, 41 skipped**.
 - PostgreSQL integration tests remain skipped; no live provider or publishing calls.
+
+
+## 2026-11-18 — Local Module 11 coding continuation (PR #14)
+
+- Reconnected to the existing GitHub repository and fetched PR #14 head `b399a6feaa03bceb6ce5dda48e84d4b35889e25f` from `layer-1/module9-onchain-continuation`.
+- The original `/root/Binance-bot` checkout was on `feature/binance-cms-announcement-worker` with three pre-existing modified announcement-worker files. Those changes were preserved. A separate worktree was created at `/tmp/binance-w2e-continuation` from the exact PR #14 head, with local branch `work/module9-continuation-local`.
+- TDD found a Module 11 false-positive: a positive market-change value paired with “down 5%” could be marked VERIFIED. Additional false positives allowed negated and modal/uncertain market assertions to pass.
+- Added fail-closed directional consistency for `market.price_change` / `market.change_24h`, plus negation and modal/uncertainty rejection. Explicit numeric signs must agree with directional wording; unsigned values can use an unambiguous direction word; neutral wording is valid only for zero movement.
+- Regression tests first failed against the previous implementation, then passed after the fix. Final isolated-worktree validation: Python `compileall` passed; full `unittest discover` suite **698 tests, 0 failures, 41 skipped**; `git diff --check` passed. The 41 skips are PostgreSQL integration tests requiring `TEST_POSTGRES_DSN`, not successful database tests.
+- Module 11 remains PARTIAL: broad semantic entailment, all natural-language paraphrases, and ambiguous shared-subject/elliptical claim forms are not solved by this bounded deterministic fix. Module 14 remains fail-closed until an owner-approved scoring policy and calibrated factor definitions are supplied.
+- All changes remain local and uncommitted/unpushed. No changes were made to the original dirty checkout. No database/production write, provider inference, paid Cloudflare generation, Binance upload/post, publisher activation, workflow/credential/schedule change, merge or deployment occurred.

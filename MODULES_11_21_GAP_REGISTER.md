@@ -1478,3 +1478,15 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Hardened research package isolation beyond optional asset IDs: if a claim/evidence subject explicitly names a canonical CoinGecko asset different from the selected package asset, it is rejected even when its `asset_id` field is incorrectly set to the selected asset.
 - This closes a malformed claim/evidence pair that could pass the lower-level verifier's exact subject/asset field equality while semantically naming another canonical asset.
 - TDD RED `44224711294`; GREEN `44224786514`: **696 tests, 0 failures, 41 skipped**, compile passed. PostgreSQL integration acceptance remains pending.
+
+
+## 2026-11-18 — Module 11 market-claim polarity and uncertainty guard
+
+- TDD reproduced false-positive verification cases in which structured market evidence for a positive change could be paired with text saying “down”, and market assertions containing negation or modal/uncertain language could still become `VERIFIED`. The new regressions failed before the implementation.
+- `EvidenceVerificationEngine._claim_text_mismatch()` now checks directional language against the signed value for `market.price_change` and `market.change_24h`. Unsigned magnitudes inherit a clear direction word; explicit signs that contradict the word fail closed. Conflicting positive/negative language is rejected. Neutral language such as “flat” or “unchanged” is accepted only for a zero value.
+- Market claim text containing negation (for example, “not 100 USD”) or modal/uncertain language (for example, “may be 100 USD”, “could rise”) is no longer accepted as a confirmed market fact. It returns a structured text mismatch and remains unverified.
+- RED was observed for both regression groups; GREEN focused verification passed. Final local validation on the isolated worktree: `compileall` passed; full suite **698 tests, 0 failures, 41 skipped**; `git diff --check` passed. The 41 skips are PostgreSQL integration tests guarded by missing `TEST_POSTGRES_DSN`; they are not accepted as passes.
+- Scope is deliberately bounded deterministic text/value consistency. It does not implement general semantic entailment, all natural-language paraphrases, ambiguous elliptical claim splitting or full semantic attribution. Module 11 remains **PARTIAL**; no LLM confidence is treated as evidence.
+- Module 14 remains fail-closed pending an owner-approved, evidence-backed opportunity scoring policy and calibrated factor definitions. No policy weights or thresholds were invented.
+- Work was performed in a new isolated worktree from PR #14 head `b399a6feaa03bceb6ce5dda48e84d4b35889e25f`; existing `/root/Binance-bot` checkout and its three pre-existing announcement-worker modifications were left untouched. Changes are local and uncommitted/unpushed.
+- No PostgreSQL test DSN was loaded, no database was written, no live DeepSeek/Cloudflare request was made, no Binance media upload/post occurred, and no publisher, production workflow, credential, deployment, merge or schedule was changed.
