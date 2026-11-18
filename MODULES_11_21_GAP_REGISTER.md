@@ -1542,3 +1542,11 @@ This checklist does not authorize the work to be marked done merely by checking 
 - TDD regression failed against the old implementation because it called `git remote set-url`; after the fix, both focused security tests pass, including missing-token no-op behavior.
 - Full local repository suite after the fix: **704 tests, 0 failures, 41 skipped**. `compileall` and `git diff --check` passed. The 41 skips remain PostgreSQL integration tests gated by missing `TEST_POSTGRES_DSN`, not passes.
 - Code commit `626ec8fe69cbc824dc12271d0bb1fa4b210219d2` was pushed to the existing PR #14 branch and its exact remote SHA was verified. No deployment, merge, production DB operation, publisher activation or live Binance post occurred.
+
+
+## 2026-11-18 — Lowercase possessive asset clause segmentation
+
+- TDD reproduced that `bitcoin's price rose 8% and ethereum's price fell 4%.` remained a single compound claim. The bounded subject grammar had required uppercase initial characters for possessive asset names.
+- Added a constrained lowercase possessive subject alternative only when followed by explicit market descriptors (`price`, `volume`, `market cap`). Added coverage for two distinct lowercase asset subjects and a lowercase shared-subject continuation.
+- Focused Module 11 evidence-verification suite: **68 tests, 0 failures**. Full repository suite: **705 tests, 0 failures, 41 skipped**; `compileall` and `git diff --check` passed. The 41 PostgreSQL integration skips remain unexecuted without `TEST_POSTGRES_DSN`.
+- Code commit `08ecde578f58abcabdaae676838410e5d46ce4ad` was pushed to the existing PR #14 branch and the exact remote SHA was verified. Module 11 remains PARTIAL; no semantic-entailment claim is made.
