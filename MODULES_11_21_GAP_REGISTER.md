@@ -1985,3 +1985,30 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Production database architecture/cutover review and explicit owner approval; SQLite remains runtime default.
 - Real provider, OCR/vision, authenticated media upload and Binance publishing acceptance.
 - Project remains **PARTIAL / NOT PRODUCTION-READY**. No production DB writes, real post, merge or deployment.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-20 (TLS test prerequisite re-verification)
+
+## B-PG-01 — BLOCKED
+- Read-only active environment check: `TEST_POSTGRES_DSN` absent; neither `psycopg` nor `psycopg2` is available.
+- The previously inspected DSN is not eligible for reuse because its live PostgreSQL session reported `pg_stat_ssl.ssl = false`.
+- No database connection or write was attempted; no package or database server was installed/launched.
+- Existing fixture checks the disposable database name, exact allowlisted host and requested TLS mode before migrations. Add/perform a live preflight that verifies `pg_stat_ssl.ssl = true`, `pg_backend_pid()`, and the actual connected database before allowing migrations or test writes.
+- Required prerequisite: owner-authorized disposable PostgreSQL endpoint, exact host allowlist, TLS certificate/hostname validation, dedicated test credentials and sufficient test-schema permissions.
+
+## B-PG-02 — NOT VERIFIED: full scheduled workflow acceptance
+- Required harness: real PostgreSQL adapters and transaction boundaries; deterministic mocked discovery/research/content/image providers; local in-process publisher transport fake with network disabled.
+- Cover run lease, discovery, evidence persistence, quota reservation, authorization, mocked publication-attempt ledger, reconciliation, final state, failure cleanup, duplicate-run protection and concurrent quota/lease contention.
+- Verify durable records from a fresh connection/process and prove zero external provider/Binance network calls. No real media upload or post.
+- Current one-shot scheduler tests cover orchestration/lease lifecycle with fake downstream pipeline dependencies; they do not satisfy this full-path gate.
+
+## main_loop() investigation — no defect established
+- The caught posted-symbol history value is passed to `_run_once_impl()`, whose current body does not consume that argument. No change is justified by this path alone.
+- Separate post-history and DB cooldown reads inside `_run_once_impl()` retain their own exception handling and may merit a separate targeted audit. Do not treat that as a confirmed defect without tracing enforcement and writing a failing test first.
+
+## Remaining operational acceptance
+- B-PG-03/B-PG-04: backend kill, server restart, HA/DNS failover and reconnect remain NOT VERIFIED; require an authorized controllable database topology and suitable privileges.
+- B-PG-05: production DB architecture review and owner approval remain PENDING.
+- B-CF-01, B-VIS-01, B-SCORE-01, B-CONTENT-01, B-POLICY-01 and B-PUBLISH-01 remain open.
+- SQLite remains runtime default. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+- No production resources, publisher/gateway, external providers, real Binance publication, merge or deployment were touched.

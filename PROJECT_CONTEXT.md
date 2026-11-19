@@ -3563,3 +3563,45 @@ This checkpoint supersedes the previous scheduled-entrypoint next-step statement
 
 ## Exact next step
 Review the two-file diff, run compile/diff/credential scans, commit application/tests and both canonical docs, non-force push to existing PR #14, then verify exact remote SHA, PR state and hosted CI on that SHA. Do not use production DB or publish.
+
+
+# CURRENT AUTHORITATIVE CONTINUATION UPDATE — 2026-11-20 (TLS test prerequisite re-verification)
+
+## Read-only state verification
+- Worktree: `/tmp/binance-w2e-continuation`; local branch: `work/module9-continuation-local`; working tree was clean before this documentation update.
+- Starting HEAD: `4ed29a138c92781efd71b49926437d6f3e648552`.
+- Remote `layer-1/module9-onchain-continuation` SHA matched the local HEAD exactly. The local branch has no configured upstream; no branch configuration was changed.
+- PR #14 remains OPEN / DRAFT / UNMERGED; head `layer-1/module9-onchain-continuation`, base `layer-1/module9-onchain-intelligence`, head SHA `4ed29a138c92781efd71b49926437d6f3e648552`.
+- Latest inspected CI run: `44628692385`, `mocked-safety-tests`, SUCCESS for the exact HEAD SHA. This job compiles Python and runs mocked publication safety tests; it is not PostgreSQL integration acceptance.
+- No newer run appeared in the eight most recent workflow records inspected.
+
+## PostgreSQL test prerequisite — currently unavailable
+- Active process environment check: `TEST_POSTGRES_DSN` ABSENT; `psycopg` and `psycopg2` are not installed in the active Python environment.
+- The older DSN remains disallowed: historical live-session evidence reported `pg_stat_ssl.ssl = false`, despite its connection string requesting TLS. It was not reused.
+- No endpoint authorization, credential retrieval, database connection, database write, dependency installation, local database launch, or production access occurred.
+- B-PG-01 remains BLOCKED. No PostgreSQL integration test was run in this continuation.
+
+## Existing integration fixture review
+- `tests/test_publication_postgres.py` requires database `binance_onchain_test`, exact `TEST_POSTGRES_ALLOWED_HOST` match and a DSN TLS mode of require/verify-ca/verify-full before applying migrations.
+- The fixture's static DSN checks alone do not establish that the negotiated session actually uses TLS. Before any integration writes, the harness must connect read-only and verify `pg_stat_ssl.ssl = true` for `pg_backend_pid()`, then verify the connected database identity and exact authorized host. Do not print the DSN or connection metadata containing secrets.
+- The active environment lacks the DSN and driver, so this live preflight could not be performed.
+
+## main_loop() code-level assessment
+- `main_loop()` catches `get_posted_symbols(hours=48)` errors and substitutes an empty set.
+- The value is passed into `_run_once_impl()`, but the current implementation does not read its `posted_symbols` parameter. The fallback therefore is not demonstrated to weaken duplicate/cooldown enforcement in the current code path.
+- `_run_once_impl()` separately loads post-history and queries `get_posted_hours_dict(hours=72)`; those reads have their own exception handling. This is a distinct audit target, not proof that the reported `main_loop()` fallback is a defect.
+- No change was made. A narrow failing test is required before any future behavior change.
+
+## Safe full-path acceptance harness design
+- Use only a separately authorized, disposable TLS-enabled PostgreSQL database with exact host allowlisting, verified live TLS, dedicated test credentials and cleanup scope limited to unique synthetic run/asset/attempt IDs.
+- Use the real PostgreSQL adapters, migrations, transaction boundaries, run lease, evidence persistence, quota reservation, authorization persistence, publication-attempt ledger and reconciliation logic.
+- Replace discovery, market/announcement/research/content/image providers with deterministic fakes. Replace the Binance transport with a local in-process fake that records the attempted request and cannot open a network connection. Assert publisher dry-run/disabled safety and zero external network calls; never submit a real post or media upload.
+- Exercise: run/lease acquisition; discovery; evidence persistence; daily quota reservation; authorization; mocked publication attempt; reconciliation; final durable state; injected failure and resource cleanup; duplicate-run and concurrent quota/lease contention.
+- Acceptance evidence must include exact test command/output, connected database identity, live TLS boolean, test run IDs, durable state observed from a fresh connection/process, cleanup verification and explicit proof that no provider/Binance network request occurred.
+- Follow-on backend termination/restart and HA/DNS failover tests require a separately authorized controllable PostgreSQL instance/topology and privileges. The prior managed test role's denied backend termination is not failover evidence.
+
+## Status and boundaries
+- B-PG-01 remains BLOCKED; B-PG-02 through B-PG-05 remain open/not accepted. Provider, visual, scoring, content/policy, media-upload and real-publishing gates remain open.
+- SQLite remains runtime default. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+- No production DB/configuration, publisher, publishing gateway, earning workflow, provider, Binance post, Pinterest Pin, merge or deployment was touched.
+- Next action: obtain owner authorization and a disposable TLS-enabled endpoint; then perform the live TLS/database identity preflight before any test migration or write. If unavailable, do not attempt DB integration tests.
