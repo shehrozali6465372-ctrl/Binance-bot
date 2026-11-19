@@ -258,6 +258,35 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
                 )
         self.store.close()
 
+    def test_closed_connection_fails_closed_and_new_store_recovers_durable_quota(self):
+        """A closed DB session cannot be reused; a new store sees committed quota."""
+        from datetime import datetime, timezone
+        import psycopg
+        from layer1.publication_postgres import PostgresPublicationStore
+
+        timestamp = datetime(2098, 6, 15, 12, 0, tzinfo=timezone.utc)
+        reservation_id = self.store.reserve_daily_quota(
+            symbol="RECOVERY", daily_limit=5, now=timestamp.isoformat(),
+        )
+        self.assertIsNotNone(reservation_id)
+        self.reservation_ids.append(reservation_id)
+
+        # Model a lost client connection deterministically. The managed test DB
+        # rejected pg_terminate_backend for this session, so this does not claim
+        # a server-side failover or backend-kill drill.
+        self.store.conn.close()
+        with self.assertRaises(psycopg.OperationalError):
+            self.store.conn.execute("SELECT 1")
+
+        self.store = PostgresPublicationStore(_TEST_PUBLICATION_DSN)
+        recovered = self.store.conn.execute(
+            "SELECT status, symbol FROM publication_quota_reservations WHERE reservation_id=%s",
+            (reservation_id,),
+        ).fetchone()
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered["status"], "RESERVED")
+        self.assertEqual(recovered["symbol"], "RECOVERY")
+
     def test_daily_quota_does_not_hide_unmirrored_reservations_behind_legacy_analytics(self):
         from datetime import datetime, timezone
 

@@ -3396,7 +3396,7 @@ Added five fresh-process persistence tests, test-only:
 - `tests/test_onchain_postgres.py::test_verified_onchain_observation_survives_fresh_process_reopen`
 Each writes synthetic test data to the disposable `binance_onchain_test` DB, closes the original DB connection and verifies persistence from a separately spawned Python process. Child processes verify the expected test database, allowed database host and TLS policy without printing connection secrets.
 - Combined adapter test batch: **24 passed, 0 failed, 0 skipped**. All five newly added tests also passed individually.
-- Full repository suite on 2026-11-20: **755 tests run, 0 failures, 0 errors, 53 skipped**, 38.539 seconds; process exit code 0. This count includes the five added tests. The skips are recorded as skips, not passes; this execution is not equivalent to the previous 750-test, zero-skip run because the test inventory changed and skip count differs. Reconcile the 53 skip reasons before claiming full PostgreSQL acceptance across every integration case.
+- Initial full-suite execution on 2026-11-20: 755 tests, 53 skipped; superseded by the later final run recorded below (**755 tests, 0 skipped**).
 - `python -m compileall -q .`: PASS.
 - `git diff --check`: PASS.
 - Changed-diff credential-pattern scan: PASS (no matches).
@@ -3458,5 +3458,36 @@ Each writes synthetic records to the disposable `binance_onchain_test` DB, close
 
 ## Exact next step
 Final-review the six-file diff, rerun compile/diff/secret scans, commit only the four tests plus the two docs, push non-force to the existing PR #14 branch, and verify remote SHA, PR state and hosted CI on the exact pushed SHA. Preserve all other worktrees and do not touch production.
+
+---
+
+# CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-20 (PostgreSQL client-connection recovery)
+
+This checkpoint supersedes the previous 2026-11-20 test count and next-step statement. Earlier records remain historical.
+
+## Verified Git state before this change
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Active worktree: `/tmp/binance-w2e-continuation`; local branch: `work/module9-continuation-local`.
+- Baseline HEAD and remote PR #14 branch SHA: `9809bb7a059ee10853ac7837ef77ebddce8cfd78`.
+- PR #14 remained OPEN / DRAFT / UNMERGED; no duplicate PR, merge, deployment or `main` change.
+- The older `/tmp/binance-deepseek-verify` worktree remains untouched; its mode-0600 `.env` was parsed in-process only for the disposable test DB settings.
+
+## PostgreSQL client-connection recovery test — 2026-11-20
+- Added `tests/test_publication_postgres.py::PublicationPostgresIntegrationTests::test_closed_connection_fails_closed_and_new_store_recovers_durable_quota`.
+- Test creates a quota reservation in the isolated `binance_onchain_test` DB, closes the client connection, verifies the old connection raises `psycopg.OperationalError`, constructs a new `PostgresPublicationStore`, and verifies the committed reservation remains `RESERVED` with the expected symbol.
+- Focused test: **1 passed**. The test uses a unique synthetic symbol/date and the existing fixture teardown for cleanup.
+- A stronger `pg_terminate_backend` attempt returned `false` for the managed test DB session. The test role therefore did not permit the requested backend termination. This run does **not** prove server-side failover, backend crash recovery, TCP partition recovery, or transparent reconnect of an existing store object.
+- No production logic was changed. The adapter retains one psycopg connection; after client connection closure the old connection fails, and recovery in this test requires constructing a new store.
+
+## Full verification after the new test
+- Full repository suite: **756 tests, 0 failures, 0 errors, 0 skipped**, 425.211 seconds; process exit code 0.
+- `python -m compileall -q .`, `git diff --check`, and changed-diff secret-pattern scan are required again before commit/push.
+- Publisher output explicitly logged dry-run with no network POST attempted. No real Binance post, Pinterest Pin, live media upload or provider call occurred.
+
+## Remaining gap / exact next step
+- True PostgreSQL HA failover and backend-kill drills remain open because the managed test role could not terminate the backend. These require a separately authorized test environment with a controllable PostgreSQL instance/HA topology, not production.
+- Also outstanding: full scheduled discovery-to-publication recovery acceptance; production DB architecture/cutover review and owner approval; live provider/media/publishing acceptance under separate authorization.
+- SQLite remains runtime default. Project remains **PARTIAL / NOT PRODUCTION-READY**.
+- Review the final diff, run compile/diff/secret checks, commit only intended tests/docs, non-force push to existing PR #14, and verify remote SHA, PR state and hosted CI. Do not merge/deploy or touch production.
 
 ---

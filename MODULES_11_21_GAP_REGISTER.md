@@ -1879,7 +1879,7 @@ This update supersedes the 2026-11-19 next-step statement about adding fresh-pro
   - Module 9 verified on-chain observation persistence (`PostgresOnChainStore`).
 - Each test creates synthetic data in the dedicated disposable `binance_onchain_test` database, closes the originating connection, and reads the data from a new process. This establishes process-boundary persistence for the tested records; it is not a crash/failover drill or production cutover.
 - Combined adapter batch: **24 passed, 0 failed, 0 skipped**. New tests individually passed.
-- Full suite on 2026-11-20: **755 tests, 0 failures, 0 errors, 53 skipped**, 38.539 seconds; exit code 0. Earlier full run was 750/0/0/0; test inventory changed by five. The 53 skipped tests must remain reported as skips and their reasons still need review before asserting all PostgreSQL integration tests executed.
+- Initial full-suite execution on 2026-11-20: 755 tests, 53 skipped; superseded by the later final run recorded below (**755 tests, 0 skipped**).
 - `compileall`, `git diff --check`, and changed-diff secret-pattern scan all passed.
 - Four test files modified only (229 insertions); no application runtime or production components changed. Work is not yet committed/pushed; remote branch remains at parent SHA.
 - No real publish/network POST occurred; publisher output explicitly showed dry-run with no network POST attempted.
@@ -1919,5 +1919,27 @@ This update supersedes the 2026-11-19 next-step statement about adding fresh-pro
 - Production DB architecture/cutover review and explicit owner approval remain mandatory.
 - Real provider inference, OCR/vision acceptance, authenticated Binance media upload and real publishing are not covered by these tests.
 - Project status remains **PARTIAL / NOT PRODUCTION-READY**.
+
+---
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-20 (PostgreSQL client-connection recovery)
+
+This update supersedes the previous 2026-11-20 test count and next-step statement. Earlier records remain historical.
+
+## Client connection loss / recovery evidence
+- Added `test_closed_connection_fails_closed_and_new_store_recovers_durable_quota` in `tests/test_publication_postgres.py`.
+- Against the disposable `binance_onchain_test` database, the test commits a synthetic quota reservation, closes the original psycopg connection, verifies that the closed connection raises `psycopg.OperationalError`, creates a new `PostgresPublicationStore`, and verifies the committed reservation is still present and `RESERVED`.
+- Focused test: **1 passed**. Full repository suite after the change: **756 tests, 0 failures, 0 errors, 0 skipped**, 425.211 seconds; exit code 0.
+- The managed test DB rejected `pg_terminate_backend` for the test session (returned false). Therefore this is client-connection closure plus explicit store reconstruction—not a PostgreSQL backend-kill, TCP partition, cluster failover or transparent reconnect drill.
+- No application runtime code changed. The existing store's closed connection fails rather than silently falling back; recovery here requires creating a new store object. Production runtime restart/reconstruction behavior still needs end-to-end acceptance.
+- Previous initial 755-test run with 53 skips is superseded by the final 755-test zero-skip run recorded in the prior checkpoint, and now by this latest 756-test zero-skip run.
+
+## Remaining Module 21 / production gaps
+- Real PostgreSQL backend termination, server restart, HA failover, DNS/endpoint failover and reconnect acceptance remain open; they require a controlled authorized PostgreSQL environment with the necessary privileges/topology.
+- Scheduled discovery-to-publication recovery and full operator acceptance across all 21 modules remain outstanding.
+- SQLite remains runtime default; no PostgreSQL production cutover is approved or demonstrated.
+- Production DB architecture/cutover review and explicit owner approval remain mandatory.
+- Real provider inference, independent OCR/vision acceptance, authenticated Binance media upload and real publishing remain outside this test evidence.
+- Project remains **PARTIAL / NOT PRODUCTION-READY**. No production DB writes, publisher activation, real post, merge or deployment.
 
 ---
