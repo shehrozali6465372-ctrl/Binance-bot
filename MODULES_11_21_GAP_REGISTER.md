@@ -1952,7 +1952,8 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Moved the history read into the protected lifecycle and added `test_one_shot_bootstrap_closes_postgres_resources_when_history_read_fails`, proving both resources close and the cycle does not enter `run_once`.
 - Focused regression: **1 passed**; scheduled persistence safety suite: **10 passed**; existing `run_once` lease/failure suite: **11 passed**.
 - Full repository suite: **757 tests, 0 failures, 0 errors, 54 skipped**, exit code 0. The current runtime had no `TEST_POSTGRES_DSN` and no `psycopg`; PostgreSQL-gated tests were skipped. This does not prove PostgreSQL runtime acceptance.
-- Commit: `87e43863016dca951c7b747c70f6ebd783e7c7fe` (local, pending docs commit/push/CI). Compileall, diff check and changed-diff credential-pattern scan passed.
+- A separate read-only check of the older mode-0600 test `.env` found the expected disposable DB name, host allowlist match and `sslmode=require`, but the live session reported `pg_stat_ssl.ssl=false`. The DSN was not supplied to tests and no DB writes were attempted; PostgreSQL integration remains unverified here.
+- Application/test commit `87e43863016dca951c7b747c70f6ebd783e7c7fe` was pushed to PR #14. Hosted CI run `44624351552` for combined SHA `aa413a483e8643eb420717232251ceb993f889e3` passed; this run predates the latest documentation-only correction, so the final docs SHA still needs hosted CI verification. Compileall, diff check and changed-diff credential-pattern scan passed.
 
 ## Remaining Module 21 / production gaps
 - Actual PostgreSQL backend kill, server restart, HA failover, DNS/endpoint failover and transparent reconnect remain unverified.

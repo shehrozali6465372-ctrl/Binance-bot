@@ -3501,8 +3501,9 @@ This checkpoint supersedes the prior exact-next-step statement. Historical test 
 - Repository: `shehrozali6465372-ctrl/Binance-bot`.
 - Worktree: `/tmp/binance-w2e-continuation`; local branch: `work/module9-continuation-local`.
 - Parent HEAD and PR #14 remote head before this change: `c6c51792ed46278b307ab97e1fcdc9a5edbb9fba`.
-- Application/test commit: `87e43863016dca951c7b747c70f6ebd783e7c7fe` — `fix: close scheduled database resources on history failure`.
-- Existing PR #14 remains OPEN / DRAFT / UNMERGED; head branch `layer-1/module9-onchain-continuation`, base `layer-1/module9-onchain-intelligence`. The application/test commit is local pending documentation, push and hosted CI verification.
+- Application/test commit: `87e43863016dca951c7b747c70f6ebd783e7c7fe` — `fix: close scheduled database resources on history failure`; non-force pushed to the existing PR #14 branch.
+- Hosted CI run `44624351552` for combined SHA `aa413a483e8643eb420717232251ceb993f889e3` completed SUCCESS (`mocked-safety-tests` pass). This CI run preceded the latest documentation-only correction below; verify hosted CI again for the final docs SHA.
+- Existing PR #14 remains OPEN / DRAFT / UNMERGED; head branch `layer-1/module9-onchain-continuation`, base `layer-1/module9-onchain-intelligence`.
 
 ## Scheduled one-shot bootstrap cleanup
 - Found that `main.main()` read the 48-hour posted-symbol history before entering its `try/finally`. A database error at that point bypassed explicit cleanup of both `publisher.db` and the shared PostgreSQL store.
@@ -3510,6 +3511,7 @@ This checkpoint supersedes the prior exact-next-step statement. Historical test 
 - Added `tests/test_scheduled_persistence_safety.py::test_one_shot_bootstrap_closes_postgres_resources_when_history_read_fails`. It injects a deterministic history-read failure, verifies both close methods execute, and verifies `run_once` is not entered.
 - Focused new regression: **1 passed**. Scheduled persistence safety suite: **10 passed**. Existing `run_once` lease/failure tests: **11 passed**.
 - Full repository suite after the code change: **757 tests, 0 failures, 0 errors, 54 skipped**, 37.15 seconds; exit code 0. In this execution `TEST_POSTGRES_DSN` was not configured and `psycopg` was unavailable, so PostgreSQL-gated integration tests were skipped. This run is not PostgreSQL acceptance and does not supersede the earlier isolated PostgreSQL test evidence.
+- A separate read-only check of the older mode-0600 test `.env` confirmed its DSN database name and host allowlist matched the disposable test DB, and its DSN specified `sslmode=require`; however, the live session's `pg_stat_ssl` reported TLS inactive. That DSN was therefore not supplied to tests and no database writes were attempted. The PostgreSQL integration suite remains unverified in this environment.
 - `python -m compileall -q .`: PASS. `git diff --check`: PASS. Changed-diff credential-pattern scan: PASS.
 - Pillow was installed only into `/tmp/binance-w2e-test-deps` to make the local Python import/test path runnable; no repository dependency manifest or system Python package set was changed.
 
