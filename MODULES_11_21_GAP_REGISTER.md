@@ -349,7 +349,7 @@ No LLM or scheduler can create its own authorization. Authorization is determini
 **Critical scenario:** Binance may accept a post while the network response is lost. A timeout is not proof of failure.
 
 States include at minimum:
-`CREATED → AUTHORIZED → SUBMITTING → CONFIRMED`  
+`CREATED → AUTHORIZED → SUBMITTING → CONFIRMED`
 with alternative terminal/recovery states `REJECTED`, `FAILED_CONFIRMED`, and `UNKNOWN_NEEDS_RECONCILIATION`.
 
 Required logic:
@@ -1865,3 +1865,59 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Fresh-process persistence coverage inventory: PostgreSQL event lifecycle has a fresh-process reopen test; Module 21 publication/run lease, unknown attempt/quota, and research/editorial/draft/validation/image/opportunity/authorization paths have fresh-process coverage. The inspected tests do not show explicit fresh-process recovery tests for PostgresClaimRegistryStore, PostgresLayer1Store, PostgresLegacyDatabase, or Module 9 PostgresOnChainIngestionStore / PostgresOnChainStore. These are next coverage gaps to assess; same-process round trips and transaction rollback tests are not equivalent to restart recovery.
 - No production database, runtime cutover, provider inference, authenticated upload, real Binance publication, merge or deployment. SQLite remains the runtime default. Module 21 and the overall project remain PARTIAL / NOT PRODUCTION-READY.
 - Final verification: compileall -q . PASS; git diff --check PASS; credential-pattern scan of the complete diff PASS. Test/code commit 4a32320c9d697ece7be5e9c553f81baaa7128de1 and documentation follow-up commit 06bd27ba5d99efba1adbbb030092e444ce61c894 were non-force pushed to the existing PR #14 branch. Latest local and remote SHA match 06bd27ba5d99efba1adbbb030092e444ce61c894; PR #14 remains OPEN / DRAFT / UNMERGED. Hosted CI run 44448416055 for the latest exact SHA completed SUCCESS. Next: design isolated fresh-process adapter tests from actual contracts; do not merge or deploy.
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-20 (PostgreSQL adapter fresh-process coverage)
+
+This update supersedes the 2026-11-19 next-step statement about adding fresh-process coverage to the four adapters below. Historical entries remain for traceability.
+
+## Newly verified adapter persistence coverage
+- Correct worktree: `/tmp/binance-w2e-continuation`; local branch `work/module9-continuation-local`; parent HEAD `3b3cc2d92c059f4e6f4ad110a5ff6a8fd69117e8`, matching the remote PR #14 branch before these local changes.
+- Added five test-only fresh-process reopen checks:
+  - Claim registry snapshot persistence (`PostgresClaimRegistryStore`).
+  - Layer 1 market observation persistence (`PostgresLayer1Store`).
+  - Legacy post-history persistence (`PostgresLegacyDatabase`).
+  - Module 9 ingestion checkpoint + event persistence (`PostgresOnChainIngestionStore`).
+  - Module 9 verified on-chain observation persistence (`PostgresOnChainStore`).
+- Each test creates synthetic data in the dedicated disposable `binance_onchain_test` database, closes the originating connection, and reads the data from a new process. This establishes process-boundary persistence for the tested records; it is not a crash/failover drill or production cutover.
+- Combined adapter batch: **24 passed, 0 failed, 0 skipped**. New tests individually passed.
+- Full suite on 2026-11-20: **755 tests, 0 failures, 0 errors, 53 skipped**, 38.539 seconds; exit code 0. Earlier full run was 750/0/0/0; test inventory changed by five. The 53 skipped tests must remain reported as skips and their reasons still need review before asserting all PostgreSQL integration tests executed.
+- `compileall`, `git diff --check`, and changed-diff secret-pattern scan all passed.
+- Four test files modified only (229 insertions); no application runtime or production components changed. Work is not yet committed/pushed; remote branch remains at parent SHA.
+- No real publish/network POST occurred; publisher output explicitly showed dry-run with no network POST attempted.
+
+## Remaining production/operational gaps
+- PostgreSQL database failover/reconnect drills remain outstanding.
+- Full scheduled discovery-to-publication recovery and operator acceptance across all 21 modules remain outstanding.
+- SQLite remains runtime default; no PostgreSQL production cutover has been approved or demonstrated.
+- Production DB architecture/cutover review and explicit owner approval remain mandatory.
+- Real provider inference, OCR/vision acceptance, authenticated Binance media upload and real publishing are not covered by these tests.
+- Project status remains **PARTIAL / NOT PRODUCTION-READY**.
+
+---
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-20 (PostgreSQL adapter fresh-process coverage)
+
+This update supersedes the 2026-11-19 next-step statement about adding fresh-process coverage to the adapters below. Historical entries remain for traceability.
+
+## Newly verified adapter persistence coverage
+- Correct worktree: `/tmp/binance-w2e-continuation`; local branch `work/module9-continuation-local`; parent HEAD `3b3cc2d92c059f4e6f4ad110a5ff6a8fd69117e8`, matching the remote PR #14 branch before these changes.
+- Added five test-only fresh-process reopen checks:
+  - Claim registry snapshot persistence (`PostgresClaimRegistryStore`).
+  - Layer 1 market observation persistence (`PostgresLayer1Store`).
+  - Legacy post-history persistence (`PostgresLegacyDatabase`).
+  - Module 9 ingestion checkpoint + event persistence (`PostgresOnChainIngestionStore`).
+  - Module 9 verified on-chain observation persistence (`PostgresOnChainStore`).
+- Each test stores synthetic data in the dedicated disposable `binance_onchain_test` database, closes the originating connection, and verifies recovery from a new process. The verified observation test uses unique mapping and observation identifiers and key-scoped cleanup. This is process-boundary persistence evidence, not a database crash/failover drill or production cutover.
+- Combined adapter batch before final cleanup refinement: **24 passed, 0 failed, 0 skipped**. All five new tests passed individually during development; final cleanup-refined verified-observation test rerun: **1 passed**.
+- Final full suite after final code/test change on 2026-11-20: **755 tests, 0 failures, 0 errors, 0 skipped**, 425.521 seconds; process exit code 0. PostgreSQL-gated tests ran with the isolated disposable test DSN.
+- `compileall`, `git diff --check`, and changed-diff secret-pattern scan passed.
+- Changed scope: four test files (229 insertions) and these two project documentation files. No application runtime or production components changed. Changes await commit/push; remote PR branch was still at parent SHA on last verification.
+- No real publication occurred; the suite explicitly logged publisher dry-run with no network POST attempted.
+
+## Remaining production/operational gaps
+- PostgreSQL database failover/reconnect drills remain outstanding.
+- Full scheduled discovery-to-publication recovery and operator acceptance across all 21 modules remain outstanding.
+- SQLite remains runtime default; no PostgreSQL production cutover has been approved or demonstrated.
+- Production DB architecture/cutover review and explicit owner approval remain mandatory.
+- Real provider inference, OCR/vision acceptance, authenticated Binance media upload and real publishing are not covered by these tests.
+- Project status remains **PARTIAL / NOT PRODUCTION-READY**.
+
+---

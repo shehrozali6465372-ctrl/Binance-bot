@@ -3375,3 +3375,88 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Current active worktree: /tmp/binance-w2e-continuation; local branch work/module9-continuation-local; code/test commit 4a32320c9d697ece7be5e9c553f81baaa7128de1 and documentation follow-up commit 06bd27ba5d99efba1adbbb030092e444ce61c894 are pushed to PR #14. Latest local and remote SHA match 06bd27ba5d99efba1adbbb030092e444ce61c894. Hosted CI run 44448416055 completed SUCCESS; PR #14 remains OPEN / DRAFT / UNMERGED.
 - Adapter coverage inventory: fresh-process recovery exists for PostgreSQL event lifecycle and the Module 21 publication/run-lease/research/editorial/draft/validation/image/opportunity/authorization records. Explicit fresh-process recovery coverage was not found in the inspected tests for PostgresClaimRegistryStore, PostgresLayer1Store, PostgresLegacyDatabase, or the Module 9 PostgresOnChainIngestionStore / PostgresOnChainStore; these are candidate next durability tests, not proven defects. Existing same-process round-trip/atomicity tests do not establish process-restart recovery.
 - Final checks after documentation updates: compileall -q . PASS; git diff --check PASS; credential-pattern scan of the complete diff PASS (no credential-shaped values found). No production database/configuration, publisher, gateway, real provider, Binance post, Pinterest Pin, merge or deployment was touched. Project remains PARTIAL — NOT PRODUCTION-READY; SQLite remains the runtime default.
+# CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-20 (PostgreSQL adapter fresh-process coverage)
+
+This section supersedes the 2026-11-19 test count and adapter-recovery next-step statement below. Historical entries remain unchanged for traceability.
+
+## Exact repository and Git state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Active worktree: `/tmp/binance-w2e-continuation`.
+- Local branch: `work/module9-continuation-local`.
+- Parent HEAD for this continuation: `3b3cc2d92c059f4e6f4ad110a5ff6a8fd69117e8`; at verification time GitHub PR #14 head branch `layer-1/module9-onchain-continuation` matched this exact SHA.
+- Existing PR #14 only: base `layer-1/module9-onchain-intelligence`; GitHub API verified OPEN / DRAFT / UNMERGED. No duplicate PR, merge, deployment or main-branch changes.
+- Older `/tmp/binance-deepseek-verify` worktree remains separate and was not edited, reset, stashed or cleaned. Its mode-0600 `.env` was used only as an in-process test environment source; no secret values were displayed or copied.
+
+## New tests — 2026-11-20
+Added five fresh-process persistence tests, test-only:
+- `tests/test_claim_registry_postgres.py::test_claim_registry_adapter_survives_fresh_process_reopen`
+- `tests/test_layer1_postgres.py::test_layer1_market_observation_survives_fresh_process_reopen`
+- `tests/test_legacy_postgres.py::test_legacy_post_history_survives_fresh_process_reopen`
+- `tests/test_onchain_postgres.py::test_ingestion_checkpoint_and_event_survive_fresh_process_reopen`
+- `tests/test_onchain_postgres.py::test_verified_onchain_observation_survives_fresh_process_reopen`
+Each writes synthetic test data to the disposable `binance_onchain_test` DB, closes the original DB connection and verifies persistence from a separately spawned Python process. Child processes verify the expected test database, allowed database host and TLS policy without printing connection secrets.
+- Combined adapter test batch: **24 passed, 0 failed, 0 skipped**. All five newly added tests also passed individually.
+- Full repository suite on 2026-11-20: **755 tests run, 0 failures, 0 errors, 53 skipped**, 38.539 seconds; process exit code 0. This count includes the five added tests. The skips are recorded as skips, not passes; this execution is not equivalent to the previous 750-test, zero-skip run because the test inventory changed and skip count differs. Reconcile the 53 skip reasons before claiming full PostgreSQL acceptance across every integration case.
+- `python -m compileall -q .`: PASS.
+- `git diff --check`: PASS.
+- Changed-diff credential-pattern scan: PASS (no matches).
+- Existing publisher behavior was tested via mocks/dry-run; output explicitly says `[DRY-RUN] ... no network POST attempted`. No real Binance post, Pinterest Pin or external publication occurred.
+
+## Current file state at checkpoint
+- Modified, not yet committed: exactly four test files listed above.
+- Diff: 4 files changed, 229 insertions; no application runtime, publisher, workflow, deployment, production configuration or credentials changed.
+- Local HEAD remains the parent SHA above. Remote PR branch remains that same parent SHA; the five tests are not yet pushed.
+- Documentation updates for this checkpoint are still pending, followed by final diff review, commit, non-force push and hosted CI verification.
+
+## Production readiness boundary / next work
+- SQLite remains the runtime default; these tests do not prove production PostgreSQL cutover or operational failover.
+- Remaining acceptance includes PostgreSQL failover/reconnect drills; scheduled discovery-to-publication recovery acceptance; full operator recovery across all modules; production DB architecture review and explicit owner approval; live provider/media/publishing acceptance under separate authorization.
+- Keep project status **PARTIAL / NOT PRODUCTION-READY**. No production database changes, credential/schedule changes, publisher activation, workflow dispatch, merge or deployment.
+
+## Exact next step
+Review the complete four-file test diff; inspect the 53 skipped test reasons from the latest full run and reconcile them against expected environment-gated tests; update `PROJECT_CONTEXT.md` and `MODULES_11_21_GAP_REGISTER.md` with this checkpoint. Then commit only the four tests plus these two docs, push non-force to the existing PR #14 branch, and verify remote SHA, PR state and hosted CI on the exact pushed SHA. Preserve all other worktrees and do not touch production.
+
+---
+# CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-20 (PostgreSQL adapter fresh-process coverage)
+
+This section supersedes the 2026-11-19 test count and adapter-recovery next-step statement below. Historical entries remain unchanged for traceability.
+
+## Exact repository and Git state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Active worktree: `/tmp/binance-w2e-continuation`.
+- Local branch: `work/module9-continuation-local`.
+- Parent HEAD for this continuation: `3b3cc2d92c059f4e6f4ad110a5ff6a8fd69117e8`; GitHub PR #14 head branch `layer-1/module9-onchain-continuation` matched this exact SHA before the new changes.
+- Existing PR #14 only: base `layer-1/module9-onchain-intelligence`; GitHub API verified OPEN / DRAFT / UNMERGED. No duplicate PR, merge, deployment or main-branch changes.
+- Older `/tmp/binance-deepseek-verify` worktree remains separate and was not edited, reset, stashed or cleaned. Its mode-0600 `.env` was parsed in-process only as the test environment source; no secret values were displayed or copied.
+
+## New tests — 2026-11-20
+Added five fresh-process persistence tests, test-only:
+- `tests/test_claim_registry_postgres.py::test_claim_registry_adapter_survives_fresh_process_reopen`
+- `tests/test_layer1_postgres.py::test_layer1_market_observation_survives_fresh_process_reopen`
+- `tests/test_legacy_postgres.py::test_legacy_post_history_survives_fresh_process_reopen`
+- `tests/test_onchain_postgres.py::test_ingestion_checkpoint_and_event_survive_fresh_process_reopen`
+- `tests/test_onchain_postgres.py::test_verified_onchain_observation_survives_fresh_process_reopen`
+Each writes synthetic records to the disposable `binance_onchain_test` DB, closes the originating connection and verifies persistence from a separate Python process. Child processes assert the test DB name, exact allowed host and TLS mode without printing connection secrets. The verified on-chain observation test uses unique mapping/observation IDs and performs key-scoped cleanup after the child process returns.
+- Combined adapter test batch before the final scoped-cleanup refinement: **24 passed, 0 failed, 0 skipped**. All five tests passed individually during development; after the final cleanup refinement, the verified-observation test was rerun and passed (1/1).
+- Final full repository suite after the final test change: **755 tests, 0 failures, 0 errors, 0 skipped**, 425.521 seconds; process exit code 0. All configured PostgreSQL-gated tests ran in this execution.
+- `python -m compileall -q .`: PASS.
+- `git diff --check`: PASS after Markdown whitespace normalization.
+- Changed-diff credential-pattern scan: PASS (no matches).
+- Publisher test output explicitly reports `[DRY-RUN] Would publish post ...; no network POST attempted`. No real Binance post, Pinterest Pin or external publication occurred.
+
+## Current file state at checkpoint
+- Modified, not yet committed: exactly four test files and the two canonical Markdown files (`PROJECT_CONTEXT.md`, `MODULES_11_21_GAP_REGISTER.md`).
+- Four test files contribute 229 insertions; two documentation files contain this dated checkpoint.
+- No application runtime, publisher, workflow, deployment, production configuration or credentials changed.
+- Local HEAD remains parent SHA `3b3cc2d92c059f4e6f4ad110a5ff6a8fd69117e8`. Remote PR branch remained at that same SHA at last check; new work is not yet pushed.
+- Final docs review, commit, non-force push, and hosted CI verification remain to do.
+
+## Production readiness boundary / next work
+- SQLite remains the runtime default; these adapter tests do not prove production PostgreSQL cutover or operational failover.
+- Outstanding acceptance includes PostgreSQL failover/reconnect drills; scheduled discovery-to-publication recovery acceptance; full operator recovery across all modules; production DB architecture review and explicit owner approval; live provider/media/publishing acceptance under separate authorization.
+- Keep project status **PARTIAL / NOT PRODUCTION-READY**. No production database changes, credential/schedule changes, publisher activation, workflow dispatch, merge or deployment.
+
+## Exact next step
+Final-review the six-file diff, rerun compile/diff/secret scans, commit only the four tests plus the two docs, push non-force to the existing PR #14 branch, and verify remote SHA, PR state and hosted CI on the exact pushed SHA. Preserve all other worktrees and do not touch production.
+
+---

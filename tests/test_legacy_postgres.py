@@ -67,6 +67,53 @@ class PostgresLegacyDatabaseIntegrationTests(unittest.TestCase):
             self.owner.conn.execute("DELETE FROM runs WHERE status=%s", (self.run_status,))
         self.owner.close()
 
+    def test_legacy_post_history_survives_fresh_process_reopen(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        post_id = self.db.save_post({
+            "content": "Fresh-process legacy persistence fixture",
+            "coin_symbol": self.symbol,
+            "remote_post_id": self.remote_id,
+            "test_token": self.suffix,
+        })
+        self.post_id = post_id
+        self.owner.close()
+
+        child_code = "\n".join((
+            "import os, sys",
+            "from psycopg.conninfo import conninfo_to_dict",
+            "from layer1.publication_postgres import PostgresPublicationStore",
+            "from layer1.legacy_postgres import PostgresLegacyDatabase",
+            "dsn = os.environ['TEST_POSTGRES_DSN']",
+            "info = conninfo_to_dict(dsn)",
+            "assert (info.get('dbname') or info.get('database')) == 'binance_onchain_test'",
+            "assert info.get('host') == os.environ['TEST_POSTGRES_ALLOWED_HOST']",
+            "assert info.get('sslmode') in {'require', 'verify-ca', 'verify-full'}",
+            "owner = PostgresPublicationStore(dsn)",
+            "try:",
+            "    db = PostgresLegacyDatabase(owner)",
+            "    matches = [row for row in db.recent_posts(1000) if row['metadata'].get('test_token') == sys.argv[1]]",
+            "    assert len(matches) == 1, 'legacy post missing or duplicated after fresh-process reconnect'",
+            "    assert matches[0]['coin_symbol'] == sys.argv[2]",
+            "    assert db.get_post_count_for_symbol(sys.argv[2]) == 1",
+            "finally:",
+            "    owner.close()",
+        ))
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", child_code, self.suffix, self.symbol],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            from layer1.publication_postgres import PostgresPublicationStore
+            from layer1.legacy_postgres import PostgresLegacyDatabase
+            self.owner = PostgresPublicationStore(_LEGACY_TEST_DSN)
+            self.db = PostgresLegacyDatabase(self.owner)
+
     def test_post_history_metrics_runs_and_performance_analysis_round_trip(self):
         from main import PostgresPerformanceAnalyzer
         post_id = self.db.save_post({

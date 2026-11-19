@@ -43,6 +43,54 @@ class ClaimRegistryPostgresIntegrationTests(unittest.TestCase):
             )
         self.store.close()
 
+    def test_claim_registry_adapter_survives_fresh_process_reopen(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        from layer1.evidence_verification import ClaimRegistry
+        from layer1.publication_runtime import PostgresClaimRegistryStore
+
+        marker = "fresh-process-claim-registry:" + uuid.uuid4().hex
+        registry = ClaimRegistry(
+            claims=(), evidence_records=(), results=(),
+            unresolved_issues=({"issue": marker},),
+        )
+        adapter = PostgresClaimRegistryStore(self.store)
+        verification_id = adapter.save(registry)
+        self.ids.append(verification_id)
+        self.store.close()
+
+        child_code = "\n".join((
+            "import os, sys",
+            "from psycopg.conninfo import conninfo_to_dict",
+            "from layer1.publication_postgres import PostgresPublicationStore",
+            "from layer1.publication_runtime import PostgresClaimRegistryStore",
+            "dsn = os.environ['TEST_POSTGRES_DSN']",
+            "info = conninfo_to_dict(dsn)",
+            "assert (info.get('dbname') or info.get('database')) == 'binance_onchain_test'",
+            "assert info.get('host') == os.environ['TEST_POSTGRES_ALLOWED_HOST']",
+            "assert info.get('sslmode') in {'require', 'verify-ca', 'verify-full'}",
+            "store = PostgresPublicationStore(dsn)",
+            "try:",
+            "    latest = PostgresClaimRegistryStore(store).load_latest()",
+            "    assert latest is not None, 'claim registry snapshot missing after reconnect'",
+            "    assert latest['verification_id'] == sys.argv[1], 'fresh process loaded a different snapshot'",
+            "    assert latest['payload']['unresolved_issues'][0]['issue'] == sys.argv[2]",
+            "finally:",
+            "    store.close()",
+        ))
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", child_code, verification_id, marker],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            from layer1.publication_postgres import PostgresPublicationStore
+            self.store = PostgresPublicationStore(_DSN)
+
     def test_registry_snapshots_are_append_only_idempotent_and_load_latest(self):
         from layer1.evidence_verification import ClaimRegistry, ClaimVerificationResult
 

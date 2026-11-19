@@ -95,6 +95,51 @@ class PostgresLayer1StoreIntegrationTests(unittest.TestCase):
                     )
             self.owner.save_claim_registry = original_save
 
+    def test_layer1_market_observation_survives_fresh_process_reopen(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        from layer1.foundation import MarketObservation, utc_now
+
+        observation = MarketObservation(
+            self.asset_id, "fresh-process-provider", "/fresh-process", utc_now(), price=42.75,
+        )
+        self.layer1.save_market(observation)
+        self.owner.close()
+
+        child_code = "\n".join((
+            "import os, sys",
+            "from psycopg.conninfo import conninfo_to_dict",
+            "from layer1.publication_postgres import PostgresPublicationStore",
+            "from layer1.layer1_postgres import PostgresLayer1Store",
+            "dsn = os.environ['TEST_POSTGRES_DSN']",
+            "info = conninfo_to_dict(dsn)",
+            "assert (info.get('dbname') or info.get('database')) == 'binance_onchain_test'",
+            "assert info.get('host') == os.environ['TEST_POSTGRES_ALLOWED_HOST']",
+            "assert info.get('sslmode') in {'require', 'verify-ca', 'verify-full'}",
+            "owner = PostgresPublicationStore(dsn)",
+            "try:",
+            "    records = PostgresLayer1Store(owner.conn).get_market_history(sys.argv[1], provider='fresh-process-provider')",
+            "    assert len(records) == 1, 'fresh process did not recover exactly one market observation'",
+            "    assert records[0].price == 42.75",
+            "    assert records[0].endpoint == '/fresh-process'",
+            "finally:",
+            "    owner.close()",
+        ))
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", child_code, self.asset_id],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            from layer1.publication_postgres import PostgresPublicationStore
+            from layer1.layer1_postgres import PostgresLayer1Store
+            self.owner = PostgresPublicationStore(_LAYER1_TEST_DSN)
+            self.layer1 = PostgresLayer1Store(self.owner.conn)
+
     def test_postgres_layer1_store_round_trips_source_records_and_writes_atomically(self):
         from layer1.foundation import (
             AnnouncementEvidence, AssetIdentity, AssetIdentityProof, Candidate,
