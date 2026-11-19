@@ -1943,3 +1943,21 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Project remains **PARTIAL / NOT PRODUCTION-READY**. No production DB writes, publisher activation, real post, merge or deployment.
 
 ---
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-20 (scheduled entrypoint cleanup)
+
+## Newly closed code-level lifecycle gap
+- In the one-shot scheduled entrypoint, `main.main()` previously read posted-symbol history before entering `try/finally`. A history DB exception therefore skipped explicit close of the publisher DB and shared PostgreSQL store.
+- Moved the history read into the protected lifecycle and added `test_one_shot_bootstrap_closes_postgres_resources_when_history_read_fails`, proving both resources close and the cycle does not enter `run_once`.
+- Focused regression: **1 passed**; scheduled persistence safety suite: **10 passed**; existing `run_once` lease/failure suite: **11 passed**.
+- Full repository suite: **757 tests, 0 failures, 0 errors, 54 skipped**, exit code 0. The current runtime had no `TEST_POSTGRES_DSN` and no `psycopg`; PostgreSQL-gated tests were skipped. This does not prove PostgreSQL runtime acceptance.
+- Commit: `87e43863016dca951c7b747c70f6ebd783e7c7fe` (local, pending docs commit/push/CI). Compileall, diff check and changed-diff credential-pattern scan passed.
+
+## Remaining Module 21 / production gaps
+- Actual PostgreSQL backend kill, server restart, HA failover, DNS/endpoint failover and transparent reconnect remain unverified.
+- Full scheduled discovery-to-publication recovery across discovery, authorization, quota, publisher and reconciliation remains outstanding; this change covers bootstrap resource cleanup only.
+- SQLite remains runtime default; no production PostgreSQL cutover is approved or demonstrated.
+- Production DB architecture review and explicit owner approval remain mandatory.
+- Live provider inference, independent OCR/vision acceptance, authenticated Binance media upload and real publishing acceptance remain outstanding.
+- Project remains **PARTIAL / NOT PRODUCTION-READY**. No production writes, publisher activation, real post, merge or deployment.

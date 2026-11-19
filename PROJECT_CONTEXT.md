@@ -3491,3 +3491,33 @@ This checkpoint supersedes the previous 2026-11-20 test count and next-step stat
 - Review the final diff, run compile/diff/secret checks, commit only intended tests/docs, non-force push to existing PR #14, and verify remote SHA, PR state and hosted CI. Do not merge/deploy or touch production.
 
 ---
+
+
+# CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-20 (scheduled entrypoint cleanup)
+
+This checkpoint supersedes the prior exact-next-step statement. Historical test counts and limitations remain for traceability.
+
+## Exact Git state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Worktree: `/tmp/binance-w2e-continuation`; local branch: `work/module9-continuation-local`.
+- Parent HEAD and PR #14 remote head before this change: `c6c51792ed46278b307ab97e1fcdc9a5edbb9fba`.
+- Application/test commit: `87e43863016dca951c7b747c70f6ebd783e7c7fe` — `fix: close scheduled database resources on history failure`.
+- Existing PR #14 remains OPEN / DRAFT / UNMERGED; head branch `layer-1/module9-onchain-continuation`, base `layer-1/module9-onchain-intelligence`. The application/test commit is local pending documentation, push and hosted CI verification.
+
+## Scheduled one-shot bootstrap cleanup
+- Found that `main.main()` read the 48-hour posted-symbol history before entering its `try/finally`. A database error at that point bypassed explicit cleanup of both `publisher.db` and the shared PostgreSQL store.
+- Moved the history read inside the protected block. The existing failure handling still exits nonzero and redacts exception details; the `finally` now closes the publisher database and PostgreSQL store on this bootstrap failure.
+- Added `tests/test_scheduled_persistence_safety.py::test_one_shot_bootstrap_closes_postgres_resources_when_history_read_fails`. It injects a deterministic history-read failure, verifies both close methods execute, and verifies `run_once` is not entered.
+- Focused new regression: **1 passed**. Scheduled persistence safety suite: **10 passed**. Existing `run_once` lease/failure tests: **11 passed**.
+- Full repository suite after the code change: **757 tests, 0 failures, 0 errors, 54 skipped**, 37.15 seconds; exit code 0. In this execution `TEST_POSTGRES_DSN` was not configured and `psycopg` was unavailable, so PostgreSQL-gated integration tests were skipped. This run is not PostgreSQL acceptance and does not supersede the earlier isolated PostgreSQL test evidence.
+- `python -m compileall -q .`: PASS. `git diff --check`: PASS. Changed-diff credential-pattern scan: PASS.
+- Pillow was installed only into `/tmp/binance-w2e-test-deps` to make the local Python import/test path runnable; no repository dependency manifest or system Python package set was changed.
+
+## Safety and production boundary
+- This is a narrow lifecycle cleanup change; no publisher behavior, workflow configuration, database schema, production DB, credential, schedule or deployment was changed.
+- Tests use mocked resources and no external publishing. No Binance Square post, Pinterest Pin, authenticated media upload, provider inference, workflow dispatch, merge or deployment occurred.
+- SQLite remains the runtime default. PostgreSQL backend termination/HA failover, full scheduled discovery-to-publication recovery, production DB architecture/cutover approval, live provider/media acceptance and real publishing acceptance remain outstanding.
+- Project remains **PARTIAL / NOT PRODUCTION-READY**.
+
+## Exact next step
+Review the two-file application/test commit plus this documentation update, run compile/diff/credential scans, commit the canonical docs, then non-force push to the existing PR #14 branch. Verify exact remote SHA, PR state and hosted CI for that SHA. Do not merge, deploy, touch production or create another PR.
