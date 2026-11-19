@@ -1,3 +1,35 @@
+# CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-19 (Module 21 fresh-process recovery)
+
+This latest section supersedes older test counts and the immediately prior Module 21 recovery status below. Historical entries remain for traceability.
+
+## Exact worktree and branch
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Active code worktree: `/tmp/binance-w2e-continuation`.
+- Local branch: `work/module9-continuation-local`.
+- Baseline HEAD: `77221377f71715f317f07f8750b2e6bf214eae42`; GitHub PR #14 branch `layer-1/module9-onchain-continuation` still matches this exact SHA. No current changes are committed or pushed.
+- Older `/tmp/binance-deepseek-verify` worktree remains separate and must not be edited, reset, stashed or cleaned. Its mode-0600 `.env` was read only in-process for isolated test variables; no secret values were displayed or copied.
+- PR #14 remains the only target: `layer-1/module9-onchain-continuation` → `layer-1/module9-onchain-intelligence`; do not create another PR, merge, deploy or modify `main`.
+
+## Module 21 fresh-process recovery work — 2026-11-19
+- Added `test_postgres_run_lease_crash_recovery_survives_fresh_process`: a separate worker process acquires a PostgreSQL run lease and is force-killed (no graceful adapter close). A new process sees the orphaned RUNNING lease, cannot overlap it, and performs explicit operator recovery with exact run ID and termination evidence. The parent verifies `INTERRUPTED` and lease removal. Focused test passed (1 test, 18.1 seconds).
+- Added `test_unknown_publication_attempt_and_quota_reconcile_in_fresh_process`: a durable `PUBLICATION_UNKNOWN` attempt and linked quota reservation survive connection closure; a new process verifies pending state and idempotent duplicate blocking, then reconciles attempt, quota and audit to a synthetic confirmed identity.
+- Added `test_research_editorial_draft_validation_image_and_opportunity_survive_fresh_process`: verifies fresh-process retrieval of research package, editorial brief, draft, text validation, visual validation, image artifact metadata and opportunity decision.
+- Extended the mocked publisher/PostgreSQL authorization integration test: closes the original connection, then a separate process reloads the immutable `PublicationAuthorization` and verifies its integrity and exact draft/research/editorial/quota provenance before the mocked publisher consumes it.
+- Full repository suite after the final force-kill fixture correction: **749 tests, 0 failures, 0 errors, 0 skipped**, approximately 433.6 seconds. All PostgreSQL integration tests ran against the isolated disposable `binance_onchain_test` database; the suite was not a skip-based estimate.
+- `python -m compileall -q .`: PASS. `git diff --check`: still needs one final cleanup of a pre-existing Markdown trailing-space line in `PROJECT_CONTEXT.md`; do not confuse that formatting-only warning with a test failure.
+- Current code changes are test-only in `tests/test_publication_postgres.py`; canonical context and gap-register docs are being updated. No application runtime, publisher, workflow, production config or credentials were changed.
+
+## Remaining Module 21 gaps and production boundary
+- Process-boundary persistence/recovery evidence now exists for event lifecycle, run leases (including force-killed worker), unknown publication attempts + quota reconciliation, research/editorial/draft/text/visual validation/image artifact/opportunity records, and publication authorization.
+- Still outstanding: kill/failure injection during an open/in-flight DB transaction; database failover/reconnect drills; full scheduled discovery-to-publication recovery acceptance; production DB architecture/cutover review; explicit owner approval.
+- SQLite remains the runtime default. No production DB was used, no publisher was activated for real traffic, no real provider inference or authenticated media upload was made, no Binance post was published, and no deployment or merge occurred.
+- Module 21 and the overall project remain **PARTIAL / NOT PRODUCTION-READY**.
+
+## Exact next step
+Review final local diff and formatting, run `compileall` and `git diff --check`, then commit and non-force push only if the PR branch still equals parent SHA `77221377f71715f317f07f8750b2e6bf214eae42`. After push, verify exact remote SHA, PR #14 state and hosted CI. Do not merge/deploy or touch production.
+
+---
+
 # CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-18 (PostgreSQL integration acceptance)
 
 This is the latest verified checkpoint and supersedes older top-level statements below about worktree, DSN availability, PostgreSQL skips, test counts and current PR head. Older entries remain historical records and must not be used as current status.
@@ -3333,3 +3365,13 @@ Safety: publisher disabled, `DRY_RUN=1`, no real Square post, no production DB w
 - Local and remote branch SHA matched at `32497adc840a04c50d56b4efb5c1395a83593309`; PR #14 remained OPEN / DRAFT / UNMERGED with the expected base/head branches.
 - GitHub Actions mocked-safety workflow for the exact commit completed SUCCESS: run `44341243997`.
 - This CI result does not execute the 43 skipped PostgreSQL integration tests or establish live provider/media/publishing acceptance.
+
+## 2026-11-19 — Module 21 PostgreSQL open-transaction process-kill recovery
+
+- Added test_postgres_open_transaction_is_rolled_back_after_worker_process_kill to the existing guarded PostgreSQL integration suite. The test creates a unique committed control row, starts a separate worker, inserts a synthetic layer1_runs row and layer1_run_lease row inside one still-open transaction, signals readiness, then force-kills the worker OS process without graceful connection close.
+- A fresh Python process waits until the killed PostgreSQL backend disappears from pg_stat_activity, then verifies both uncommitted rows were rolled back, the previously committed control row is intact, and no orphaned lease remains. Cleanup is restricted to the test's unique run IDs.
+- Focused PostgreSQL integration result after DSN handling hardening: 1 passed in 16.314 seconds.
+- Final full repository suite after subprocess-argument hardening, with the isolated test DSN and exact-host/TLS guard loaded in-process using the existing test virtual environment: 750 tests, 0 failures, 0 errors, 0 skipped in 414.859 seconds. PostgreSQL-gated tests executed; this was not a skip-based run.
+- Current active worktree: /tmp/binance-w2e-continuation; local branch work/module9-continuation-local; HEAD and existing PR #14 remote head still equal parent 77221377f71715f317f07f8750b2e6bf214eae42 at the last check. Changes remain local and uncommitted/unpushed. Three modified files: tests/test_publication_postgres.py, PROJECT_CONTEXT.md, MODULES_11_21_GAP_REGISTER.md.
+- Adapter coverage inventory: fresh-process recovery exists for PostgreSQL event lifecycle and the Module 21 publication/run-lease/research/editorial/draft/validation/image/opportunity/authorization records. Explicit fresh-process recovery coverage was not found in the inspected tests for PostgresClaimRegistryStore, PostgresLayer1Store, PostgresLegacyDatabase, or the Module 9 PostgresOnChainIngestionStore / PostgresOnChainStore; these are candidate next durability tests, not proven defects. Existing same-process round-trip/atomicity tests do not establish process-restart recovery.
+- Final checks after documentation updates: compileall -q . PASS; git diff --check PASS; credential-pattern scan of the complete diff PASS (no credential-shaped values found). No production database/configuration, publisher, gateway, real provider, Binance post, Pinterest Pin, merge or deployment was touched. Project remains PARTIAL — NOT PRODUCTION-READY; SQLite remains the runtime default.

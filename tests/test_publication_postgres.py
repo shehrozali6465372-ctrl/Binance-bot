@@ -359,6 +359,194 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
                     "DELETE FROM layer1_runs WHERE run_id=%s", (context.run_id,),
                 )
 
+    def test_postgres_run_lease_crash_recovery_survives_fresh_process(self):
+        import subprocess
+        import sys
+        import tempfile
+        import time
+        from pathlib import Path
+
+        # A worker process acquires the lease and then remains alive. The test
+        # kills that OS process rather than gracefully closing its DB adapter.
+        worker_code = "\n".join((
+            "import os, sys, time",
+            "from pathlib import Path",
+            "from layer1.foundation import AgentConfig, ConfigurationOrchestrator",
+            "from layer1.publication_postgres import PostgresPublicationStore",
+            "from layer1.publication_runtime import PostgresRunLease",
+            "store = PostgresPublicationStore(os.environ['TEST_POSTGRES_DSN'])",
+            "context = ConfigurationOrchestrator(AgentConfig(database_path='killed-worker.db')).create_context({'case': 'os-killed-run-owner'})",
+            "lease = PostgresRunLease(store)",
+            "lease.acquire(context)",
+            "Path(sys.argv[1]).write_text(context.run_id)",
+            "while True: time.sleep(60)",
+        ))
+        with tempfile.TemporaryDirectory(prefix="binance-run-lease-kill-") as ready_dir:
+            ready_file = Path(ready_dir) / "worker-ready"
+            worker = subprocess.Popen(
+                [sys.executable, "-c", worker_code, str(ready_file)],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                env=os.environ.copy(), stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                deadline = time.monotonic() + 30
+                while not ready_file.exists() and worker.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if not ready_file.exists():
+                    error = worker.stderr.read() if worker.poll() is not None else "worker readiness timed out"
+                    self.fail("lease-owning worker failed before readiness: " + error)
+                run_id = ready_file.read_text().strip()
+                self.assertTrue(run_id)
+                worker.kill()
+                worker.wait(timeout=10)
+                self.assertNotEqual(worker.returncode, 0, "lease-owning worker was expected to be killed")
+            finally:
+                if worker.poll() is None:
+                    worker.kill()
+                    worker.wait(timeout=10)
+                if worker.stderr:
+                    worker.stderr.close()
+
+        child = "\n".join((
+            "import os, sys",
+            "from layer1.foundation import AgentConfig, ConfigurationOrchestrator",
+            "from layer1.publication_postgres import PostgresPublicationStore",
+            "from layer1.publication_runtime import PostgresRunLease",
+            "run_id = sys.argv[1]",
+            "store = PostgresPublicationStore(os.environ['TEST_POSTGRES_DSN'])",
+            "try:",
+            "    lease = PostgresRunLease(store)",
+            "    active = lease.inspect_active()",
+            "    assert active and active['run_id'] == run_id and active['status'] == 'RUNNING'",
+            "    context = ConfigurationOrchestrator(AgentConfig(database_path='recovery-child.db')).create_context({'case': 'overlap'})",
+            "    try:",
+            "        lease.acquire(context)",
+            "    except RuntimeError as exc:",
+            "        assert 'lease already held' in str(exc)",
+            "    else:",
+            "        raise AssertionError('fresh process bypassed the active run lease')",
+            "    assert lease.recover_interrupted(run_id, process_termination_confirmed=True, evidence='isolated test confirmed lease owner process was SIGKILLed', recovered_by='fresh-process-test-operator')",
+            "    assert lease.inspect_active() is None",
+            "    row = store.conn.execute('SELECT status,summary_json FROM layer1_runs WHERE run_id=%s', (run_id,)).fetchone()",
+            "    assert row['status'] == 'INTERRUPTED'",
+            "    assert row['summary_json']['operator_recovery']['recovered_by'] == 'fresh-process-test-operator'",
+            "finally:",
+            "    store.close()",
+        ))
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", child, run_id],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIsNone(self.store.inspect_active_run_lease())
+            row = self.store.conn.execute(
+                "SELECT status,summary_json FROM layer1_runs WHERE run_id=%s", (run_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "INTERRUPTED")
+            self.assertEqual(
+                row["summary_json"]["operator_recovery"]["recovered_by"],
+                "fresh-process-test-operator",
+            )
+        finally:
+            with self.store.conn.transaction():
+                self.store.conn.execute("DELETE FROM layer1_run_lease WHERE run_id=%s", (run_id,))
+                self.store.conn.execute("DELETE FROM layer1_runs WHERE run_id=%s", (run_id,))
+
+    def test_postgres_open_transaction_is_rolled_back_after_worker_process_kill(self):
+        import json
+        import subprocess
+        import sys
+        import tempfile
+        import time
+        import uuid
+        from pathlib import Path
+
+        suffix = uuid.uuid4().hex
+        uncommitted_run_id = "test-open-tx-uncommitted:" + suffix
+        committed_run_id = "test-open-tx-committed:" + suffix
+        config_hash = "a" * 64
+        worker = None
+        self.store.conn.execute(
+            "INSERT INTO layer1_runs (run_id,started_at,finished_at,status,config_hash,summary_json) "
+            "VALUES (%s,now(),now(),'SUCCEEDED',%s,%s::jsonb)",
+            (committed_run_id, config_hash, json.dumps({"case": "committed-control"})),
+        )
+        worker_code = "\n".join((
+            "import json, os, sys, time",
+            "from pathlib import Path",
+            "import psycopg",
+            "dsn = os.environ['TEST_POSTGRES_DSN']",
+            "run_id, ready = sys.argv[1], Path(sys.argv[2])",
+            "conn = psycopg.connect(dsn, autocommit=True)",
+            "backend_pid = conn.execute('SELECT pg_backend_pid()').fetchone()[0]",
+            "with conn.transaction():",
+            "    conn.execute(\"INSERT INTO layer1_runs (run_id,started_at,status,config_hash,summary_json) VALUES (%s,now(),'RUNNING',%s,%s::jsonb)\", (run_id, 'b'*64, json.dumps({'case':'uncommitted-crash-test'})))",
+            "    conn.execute(\"INSERT INTO layer1_run_lease (lease_name,run_id,acquired_at) VALUES ('agent',%s,now())\", (run_id,))",
+            "    ready.write_text(json.dumps({'backend_pid': backend_pid}), encoding='utf-8')",
+            "    while True: time.sleep(60)",
+        ))
+        child_code = "\n".join((
+            "import json, os, sys, time",
+            "import psycopg",
+            "backend_pid, missing_run, committed_run = sys.argv[1:]",
+            "conn = psycopg.connect(os.environ['TEST_POSTGRES_DSN'], autocommit=True)",
+            "try:",
+            "    deadline = time.monotonic() + 30",
+            "    while time.monotonic() < deadline:",
+            "        active = conn.execute('SELECT 1 FROM pg_stat_activity WHERE pid=%s', (int(backend_pid),)).fetchone()",
+            "        if active is None: break",
+            "        time.sleep(0.1)",
+            "    else: raise AssertionError('killed worker PostgreSQL backend remains active')",
+            "    run = conn.execute('SELECT run_id FROM layer1_runs WHERE run_id=%s', (missing_run,)).fetchone()",
+            "    lease = conn.execute('SELECT run_id FROM layer1_run_lease WHERE run_id=%s', (missing_run,)).fetchone()",
+            "    assert run is None, 'uncommitted run row survived process death'",
+            "    assert lease is None, 'uncommitted lease row survived process death'",
+            "    committed = conn.execute('SELECT status,summary_json FROM layer1_runs WHERE run_id=%s', (committed_run,)).fetchone()",
+            "    assert committed is not None and committed[0] == 'SUCCEEDED'",
+            "    assert committed[1]['case'] == 'committed-control'",
+            "    orphan_leases = conn.execute('SELECT count(*) FROM layer1_run_lease l LEFT JOIN layer1_runs r ON r.run_id=l.run_id WHERE r.run_id IS NULL').fetchone()[0]",
+            "    assert orphan_leases == 0, 'orphaned run lease remains after transaction rollback'",
+            "finally: conn.close()",
+        ))
+        try:
+            with tempfile.TemporaryDirectory(prefix="binance-open-tx-kill-") as tmp:
+                ready_path = Path(tmp) / "worker-ready.json"
+                worker = subprocess.Popen(
+                    [sys.executable, "-c", worker_code, uncommitted_run_id, str(ready_path)],
+                    cwd=str(Path(__file__).resolve().parents[1]),
+                    env=os.environ.copy(), stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE, text=True,
+                )
+                deadline = time.monotonic() + 30
+                while not ready_path.exists() and worker.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if not ready_path.exists():
+                    error = worker.stderr.read() if worker.poll() is not None else "worker readiness timed out"
+                    self.fail("open-transaction worker failed before readiness: " + error)
+                backend_pid = json.loads(ready_path.read_text(encoding="utf-8"))["backend_pid"]
+                worker.kill()
+                worker.wait(timeout=10)
+                self.assertNotEqual(worker.returncode, 0, "open-transaction worker was expected to be killed")
+                result = subprocess.run(
+                    [sys.executable, "-c", child_code,
+                     str(backend_pid), uncommitted_run_id, committed_run_id],
+                    cwd=str(Path(__file__).resolve().parents[1]),
+                    env=os.environ.copy(), capture_output=True, text=True, timeout=45,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            if worker is not None and worker.poll() is None:
+                worker.kill()
+                worker.wait(timeout=10)
+            if worker is not None and worker.stderr:
+                worker.stderr.close()
+            with self.store.conn.transaction():
+                self.store.conn.execute("DELETE FROM layer1_run_lease WHERE run_id = ANY(%s)", ([uncommitted_run_id, committed_run_id],))
+                self.store.conn.execute("DELETE FROM layer1_runs WHERE run_id = ANY(%s)", ([uncommitted_run_id, committed_run_id],))
+
     def test_postgres_run_lease_is_durable_and_fences_overlapping_runs(self):
         from layer1.foundation import AgentConfig, ConfigurationOrchestrator
         from layer1.publication_runtime import PostgresRunLease
@@ -523,6 +711,78 @@ class PublicationPostgresIntegrationTests(unittest.TestCase):
         self.assertEqual(quota["status"], "FAILED_CONFIRMED")
         self.assertEqual((audit["prior_status"], audit["new_status"]),
                          ("SUBMITTING", "FAILED_CONFIRMED"))
+
+    def test_unknown_publication_attempt_and_quota_reconcile_in_fresh_process(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+        from datetime import date, timedelta
+        from layer1.publication_postgres import PostgresPublicationStore
+
+        key, attempt_id, content_hash = self._new_attempt("PROCESSRECOVERY")
+        future_time = (date(2099, 1, 1) + timedelta(days=uuid.uuid4().int % 3000)).isoformat() + "T12:00:00+00:00"
+        reservation = self.store.reserve_daily_quota(
+            symbol="PROCESSRECOVERY", daily_limit=1, now=future_time,
+        )
+        self.assertIsNotNone(reservation)
+        self.reservation_ids.append(reservation)
+        self.store.bind_attempt(reservation, attempt_id)
+        self.store.mark_quota_status(reservation, "SUBMITTING")
+        self.store.finish_attempt(key, "PUBLICATION_UNKNOWN", error="simulated process interruption")
+        self.store.mark_quota_status(reservation, "PUBLICATION_UNKNOWN")
+        self.store.close()
+
+        remote_id = "process-recovery-" + uuid.uuid4().hex
+        share_link = "https://www.binance.com/square/post/" + remote_id
+        child = "\n".join((
+            "import os, sys",
+            "from layer1.publication_postgres import PostgresPublicationStore",
+            "dsn = os.environ['TEST_POSTGRES_DSN']",
+            "attempt_id, reservation, key, symbol, content_hash, remote_id, share_link = sys.argv[1:]",
+            "attempt_id = int(attempt_id)",
+            "store = PostgresPublicationStore(dsn)",
+            "try:",
+            "    attempt = store.get_attempt(attempt_id)",
+            "    assert attempt['status'] == 'PUBLICATION_UNKNOWN'",
+            "    pending = [item for item in store.list_pending_attempts() if item['id'] == attempt_id]",
+            "    assert len(pending) == 1",
+            "    duplicate = store.begin_attempt(key, symbol, content_hash)",
+            "    assert duplicate['id'] == attempt_id and duplicate['status'] == 'PUBLICATION_UNKNOWN'",
+            "    quota = store.conn.execute('SELECT status,attempt_id FROM publication_quota_reservations WHERE reservation_id=%s', (reservation,)).fetchone()",
+            "    assert quota['status'] == 'PUBLICATION_UNKNOWN' and quota['attempt_id'] == attempt_id",
+            "    store.reconcile_attempt(attempt_id=attempt_id, new_status='PUBLISHED_CONFIRMED', reconciled_by='fresh-process-test-operator', evidence='isolated test fixture confirms synthetic remote identity', note='fresh-process unknown-outcome reconciliation', remote_post_id=remote_id, share_link=share_link)",
+            "    attempt = store.get_attempt(attempt_id)",
+            "    quota = store.conn.execute('SELECT status FROM publication_quota_reservations WHERE reservation_id=%s', (reservation,)).fetchone()",
+            "    audit = store.conn.execute('SELECT COUNT(*) AS n FROM publication_reconciliation_events WHERE attempt_id=%s', (attempt_id,)).fetchone()",
+            "    assert attempt['status'] == 'PUBLISHED_CONFIRMED' and attempt['remote_post_id'] == remote_id and attempt['share_link'] == share_link",
+            "    assert quota['status'] == 'PUBLISHED_CONFIRMED' and audit['n'] == 1",
+            "finally:",
+            "    store.close()",
+        ))
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", child, str(attempt_id), reservation, key,
+                 "PROCESSRECOVERY", content_hash, remote_id, share_link],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            self.store = PostgresPublicationStore(_TEST_PUBLICATION_DSN)
+
+        attempt = self.store.get_attempt(attempt_id)
+        quota = self.store.conn.execute(
+            "SELECT status FROM publication_quota_reservations WHERE reservation_id=%s",
+            (reservation,),
+        ).fetchone()
+        audit = self.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM publication_reconciliation_events WHERE attempt_id=%s",
+            (attempt_id,),
+        ).fetchone()
+        self.assertEqual(attempt["status"], "PUBLISHED_CONFIRMED")
+        self.assertEqual(attempt["remote_post_id"], remote_id)
+        self.assertEqual(quota["status"], "PUBLISHED_CONFIRMED")
+        self.assertEqual(audit["n"], 1)
 
     def test_reconciliation_rejects_conflicting_known_remote_id_without_mutation(self):
         _, attempt_id, _ = self._new_attempt("CONFLICT")
@@ -766,6 +1026,101 @@ class PublicationPostgresResearchPackageTests(unittest.TestCase):
             store.close()
 
 
+    @unittest.skipUnless(__import__("os").environ.get("TEST_POSTGRES_DSN"), "TEST_POSTGRES_DSN is not configured")
+    def test_research_editorial_draft_validation_image_and_opportunity_survive_fresh_process(self):
+        import hashlib
+        import json
+        import os
+        import subprocess
+        import sys
+        import uuid
+        from pathlib import Path
+        from layer1.opportunity import OpportunityDecision, _decision_digest
+        from layer1.publication_postgres import PostgresPublicationStore
+
+        dsn = os.environ["TEST_POSTGRES_DSN"]
+        store = PostgresPublicationStore(dsn)
+        suffix = uuid.uuid4().hex
+        research_key = "test-process-recovery-research:" + suffix
+        event_id = "test-process-recovery-event:" + suffix
+        angle_id = "fresh-process-angle"
+        research_payload = {"asset_id": "coingecko:bitcoin", "symbol": "BTC", "facts": ["persisted"]}
+        research_hash = hashlib.sha256(json.dumps(research_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        brief_payload = {"headline": "Fresh process persistence", "claims": ["claim-1"]}
+        brief_hash = hashlib.sha256(json.dumps(brief_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        content = "BTC market update backed by persisted evidence " + suffix
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        image_hash = hashlib.sha256(("image:" + suffix).encode()).hexdigest()
+        prompt_hash = hashlib.sha256(("prompt:" + suffix).encode()).hexdigest()
+        source_hash = hashlib.sha256(("source:" + suffix).encode()).hexdigest()
+        decision_snapshot = json.dumps({"policy": {"version": "process-test-v1"}, "inputs": {"quality": 0.91}}, sort_keys=True, separators=(",", ":"))
+        reasons = ("PROCESS_RESTART_TEST",)
+        decision_id = _decision_digest(state="PROCEED", score=91.0, reasons=reasons, policy_version="process-test-v1", input_snapshot_json=decision_snapshot)
+        artifact_metadata = {
+            "provider": "cloudflare_workers_ai", "model": "@cf/black-forest-labs/flux-2-klein-4b",
+            "generated_at": "2026-11-18T00:00:00Z", "prompt_hash": prompt_hash,
+            "generation_parameters": {"width": 1024, "height": 1024, "output_format": "PNG"},
+            "source_image_hash": source_hash, "final_image_hash": image_hash,
+            "draft_hash": content_hash, "asset_id": "coingecko:bitcoin", "symbol": "BTC",
+            "dimensions": [1024, 1024], "request_id": "process-recovery-" + suffix,
+        }
+        try:
+            research = store.save_research_package(research_key=research_key, package_hash=research_hash, cutoff_at="2026-11-18T00:00:00Z", payload=research_payload)
+            brief = store.save_editorial_brief(event_id=event_id, angle_id=angle_id, research_package_id=research["package_id"], brief_hash=brief_hash, payload=brief_payload)
+            draft = store.save_draft(content, asset_id="coingecko:bitcoin", research_package_id=research["package_id"], editorial_brief_id=brief["brief_id"], approved_claim_ids=["a" * 64])
+            text_validation_id = store.save_text_validation(draft_hash=content_hash, status="PASS", reasons=["claim-backed"], validation_version="process-text-v1")
+            visual_validation_id = store.save_visual_validation(draft_hash=content_hash, image_hash=image_hash, status="PASS", reasons=["legible"], validation_version="process-visual-v1")
+            artifact_id = store.save_image_artifact(artifact_metadata, image_path="/tmp/fresh-process-image-fixture.png")
+            decision = OpportunityDecision("PROCEED", 91.0, reasons, "process-test-v1", decision_id, decision_snapshot)
+            store.save_opportunity_decision(research["package_id"], decision)
+            draft_key = draft.draft_key
+            store.close()
+
+            child = "\n".join((
+                "import os, sys",
+                "from layer1.publication_postgres import PostgresPublicationStore",
+                "store = PostgresPublicationStore(os.environ['TEST_POSTGRES_DSN'])",
+                "research_key, event_id, angle_id, draft_key, content_hash, image_hash, decision_id, package_id, brief_id, draft_id, text_id, visual_id, artifact_id = sys.argv[1:]",
+                "try:",
+                "    research = store.load_latest_research_package(research_key)",
+                "    brief = store.load_latest_editorial_brief(event_id, angle_id)",
+                "    draft = store.load_latest_draft(draft_key)",
+                "    text = store.load_latest_text_validation(content_hash)",
+                "    visual = store.load_latest_visual_validation(content_hash, image_hash)",
+                "    artifact = store.load_image_artifact(content_hash, image_hash)",
+                "    decision = store.load_opportunity_decision(decision_id)",
+                "    assert research and research['package_id'] == package_id and research['payload']['facts'] == ['persisted']",
+                "    assert brief and brief['brief_id'] == brief_id and brief['payload']['headline'] == 'Fresh process persistence'",
+                "    assert draft and draft['draft_id'] == draft_id and draft['content_hash'] == content_hash",
+                "    assert text and text['validation_id'] == text_id and text['status'] == 'PASS'",
+                "    assert visual and visual['validation_id'] == visual_id and visual['status'] == 'PASS'",
+                "    assert artifact and artifact['artifact_id'] == artifact_id and artifact['metadata']['final_image_hash'] == image_hash",
+                "    assert decision and decision['decision_id'] == decision_id and decision['research_package_id'] == package_id",
+                "finally:",
+                "    store.close()",
+            ))
+            result = subprocess.run(
+                [sys.executable, "-c", child, research_key, event_id, angle_id, draft_key,
+                 content_hash, image_hash, decision_id, research["package_id"], brief["brief_id"],
+                 draft.draft_id, text_validation_id, visual_validation_id, artifact_id],
+                cwd=str(Path(__file__).resolve().parents[1]), env=os.environ.copy(),
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            if store.conn.closed:
+                store = PostgresPublicationStore(dsn)
+            with store.conn.transaction():
+                store.conn.execute("DELETE FROM content_draft_validation_results WHERE draft_hash=%s", (content_hash,))
+                store.conn.execute("DELETE FROM visual_validation_results WHERE draft_hash=%s AND image_hash=%s", (content_hash, image_hash))
+                store.conn.execute("DELETE FROM image_generation_artifacts WHERE draft_hash=%s AND image_hash=%s", (content_hash, image_hash))
+                store.conn.execute("DELETE FROM opportunity_decisions WHERE research_package_id IN (SELECT package_id FROM layer1_research_package_versions WHERE research_key=%s)", (research_key,))
+                store.conn.execute("DELETE FROM content_draft_versions WHERE editorial_brief_id IN (SELECT brief_id FROM editorial_brief_versions WHERE event_id=%s AND angle_id=%s)", (event_id, angle_id))
+                store.conn.execute("DELETE FROM editorial_brief_versions WHERE event_id=%s AND angle_id=%s", (event_id, angle_id))
+                store.conn.execute("DELETE FROM layer1_research_package_versions WHERE research_key=%s", (research_key,))
+            store.close()
+
+
 class PublicationPostgresEditorialBriefTests(unittest.TestCase):
     @unittest.skipUnless(__import__("os").environ.get("TEST_POSTGRES_DSN"), "TEST_POSTGRES_DSN is not configured")
     def test_editorial_brief_is_versioned_idempotent_and_research_bound(self):
@@ -996,7 +1351,7 @@ class PublicationPostgresOpportunityTests(unittest.TestCase):
 class PublicationPostgresAuthorizationTests(unittest.TestCase):
     @unittest.skipUnless(__import__("os").environ.get("TEST_POSTGRES_DSN"), "TEST_POSTGRES_DSN is not configured")
     def test_authorization_is_persisted_only_when_all_exact_provenance_is_present(self):
-        import hashlib, json, os, uuid
+        import hashlib, json, os, subprocess, sys, uuid
         from datetime import datetime, timedelta, timezone
         from layer1.publication_postgres import PostgresPublicationStore
         from layer1.publication_runtime import PostgresPublicationAuthorizationEngine
@@ -1047,6 +1402,38 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
             store.conn.execute("DELETE FROM posts WHERE coin_symbol=%s", (symbol,))
             self.assertEqual(store.save_publication_authorization(auth), auth_id)
             self.assertEqual(store.load_publication_authorization(auth_id)["draft_id"], draft.draft_id)
+
+            # Verify the immutable authorization survives a genuinely separate
+            # process and connection before the mocked publisher consumes it.
+            store.close()
+            child = "\n".join((
+                "import os, sys",
+                "from layer1.publication_authorization import PublicationAuthorization",
+                "from layer1.publication_postgres import PostgresPublicationStore",
+                "auth_id, draft_id, research_id, brief_id, content_hash, quota_id = sys.argv[1:]",
+                "store = PostgresPublicationStore(os.environ['TEST_POSTGRES_DSN'])",
+                "try:",
+                "    payload = store.load_publication_authorization(auth_id)",
+                "    assert payload and payload['draft_id'] == draft_id",
+                "    authorization = PublicationAuthorization(**payload)",
+                "    assert authorization.verify_integrity()",
+                "    assert authorization.research_package_id == research_id",
+                "    assert authorization.editorial_brief_id == brief_id",
+                "    assert authorization.content_hash == content_hash",
+                "    assert authorization.quota_reservation_id == quota_id",
+                "finally:",
+                "    store.close()",
+            ))
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-c", child, auth_id, draft.draft_id,
+                     package["package_id"], brief["brief_id"], content_hash, reservation],
+                    cwd=str(Path(__file__).resolve().parents[1]), env=os.environ.copy(),
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+            finally:
+                store = PostgresPublicationStore(os.environ["TEST_POSTGRES_DSN"])
 
             # Exercise the actual publisher against the disposable PostgreSQL ledger;
             # the Binance transport is replaced with a deterministic local response.

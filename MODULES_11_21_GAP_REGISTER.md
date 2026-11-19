@@ -1,3 +1,26 @@
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-19 (Module 21 fresh-process recovery)
+
+This update supersedes the previous Module 21 fresh-process test count and recovery coverage statement. Older entries are retained as historical checkpoints.
+
+## New process-boundary recovery acceptance
+- Worktree: `/tmp/binance-w2e-continuation`; branch `work/module9-continuation-local`; parent commit `77221377f71715f317f07f8750b2e6bf214eae42`, which matched the remote PR #14 continuation branch before these local test additions.
+- `tests/test_publication_postgres.py` adds three guarded integration tests, all passing against the existing disposable `binance_onchain_test` database:
+  - `test_postgres_run_lease_crash_recovery_survives_fresh_process`: a separate worker process acquires a durable lease and is force-killed (no graceful adapter close); a recovery process sees the orphaned lease, cannot overlap it, and performs only explicit operator recovery with exact run ID and termination evidence. Parent verifies `INTERRUPTED` and lease removal.
+  - `test_unknown_publication_attempt_and_quota_reconcile_in_fresh_process`: persists a `PUBLICATION_UNKNOWN` attempt and linked quota reservation; a separate process verifies durable pending state and idempotent duplicate blocking, then atomically reconciles attempt/quota/audit to a synthetic confirmed remote identity. Parent reconnect verifies all final records.
+  - `test_research_editorial_draft_validation_image_and_opportunity_survive_fresh_process`: verifies fresh-process retrieval of research package, editorial brief, draft, text and visual validation results, image artifact metadata and opportunity decision.
+- Focused process-boundary tests: **3 passed, 0 failed**. The existing mocked publisher authorization integration test was also extended to close its connection and verify authorization integrity and provenance bindings from a separate Python process; focused authorization test **1 passed**. Initial test-only fixture issues (numeric attempt ID type and image artifact metadata nesting) were corrected; no product code change was needed.
+- Final full repository suite after the force-killed worker regression and authorization fresh-process extension, with `TEST_POSTGRES_DSN` and exact allowed-host guard loaded in-process: **749 tests, 0 failures, 0 errors, 0 skipped** (approximately 433.6 seconds). All PostgreSQL integration tests executed; this is not a skip-based estimate.
+- `compileall -q .` and `git diff --check`: PASS.
+- The only application test file changed is `tests/test_publication_postgres.py`; both canonical project context documents are updated. No production application logic, workflow, publisher configuration, credentials or schedules changed.
+
+### Updated Module 21 assessment
+- Fresh-process persistence/recovery evidence now exists for event lifecycle, run leases, unknown publication + quota reconciliation, research/editorial/draft/validation/image/opportunity records, and publication authorization.
+- Still outstanding: process kill during an open/in-flight database transaction (the new test kills the worker after its lease transaction has committed); database failover/reconnect drills; full scheduled discovery-to-publication recovery acceptance; production DB architecture/cutover review and owner approval.
+- SQLite remains the runtime default. No production database was used, no real publisher was activated, no real Binance post or media upload occurred, and no production deployment/merge was performed.
+- **Module 21 remains PARTIAL / NOT PRODUCTION-READY.** These tests are isolated durability evidence, not production certification.
+
+---
+
 # LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-18 (PostgreSQL integration acceptance)
 
 This entry supersedes earlier claims below that the isolated PostgreSQL integration tests are skipped or not yet executed. Historical counts are retained for traceability.
@@ -1832,3 +1855,12 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Local and remote branch SHA matched at `32497adc840a04c50d56b4efb5c1395a83593309`; PR #14 remained OPEN / DRAFT / UNMERGED with the expected base/head branches.
 - GitHub Actions mocked-safety workflow for the exact commit completed SUCCESS: run `44341243997`.
 - This CI result does not execute the 43 skipped PostgreSQL integration tests or establish live provider/media/publishing acceptance.
+
+## 2026-11-19 — Module 21 open-transaction crash recovery and adapter coverage audit
+
+- Added test_postgres_open_transaction_is_rolled_back_after_worker_process_kill. A separate worker inserts a unique run row and lease inside an open PostgreSQL transaction, signals the parent, and is force-killed. A fresh process waits for the backend to disappear and verifies the uncommitted run/lease are absent, a previously committed control row remains intact, and no orphan lease remains.
+- Focused result after DSN handling hardening: 1 passed in 16.314 seconds against the guarded disposable binance_onchain_test database.
+- Final full suite after subprocess-argument hardening: 750 tests, 0 failures, 0 errors, 0 skipped in 414.859 seconds with the isolated PostgreSQL DSN loaded in-process and exact allowed-host/TLS guard active. PostgreSQL integration tests executed rather than being skipped.
+- Fresh-process persistence coverage inventory: PostgreSQL event lifecycle has a fresh-process reopen test; Module 21 publication/run lease, unknown attempt/quota, and research/editorial/draft/validation/image/opportunity/authorization paths have fresh-process coverage. The inspected tests do not show explicit fresh-process recovery tests for PostgresClaimRegistryStore, PostgresLayer1Store, PostgresLegacyDatabase, or Module 9 PostgresOnChainIngestionStore / PostgresOnChainStore. These are next coverage gaps to assess; same-process round trips and transaction rollback tests are not equivalent to restart recovery.
+- No production database, runtime cutover, provider inference, authenticated upload, real Binance publication, merge or deployment. SQLite remains the runtime default. Module 21 and the overall project remain PARTIAL / NOT PRODUCTION-READY.
+- Final verification: compileall -q . PASS; git diff --check PASS; credential-pattern scan of the complete diff PASS. Next: finish the complete three-file diff review, then commit and non-force push only after rechecking the exact remote parent SHA; subsequently design the next isolated fresh-process adapter test from the actual adapter/schema contracts. Preserve parent SHA 77221377f71715f317f07f8750b2e6bf214eae42.
