@@ -6222,8 +6222,8 @@ def main() -> None:
     publisher = PostPublisher(config, postgres_store=postgres_store)
     publisher_db = publisher.db
     
-    posted_symbols = publisher_db.get_posted_symbols(hours=48)
     try:
+        posted_symbols = publisher_db.get_posted_symbols(hours=48)
         run_once(config, scanner, announcement_engine, research, generator, publisher, posted_symbols)
     except Exception as exc:
         _log_iteration_failure(1, exc)

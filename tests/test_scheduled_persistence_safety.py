@@ -164,5 +164,47 @@ class ScheduledPersistenceSafetyTests(unittest.TestCase):
         self.assertEqual(store.calls[0]["expected_run_id"], "run-123")
 
 
+    def test_one_shot_bootstrap_closes_postgres_resources_when_history_read_fails(self):
+        """The scheduled entrypoint must release shared DB resources on bootstrap failure."""
+        config = replace(
+            main.CONFIG, post_interval=0, dry_run=True,
+            persistence_backend="postgresql", postgres_dsn="postgresql://test",
+        )
+        closed = []
+
+        class FakeStore:
+            def close(self):
+                closed.append("postgres")
+
+        class FakeDatabase:
+            def get_posted_symbols(self, hours):
+                raise OSError("history database unavailable")
+
+            def close(self):
+                closed.append("publisher_db")
+
+        class FakePublisher:
+            def __init__(self, cfg, postgres_store=None):
+                self.postgres_store = postgres_store
+                self.db = FakeDatabase()
+
+        store = FakeStore()
+        with patch.object(main, "CONFIG", config), \
+             patch.object(main, "MarketScanner"), \
+             patch.object(main, "BinanceAnnouncementEngine"), \
+             patch.object(main, "HotSearchEngine"), \
+             patch.object(main, "ResearchEngine"), \
+             patch.object(main, "DeepSeekGenerator"), \
+             patch.object(main, "_create_runtime_postgres_store", return_value=store), \
+             patch.object(main, "PostPublisher", FakePublisher), \
+             patch.object(main, "run_once") as run_once:
+            with self.assertRaises(SystemExit) as raised:
+                main.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(closed, ["publisher_db", "postgres"])
+        run_once.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
