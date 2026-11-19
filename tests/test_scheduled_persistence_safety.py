@@ -206,5 +206,106 @@ class ScheduledPersistenceSafetyTests(unittest.TestCase):
         run_once.assert_not_called()
 
 
+    def _run_one_shot_with_postgres_lease(self, *, outcome=None, failure=None):
+        config = replace(
+            main.CONFIG, post_interval=0, dry_run=True,
+            persistence_backend="postgresql", postgres_dsn="postgresql://test",
+        )
+        calls = []
+        closed = []
+
+        class FakeStore:
+            def inspect_active_run_lease(self):
+                return None
+
+            def acquire_run_lease(self, context):
+                calls.append(("acquire", context.run_id))
+
+            def finish_run_lease(self, run_id, status, summary):
+                calls.append(("finish", run_id, status, summary))
+
+            def close(self):
+                closed.append("postgres")
+
+        class FakeDatabase:
+            def get_posted_symbols(self, hours):
+                self.hours = hours
+                return set()
+
+            def close(self):
+                closed.append("publisher_db")
+
+        class FakePublisher:
+            def __init__(self, cfg, postgres_store=None):
+                self.postgres_store = postgres_store
+                self.db = FakeDatabase()
+
+        store = FakeStore()
+        with patch.object(main, "CONFIG", config), \
+             patch.object(main, "MarketScanner"), \
+             patch.object(main, "BinanceAnnouncementEngine"), \
+             patch.object(main, "HotSearchEngine"), \
+             patch.object(main, "ResearchEngine"), \
+             patch.object(main, "DeepSeekGenerator"), \
+             patch.object(main, "_create_runtime_postgres_store", return_value=store), \
+             patch.object(main, "PostPublisher", FakePublisher), \
+             patch.object(main, "_run_once_impl", side_effect=failure, return_value=outcome) as pipeline:
+            if failure is None:
+                main.main()
+            else:
+                with self.assertRaises(SystemExit) as raised:
+                    main.main()
+                self.assertEqual(raised.exception.code, 1)
+
+        pipeline.assert_called_once()
+        self.assertEqual(calls[0][0], "acquire")
+        self.assertEqual(calls[1][0], "finish")
+        self.assertEqual(calls[0][1], calls[1][1])
+        self.assertEqual(closed, ["publisher_db", "postgres"])
+        return calls
+
+    def test_one_shot_entrypoint_acquires_and_finishes_postgres_run_lease_on_success(self):
+        calls = self._run_one_shot_with_postgres_lease(outcome=True)
+        self.assertEqual(calls[1][2], "SUCCEEDED")
+        self.assertEqual(calls[1][3]["cycle_result"], "SUCCEEDED")
+
+    def test_one_shot_entrypoint_finalizes_failed_postgres_run_lease_before_nonzero_exit(self):
+        calls = self._run_one_shot_with_postgres_lease(
+            failure=OSError("synthetic pipeline failure"),
+        )
+        self.assertEqual(calls[1][2], "FAILED")
+        self.assertEqual(calls[1][3]["error_type"], "OSError")
+
+
+    def test_one_shot_bootstrap_closes_postgres_store_when_publisher_initialization_fails(self):
+        config = replace(
+            main.CONFIG, post_interval=0, dry_run=True,
+            persistence_backend="postgresql", postgres_dsn="postgresql://test",
+        )
+        closed = []
+
+        class FakeStore:
+            def close(self):
+                closed.append("postgres")
+
+        class BrokenPublisher:
+            def __init__(self, cfg, postgres_store=None):
+                raise OSError("publisher initialization failed")
+
+        with patch.object(main, "CONFIG", config), \
+             patch.object(main, "MarketScanner"), \
+             patch.object(main, "BinanceAnnouncementEngine"), \
+             patch.object(main, "HotSearchEngine"), \
+             patch.object(main, "ResearchEngine"), \
+             patch.object(main, "DeepSeekGenerator"), \
+             patch.object(main, "_create_runtime_postgres_store", return_value=FakeStore()), \
+             patch.object(main, "PostPublisher", BrokenPublisher):
+            with self.assertRaises(SystemExit) as raised:
+                main.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(closed, ["postgres"])
+
+
 if __name__ == "__main__":
     unittest.main()

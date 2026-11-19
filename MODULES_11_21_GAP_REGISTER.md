@@ -1962,3 +1962,26 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Production DB architecture review and explicit owner approval remain mandatory.
 - Live provider inference, independent OCR/vision acceptance, authenticated Binance media upload and real publishing acceptance remain outstanding.
 - Project remains **PARTIAL / NOT PRODUCTION-READY**. No production writes, publisher activation, real post, merge or deployment.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-20 (one-shot scheduler lease integration)
+
+## Closed scheduled-entrypoint resource leak
+- PostgreSQL store creation followed by a failing `PostPublisher` constructor previously bypassed the one-shot entrypoint's cleanup block. A test was written first and reproduced the uncaught constructor exception.
+- Moved publisher construction into the protected lifecycle; close the publisher DB only if constructed, and always close the PostgreSQL store when present.
+- Regression `test_one_shot_bootstrap_closes_postgres_store_when_publisher_initialization_fails`: PASS.
+
+## One-shot scheduler → run lease integration
+- Added real `main.main()` → `run_once()` orchestration tests with downstream pipeline mocked.
+- Success path: durable lease adapter receives acquire and matching `SUCCEEDED` finish; publisher DB and shared store close.
+- Failure path: synthetic pipeline exception results in matching `FAILED` lease finalization before nonzero scheduler exit; both DB resources close.
+- Scheduled safety suite: **13 passed**; combined runtime-adapter + scheduled safety batch: **24 passed**.
+- Full suite: **760 passed, 0 failed, 0 errors, 54 skipped**, 50.284 seconds. `TEST_POSTGRES_DSN` absent; PostgreSQL DB integration tests were skipped. No live PostgreSQL end-to-end acceptance established.
+- Actual discovery → PostgreSQL evidence persistence → quota → authorization → publication → reconciliation workflow remains unverified as a single controlled run. The new tests cover orchestration and lease lifecycle only; they deliberately mock discovery/publication and cannot submit a post.
+
+## Production blockers remain
+- Real PostgreSQL HA/backend-kill/restart/DNS/reconnect drill and an authorized controlled TLS test endpoint.
+- Scheduled full-path acceptance with real disposable PostgreSQL, mocked external providers and no publication side effects.
+- Production database architecture/cutover review and explicit owner approval; SQLite remains runtime default.
+- Real provider, OCR/vision, authenticated media upload and Binance publishing acceptance.
+- Project remains **PARTIAL / NOT PRODUCTION-READY**. No production DB writes, real post, merge or deployment.

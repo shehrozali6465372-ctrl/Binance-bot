@@ -6219,17 +6219,18 @@ def main() -> None:
     research = ResearchEngine()
     generator = DeepSeekGenerator(config)
     postgres_store = _create_runtime_postgres_store(config)
-    publisher = PostPublisher(config, postgres_store=postgres_store)
-    publisher_db = publisher.db
-    
+    publisher_db = None
     try:
+        publisher = PostPublisher(config, postgres_store=postgres_store)
+        publisher_db = publisher.db
         posted_symbols = publisher_db.get_posted_symbols(hours=48)
         run_once(config, scanner, announcement_engine, research, generator, publisher, posted_symbols)
     except Exception as exc:
         _log_iteration_failure(1, exc)
         raise SystemExit(1) from None
     finally:
-        publisher_db.close()
+        if publisher_db is not None:
+            publisher_db.close()
         if postgres_store is not None:
             postgres_store.close()
 

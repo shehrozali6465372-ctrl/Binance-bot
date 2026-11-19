@@ -3523,3 +3523,43 @@ This checkpoint supersedes the prior exact-next-step statement. Historical test 
 
 ## Exact next step
 Review the two-file application/test commit plus this documentation update, run compile/diff/credential scans, commit the canonical docs, then non-force push to the existing PR #14 branch. Verify exact remote SHA, PR state and hosted CI for that SHA. Do not merge, deploy, touch production or create another PR.
+
+
+# CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-20 (one-shot scheduler lease integration)
+
+This checkpoint supersedes the previous scheduled-entrypoint next-step statement. Historical entries remain for traceability.
+
+## New scheduled bootstrap fix
+- Found a second resource leak in `main.main()`: PostgreSQL store construction succeeded, but `PostPublisher(config, postgres_store=...)` ran before the protected `try/finally`. If publisher initialization raised, the shared PostgreSQL connection was not closed.
+- Added a regression test first; it failed against the old implementation with the expected uncaught publisher-constructor `OSError`.
+- Moved publisher construction inside the protected block and made publisher DB cleanup conditional on successful initialization. The PostgreSQL store is now closed on publisher-constructor failure as well as history-read failure and normal execution.
+- Added `test_one_shot_bootstrap_closes_postgres_store_when_publisher_initialization_fails`; focused regression passes.
+
+## One-shot scheduled entrypoint → durable run lease integration
+- Added two tests that execute the actual `main.main()` and `run_once()` orchestration while mocking only the downstream `_run_once_impl` pipeline and provider/publisher dependencies.
+- Success case proves the one-shot entrypoint acquires a PostgreSQL run lease, invokes the pipeline, finalizes the same run ID as `SUCCEEDED`, and closes publisher DB + shared PostgreSQL store.
+- Failure case injects a deterministic pipeline exception, proves the same run ID is finalized as `FAILED` before the entrypoint exits nonzero, and verifies both resources close.
+- These are orchestration/lease integration tests using a fake store. They do not prove real PostgreSQL transaction behavior, actual quota reservation, provider discovery, authenticated media upload or Binance publishing. Those components remain separately tested and actual production acceptance remains outstanding.
+
+## Verification
+- Scheduled persistence safety suite: **13 passed**.
+- Combined PostgreSQL runtime-adapter + scheduled persistence tests: **24 passed**.
+- Full repository suite: **760 tests, 0 failures, 0 errors, 54 skipped**, 50.284 seconds; exit code 0. `TEST_POSTGRES_DSN` is not configured in this execution, so DB-backed PostgreSQL integration tests remain skipped; the suite result is not PostgreSQL runtime acceptance.
+- No real Binance post, Pinterest Pin, live media upload, provider inference, workflow dispatch, merge or deployment.
+- Static compile, diff and changed-diff credential-pattern scans must be rerun before commit/push.
+
+## Exact Git state
+- Worktree: `/tmp/binance-w2e-continuation`; branch: `work/module9-continuation-local`.
+- Parent HEAD / PR #14 remote head before this change: `2131f89b00e04b4f47dd53a5b8a96c48bd9579d0`.
+- Current changes: `main.py` and `tests/test_scheduled_persistence_safety.py`; not yet committed/pushed at this checkpoint.
+- Existing PR #14 remains OPEN / DRAFT / UNMERGED. No new PR, merge or deployment.
+
+## Remaining acceptance
+- Actual controlled PostgreSQL scheduled run integrating discovery, persisted evidence, quota reservation, authorization, publisher attempt and reconciliation remains unverified. The older test DSN was not used because its live TLS status check reported inactive.
+- PostgreSQL backend termination, server restart, HA/DNS failover and reconnect remain unverified.
+- SQLite remains runtime default; production PostgreSQL cutover requires architecture review and explicit owner approval.
+- Provider, OCR/vision, authenticated Binance media upload and real publication acceptance remain outstanding.
+- Project remains **PARTIAL / NOT PRODUCTION-READY**.
+
+## Exact next step
+Review the two-file diff, run compile/diff/credential scans, commit application/tests and both canonical docs, non-force push to existing PR #14, then verify exact remote SHA, PR state and hosted CI on that SHA. Do not use production DB or publish.
