@@ -2022,3 +2022,30 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - The disposable `binance_onchain_test` acceptance was previously completed (750 passed, 0 failed, 0 skipped on 19 November); do not repeat it without a new, narrowly scoped test requirement.
 - B-PG-01 remains BLOCKED for new DB-backed work because the older DSN's live session reported `pg_stat_ssl.ssl = false`. No DB connection, migration or write was attempted in this audit. The 20 November 760-test suite had 54 skips because the DSN was absent and must not be represented as PostgreSQL acceptance.
 - Next: inspect adapter transaction boundaries and design isolated process-kill/rollback tests. Run them only after owner authorization and live read-only verification of the disposable database identity, exact allowed host and `pg_stat_ssl.ssl = true`. Backend termination, server restart and HA/DNS failover remain separate NOT VERIFIED gates.
+
+
+# LATEST GAP REGISTER UPDATE — 2026-11-20 (adapter crash rollback + disposable endpoint)
+
+## B-PG-01 — BLOCKED for new DB-backed tests
+- The existing dedicated Neon branch `module9-pg-lease-fencing-disposable` (`br-falling-butterfly-az03rryi`) is still `ready`; its endpoint `module9-disposable-test` (`ep-autumn-frost-azvk3fj4`) is currently `idle`/suspended (suspended at `2026-11-19T22:06:46Z`). It was not woken.
+- Active RDC shell lacks `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST`. The historical `.env` file exists but was not read; its previously recorded connection was rejected after live `pg_stat_ssl.ssl=false` evidence.
+- No DB connection, SQL, migration, write, endpoint start, restart, credential retrieval or dependency installation occurred. Do not repeat the prior 750-test disposable acceptance.
+
+## Adapter crash-during-transaction gap — design only
+- Claim registry: kill after `layer1_claim_verification_runs` INSERT; assert snapshot absent.
+- Layer1: exercise `save_announcement()` and kill after the revision INSERT but before the evidence INSERT completes; assert both rows absent.
+- Legacy: kill after synthetic `posts` INSERT; assert post absent.
+- On-chain ingestion: kill after transfer-event INSERT and before checkpoint update; assert event absent and checkpoint unchanged.
+- Verified on-chain store: kill after mapping INSERT and before observation INSERT; assert mapping and observation absent.
+- Each worker must invoke the real adapter method and real psycopg transaction. A delegating connection proxy may signal readiness after the target INSERT while the transaction remains open. Parent kills the worker; a separate verifier waits for backend exit and checks rollback plus a committed control record.
+- Unique synthetic keys and exact-key cleanup only. Do not use broad table truncation for these cases. No transaction defect is established by static inspection; no runtime crash rollback is yet verified.
+- Run only after owner authorization and a disposable TLS-enabled endpoint passes live read-only database identity, exact-host and `pg_stat_ssl.ssl=true` checks. Keep the current idle endpoint idle unless explicitly authorized to start it.
+
+## CI and PR
+- Latest local docs checkpoint SHA before this update: `587e9337ad1a9e1438fcceab383869f618eb0dd7`.
+- GitHub status and PR-workflow lookup for that SHA returned no status checks/runs. Hosted CI is NOT VERIFIED, not passed.
+- Continue on existing PR #14 only; no duplicate PR, merge or deployment.
+
+## Status
+- B-PG-01 remains BLOCKED; adapter crash rollback and operational failover remain NOT VERIFIED. The previous 19 November disposable PostgreSQL suite acceptance remains valid historical evidence and will not be repeated unnecessarily.
+- SQLite remains runtime default. Project remains **PARTIAL — NOT PRODUCTION-READY**.

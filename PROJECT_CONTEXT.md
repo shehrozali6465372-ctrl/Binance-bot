@@ -3632,3 +3632,35 @@ Review the two-file diff, run compile/diff/credential scans, commit application/
 - Do not repeat clean-reopen tests or the prior 750-test PostgreSQL acceptance.
 - Continue with a source-level transaction-boundary audit of the five adapters and prepare narrowly scoped process-kill/rollback test cases. Execute DB-backed tests only after a separately authorized disposable endpoint passes a live read-only identity + TLS preflight (`pg_stat_ssl.ssl = true`) using dedicated test credentials.
 - Keep B-PG-03/B-PG-04 (backend kill, server restart, HA/DNS failover and reconnect) NOT VERIFIED until a controllable authorized database topology and required privileges are available. Production DB cutover, provider acceptance and real publishing remain separately gated.
+
+
+# CONTINUATION UPDATE — 2026-11-20 (adapter crash-test design and disposable endpoint state)
+
+## Live infrastructure state — read-only inspection
+- Neon project `orange-glade-36037611`; dedicated branch `module9-pg-lease-fencing-disposable` (`br-falling-butterfly-az03rryi`) still exists and reports `ready`.
+- Its dedicated endpoint `module9-disposable-test` (`ep-autumn-frost-azvk3fj4`) still exists but reports `idle`; its compute was suspended at `2026-11-19T22:06:46Z`. It was NOT started or woken.
+- The active RDC shell still has `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST` absent. The historical `/tmp/binance-deepseek-verify/.env` file exists, but its contents were not read in this check; the previously recorded DSN is not eligible because the prior live session reported `pg_stat_ssl.ssl=false`.
+- No database connection, SQL, migration, write, endpoint wake/restart, credential retrieval or dependency installation occurred. The already-passed 19 November disposable-branch suite (750/750) is not being repeated.
+
+## Adapter transaction-boundary audit — source inspection only
+- Claim registry: `PostgresPublicationStore.save_claim_registry()` wraps the `FOR UPDATE` identity check and append-only snapshot INSERT in one `self.conn.transaction()` scope.
+- Layer1: individual writes are transactional. `PostgresLayer1Store.save_announcement()` is a useful atomicity target because it inserts both a revision row and the current evidence row inside one transaction.
+- Legacy: `PostgresLegacyDatabase.save_post()` wraps its `posts` INSERT in one transaction.
+- On-chain ingestion: `PostgresOnChainIngestionStore.commit_page()` inserts transfer events (and optional block/slot journals) before updating the ingestion checkpoint, all inside one transaction. The crash test should prove event and checkpoint state roll back together.
+- Verified on-chain storage: `PostgresOnChainStore.save_verified()` inserts/validates the asset mapping and then inserts the accepted observation inside one transaction. The crash test should prove neither half remains after termination between writes.
+- No transaction defect was established by this static inspection. No runtime crash-rollback behavior is claimed.
+
+## Narrow crash-test design — NOT IMPLEMENTED / NOT EXECUTED
+- Reuse the existing process-kill test pattern in `tests/test_publication_postgres.py`: child worker writes within a real adapter method, publishes its backend PID/readiness marker only after the target INSERT has executed, then blocks; parent kills the worker; a separate verifier waits for backend disappearance and checks committed control data remains while the in-flight adapter's synthetic records are absent.
+- For adapters whose constructors own connection creation, wrap the real psycopg connection in a delegating proxy that forwards `.transaction()` and `.execute()`, and blocks after the chosen INSERT. Do not replace transaction semantics with a fake transaction or raw-SQL-only test.
+- Target assertions: claim registry snapshot absent; both Layer1 announcement revision and evidence absent; legacy synthetic post absent; on-chain transfer event and checkpoint advancement absent; verified mapping and observation both absent.
+- Use unique synthetic identifiers and exact-key cleanup only. Do not broaden cleanup or truncate unrelated tables. Existing `tests/test_onchain_postgres.py` has a broad test fixture `TRUNCATE`; new tests must remain guarded to the dedicated `binance_onchain_test` target and must not be pointed at production.
+- This design still requires a separately authorized disposable TLS-enabled target, exact host allowlist and live read-only preflight confirming the database identity and `pg_stat_ssl.ssl=true` before any migration or write. Do not wake the existing idle endpoint without authorization.
+
+## GitHub verification at this checkpoint
+- Local worktree was clean at start, branch `work/module9-continuation-local`, starting SHA `587e9337ad1a9e1438fcceab383869f618eb0dd7`.
+- GitHub combined commit status and PR-triggered workflow-run lookup for that exact SHA both returned empty lists. Hosted CI is therefore NOT VERIFIED for this documentation commit; an empty result is not a pass.
+- PR #14 remains the only continuation PR; do not create another PR, merge, deploy, or change branches.
+
+## Exact next step
+- Keep the existing disposable endpoint idle. Obtain owner authorization for a TLS-enabled disposable DB endpoint and test credentials to be made available to the active test process without exposing values. Perform live TLS/database identity preflight first. Then implement the five narrowly scoped process-kill/rollback tests test-first and execute only those focused DB tests, followed by the repository's required verification. Until that prerequisite is met, do not write tests that cannot be run safely against the real adapters and do not claim crash rollback is accepted.
