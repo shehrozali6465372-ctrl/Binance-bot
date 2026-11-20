@@ -3605,3 +3605,30 @@ Review the two-file diff, run compile/diff/credential scans, commit application/
 - SQLite remains runtime default. Project remains **PARTIAL — NOT PRODUCTION-READY**.
 - No production DB/configuration, publisher, publishing gateway, earning workflow, provider, Binance post, Pinterest Pin, merge or deployment was touched.
 - Next action: obtain owner authorization and a disposable TLS-enabled endpoint; then perform the live TLS/database identity preflight before any test migration or write. If unavailable, do not attempt DB integration tests.
+
+
+
+# CONTINUATION CORRECTION — 2026-11-20 (PostgreSQL adapter recovery coverage inventory)
+
+## Read-only source audit at commit c165be0fc60606abe262ad9b91fb9f2553f5e2ee
+- Correct worktree: `/tmp/binance-w2e-continuation`; branch: `work/module9-continuation-local`; HEAD: `c165be0fc60606abe262ad9b91fb9f2553f5e2ee`; working tree clean.
+- GitHub PR #14 branch `layer-1/module9-onchain-continuation` was independently checked with `git ls-remote` and matched the same SHA. PR #14 remains OPEN / DRAFT / UNMERGED. No upstream was configured on the local branch; none was added.
+- Correcting the prior adapter coverage inventory: explicit graceful fresh-process reopen tests already exist in the current source for all five previously listed adapter targets:
+  - `tests/test_claim_registry_postgres.py::ClaimRegistryPostgresIntegrationTests.test_claim_registry_adapter_survives_fresh_process_reopen` — `PostgresClaimRegistryStore`.
+  - `tests/test_layer1_postgres.py::PostgresLayer1StoreIntegrationTests.test_layer1_market_observation_survives_fresh_process_reopen` — `PostgresLayer1Store`.
+  - `tests/test_legacy_postgres.py::PostgresLegacyDatabaseIntegrationTests.test_legacy_post_history_survives_fresh_process_reopen` — `PostgresLegacyDatabase`.
+  - `tests/test_onchain_postgres.py::PostgresOnChainIngestionTests.test_ingestion_checkpoint_and_event_survive_fresh_process_reopen` — `PostgresOnChainIngestionStore`.
+  - `tests/test_onchain_postgres.py::PostgresOnChainIngestionTests.test_verified_onchain_observation_survives_fresh_process_reopen` — `PostgresOnChainStore`.
+- These tests persist synthetic records, close the original connection, and verify the committed records from a separately spawned Python process. They establish committed-data visibility after a clean connection close; they do NOT simulate abrupt termination of the writer while a transaction is open, PostgreSQL backend termination, server restart, HA/DNS failover, or transparent reconnect of an existing adapter.
+- Therefore the earlier statement that fresh-process reopen tests were absent was inaccurate. The remaining adapter-specific gap is crash-during-open-transaction/rollback and operational recovery behavior, not basic process-boundary persistence.
+
+## Test and safety status
+- The last recorded complete PostgreSQL-enabled suite remains the 19 November result: 750 passed, 0 failed, 0 errors, 0 skipped against the disposable `binance_onchain_test` database. Do not rerun it merely to repeat the same acceptance.
+- The later 20 November full suite result was 760 passed with 54 skipped because `TEST_POSTGRES_DSN` was absent; those skips are not PostgreSQL acceptance.
+- Current B-PG-01 restriction remains in force: the older DSN was rejected after a live session reported `pg_stat_ssl.ssl = false`. This continuation performed no DB connection, migration, write, endpoint wake, dependency installation, or production access. The existing disposable branch's earlier successful tests are acknowledged and will not be repeated without a specific new test requirement and a verified authorized TLS target.
+- No code, database, publisher, workflow, production configuration, merge or deployment was changed in this audit.
+
+## Exact next work
+- Do not repeat clean-reopen tests or the prior 750-test PostgreSQL acceptance.
+- Continue with a source-level transaction-boundary audit of the five adapters and prepare narrowly scoped process-kill/rollback test cases. Execute DB-backed tests only after a separately authorized disposable endpoint passes a live read-only identity + TLS preflight (`pg_stat_ssl.ssl = true`) using dedicated test credentials.
+- Keep B-PG-03/B-PG-04 (backend kill, server restart, HA/DNS failover and reconnect) NOT VERIFIED until a controllable authorized database topology and required privileges are available. Production DB cutover, provider acceptance and real publishing remain separately gated.

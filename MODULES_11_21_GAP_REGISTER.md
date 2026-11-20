@@ -2012,3 +2012,13 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - B-CF-01, B-VIS-01, B-SCORE-01, B-CONTENT-01, B-POLICY-01 and B-PUBLISH-01 remain open.
 - SQLite remains runtime default. Project remains **PARTIAL — NOT PRODUCTION-READY**.
 - No production resources, publisher/gateway, external providers, real Binance publication, merge or deployment were touched.
+
+
+
+# CONTINUATION CORRECTION — 2026-11-20 (adapter test inventory)
+
+- Read-only source inspection at local/remote PR #14 SHA `c165be0fc60606abe262ad9b91fb9f2553f5e2ee` found existing clean-reopen subprocess tests for `PostgresClaimRegistryStore`, `PostgresLayer1Store`, `PostgresLegacyDatabase`, `PostgresOnChainIngestionStore`, and `PostgresOnChainStore` (exact test names and paths are recorded in `PROJECT_CONTEXT.md`).
+- These tests close the original connection and read committed synthetic records from a separate Python process. They are NOT writer-process crash tests and do not prove rollback of an uncommitted transaction after abrupt termination. The prior gap wording that said no fresh-process tests existed was too broad; the remaining gap is crash-during-open-transaction and operational recovery semantics.
+- The disposable `binance_onchain_test` acceptance was previously completed (750 passed, 0 failed, 0 skipped on 19 November); do not repeat it without a new, narrowly scoped test requirement.
+- B-PG-01 remains BLOCKED for new DB-backed work because the older DSN's live session reported `pg_stat_ssl.ssl = false`. No DB connection, migration or write was attempted in this audit. The 20 November 760-test suite had 54 skips because the DSN was absent and must not be represented as PostgreSQL acceptance.
+- Next: inspect adapter transaction boundaries and design isolated process-kill/rollback tests. Run them only after owner authorization and live read-only verification of the disposable database identity, exact allowed host and `pg_stat_ssl.ssl = true`. Backend termination, server restart and HA/DNS failover remain separate NOT VERIFIED gates.
