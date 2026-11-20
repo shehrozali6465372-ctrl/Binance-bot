@@ -3664,3 +3664,19 @@ Review the two-file diff, run compile/diff/credential scans, commit application/
 
 ## Exact next step
 - Keep the existing disposable endpoint idle. Obtain owner authorization for a TLS-enabled disposable DB endpoint and test credentials to be made available to the active test process without exposing values. Perform live TLS/database identity preflight first. Then implement the five narrowly scoped process-kill/rollback tests test-first and execute only those focused DB tests, followed by the repository's required verification. Until that prerequisite is met, do not write tests that cannot be run safely against the real adapters and do not claim crash rollback is accepted.
+
+# LATEST CONTINUATION UPDATE — 2026-11-20 (authorized disposable endpoint TLS preflight)
+
+## Owner-authorized endpoint start and read-only preflight
+- User explicitly authorized starting only Neon endpoint `module9-disposable-test` (`ep-autumn-frost-azvk3fj4`) on disposable branch `module9-pg-lease-fencing-disposable` (`br-falling-butterfly-az03rryi`) in project `orange-glade-36037611`.
+- Endpoint start was requested through Neon and the endpoint reached `active`; its host was `ep-autumn-frost-azvk3fj4.c-3.ap-southeast-1.aws.neon.tech` in Singapore region.
+- One read-only SQL statement was run against database `binance_onchain_test`: `SELECT current_database() AS database_name, current_user AS role_name, inet_server_addr()::text AS server_address, s.ssl AS tls_enabled FROM pg_stat_ssl AS s WHERE s.pid = pg_backend_pid();`. Returned database identity `binance_onchain_test`, role `binance_bot_staging_owner`, server address `127.0.0.1/32`, and `tls_enabled=false`.
+- Important limitation: this query ran through the Neon management SQL connector, not the application's direct psycopg DSN. Its `ssl=false` result is a failed TLS signal for this observed session, but does not independently characterize a direct application-to-endpoint TLS handshake. Fail closed: do not run migrations, adapter integration tests or writes until the active test process has its own dedicated DSN/host allowlist and direct read-only preflight confirms `pg_stat_ssl.ssl=true` on that same connection.
+- Active RDC process environment still reports `TEST_POSTGRES_DSN` ABSENT and `TEST_POSTGRES_ALLOWED_HOST` ABSENT. No connection string/password was retrieved, no `.env` contents were read, and no dependencies were installed.
+- To avoid unnecessary compute spend after the failed preflight, suspend was requested for the same authorized disposable endpoint. Follow-up endpoint inspection confirmed state `idle`, suspended at `2026-11-20T07:57:38Z`.
+- No migrations, inserts, updates, deletes, adapter tests, production DB operations, publisher/gateway changes, real Binance publication, merge or deployment occurred.
+
+## Updated gate decision
+- B-PG-01 remains BLOCKED for new DB-backed tests. The branch and endpoint are correctly isolated, but the active test process lacks the required DSN and exact host allowlist, and the only available read-only session returned TLS false.
+- Next safe action is to provision/authorize dedicated disposable test credentials and host allowlist into the active RDC test environment without exposing secrets, then run direct psycopg identity/TLS preflight. Only after it returns the exact disposable database/host and `pg_stat_ssl.ssl=true` may the five adapter crash-rollback tests be implemented and executed.
+- Existing historical 19 November acceptance (750 passed, 0 failed) is preserved; it was not repeated. Process-kill adapter tests remain NOT IMPLEMENTED / NOT EXECUTED. Production remains untouched; SQLite remains runtime default; project remains PARTIAL — NOT PRODUCTION-READY.

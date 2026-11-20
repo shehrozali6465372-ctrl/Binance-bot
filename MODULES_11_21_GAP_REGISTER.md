@@ -2049,3 +2049,17 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 ## Status
 - B-PG-01 remains BLOCKED; adapter crash rollback and operational failover remain NOT VERIFIED. The previous 19 November disposable PostgreSQL suite acceptance remains valid historical evidence and will not be repeated unnecessarily.
 - SQLite remains runtime default. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# LATEST GAP REGISTER UPDATE — 2026-11-20 (authorized endpoint TLS preflight)
+
+## B-PG-01 — STILL BLOCKED
+- User authorized starting only the disposable Neon endpoint `module9-disposable-test` (`ep-autumn-frost-azvk3fj4`) on branch `module9-pg-lease-fencing-disposable` (`br-falling-butterfly-az03rryi`). It was started, then suspended after preflight; final read-only state is `idle` (`2026-11-20T07:57:38Z`).
+- A single read-only Neon management SQL query against `binance_onchain_test` returned database `binance_onchain_test`, role `binance_bot_staging_owner`, server address `127.0.0.1/32`, and `pg_stat_ssl.ssl=false`.
+- This query used the Neon management SQL connector, not the application's direct psycopg DSN; therefore it is not proof of the direct application's TLS handshake. Treat it as a failed/insufficient TLS signal and fail closed. No DB migrations or writes were run.
+- Active RDC environment still lacks `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST`; no password/connection string was retrieved and no env file was read.
+- Required next: dedicated test credentials + exact host allowlist provisioned securely to active test process; direct psycopg read-only preflight must confirm database identity, exact host and `pg_stat_ssl.ssl=true` on that same connection before any DB-backed tests.
+
+## Adapter crash rollback — NOT IMPLEMENTED / NOT EXECUTED
+- The five narrow process-kill tests remain design-only. Do not repeat historical 750/750 PostgreSQL suite. Run only after B-PG-01 direct TLS preflight succeeds.
+- No production DB/config, publisher, workflow, Binance account, merge or deployment was touched. Project remains PARTIAL — NOT PRODUCTION-READY.
