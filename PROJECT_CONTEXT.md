@@ -6,7 +6,7 @@ This section supersedes earlier branch-head, push-status, and PostgreSQL test-gu
 - Repository: `shehrozali6465372-ctrl/Binance-bot`.
 - Active worktree: `/tmp/binance-w2e-continuation`; local branch: `work/module9-continuation-local`.
 - Existing PR target branch: `layer-1/module9-onchain-continuation`; base: `layer-1/module9-onchain-intelligence`. Do not create a duplicate PR, merge, deploy, or work on `main`.
-- Latest local and GitHub branch HEAD verified equal: `bdae9a2311e938ffa390a6b28654b9f4cc6e3064` (`Harden PostgreSQL integration test TLS guards`). The non-force push completed with exit code 0; GitHub PR #14 reports the same head SHA.
+- Code commit `bdae9a2311e938ffa390a6b28654b9f4cc6e3064` (`Harden PostgreSQL integration test TLS guards`) was pushed successfully. A subsequent documentation-only checkpoint commit records this state; the latest local and GitHub branch heads were verified equal after that push. GitHub PR #14 reports the latest documentation commit as its head SHA.
 - PR #14 is OPEN / DRAFT / UNMERGED. GitHub reports mergeable=true and mergeable_state=unstable.
 - Hosted CI is NOT verified for this SHA: PR-triggered workflow-run query returned zero runs; combined commit status returned `pending` with zero statuses. Do not describe this as CI success.
 - Local worktree was clean immediately after the pushed code commit.
