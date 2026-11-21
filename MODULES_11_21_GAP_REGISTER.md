@@ -2302,3 +2302,13 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Expected DB assertions: two READY research packages; two persisted DEFER opportunity decisions with `APPROVED_OPPORTUNITY_SCORING_POLICY_NOT_CONFIGURED`; no editorial brief, draft, authorization, quota reservation, publication attempt, content generation, or publisher call. Provider HTTP/urllib network access is blocked.
 - This reaches scheduled discovery → Layer 1 PG persistence → claim registry → research package → opportunity decision → fail-closed return. It does not bypass scoring or prove a positive PROCEED/publishing path.
 - Local environment has no PostgreSQL service/DSN, so both DB acceptance methods skip locally. The new positive-discovery scenario is pending the next hosted PostgreSQL service-container run; not yet accepted.
+
+
+# RUN-LEASE SUMMARY JSON SERIALIZATION FIX — 2026-11-22
+
+- Hosted PostgreSQL run `44960855077` passed the target guard and prior adapter tests but failed the new full scheduled discovery/defer test during `finish_run_lease()` with `ValueError: run summary must contain finite JSON data`.
+- Root cause: `_persist_layer1_market_intelligence()` stores a live `ClaimRegistry` object under private key `_claim_registry` in `_LAYER1_LAST_SUMMARY` for downstream runtime use. `run_once()` copied the private object into the durable run summary, violating the JSON contract and leaving the lease unfinalized.
+- Added `_layer1_run_summary_for_persistence()` to strip private underscore-prefixed runtime fields before durable serialization. `run_once()` now uses it. Added a unit regression for private-object exclusion.
+- Hardened the DB integration test cleanup to remove a run lease acquired before a test failure.
+- Focused local tests: **23 run, 0 failures, 2 DB-backed skipped** (no local DSN). Compileall and diff check passed.
+- Fix is local only at this checkpoint; push to existing PR #14 and wait for fresh PostgreSQL CI. Previous run remains failed. B-PG-02/B-SCORE-01 remain OPEN; project remains **PARTIAL — NOT PRODUCTION-READY**.

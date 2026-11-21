@@ -6037,6 +6037,16 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
         if lifecycle_connection is not None:
             lifecycle_connection.close()
 
+def _layer1_run_summary_for_persistence(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip private in-process objects before attaching Layer 1 data to a durable run record."""
+    if not isinstance(summary, dict):
+        raise TypeError("Layer 1 run summary must be a dictionary")
+    return {
+        key: value for key, value in summary.items()
+        if isinstance(key, str) and not key.startswith("_")
+    }
+
+
 def run_once(config, scanner, announcement_engine, research, generator, publisher,
              posted_symbols, hot_search_engine=None, onchain_aggregation_by_asset=None) -> bool:
     """Execute one Layer 1+ downstream cycle under a durable run lease."""
@@ -6099,7 +6109,7 @@ def run_once(config, scanner, announcement_engine, research, generator, publishe
         status = "SUCCEEDED" if outcome else "NO_CANDIDATE_OR_BLOCKED"
         summary["cycle_result"] = status
         if _LAYER1_LAST_SUMMARY:
-            summary["layer1"] = dict(_LAYER1_LAST_SUMMARY)
+            summary["layer1"] = _layer1_run_summary_for_persistence(_LAYER1_LAST_SUMMARY)
         return outcome
     except KeyboardInterrupt:
         execution_failed = True

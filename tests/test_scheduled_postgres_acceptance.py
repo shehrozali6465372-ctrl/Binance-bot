@@ -265,6 +265,7 @@ class ScheduledPostgresFailClosedAcceptanceTests(unittest.TestCase):
             publisher = NetworkDisabledPublisher(store)
             generator = DeterministicGenerator()
             before = {
+                "runs": store.conn.execute("SELECT COUNT(*) AS count FROM layer1_runs").fetchone()["count"],
                 "research": store.conn.execute("SELECT COUNT(*) AS count FROM layer1_research_package_versions").fetchone()["count"],
                 "decisions": store.conn.execute("SELECT COUNT(*) AS count FROM opportunity_decisions").fetchone()["count"],
                 "editorial": store.conn.execute("SELECT COUNT(*) AS count FROM editorial_brief_versions").fetchone()["count"],
@@ -349,8 +350,20 @@ class ScheduledPostgresFailClosedAcceptanceTests(unittest.TestCase):
                     0,
                 )
             finally:
+                if run_id is None:
+                    current_runs = store.conn.execute(
+                        "SELECT COUNT(*) AS count FROM layer1_runs"
+                    ).fetchone()["count"]
+                    if current_runs > before["runs"]:
+                        latest_run = store.conn.execute(
+                            "SELECT run_id FROM layer1_runs ORDER BY started_at DESC LIMIT 1"
+                        ).fetchone()
+                        run_id = latest_run["run_id"] if latest_run else None
                 if run_id:
                     with store.conn.transaction():
+                        store.conn.execute(
+                            "DELETE FROM layer1_run_lease WHERE run_id=%s", (run_id,),
+                        )
                         package_ids = [
                             row["package_id"] for row in store.conn.execute(
                                 "SELECT package_id FROM layer1_research_package_versions "

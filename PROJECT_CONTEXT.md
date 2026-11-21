@@ -4143,3 +4143,23 @@ The most relevant candidate capabilities identified from the directory are:
 - The intended acceptance asserts both PostgreSQL research packages are READY, both opportunity decisions are DEFER specifically because `APPROVED_OPPORTUNITY_SCORING_POLICY_NOT_CONFIGURED`, and no editorial brief, draft, authorization, quota reservation, attempt, content generation, image generation or publisher call occurs. Provider HTTP and urllib network access are blocked in the test.
 - This scenario exercises the actual scheduled discovery → Layer 1 PostgreSQL persistence → claim registry → research package → opportunity decision → fail-closed return path. It does not exercise a positive PROCEED/content/publication path because B-SCORE-01 remains unresolved.
 - Local execution can only confirm import/compile and the explicit skip: this device has no local PostgreSQL service and no TEST_POSTGRES_DSN. The real execution is pending the next hosted PostgreSQL service-container CI run. Do not count it as passed until the check is green.
+
+
+# SCHEDULED POSTGRES RUN-SUMMARY SERIALIZATION DEFECT — 2026-11-22
+
+## Hosted failure diagnosis
+- Latest isolated PostgreSQL job (`44960855077`) passed target guard and all earlier DB integration tests, but the new positive-discovery scheduled test failed during durable run-lease finalization.
+- Exact failure: `PostgresPublicationStore.finish_run_lease()` rejected the run summary as non-JSON data. `_persist_layer1_market_intelligence()` intentionally places the live `ClaimRegistry` object in `_LAYER1_LAST_SUMMARY["_claim_registry"]` for downstream in-process use. `run_once()` copied that private object into the persisted run summary, so `json.dumps(..., allow_nan=False)` raised `ValueError` after the pipeline had already completed the research/decision stage.
+- This is a real scheduled-runtime defect: it can leave a run lease active even when the pipeline returns a normal blocked outcome.
+
+## Fix implemented locally
+- Added `_layer1_run_summary_for_persistence()` to exclude private underscore-prefixed runtime objects from the durable summary while preserving public JSON-safe summary fields.
+- `run_once()` now applies this sanitizer before attaching the Layer 1 summary to the durable run record.
+- Added unit regression `test_private_layer1_runtime_objects_are_excluded_from_durable_run_summary`.
+- Hardened the scheduled PostgreSQL integration test cleanup so an unexpected failure after run-lease acquisition does not leave a RUNNING row/lease in the disposable CI database.
+- Focused local tests `tests.test_scheduled_persistence_safety` + `tests.test_scheduled_postgres_acceptance`: **23 tests run, 0 failures, 2 DB-backed tests skipped** (no local DSN). Compileall and diff check passed.
+
+## Acceptance status
+- This fix is not yet pushed or hosted-verified at this checkpoint. The previous DB run `44960855077` remains failed and must not be reported as accepted.
+- Next: push this narrow fix to the existing PR #14 branch, then require a fresh PostgreSQL service-container run. The full scheduled test should now persist two READY research packages and two DEFER decisions, release its lease, and create no editorial/draft/authorization/quota/publication records.
+- B-PG-02 and B-SCORE-01 remain OPEN until the hosted run is green and owner-approved scoring is supplied. No Neon/production DB operation, live provider call, real post, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.

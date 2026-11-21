@@ -10,6 +10,25 @@ import main
 
 
 class ScheduledPersistenceSafetyTests(unittest.TestCase):
+    def test_private_layer1_runtime_objects_are_excluded_from_durable_run_summary(self):
+        private_registry = object()
+        summary = {
+            "observations": 2,
+            "claim_verification_summary": {"claim_count": 3},
+            "_claim_registry": private_registry,
+        }
+
+        persisted = main._layer1_run_summary_for_persistence(summary)
+
+        self.assertEqual(
+            persisted,
+            {
+                "observations": 2,
+                "claim_verification_summary": {"claim_count": 3},
+            },
+        )
+        self.assertNotIn("_claim_registry", persisted)
+
     def test_postgres_authorization_connection_loss_is_propagated_without_quota_release(self):
         import psycopg
         config = replace(main.CONFIG, persistence_backend="postgresql")
