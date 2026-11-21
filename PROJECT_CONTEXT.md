@@ -4061,3 +4061,29 @@ The most relevant candidate capabilities identified from the directory are:
 - GitHub Actions run `44919716032` for this commit completed with conclusion **success**. This is mocked safety CI, not PostgreSQL live DB acceptance.
 - Local full suite remains **779 passed, 0 failed, 58 skipped**; the 58 skipped DB-backed tests were not counted as passes.
 - Next work remains B-PG-02: full scheduled PostgreSQL pipeline acceptance. The disposable Neon endpoint remains suspended; do not resume it without a separately approved, scoped DB test window.
+
+
+# CONTINUATION AUDIT — 2026-11-21 (B-PG-02 feasibility boundary)
+
+## Verified scheduled-path dependency discovered
+- Read-only trace of `main.py::_run_once_impl()` and `layer1/opportunity.py::OpportunityEvaluationEngine.evaluate()` confirms the scheduled orchestration currently invokes the opportunity engine with `factors=None` and `policy=None` for each persisted research package.
+- The engine deliberately returns `DEFER` with reason `APPROVED_OPPORTUNITY_SCORING_POLICY_NOT_CONFIGURED` when eligibility/research checks pass but no approved policy is supplied. The runtime saves that decision but only creates an editorial brief when the decision is `PROCEED`.
+- Consequently, under the current production runtime wiring, a scheduled cycle cannot proceed from research into editorial brief, draft, publication authorization, quota reservation, or publisher submission. This is a fail-closed behavior, not a defect to bypass with guessed weights.
+- B-PG-02's positive full scheduled discovery-to-publication acceptance path is therefore dependent on B-SCORE-01: an owner-approved scoring policy and evidence-backed factor calculation must first be supplied and wired. Do not monkeypatch `OpportunityEvaluationEngine`, fabricate factors, or use a test-only policy to claim production scheduled-path acceptance.
+- Existing `tests/test_opportunity.py::test_unconfigured_policy_defers_instead_of_guessing_weights` already verifies the engine's fail-closed contract. Existing SQLite end-to-end test supplies an explicit test policy directly and is not proof that the scheduled runtime has one.
+
+## Environment feasibility check
+- RDC device is online; local worktree `/tmp/binance-w2e-continuation` is clean at `c19e8f2c5b109e641b6736fb731a3a391ced6d4b` on `work/module9-continuation-local`.
+- `git ls-remote origin refs/heads/layer-1/module9-onchain-continuation` and GitHub PR #14 metadata both confirm remote head `c19e8f2c5b109e641b6736fb731a3a391ced6d4b`; cached `origin` tracking ref is stale and should not be treated as remote state.
+- No `TEST_POSTGRES_DSN` or `TEST_POSTGRES_ALLOWED_HOST` variable is present in the active shell. `pg_isready` reports no local PostgreSQL server. The disposable Neon endpoint remains suspended and was not resumed.
+- No DB connection, migration, DB write, provider call, image upload, real Binance post, publisher/gateway change, merge or deployment occurred in this audit.
+
+## Next exact work
+1. Keep B-PG-02 OPEN. First resolve B-SCORE-01 through explicit owner-approved policy/factors; absent that, only the scheduled fail-closed/DEFER path can be accepted end-to-end.
+2. In parallel, prepare a deterministic scheduled-run harness that uses a disposable ephemeral PostgreSQL service (e.g. CI service container), actual PostgreSQL adapters, fake market/announcement/research/content/image inputs, and a publisher transport that cannot access the network. The harness must explicitly prove that no real provider or Binance request can escape.
+3. Separate positive-path acceptance from the current fail-closed path. Until approved scoring is wired, assert that the persisted opportunity decision is DEFER and that no editorial/draft/authorization/quota/publisher side effects occur.
+4. Do not resume Neon or run DB-backed acceptance there without a new, separately scoped authorization. Do not invent a score/policy, enable live publishing, merge or deploy.
+
+## Current status
+- PR #14 remains OPEN / DRAFT / UNMERGED; no duplicate PR exists.
+- SQLite remains the runtime default. Project remains **PARTIAL — NOT PRODUCTION-READY**.

@@ -2231,3 +2231,23 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Hosted GitHub Actions run `44919716032` completed **success** for commit `935c264`. It validates the mocked safety workflow only; it does not close B-PG-02 or prove live PostgreSQL acceptance.
 - Local full suite: **779 passed, 0 failed, 58 skipped**; all 58 skipped tests remain excluded from PostgreSQL acceptance claims.
 - Continue with the design/implementation of the full scheduled PostgreSQL acceptance harness. Neon remains suspended and needs a separately approved test window before any new DB-backed run.
+
+
+# B-PG-02 DEPENDENCY AUDIT — 2026-11-21
+
+## Newly verified blocker: B-SCORE-01 prevents the positive scheduled path
+- `main.py::_run_once_impl()` currently calls `OpportunityEvaluationEngine.evaluate(..., factors=None, policy=None)` when it persists each research package.
+- `OpportunityEvaluationEngine` explicitly returns `DEFER` with `APPROVED_OPPORTUNITY_SCORING_POLICY_NOT_CONFIGURED` when other prerequisites pass but policy is absent. Runtime persists the decision and creates an editorial brief only inside `if opportunity_decision.state == "PROCEED"`.
+- Therefore the current scheduled runtime cannot reach editorial brief, draft, authorization, quota reservation or publisher submission on the positive path. This is intentional fail-closed behavior while B-SCORE-01 awaits an owner-approved scoring policy and evidence-backed factors.
+- Do not invent weights/factors, monkeypatch the production engine to force `PROCEED`, or claim a test-only policy proves production acceptance.
+- Existing `tests/test_opportunity.py::test_unconfigured_policy_defers_instead_of_guessing_weights` covers the engine contract; the SQLite end-to-end test passes an explicit test policy directly and does not validate scheduled runtime configuration.
+
+## B-PG-02 test strategy update
+- Keep B-PG-02 OPEN. Split acceptance into (a) current scheduled fail-closed path, which should persist a DEFER decision and prove no editorial/draft/authorization/quota/publisher side effects, and (b) positive scheduled path, which is blocked until B-SCORE-01 is resolved by the owner.
+- Prepare a deterministic harness using actual PostgreSQL adapters and an ephemeral isolated PostgreSQL service, with fake discovery/announcement/research/content/image providers and a publisher transport that is technically unable to reach the network. Include failure injection, fresh-process reads, unknown-outcome reconciliation and duplicate prevention once the positive path is legitimately available.
+- Active RDC shell has no `TEST_POSTGRES_DSN` or `TEST_POSTGRES_ALLOWED_HOST`; `pg_isready` reports no local server. The Neon disposable endpoint remains suspended. No DB connection or write was attempted.
+- Remote branch SHA and PR #14 head both verify `c19e8f2c5b109e641b6736fb731a3a391ced6d4b`; cached local origin tracking ref is stale. Worktree was clean before this documentation-only audit.
+
+## Status
+- B-PG-02 remains OPEN; B-SCORE-01 remains OPEN. No DB-backed acceptance, live provider call, media upload, real Binance post, merge or deployment occurred.
+- Project remains **PARTIAL — NOT PRODUCTION-READY**; SQLite remains runtime default.
