@@ -1,3 +1,31 @@
+# CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-21 (PostgreSQL test TLS guard push verified)
+
+This section supersedes earlier branch-head, push-status, and PostgreSQL test-guard notes. Historical entries remain for traceability.
+
+## Exact continuation state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Active worktree: `/tmp/binance-w2e-continuation`; local branch: `work/module9-continuation-local`.
+- Existing PR target branch: `layer-1/module9-onchain-continuation`; base: `layer-1/module9-onchain-intelligence`. Do not create a duplicate PR, merge, deploy, or work on `main`.
+- Latest local and GitHub branch HEAD verified equal: `bdae9a2311e938ffa390a6b28654b9f4cc6e3064` (`Harden PostgreSQL integration test TLS guards`). The non-force push completed with exit code 0; GitHub PR #14 reports the same head SHA.
+- PR #14 is OPEN / DRAFT / UNMERGED. GitHub reports mergeable=true and mergeable_state=unstable.
+- Hosted CI is NOT verified for this SHA: PR-triggered workflow-run query returned zero runs; combined commit status returned `pending` with zero statuses. Do not describe this as CI success.
+- Local worktree was clean immediately after the pushed code commit.
+
+## PostgreSQL test target guard — pushed 2026-11-21
+- Added `tests/postgres_test_support.py` and eight unit tests in `tests/test_postgres_test_support.py`; added `tests/__init__.py`.
+- Replaced duplicated DSN-only prechecks in six PostgreSQL integration test modules: claim registry, event lifecycle, Layer 1, legacy, on-chain, and publication. The on-chain test class invokes the shared guard in `setUpClass` before migrations; publication and the other guarded classes likewise preflight before migration.
+- Guard validates the dedicated `binance_onchain_test` database identity, exact remote host allowlist, required TLS mode, `channel_binding=require`, rejects remote `hostaddr` overrides/service aliases, opens a short-timeout read-only preflight connection, verifies `current_database()`, and checks client-side `conn.pgconn.ssl_in_use` for remote targets. The connection is closed before migrations.
+- Focused local verification before push: `compileall` passed; 17 focused tests passed, 0 failed; `git diff --check` passed. No DSN/allowlist was configured in that focused test environment, so no database-backed integration test or migration ran in that verification.
+- The disposable Neon endpoint remains suspended. Do not resume it or run DB-backed tests without an approved disposable DB test window. Do not print or expose `/tmp/binance-postgres-test.env` contents.
+- Full repository suite and hosted CI are not verified for this latest commit. The earlier isolated environment lacked application dependencies such as Pillow; do not infer full-suite status from the focused run.
+
+## Safety and production status
+- This commit changes tests only; no application runtime code, publisher, publishing gateway, production database, credentials, scheduled workflow, or deployment was changed. No real Binance Square post or Pinterest Pin was published.
+- Project remains **PARTIAL — NOT PRODUCTION-READY**. Existing Module 2/4/5/6/7/9/10/11/12/14/15/16/17/18/19/20/21 gaps and five unimplemented PostgreSQL adapter crash/rollback tests remain as recorded in the gap register and prior sections.
+- Next safe step: verify the full suite in a dependency-complete isolated environment without production credentials; then separately obtain approval before resuming the disposable Neon endpoint for DB-backed integration tests. Do not enable publishing or use production DB credentials.
+
+---
+
 # CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-19 (Module 21 fresh-process recovery)
 
 This latest section supersedes older test counts and the immediately prior Module 21 recovery status below. Historical entries remain for traceability.
