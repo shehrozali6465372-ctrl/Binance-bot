@@ -3735,3 +3735,31 @@ The most relevant candidate capabilities identified from the directory are:
 - No implementation, tests, configuration, workflow, database, publisher, gateway, credentials, merge or deployment changed as part of this research.
 - Project remains PARTIAL — NOT PRODUCTION-READY. Existing Module 9 integration and PostgreSQL TLS preflight blockers remain unchanged.
 - Next step, only if separately approved: source-level security and contract review of the first evaluation group, followed by an integration-gap proposal. Do not install or execute skills as part of that review.
+
+
+# LATEST CONTINUATION UPDATE — 2026-11-21 (isolated psycopg setup and direct TLS preflight)
+
+## Test environment and credential-file location
+- Authorized RDC device: `localhost` (device ID `bd830869-fbae-4825-ae7b-5044d6161090`).
+- Correct local repository/worktree: `/tmp/binance-w2e-continuation`; branch: `work/module9-continuation-local`. No project code, runtime configuration, publisher or workflow was changed in this continuation.
+- Disposable test environment created separately at `/tmp/binance-pg-venv`. The system Python and existing project environment were not modified.
+- Installed into that isolated venv from the repository's declared optional dependency chain: `requirements-onchain-postgres.txt` → `requirements-announcement-importer.txt` → `psycopg[binary]>=3.2,<4`.
+- Verified installed versions: `psycopg 3.3.9`, `psycopg-binary 3.3.9`, `typing-extensions 4.16.0`, and isolated venv `pip 26.3`. Psycopg reports the `binary` implementation; bundled libpq version reports `180006`.
+- Safe dependency verification command: `/tmp/binance-pg-venv/bin/python -c "import psycopg; print(psycopg.__version__)"`.
+- Dedicated environment file: `/tmp/binance-postgres-test.env` on RDC device `localhost`. File mode verified as `0600`. It contains exactly two lines: line 1 `TEST_POSTGRES_DSN=<secret value>`; line 2 `TEST_POSTGRES_ALLOWED_HOST=ep-autumn-frost-azvk3fj4.c-3.ap-southeast-1.aws.neon.tech`.
+- The DSN value is intentionally NOT copied into this context file, chat, logs, shell output, or GitHub. Never print, source, commit, or request the secret value. The earlier line-wrapping issue was corrected by moving the existing URL value onto line 1 and restoring the required missing `po` prefix. The file was revalidated without displaying the URL or credentials.
+- The DSN's structural guards passed: PostgreSQL URL scheme, exact direct host allowlist, non-pooler host, database name `binance_onchain_test`, username/password presence, configured TLS mode (`require`/verify equivalent), no whitespace, exact two-line layout, and mode 0600. Structural validation is not proof of negotiated TLS.
+
+## Direct application connection preflight — failed closed
+- User approved installing the driver in an isolated venv. The previously authorized disposable Neon endpoint was started for the direct read-only preflight: project `orange-glade-36037611`, branch `br-falling-butterfly-az03rryi`, database `binance_onchain_test`, endpoint `ep-autumn-frost-azvk3fj4` (`module9-disposable-test`), Singapore region, direct host `ep-autumn-frost-azvk3fj4.c-3.ap-southeast-1.aws.neon.tech`; connection pooler is disabled.
+- The direct application process used `/tmp/binance-pg-venv/bin/python` and psycopg 3.3.9, with a read-only session setting (`default_transaction_read_only=on`). It ran only a read-only identity/TLS query against `pg_stat_ssl` for its own backend.
+- DSN guards passed and a direct connection succeeded; `current_database()` matched `binance_onchain_test`; a database role and server address were present. Critically, the direct connection returned `pg_stat_ssl.ssl = false`. Therefore `PREFLIGHT_PASS=False`. Do NOT treat the configured `sslmode` parameter alone as proof of TLS.
+- The endpoint was immediately suspended after the failed preflight. A subsequent Neon endpoint read confirmed state `idle`, with `suspended_at=2026-11-21T01:35:26Z`.
+- No migration, DDL, insert, update, delete, adapter test, or application write was performed. No production database was accessed. No Binance post, Pinterest Pin, media upload, publisher, gateway, earning workflow, or provider was invoked or changed.
+
+## Gate decision and exact next steps
+- B-PG-01 remains BLOCKED. The live direct application session negotiated without TLS despite the DSN's TLS-mode setting; this is a hard stop.
+- Do not retry with `sslmode=disable`, do not weaken TLS requirements, do not run migrations or DB-backed tests, and do not attempt to bypass the host guard.
+- Next investigate why the direct Neon session reports `pg_stat_ssl.ssl=false` despite the configured TLS mode: inspect sanitized DSN query parameters only (never credentials), psycopg/libpq connection options and runtime connection path, Neon endpoint/proxy TLS behavior, and whether the driver is actually using the expected DSN. Any further attempt must retain strict TLS requirements and repeat the same direct read-only identity + `pg_stat_ssl.ssl=true` preflight.
+- Only after the direct connection returns the exact disposable database/host and `pg_stat_ssl.ssl=true` may narrowly scoped adapter crash/rollback tests be implemented and executed. Keep the endpoint suspended until a separately approved next diagnostic attempt.
+- Project remains PARTIAL — NOT PRODUCTION-READY. SQLite remains runtime default. Historical 19 November PostgreSQL suite result (750 passed, 0 failed) remains historical evidence only and was not repeated. The five adapter process-kill/rollback tests remain NOT IMPLEMENTED / NOT EXECUTED.
