@@ -4590,7 +4590,13 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
             if sym not in posted_hours_data or hrs < posted_hours_data[sym]:
                 posted_hours_data[sym] = hrs
     except Exception:
-        pass
+        # A missing cooldown-history read is tolerable for the legacy SQLite
+        # path, but not for the durable PostgreSQL runtime: continuing with an
+        # empty/incomplete history could make duplicate decisions from stale data.
+        # Preserve the original psycopg exception so the scheduler can stop for
+        # supervised recovery rather than treating the failure as no history.
+        if config.persistence_backend == "postgresql":
+            raise
 
     # Skills Hub BAPI is undocumented and remains disabled. Use the existing
     # CoinGecko market scanner as the candidate universe; do not invent data.

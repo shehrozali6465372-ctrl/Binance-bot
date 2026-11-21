@@ -1,3 +1,25 @@
+# LATEST AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-21 (Fail-closed PostgreSQL cooldown-history read)
+
+This entry records a separate scheduled-runtime safety correction after the approved PostgreSQL recovery window. Earlier entries remain historical.
+
+## Defect reproduced and corrected
+- Repository/worktree: `shehrozali6465372-ctrl/Binance-bot`, `/tmp/binance-w2e-continuation`; local branch `work/module9-continuation-local`.
+- Parent commit: `d39ec607aa778f4ccccf38bf39ffcecd5a909aad`; existing PR #14 is the only target. Do not create another PR, merge, deploy, or touch `main`.
+- Audit found `_run_once_impl()` swallowed all exceptions from `publisher.db.get_posted_hours_dict(hours=72)`, including PostgreSQL connection/session failures, then continued with incomplete cooldown history.
+- TDD RED: added `test_postgres_connection_loss_during_posted_hours_lookup_aborts_pipeline`; it failed because the synthetic psycopg `OperationalError` was swallowed and the cycle proceeded to candidate discovery.
+- GREEN: PostgreSQL-selected runtime now re-raises the original history-read exception. The existing scheduler-level psycopg connection-failure handler can then stop the scheduler for supervised restart/reconciliation. Legacy SQLite retains its previous best-effort behavior.
+- Focused regression: **1 passed** after the fix. Related scheduled-persistence, end-to-end pipeline, publisher-safety and authorization suites: **74 passed, 0 failed**.
+- Full local suite after the code change, with PostgreSQL DSN/allowlist unset: **776 tests, 0 failures, 58 skipped**. These 58 are guarded PostgreSQL integration tests and are not counted as passes. This run does not replace the separately approved live PostgreSQL recovery acceptance of 22 passed.
+- `python -m compileall -q main.py layer1 tests` and `git diff --check`: PASS.
+
+## Safety and scope
+- Runtime change is limited to propagating errors from the 72-hour history read when PostgreSQL is selected; SQLite behavior is unchanged.
+- No production database, provider API, media upload, Binance Square publication, Pinterest Pin, scheduled workflow dispatch, merge or deployment was performed. No publisher configuration was changed.
+- The disposable Neon endpoint remains suspended. No additional live PostgreSQL run was needed for this deterministic connection-failure regression.
+- Project remains **PARTIAL — NOT PRODUCTION-READY**. Remaining release gaps include database failover/reconnect drills, full scheduled discovery-to-publication recovery acceptance, production DB architecture/cutover review, and production owner approval.
+
+---
+
 # LATEST AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-21 (Approved PostgreSQL recovery window)
 
 This entry records the latest approved live disposable-PostgreSQL verification. Earlier entries remain historical.

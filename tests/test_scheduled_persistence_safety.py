@@ -1,5 +1,6 @@
 """Regression tests for durable scheduled-run persistence and fail-closed quota checks."""
 import os
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -9,6 +10,42 @@ import main
 
 
 class ScheduledPersistenceSafetyTests(unittest.TestCase):
+    def test_postgres_connection_loss_during_posted_hours_lookup_aborts_pipeline(self):
+        """A failed PostgreSQL cooldown-history read must not become empty history."""
+        import psycopg
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                main.CONFIG, database_path=str(Path(tmp) / "agent.db"),
+                dry_run=True, persistence_backend="postgresql",
+                postgres_dsn="postgresql://test", max_daily_posts=6,
+            )
+
+            class BrokenDatabase:
+                def get_today_post_count(self):
+                    return 0
+
+                def get_posted_hours_dict(self, hours):
+                    raise psycopg.OperationalError("synthetic PostgreSQL history outage")
+
+            class Publisher:
+                db = BrokenDatabase()
+                postgres_store = object()
+
+            class EmptyScanner:
+                def _universe(self):
+                    return []
+
+            with patch.object(main, "CONFIG", config), \
+                 patch.object(main, "_verify_persistence_integrity", return_value=True), \
+                 patch.object(main, "_retry_pending_push"), \
+                 patch.object(main, "_load_post_history", return_value={}):
+                with self.assertRaises(psycopg.OperationalError):
+                    main._run_once_impl(
+                        config, scanner=EmptyScanner(), announcement_engine=object(),
+                        research=object(), generator=object(), publisher=Publisher(),
+                        posted_symbols=set(),
+                    )
+
     def test_postgres_connection_loss_during_history_lookup_is_not_treated_as_empty_history(self):
         """A broken PostgreSQL connection must abort, not erase duplicate history."""
         import psycopg
