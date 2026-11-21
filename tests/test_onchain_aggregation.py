@@ -11,7 +11,7 @@ from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine, OnCha
 from layer1.onchain_ingestion import NormalizedTransferEvent, OnChainIngestionStore
 from layer1.onchain_aggregation import OnChainTransferAggregator
 
-NOW = datetime(2026, 11, 11, 17, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 ASSET = "coingecko:bitcoin"
 TX1 = "a" * 64
 BLOCK = "b" * 64

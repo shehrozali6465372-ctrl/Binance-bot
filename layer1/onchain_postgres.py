@@ -41,6 +41,39 @@ def _driver():
     return psycopg, Jsonb
 
 
+def verify_postgres_migrations(dsn: str, migrations_dir: Optional[str] = None) -> tuple[str, ...]:
+    """Verify the checked-in migration set using read-only database access.
+
+    Runtime/application roles need only SELECT on the migration ledger. Schema
+    creation and DDL remain an explicit, separately executed migrator task.
+    """
+    if not isinstance(dsn, str) or not dsn.strip():
+        raise ValueError("an explicit PostgreSQL DSN is required")
+    psycopg, _ = _driver()
+    directory = Path(migrations_dir) if migrations_dir else (
+        Path(__file__).resolve().parent / "migrations" / "postgresql"
+    )
+    files = sorted(directory.glob("[0-9][0-9][0-9][0-9]_*.sql"))
+    if not files:
+        raise RuntimeError(f"no PostgreSQL migrations found in {directory}")
+    verified: list[str] = []
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        for path in files:
+            version = path.name
+            source = path.read_text(encoding="utf-8")
+            checksum = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            prior = conn.execute(
+                "SELECT checksum FROM layer1_schema_migrations WHERE version=%s",
+                (version,),
+            ).fetchone()
+            if prior is None:
+                raise RuntimeError(f"missing applied PostgreSQL migration: {version}")
+            if prior[0] != checksum:
+                raise RuntimeError(f"applied migration checksum changed: {version}")
+            verified.append(version)
+    return tuple(verified)
+
+
 def apply_postgres_migrations(dsn: str, migrations_dir: Optional[str] = None) -> tuple[str, ...]:
     """Apply checked-in SQL migrations atomically under a database advisory lock."""
     if not isinstance(dsn, str) or not dsn.strip():

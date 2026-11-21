@@ -159,6 +159,69 @@ class RunLease:
             "config_hash": str(row[4] or ""),
         }
 
+    def recover_interrupted(
+        self, expected_run_id: str, *, process_termination_confirmed: bool,
+        evidence: str, recovered_by: str,
+    ) -> bool:
+        """Manually release a crashed-run lease after an operator confirms process death.
+
+        This never runs automatically and never replays the interrupted pipeline.
+        The exact run ID is required to avoid releasing a newer owner's lease.
+        """
+        if process_termination_confirmed is not True:
+            raise ValueError("process termination confirmation is required")
+        if not isinstance(expected_run_id, str) or not expected_run_id.strip():
+            raise ValueError("expected run ID is required")
+        if not isinstance(evidence, str) or len(evidence.strip()) < 12:
+            raise ValueError("operator recovery evidence must be specific")
+        if not isinstance(recovered_by, str) or not recovered_by.strip():
+            raise ValueError("operator identity is required")
+        if self.run_id == expected_run_id:
+            raise RuntimeError("current process cannot recover its own active run lease")
+
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            lease = self.conn.execute(
+                "SELECT run_id FROM layer1_run_lease WHERE lease_name='agent'"
+            ).fetchone()
+            if lease is None:
+                self.conn.commit()
+                return False
+            if lease[0] != expected_run_id:
+                raise ValueError("active lease does not match the expected run ID")
+            run = self.conn.execute(
+                "SELECT status, summary_json FROM layer1_runs WHERE run_id=?",
+                (expected_run_id,),
+            ).fetchone()
+            if run is None or run[0] != "RUNNING":
+                raise RuntimeError("run record is missing or not RUNNING; refusing recovery")
+            summary = json.loads(run[1]) if run[1] else {}
+            if not isinstance(summary, dict):
+                raise RuntimeError("existing run summary is invalid; refusing recovery")
+            summary["operator_recovery"] = {
+                "recovered_by": recovered_by.strip(),
+                "evidence": evidence.strip(),
+                "process_termination_confirmed": True,
+            }
+            cursor = self.conn.execute(
+                "UPDATE layer1_runs SET finished_at=?, status='INTERRUPTED', summary_json=? "
+                "WHERE run_id=? AND status='RUNNING'",
+                (utc_now(), json.dumps(summary, sort_keys=True, allow_nan=False), expected_run_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("run state changed during operator recovery")
+            deleted = self.conn.execute(
+                "DELETE FROM layer1_run_lease WHERE lease_name='agent' AND run_id=?",
+                (expected_run_id,),
+            )
+            if deleted.rowcount != 1:
+                raise RuntimeError("run lease ownership changed during operator recovery")
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def acquire(self, context: RunContext) -> None:
         self.conn.execute("BEGIN IMMEDIATE")
         try:
@@ -1162,6 +1225,7 @@ class AnnouncementEvidence:
     raw_evidence_ref: str = ""
     revision_correlation_status: str = "STABLE_PROVIDER_ID"
     revision_match_reason: str = "Provider-stable source ID is available for revision ordering."
+    body: str = ""
 
     def __post_init__(self) -> None:
         # The CMS worker's source_id is a local SHA-256 fingerprint of
@@ -1198,6 +1262,8 @@ class AnnouncementEvidence:
             raise ValueError("announcement identity/publisher/title/source URL missing")
         if self.publisher.strip().casefold() != "binance":
             raise ValueError("announcement publisher does not match the approved Binance source")
+        if not isinstance(self.body, str):
+            raise ValueError("announcement body must be text")
         parsed_url = urlparse(self.source_url)
         host = (parsed_url.hostname or "").lower()
         if (
@@ -1820,6 +1886,50 @@ class Layer1Store:
             if currency is None or observation.currency == currency:
                 observations.append(observation)
         return observations
+
+    def iter_announcement_revisions(self) -> tuple[AnnouncementEvidence, ...]:
+        """Return every persisted source revision in deterministic lineage order."""
+        rows = self.conn.execute(
+            "SELECT payload_json FROM layer1_announcement_revisions "
+            "ORDER BY source_id, first_seen_at, revision_key"
+        ).fetchall()
+        records = []
+        for (payload,) in rows:
+            decoded = json.loads(payload)
+            decoded["asset_ids"] = tuple(decoded.get("asset_ids") or ())
+            record = AnnouncementEvidence(**decoded)
+            record.validate()
+            records.append(record)
+        return tuple(records)
+
+    def iter_market_observations(self) -> tuple[MarketObservation, ...]:
+        """Return persisted market observations in stable chronological order."""
+        rows = self.conn.execute(
+            "SELECT payload_json FROM layer1_market_observations "
+            "ORDER BY observed_at, provider, observation_key"
+        ).fetchall()
+        records = []
+        for (payload,) in rows:
+            decoded = json.loads(payload)
+            decoded["history"] = tuple(decoded.get("history") or ())
+            record = MarketObservation(**decoded)
+            record.validate()
+            records.append(record)
+        return tuple(records)
+
+    def iter_trend_signals(self) -> tuple[TrendSignal, ...]:
+        """Return persisted trend signals in stable chronological order."""
+        rows = self.conn.execute(
+            "SELECT payload_json FROM layer1_trend_signals ORDER BY observed_at, signal_key"
+        ).fetchall()
+        records = []
+        for (payload,) in rows:
+            decoded = json.loads(payload)
+            decoded["asset_ids"] = tuple(decoded.get("asset_ids") or ())
+            record = TrendSignal(**decoded)
+            record.validate()
+            records.append(record)
+        return tuple(records)
 
     def save_market_analysis(self, result: MarketAnalysisResult) -> None:
         result.validate()

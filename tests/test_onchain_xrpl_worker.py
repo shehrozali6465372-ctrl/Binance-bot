@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from layer1.foundation import EligibilityDecision
 from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine, OnChainObservation, OnChainStore
@@ -9,7 +9,7 @@ from layer1.onchain_ingestion import OnChainIngestionStore
 from layer1.onchain_providers import ProviderDataPage, ProviderHealthResult, ProviderTransportError, XrplAccountTransaction
 from layer1.onchain_xrpl_worker import XrplIssuedCurrencyIngestionWorker
 
-NOW = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 ACCOUNT = "rLNaPoKeeBjZe2qs6x52yVPZpZ8td4dc6w"
 DESTINATION = "rf1BiGeXwwQoi8Z2ueFYTEXSwuJYfV2Jpn"
 ISSUER = "rhub8VRN55s94qWKDv6jmDy1pUykJzF3wq"
@@ -20,7 +20,7 @@ MAPPING_ID = "xrpl-usd-v1"
 
 def record(ledger=501, value="3.25", requested="100", tx_hash=TX_HASH, source=ACCOUNT, destination=DESTINATION):
     return XrplAccountTransaction(
-        tx_hash, ledger, "2026-11-11T12:00:00Z",
+        tx_hash, ledger, (NOW - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
         {"TransactionType": "Payment", "Account": source, "Destination": destination,
          "Amount": {"currency": "USD", "issuer": ISSUER, "value": requested},
          "Flags": 0x00020000},
@@ -46,7 +46,7 @@ class FakeXrplProvider:
 
     def fetch_ledger_header(self, index):
         return {"number": index, "hash": self.changed_hashes.get(index, BLOCK_HASH),
-                "timestamp": 1794398400, "finality_reference": "validated=true"}
+                "timestamp": int(NOW.timestamp()) - 60, "finality_reference": "validated=true"}
 
     def fetch_account_transactions(self, account, ledger_index_min, ledger_index_max, marker=None, limit=200):
         self.calls.append((account, ledger_index_min, ledger_index_max, marker, limit))
@@ -72,7 +72,7 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
         self.mapping = OnChainAssetMapping(
             MAPPING_ID, "coingecko:usd-coin", "USDC", "xrpl-mainnet", "XRPL", "xrpl-mainnet",
             "TOKEN", None, "XRPL_ISSUED_CURRENCY", 6, "VERIFIED", "OFFICIAL_PROJECT",
-            "https://xrpl.org", "2026-11-11T10:00:00+00:00",
+            "https://xrpl.org", (NOW - timedelta(hours=2)).isoformat(),
             issuer_address=ISSUER, issued_currency="USD")
         eligibility = EligibilityDecision(
             status="ELIGIBLE", asset_id="coingecko:usd-coin", symbol="USDC",

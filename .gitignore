@@ -5,3 +5,8 @@ main.py.bak
 drafts/
 posts/
 charts/
+
+# Local environment files may contain API keys and database credentials.
+.env
+.env.*
+!.env.example

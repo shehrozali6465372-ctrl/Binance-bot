@@ -28,24 +28,8 @@ class PostgresAdapterContractTests(unittest.TestCase):
 def _dedicated_local_test_dsn():
     if not TEST_DSN:
         return False
-    from psycopg.conninfo import conninfo_to_dict
-    info = conninfo_to_dict(TEST_DSN)
-    host = info.get("host", "")
-    database = info.get("dbname") or info.get("database")
-    hostaddr = info.get("hostaddr", "")
-    local_host = host in {"localhost", "127.0.0.1", "::1"} or host.startswith("/")
-    allowed_remote_host = os.environ.get("TEST_POSTGRES_ALLOWED_HOST", "").strip()
-    remote_host_allowed = (
-        bool(allowed_remote_host) and host == allowed_remote_host
-        and info.get("sslmode") in {"require", "verify-ca", "verify-full"}
-    )
-    local_hostaddr = not hostaddr or hostaddr in {"127.0.0.1", "::1"}
-    if (database != "binance_onchain_test" or not (local_host or remote_host_allowed)
-            or not local_hostaddr or info.get("service")):
-        raise RuntimeError(
-            "TEST_POSTGRES_DSN must target binance_onchain_test on localhost or an exact "
-            "TEST_POSTGRES_ALLOWED_HOST with TLS"
-        )
+    from tests.postgres_test_support import validate_postgres_test_target
+    validate_postgres_test_target(TEST_DSN, os.environ.get("TEST_POSTGRES_ALLOWED_HOST", "").strip())
     return True
 
 
@@ -140,6 +124,118 @@ class PostgresOnChainIngestionTests(unittest.TestCase):
                 fixture.observation.observation_id)[0], fixture.observation)
         finally:
             store.close()
+
+    def test_ingestion_checkpoint_and_event_survive_fresh_process_reopen(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        event_id = "fresh-process-event-" + os.urandom(8).hex()
+        cursor_key = "fresh-process-cursor-" + os.urandom(8).hex()
+        event = self.event(event_id=event_id)
+        self.store.commit_page(
+            cursor_key, {"next_block": 101, "test_marker": cursor_key}, [event],
+            expected_cursor=None, scope_identity=self.identity,
+        )
+        self.store.close()
+
+        child_code = "\n".join((
+            "import os, sys",
+            "from psycopg.conninfo import conninfo_to_dict",
+            "from layer1.onchain_postgres import PostgresOnChainIngestionStore",
+            "dsn = os.environ['TEST_POSTGRES_DSN']",
+            "info = conninfo_to_dict(dsn)",
+            "assert (info.get('dbname') or info.get('database')) == 'binance_onchain_test'",
+            "assert info.get('host') == os.environ['TEST_POSTGRES_ALLOWED_HOST']",
+            "assert info.get('sslmode') in {'require', 'verify-ca', 'verify-full'}",
+            "store = PostgresOnChainIngestionStore(dsn)",
+            "try:",
+            "    cursor = store.get_checkpoint(sys.argv[1])",
+            "    assert cursor == {'next_block': 101, 'test_marker': sys.argv[1]}, 'checkpoint did not survive reconnect'",
+            "    event = store.get_event(sys.argv[2], 'bnb-smart-chain-mainnet', 'alchemy', 'contract:0x' + '1' * 40)",
+            "    assert event is not None, 'transfer event did not survive reconnect'",
+            "    assert event.amount_raw == '12345' and event.block_number == 100",
+            "finally:",
+            "    store.close()",
+        ))
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", child_code, cursor_key, event_id],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            from layer1.onchain_postgres import PostgresOnChainIngestionStore
+            self.store = PostgresOnChainIngestionStore(TEST_DSN)
+
+    def test_verified_onchain_observation_survives_fresh_process_reopen(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        from layer1.onchain_postgres import PostgresOnChainStore
+        from tests.test_onchain_intelligence import OnChainIntelligenceTests
+
+        fixture = OnChainIntelligenceTests()
+        fixture.setUp()
+        suffix = os.urandom(8).hex()
+        fixture.mapping = type(fixture.mapping)(**{
+            **fixture.mapping.__dict__, "mapping_id": "fresh-process-mapping-" + suffix,
+        })
+        fixture.observation = type(fixture.observation)(**{
+            **fixture.observation.__dict__,
+            "observation_id": "fresh-process-observation-" + suffix,
+            "mapping_id": fixture.mapping.mapping_id,
+        })
+        store = PostgresOnChainStore(TEST_DSN, engine=fixture.engine)
+        self.assertEqual(
+            store.save_verified(fixture.eligibility, fixture.mapping, fixture.observation),
+            "INSERTED",
+        )
+        observation_id = fixture.observation.observation_id
+        mapping_id = fixture.mapping.mapping_id
+        store.close()
+
+        child_code = "\n".join((
+            "import os, sys",
+            "from psycopg.conninfo import conninfo_to_dict",
+            "from layer1.onchain_postgres import PostgresOnChainStore",
+            "dsn = os.environ['TEST_POSTGRES_DSN']",
+            "info = conninfo_to_dict(dsn)",
+            "assert (info.get('dbname') or info.get('database')) == 'binance_onchain_test'",
+            "assert info.get('host') == os.environ['TEST_POSTGRES_ALLOWED_HOST']",
+            "assert info.get('sslmode') in {'require', 'verify-ca', 'verify-full'}",
+            "store = PostgresOnChainStore(dsn)",
+            "try:",
+            "    recovered = store.get_observation(sys.argv[1])",
+            "    assert recovered is not None, 'verified on-chain observation missing after reconnect'",
+            "    observation, validation = recovered",
+            "    assert observation.observation_id == sys.argv[1]",
+            "    assert observation.transaction_hash == 'b' * 64",
+            "    assert validation.status == 'ACCEPTED'",
+            "finally:",
+            "    store.close()",
+        ))
+        result = subprocess.run(
+            [sys.executable, "-c", child_code, observation_id],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cleanup = PostgresOnChainStore(TEST_DSN)
+        try:
+            with cleanup.conn.transaction():
+                cleanup.conn.execute(
+                    "DELETE FROM layer1_onchain_observations WHERE observation_id=%s",
+                    (observation_id,),
+                )
+                cleanup.conn.execute(
+                    "DELETE FROM layer1_onchain_asset_mappings WHERE mapping_id=%s",
+                    (mapping_id,),
+                )
+        finally:
+            cleanup.close()
 
     def test_event_journal_and_checkpoint_commit_atomically(self):
         block = {

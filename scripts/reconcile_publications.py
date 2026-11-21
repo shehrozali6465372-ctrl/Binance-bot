@@ -6,30 +6,47 @@ This tool never performs network requests and never submits or retries a post.
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
+from urllib.parse import urlsplit
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from main import Database  # noqa: E402
+from layer1.publication_authorization import PublicationAuthorizationEngine  # noqa: E402
+from layer1.publication_postgres import PostgresPublicationStore  # noqa: E402
 
 
 UNRESOLVED = ("SUBMITTING", "PUBLICATION_UNKNOWN")
 
 
-def _connect(db_path: str):
-    # Initialize additive schema/migrations through the application's DB layer.
-    database = Database(db_path)
-    return database
+def _connect(db_path: str, *, backend: str = "sqlite", postgres_dsn: str = ""):
+    """Open only the explicitly selected persistence backend; never fall back."""
+    if backend == "postgresql":
+        if not isinstance(postgres_dsn, str) or not postgres_dsn.strip():
+            raise SystemExit("PostgreSQL DSN is required via --postgres-dsn or POSTGRES_DSN")
+        return PostgresPublicationStore(postgres_dsn.strip())
+    if backend != "sqlite":
+        raise SystemExit("--backend must be sqlite or postgresql")
+    # Preserve the existing SQLite default and schema initialization behavior.
+    return Database(db_path)
 
 
 def _print_row(row):
-    print(json.dumps(dict(row), indent=2, sort_keys=True))
+    print(json.dumps(dict(row), indent=2, sort_keys=True, default=str))
 
 
 def list_unresolved(conn):
+    if hasattr(conn, "list_pending_attempts"):
+        rows = conn.list_pending_attempts()
+        for row in rows:
+            _print_row(row)
+        if not rows:
+            print("No unresolved publication attempts.")
+        return
     rows = conn.execute(
         "SELECT id, coin_symbol, status, remote_post_id, share_link, http_status, "
         "error, created_at, updated_at FROM publication_attempts "
@@ -42,6 +59,12 @@ def list_unresolved(conn):
 
 
 def show_attempt(conn, attempt_id: int):
+    if hasattr(conn, "get_attempt"):
+        row = conn.get_attempt(attempt_id)
+        if row is None:
+            raise SystemExit(f"No publication attempt with id={attempt_id}")
+        _print_row(row)
+        return
     row = conn.execute(
         "SELECT * FROM publication_attempts WHERE id = ?", (attempt_id,)
     ).fetchone()
@@ -50,15 +73,106 @@ def show_attempt(conn, attempt_id: int):
     _print_row(row)
 
 
-def reconcile(conn, args):
+def _validate_reconciliation_identity(remote_post_id: str, share_link: str) -> str:
+    if not isinstance(remote_post_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", remote_post_id.strip()):
+        raise ValueError("remote post ID has an invalid format")
+    link = share_link.strip() if isinstance(share_link, str) else ""
+    if not link:
+        return ""
+    try:
+        parsed = urlsplit(link)
+        match = re.fullmatch(r"/square/post/([A-Za-z0-9_-]{1,128})/?", parsed.path)
+        valid = (
+            parsed.scheme == "https"
+            and parsed.hostname in {"www.binance.com", "binance.com"}
+            and parsed.port in (None, 443)
+            and parsed.username is None and parsed.password is None
+            and not parsed.fragment
+            and match is not None
+            and match.group(1) == remote_post_id.strip()
+        )
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise ValueError("share link must be an HTTPS Binance Square post URL matching the remote post ID")
+    return link
+
+
+def _reconcile_postgres(store, args):
     if not args.note.strip() or not args.evidence.strip() or not args.operator.strip():
         raise SystemExit("--note, --evidence and --operator must be non-empty")
 
     if args.action == "confirm-published":
-        if not args.remote_post_id.strip():
+        if not isinstance(args.remote_post_id, str) or not args.remote_post_id.strip():
             raise SystemExit("--remote-post-id is required for confirm-published")
+        try:
+            validated_share_link = _validate_reconciliation_identity(
+                args.remote_post_id, getattr(args, "share_link", ""),
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
         target = "PUBLISHED_CONFIRMED"
     else:
+        if getattr(args, "share_link", ""):
+            raise SystemExit("--share-link is not valid when confirming that no post was created")
+        validated_share_link = ""
+        if not args.confirm_no_post_created:
+            raise SystemExit(
+                "Refusing: pass --confirm-no-post-created only after independently "
+                "verifying that Binance did not create the post."
+            )
+        target = "FAILED_CONFIRMED"
+
+    row = store.get_attempt(args.attempt_id)
+    if row is None:
+        raise ValueError(f"No publication attempt with id={args.attempt_id}")
+    if row["status"] not in UNRESOLVED:
+        raise ValueError(
+            f"Attempt is terminal ({row['status']}); terminal states cannot be overwritten"
+        )
+    existing_id = str(row.get("remote_post_id") or "")
+    existing_link = str(row.get("share_link") or "")
+    supplied_id = args.remote_post_id.strip() if target == "PUBLISHED_CONFIRMED" else ""
+    if target == "FAILED_CONFIRMED" and existing_id:
+        raise ValueError("Cannot confirm failure while a remote post ID is already recorded")
+    if existing_id and supplied_id and existing_id != supplied_id:
+        raise ValueError("Supplied remote ID conflicts with the ID already stored in ledger")
+    if existing_link and validated_share_link and existing_link != validated_share_link:
+        raise ValueError("Supplied share link conflicts with the link already stored in ledger")
+    final_id = supplied_id or existing_id
+    if target == "PUBLISHED_CONFIRMED" and not final_id:
+        raise ValueError("A verified remote post ID is required")
+
+    store.reconcile_attempt(
+        attempt_id=args.attempt_id, new_status=target,
+        reconciled_by=args.operator.strip(), evidence=args.evidence.strip(),
+        note=args.note.strip(), remote_post_id=final_id,
+        share_link=validated_share_link or existing_link,
+    )
+    result = store.get_attempt(args.attempt_id)
+    _print_row(result)
+
+
+def reconcile(conn, args):
+    if hasattr(conn, "reconcile_attempt") and hasattr(conn, "get_attempt"):
+        return _reconcile_postgres(conn, args)
+    if not args.note.strip() or not args.evidence.strip() or not args.operator.strip():
+        raise SystemExit("--note, --evidence and --operator must be non-empty")
+
+    if args.action == "confirm-published":
+        if not isinstance(args.remote_post_id, str) or not args.remote_post_id.strip():
+            raise SystemExit("--remote-post-id is required for confirm-published")
+        try:
+            validated_share_link = _validate_reconciliation_identity(
+                args.remote_post_id, getattr(args, "share_link", ""),
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        target = "PUBLISHED_CONFIRMED"
+    else:
+        if getattr(args, "share_link", ""):
+            raise SystemExit("--share-link is not valid when confirming that no post was created")
+        validated_share_link = ""
         if not args.confirm_no_post_created:
             raise SystemExit(
                 "Refusing: pass --confirm-no-post-created only after independently "
@@ -67,6 +181,7 @@ def reconcile(conn, args):
         target = "FAILED_CONFIRMED"
 
     try:
+        PublicationAuthorizationEngine(conn)
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM publication_attempts WHERE id = ?", (args.attempt_id,)
@@ -101,7 +216,7 @@ def reconcile(conn, args):
             WHERE id = ? AND status IN ('SUBMITTING', 'PUBLICATION_UNKNOWN')
             """,
             (
-                target, final_id or None, args.share_link.strip() or None,
+                target, final_id or None, validated_share_link or None,
                 args.note.strip(), args.evidence.strip(), args.operator.strip(),
                 f"Operator reconciliation: {target}", args.attempt_id,
             ),
@@ -109,6 +224,19 @@ def reconcile(conn, args):
         changed = conn.execute("SELECT changes()").fetchone()[0]
         if changed != 1:
             raise ValueError("Concurrent reconciliation detected; no state changed")
+        quota_rows = conn.execute(
+            "SELECT reservation_id, status FROM publication_quota_reservations "
+            "WHERE attempt_id=?",
+            (args.attempt_id,),
+        ).fetchall()
+        for quota_row in quota_rows:
+            if quota_row["status"] not in UNRESOLVED:
+                raise ValueError("Quota reservation is terminal or inconsistent with unresolved attempt")
+            conn.execute(
+                "UPDATE publication_quota_reservations SET status=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE reservation_id=? AND status IN ('SUBMITTING','PUBLICATION_UNKNOWN')",
+                (target, quota_row["reservation_id"]),
+            )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -125,6 +253,15 @@ def reconcile(conn, args):
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Inspect/reconcile publication attempts. This tool never publishes."
+    )
+    parser.add_argument(
+        "--backend", choices=("sqlite", "postgresql"),
+        default=os.getenv("PERSISTENCE_BACKEND", "sqlite"),
+        help="Persistence backend (default: PERSISTENCE_BACKEND or sqlite)",
+    )
+    parser.add_argument(
+        "--postgres-dsn", default=os.getenv("POSTGRES_DSN", ""),
+        help="Explicit PostgreSQL DSN (default: POSTGRES_DSN); required for postgresql backend",
     )
     parser.add_argument(
         "--db", default=os.getenv("DATABASE_PATH", "agent.db"),
@@ -156,7 +293,7 @@ def build_parser():
 def main_cli():
     parser = build_parser()
     args = parser.parse_args()
-    database = _connect(args.db)
+    database = _connect(args.db, backend=args.backend, postgres_dsn=args.postgres_dsn)
     try:
         if args.command == "list":
             list_unresolved(database.conn)

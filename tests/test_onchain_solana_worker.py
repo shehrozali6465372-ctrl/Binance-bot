@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from layer1.foundation import EligibilityDecision
 from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine, OnChainObservation, OnChainStore
@@ -10,13 +10,13 @@ from layer1.onchain_providers import ProviderDataPage, ProviderTransportError, S
 from layer1.onchain_solana_worker import SolanaAddressIngestionWorker
 from tests.test_solana_normalization import MINT, WALLET, BLOCKHASH, SIGNATURE, rpc_tx
 
-NOW = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 MAPPING_ID = "sol-usdc-v1"
 
 
 def history(slot=300, signature=SIGNATURE):
     raw = rpc_tx(slot=slot, signature=signature).raw
-    return SolanaAddressTransaction(signature, slot, 1794398400, raw, 17)
+    return SolanaAddressTransaction(signature, slot, int(NOW.timestamp()) - 60, raw, 17)
 
 
 class FakeSolanaProvider:
@@ -36,7 +36,7 @@ class FakeSolanaProvider:
     def fetch_solana_block_header(self, slot):
         return {
             "number": slot, "hash": self.changed_hashes.get(slot, BLOCKHASH),
-            "timestamp": 1794398400, "finality_reference": "commitment=finalized",
+            "timestamp": int(NOW.timestamp()) - 60, "finality_reference": "commitment=finalized",
         }
 
     def fetch_solana_address_transactions(self, address, pagination_token=None, limit=100,
@@ -65,7 +65,7 @@ class SolanaAddressIngestionWorkerTests(unittest.TestCase):
             MAPPING_ID, "coingecko:usd-coin", "USDC", "solana-mainnet",
             "SOLANA", "mainnet-beta", "TOKEN", MINT, "SPL_TOKEN", 6,
             "VERIFIED", "OFFICIAL_PROJECT", "https://solana.com",
-            "2026-11-11T10:00:00+00:00")
+            (NOW - timedelta(hours=2)).isoformat())
         eligibility = EligibilityDecision(
             status="ELIGIBLE", asset_id="coingecko:usd-coin", symbol="USDC",
             eligible_pairs=("USDCUSDT",), verified_at=stamp,
