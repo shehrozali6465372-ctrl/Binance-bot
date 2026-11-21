@@ -1,3 +1,28 @@
+# LATEST AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-21 (Approved PostgreSQL recovery window)
+
+This entry records the latest approved live disposable-PostgreSQL verification. Earlier entries remain historical.
+
+## Exact repository and target
+- Repository: `shehrozali6465372-ctrl/Binance-bot`; worktree: `/tmp/binance-w2e-continuation`; local branch: `work/module9-continuation-local`.
+- HEAD before this documentation-only update: `a2338c600c06efd5520435328d163b452b6bfa96`; worktree was clean. Existing PR #14 remains OPEN / DRAFT / UNMERGED; continuation branch `layer-1/module9-onchain-continuation`, base `layer-1/module9-onchain-intelligence`. No duplicate PR, merge, deploy, or `main` changes.
+- Approved disposable target only: Neon project `orange-glade-36037611`; branch `br-falling-butterfly-az03rryi` (`module9-pg-lease-fencing-disposable`); endpoint `ep-autumn-frost-azvk3fj4` (`module9-disposable-test`); database `binance_onchain_test`; role `binance_bot_staging_owner`.
+- Endpoint was idle before the window, explicitly started after user approval, and explicitly suspended at the end. Final Neon API state: `idle`, suspended at `2026-11-21T15:06:52Z`. Do not resume without a separate approval.
+
+## Live target guard and focused acceptance
+- Direct endpoint hostname was matched to the exact endpoint ID and configured as the test allowlist. Neon connector initially returned its pooler host; only the exact `-pooler` hostname was replaced with the verified direct endpoint host. Database name remained `binance_onchain_test`.
+- Shared preflight guard passed: dedicated database identity verified, `sslmode=require`, `channel_binding=require`, and psycopg client-side TLS `conn.pgconn.ssl_in_use=True`. Guard uses a read-only preflight connection before test migrations.
+- Focused PostgreSQL recovery/atomicity batch across the seven guarded integration modules (`test_claim_registry_postgres.py`, `test_event_lifecycle_postgres.py`, `test_layer1_postgres.py`, `test_legacy_postgres.py`, `test_onchain_postgres.py`, `test_postgres_adapter_atomicity.py`, `test_publication_postgres.py`): **22 passed, 0 failed, 65 deselected**, 200.48 seconds; exit code 0.
+- Selection covered fresh-process persistence/recovery, run-lease durability/fencing/crash recovery, open-transaction rollback after worker process kill, event/checkpoint atomicity, reorg rollback, adapter atomicity, and unknown publication-attempt/quota reconciliation.
+- No full repository suite was rerun; the earlier full-suite result of 775 passed / 58 skipped remains a separate DSN-absent verification and is not upgraded by this focused run.
+
+## Safety and remaining blockers
+- Only the named disposable database was used. No production DB, runtime configuration, publisher, publishing gateway, scheduled earning workflow, provider API, media upload, Binance Square post, Pinterest Pin, deployment, or merge was touched.
+- No application source code changed in this test window. The test run itself left the worktree clean.
+- Project and Module 21 remain **PARTIAL — NOT PRODUCTION-READY**. Still outstanding: database failover/reconnect drills, full scheduled discovery-to-publication recovery acceptance, production DB architecture/cutover review, and explicit production owner approval. SQLite remains the runtime default.
+- Endpoint is suspended again. Do not repeat this focused batch or wake the endpoint unless a new gap is identified and separately approved.
+
+---
+
 # CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-21 (PostgreSQL adapter rollback acceptance)
 
 This section supersedes the prior 2026-11-21 statement that the full suite and adapter rollback tests were still pending. Older entries remain historical.
