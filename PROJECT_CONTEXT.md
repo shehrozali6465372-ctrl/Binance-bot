@@ -4052,3 +4052,12 @@ The most relevant candidate capabilities identified from the directory are:
 
 ## Next exact action
 - Review the 26-line source/test diff and the appended documentation, refresh the stale remote-tracking ref with a fetch, and verify the remote branch still points to the expected starting SHA. Then commit the narrow fix and documentation and push only to `layer-1/module9-onchain-continuation`; verify PR #14 and hosted CI afterward. Do not create another PR, merge, deploy, resume Neon, or enable publishing.
+
+
+# POST-PUSH VERIFICATION — 2026-11-21 (commit 935c264)
+
+- Commit `935c2647771c2777fd5a841a71fed4c288a5749f` (`Propagate PostgreSQL authorization connection failures`) was pushed successfully to the existing branch `layer-1/module9-onchain-continuation`.
+- GitHub PR #14 metadata confirms head SHA `935c2647771c2777fd5a841a71fed4c288a5749f`, base `layer-1/module9-onchain-intelligence`, state OPEN, draft=true, merged=false. No duplicate PR was created.
+- GitHub Actions run `44919716032` for this commit completed with conclusion **success**. This is mocked safety CI, not PostgreSQL live DB acceptance.
+- Local full suite remains **779 passed, 0 failed, 58 skipped**; the 58 skipped DB-backed tests were not counted as passes.
+- Next work remains B-PG-02: full scheduled PostgreSQL pipeline acceptance. The disposable Neon endpoint remains suspended; do not resume it without a separately approved, scoped DB test window.

@@ -2223,3 +2223,11 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 
 ## Status
 - Project remains **PARTIAL — NOT PRODUCTION-READY**. SQLite remains runtime default. Production DB cutover, full scheduled PostgreSQL acceptance, backend termination/restart/HA/DNS failover and owner architecture approval remain open.
+
+
+# POST-PUSH STATUS — 2026-11-21 (commit 935c264)
+
+- Latest source/test hardening commit `935c2647771c2777fd5a841a71fed4c288a5749f` is verified on the existing PR #14 head branch. PR #14 remains OPEN / DRAFT / UNMERGED and targets `layer-1/module9-onchain-intelligence`.
+- Hosted GitHub Actions run `44919716032` completed **success** for commit `935c264`. It validates the mocked safety workflow only; it does not close B-PG-02 or prove live PostgreSQL acceptance.
+- Local full suite: **779 passed, 0 failed, 58 skipped**; all 58 skipped tests remain excluded from PostgreSQL acceptance claims.
+- Continue with the design/implementation of the full scheduled PostgreSQL acceptance harness. Neon remains suspended and needs a separately approved test window before any new DB-backed run.
