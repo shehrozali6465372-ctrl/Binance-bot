@@ -4135,3 +4135,11 @@ The most relevant candidate capabilities identified from the directory are:
 - CI failure was isolated to its disposable PostgreSQL service container; no Neon or production database was involved.
 - No production database changes, real provider requests, media uploads, Binance posts, publisher/gateway changes, merge or deployment occurred.
 - B-PG-02 remains OPEN pending the corrected hosted PostgreSQL job and broader positive-path acceptance. B-SCORE-01 remains OPEN pending owner-approved scoring policy and evidence-backed factors. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# SCHEDULED POSITIVE-DISCOVERY / FAIL-CLOSED ACCEPTANCE EXTENSION — 2026-11-22
+
+- Extended `tests/test_scheduled_postgres_acceptance.py` with a second real `main.run_once()` PostgreSQL integration scenario. It supplies two deterministic market candidates, exact active Spot-pair snapshots, test-only canonical identity proof fixtures, and a research stub that renders evidence-bound market fields plus `Binance Spot: YES`.
+- The intended acceptance asserts both PostgreSQL research packages are READY, both opportunity decisions are DEFER specifically because `APPROVED_OPPORTUNITY_SCORING_POLICY_NOT_CONFIGURED`, and no editorial brief, draft, authorization, quota reservation, attempt, content generation, image generation or publisher call occurs. Provider HTTP and urllib network access are blocked in the test.
+- This scenario exercises the actual scheduled discovery → Layer 1 PostgreSQL persistence → claim registry → research package → opportunity decision → fail-closed return path. It does not exercise a positive PROCEED/content/publication path because B-SCORE-01 remains unresolved.
+- Local execution can only confirm import/compile and the explicit skip: this device has no local PostgreSQL service and no TEST_POSTGRES_DSN. The real execution is pending the next hosted PostgreSQL service-container CI run. Do not count it as passed until the check is green.

@@ -2294,3 +2294,11 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - The failed hosted PostgreSQL run must not be counted as DB acceptance. Push the splitter fix to the existing PR #14 branch and require a new hosted run.
 - B-PG-02 remains OPEN until corrected CI passes and the positive scheduled path is accepted. B-SCORE-01 remains OPEN pending owner-approved scoring policy/factors.
 - No Neon wake, production DB operation, live provider call, real media upload, Binance post, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# SCHEDULED POSITIVE-DISCOVERY FAIL-CLOSED TEST ADDED — 2026-11-22
+
+- Extended `tests/test_scheduled_postgres_acceptance.py` with a real `main.run_once()` scenario containing two deterministic market candidates, exact active Binance Spot pairs, isolated test identity proofs, and evidence-bound market/Spot research content.
+- Expected DB assertions: two READY research packages; two persisted DEFER opportunity decisions with `APPROVED_OPPORTUNITY_SCORING_POLICY_NOT_CONFIGURED`; no editorial brief, draft, authorization, quota reservation, publication attempt, content generation, or publisher call. Provider HTTP/urllib network access is blocked.
+- This reaches scheduled discovery → Layer 1 PG persistence → claim registry → research package → opportunity decision → fail-closed return. It does not bypass scoring or prove a positive PROCEED/publishing path.
+- Local environment has no PostgreSQL service/DSN, so both DB acceptance methods skip locally. The new positive-discovery scenario is pending the next hosted PostgreSQL service-container run; not yet accepted.
