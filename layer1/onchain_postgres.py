@@ -74,6 +74,112 @@ def verify_postgres_migrations(dsn: str, migrations_dir: Optional[str] = None) -
     return tuple(verified)
 
 
+def _split_sql_statements(source: str) -> tuple[str, ...]:
+    """Split ordinary PostgreSQL SQL without treating comments/quoted semicolons as delimiters.
+
+    Dollar-quoted procedural blocks are intentionally unsupported by this
+    migration runner; reject them rather than accidentally splitting their body.
+    """
+    import re
+
+    if not isinstance(source, str):
+        raise TypeError("migration source must be text")
+    statements: list[str] = []
+    buffer: list[str] = []
+    index = 0
+    state = "normal"
+    block_depth = 0
+    while index < len(source):
+        char = source[index]
+        next_char = source[index + 1] if index + 1 < len(source) else ""
+
+        if state == "line_comment":
+            if char == "\n":
+                buffer.append("\n")
+                state = "normal"
+            index += 1
+            continue
+
+        if state == "block_comment":
+            if char == "/" and next_char == "*":
+                block_depth += 1
+                index += 2
+                continue
+            if char == "*" and next_char == "/":
+                block_depth -= 1
+                index += 2
+                if block_depth == 0:
+                    state = "normal"
+                continue
+            index += 1
+            continue
+
+        if state == "single_quote":
+            buffer.append(char)
+            if char == "'" and next_char == "'":
+                buffer.append(next_char)
+                index += 2
+                continue
+            if char == "'":
+                state = "normal"
+            index += 1
+            continue
+
+        if state == "double_quote":
+            buffer.append(char)
+            if char == '"' and next_char == '"':
+                buffer.append(next_char)
+                index += 2
+                continue
+            if char == '"':
+                state = "normal"
+            index += 1
+            continue
+
+        if char == "-" and next_char == "-":
+            buffer.append(" ")
+            state = "line_comment"
+            index += 2
+            continue
+        if char == "/" and next_char == "*":
+            buffer.append(" ")
+            state = "block_comment"
+            block_depth = 1
+            index += 2
+            continue
+        if char == "'":
+            buffer.append(char)
+            state = "single_quote"
+            index += 1
+            continue
+        if char == '"':
+            buffer.append(char)
+            state = "double_quote"
+            index += 1
+            continue
+        if char == "$":
+            match = re.match(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", source[index:])
+            if match:
+                raise ValueError("dollar-quoted SQL blocks are not supported in migrations")
+        if char == ";":
+            statement = "".join(buffer).strip()
+            if statement:
+                statements.append(statement)
+            buffer.clear()
+            index += 1
+            continue
+
+        buffer.append(char)
+        index += 1
+
+    if state in {"single_quote", "double_quote", "block_comment"}:
+        raise ValueError("migration SQL contains an unterminated quote or block comment")
+    statement = "".join(buffer).strip()
+    if statement:
+        statements.append(statement)
+    return tuple(statements)
+
+
 def apply_postgres_migrations(dsn: str, migrations_dir: Optional[str] = None) -> tuple[str, ...]:
     """Apply checked-in SQL migrations atomically under a database advisory lock."""
     if not isinstance(dsn, str) or not dsn.strip():
@@ -108,11 +214,10 @@ def apply_postgres_migrations(dsn: str, migrations_dir: Optional[str] = None) ->
                     if prior[0] != checksum:
                         raise RuntimeError(f"applied migration checksum changed: {version}")
                     continue
-                # These checked-in migrations contain ordinary DDL only; dollar-
-                # quoted procedural blocks are intentionally not supported.
-                for statement in source.split(";"):
-                    if statement.strip():
-                        conn.execute(statement)
+                # Split only on SQL delimiters outside comments and quoted values.
+                # Dollar-quoted procedural blocks are rejected by the splitter.
+                for statement in _split_sql_statements(source):
+                    conn.execute(statement)
                 conn.execute(
                     "INSERT INTO layer1_schema_migrations(version, checksum) VALUES (%s, %s)",
                     (version, checksum),

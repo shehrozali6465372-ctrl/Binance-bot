@@ -2275,3 +2275,22 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - B-PG-02 remains OPEN pending hosted PostgreSQL service job success and positive-path scheduled acceptance.
 - B-SCORE-01 remains OPEN: scheduled runtime supplies no approved opportunity policy/factors and correctly persists DEFER. Positive editorial/content/publication acceptance requires owner-approved weights/thresholds and evidence-backed factor derivation. Do not fabricate a policy or force PROCEED.
 - Neon remains suspended. No production DB, live provider, real media upload, Binance post, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# POSTGRESQL MIGRATION RUNNER REGRESSION — 2026-11-22
+
+## Hosted CI diagnosis
+- Run `44960145503`: mocked safety job **success**; isolated PostgreSQL integration job **failure**.
+- PostgreSQL 16 service startup and the read-only target guard both succeeded. Migration application then failed with `psycopg.errors.SyntaxError` at the prose fragment `apply only on an isolated disposable test branch.`
+- Root cause: `apply_postgres_migrations()` used naive `source.split(";")`; migration `0001_publication_storage.sql` has a semicolon in a `--` comment, so a fragment of that comment was executed as SQL. Subsequent missing-table errors were downstream effects.
+
+## Fix and regression tests
+- Added a SQL-aware `_split_sql_statements()` handling line comments, nested block comments, single-quoted values, double-quoted identifiers, and doubled quote escapes. Unterminated comments/quotes and dollar-quoted procedural blocks fail closed. The checked-in migration files and checksums were not modified.
+- Migration runner now executes statements from the splitter.
+- New parser tests: **5 passed, 0 failed**. All five checked-in migration files were parsed: statement counts 11, 37, 2, 2, 13 respectively.
+- Full local suite after fix: **785 passed, 0 failed, 59 skipped**; PostgreSQL integration cases remain skipped locally because no DSN was configured.
+
+## Status
+- The failed hosted PostgreSQL run must not be counted as DB acceptance. Push the splitter fix to the existing PR #14 branch and require a new hosted run.
+- B-PG-02 remains OPEN until corrected CI passes and the positive scheduled path is accepted. B-SCORE-01 remains OPEN pending owner-approved scoring policy/factors.
+- No Neon wake, production DB operation, live provider call, real media upload, Binance post, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.

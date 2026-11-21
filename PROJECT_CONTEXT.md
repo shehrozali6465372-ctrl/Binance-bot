@@ -4109,3 +4109,29 @@ The most relevant candidate capabilities identified from the directory are:
 - B-SCORE-01 remains OPEN: scheduled runtime currently supplies `factors=None` and `policy=None`, causing the opportunity engine to persist a deliberate DEFER. An owner-approved scoring policy and evidence-backed factor derivation are required before a positive scheduled content/publication path can be accepted. Do not invent weights, fabricate factors, or force PROCEED in tests.
 - Neon remains suspended. No production DB, live provider, media upload, Binance post, publisher/gateway change, merge or deployment occurred.
 - Project remains **PARTIAL — NOT PRODUCTION-READY**; SQLite remains runtime default.
+
+
+# POSTGRESQL CI FAILURE DIAGNOSIS AND MIGRATION SPLITTER FIX — 2026-11-22
+
+## Hosted failure evidence
+- GitHub Actions run `44960145503`: mocked safety job succeeded; isolated PostgreSQL integration job failed.
+- The PostgreSQL target guard passed and the ephemeral PostgreSQL 16 container initialized successfully. The failure occurred during publication migration application.
+- Exact exception from `layer1/onchain_postgres.py::apply_postgres_migrations`: `psycopg.errors.SyntaxError: syntax error at or near "apply"`, with the submitted SQL beginning `apply only on an isolated disposable test branch.`
+- Root cause: migration runner used `source.split(";")`, which split on a semicolon inside the ordinary `--` SQL comment in `0001_publication_storage.sql`. The remaining prose fragment was then executed as SQL; publication tables were never created, producing follow-on missing-relation errors.
+
+## Fix implemented locally
+- Added `_split_sql_statements()` in `layer1/onchain_postgres.py`. It recognizes line comments, nested block comments, single-quoted values, double-quoted identifiers, and doubled quote escapes before treating semicolons as statement delimiters.
+- Unterminated quoted regions/block comments and dollar-quoted blocks fail closed with a clear `ValueError`; dollar-quoted procedural blocks remain intentionally unsupported by this DDL-only migration runner.
+- `apply_postgres_migrations()` now executes only statements returned by the splitter. Migration SQL files/checksums were not changed.
+- Added `tests/test_postgres_migration_parser.py`: **5 passed, 0 failed**, covering semicolons in line/block comments, quoted values/identifiers, doubled quotes, and malformed unterminated input.
+- Parsed every checked-in migration: on-chain 0001 (11 statements), publication 0001 (37), 0002 (2), 0003 (2), 0004 (13); no empty statement sets.
+
+## Local verification after fix
+- Full local unittest suite with PostgreSQL DSN/allowlist unset: **785 passed, 0 failed, 59 skipped** (37.605 seconds). All 59 DB-backed skips remain excluded from PostgreSQL acceptance claims.
+- `compileall` passed; `git diff --check` passed before this documentation append.
+- The failed hosted run is not a green DB acceptance result. A new CI run must prove the corrected migration runner against the isolated PostgreSQL service.
+
+## Safety/status
+- CI failure was isolated to its disposable PostgreSQL service container; no Neon or production database was involved.
+- No production database changes, real provider requests, media uploads, Binance posts, publisher/gateway changes, merge or deployment occurred.
+- B-PG-02 remains OPEN pending the corrected hosted PostgreSQL job and broader positive-path acceptance. B-SCORE-01 remains OPEN pending owner-approved scoring policy and evidence-backed factors. Project remains **PARTIAL — NOT PRODUCTION-READY**.
