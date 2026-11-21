@@ -84,7 +84,7 @@ class PostgresLegacyDatabaseIntegrationTests(unittest.TestCase):
             "info = conninfo_to_dict(dsn)",
             "assert (info.get('dbname') or info.get('database')) == 'binance_onchain_test'",
             "assert info.get('host') == os.environ['TEST_POSTGRES_ALLOWED_HOST']",
-            "assert info.get('sslmode') in {'require', 'verify-ca', 'verify-full'}",
+            "assert info.get('host') in {'localhost', '127.0.0.1', '::1'} or info.get('sslmode') in {'require', 'verify-ca', 'verify-full'}",
             "owner = PostgresPublicationStore(dsn)",
             "try:",
             "    db = PostgresLegacyDatabase(owner)",

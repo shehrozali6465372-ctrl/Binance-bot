@@ -4087,3 +4087,25 @@ The most relevant candidate capabilities identified from the directory are:
 ## Current status
 - PR #14 remains OPEN / DRAFT / UNMERGED; no duplicate PR exists.
 - SQLite remains the runtime default. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# POSTGRESQL CI ACCEPTANCE HARNESS — 2026-11-22
+
+## Implemented locally
+- Added a dedicated `postgres-integration-tests` GitHub Actions job using an ephemeral `postgres:16` service container and a dedicated `binance_onchain_test` database. The job uses only CI-local credentials, an explicit localhost allowlist, a database identity/TLS target guard, and the existing additive migration setup inside the integration test classes. It does not use or wake Neon.
+- The job runs the real PostgreSQL integration modules for on-chain persistence, Layer 1, claim registry, event lifecycle, legacy compatibility, adapter atomicity, publication state/recovery, plus the new scheduled entrypoint acceptance test.
+- Adjusted fresh-process test assertions so loopback PostgreSQL in CI does not incorrectly require TLS. Remote DB tests still require the exact allowlisted host, TLS, and `channel_binding=require` through the unchanged shared target guard.
+- Added `tests/test_scheduled_postgres_acceptance.py`. It invokes the real `main.run_once()` entrypoint with PostgreSQL persistence, a real `PostgresPublicationStore`/`PostgresRunLease`, an empty deterministic scanner, `DRY_RUN=true`, publisher disabled, and network/provider HTTP calls blocked. It asserts the run lease is finalized as `NO_CANDIDATE_OR_BLOCKED`, the singleton lease is released, no SQLite fallback DB is created, and publication attempts/quota reservations remain unchanged. This explicitly covers the scheduled no-candidate fail-closed path only; it does NOT claim positive discovery-to-publishing acceptance.
+
+## Local verification (2026-11-22)
+- `compileall -q main.py image_engine.py layer1 tests`: passed.
+- Targeted suite `tests.test_scheduled_postgres_acceptance`, `tests.test_postgres_test_support`, `tests.test_opportunity`: 23 run, 0 failures, 1 skipped because no local `TEST_POSTGRES_DSN` is configured.
+- Full local unittest suite with PostgreSQL DSN/allowlist explicitly unset: **780 passed, 0 failed, 59 skipped** (41.680 seconds). The additional skip is the new DB-backed scheduled acceptance test; all DB-backed PostgreSQL tests remain skipped in this local run.
+- Workflow YAML parsed successfully; `git diff --check` passed.
+- The PostgreSQL service-container job has not yet run on GitHub at this checkpoint. Do not describe its DB-backed results as passed until the hosted check completes.
+
+## Remaining boundary
+- B-PG-02 remains OPEN until the new hosted PostgreSQL job passes and the positive scheduled path is legitimately reachable.
+- B-SCORE-01 remains OPEN: scheduled runtime currently supplies `factors=None` and `policy=None`, causing the opportunity engine to persist a deliberate DEFER. An owner-approved scoring policy and evidence-backed factor derivation are required before a positive scheduled content/publication path can be accepted. Do not invent weights, fabricate factors, or force PROCEED in tests.
+- Neon remains suspended. No production DB, live provider, media upload, Binance post, publisher/gateway change, merge or deployment occurred.
+- Project remains **PARTIAL — NOT PRODUCTION-READY**; SQLite remains runtime default.

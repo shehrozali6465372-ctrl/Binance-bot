@@ -28,3 +28,58 @@ jobs:
         run: python -m compileall -q main.py image_engine.py layer1
       - name: Run mocked publication safety tests
         run: python -m unittest discover -s tests -v
+
+  postgres-integration-tests:
+    name: Isolated PostgreSQL integration acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: binance_onchain_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d binance_onchain_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/binance_onchain_test
+      TEST_POSTGRES_ALLOWED_HOST: localhost
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install integration test dependencies
+        run: |
+          python -m pip install Pillow
+          python -m pip install -r requirements-onchain-postgres.txt
+      - name: Verify isolated database target before migrations
+        run: |
+          python - <<'PY'
+          import os
+          from tests.postgres_test_support import validate_postgres_test_target
+          validate_postgres_test_target(
+              os.environ["TEST_POSTGRES_DSN"],
+              os.environ["TEST_POSTGRES_ALLOWED_HOST"],
+          )
+          print("Isolated PostgreSQL target guard: PASS")
+          PY
+      - name: Run real PostgreSQL adapter and recovery integration tests
+        run: >-
+          python -m unittest -v
+          tests.test_onchain_postgres
+          tests.test_layer1_postgres
+          tests.test_claim_registry_postgres
+          tests.test_event_lifecycle_postgres
+          tests.test_legacy_postgres
+          tests.test_postgres_adapter_atomicity
+          tests.test_publication_postgres
+          tests.test_scheduled_postgres_acceptance

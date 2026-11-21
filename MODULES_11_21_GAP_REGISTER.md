@@ -2251,3 +2251,27 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 ## Status
 - B-PG-02 remains OPEN; B-SCORE-01 remains OPEN. No DB-backed acceptance, live provider call, media upload, real Binance post, merge or deployment occurred.
 - Project remains **PARTIAL — NOT PRODUCTION-READY**; SQLite remains runtime default.
+
+
+# POSTGRESQL CI ACCEPTANCE HARNESS — 2026-11-22
+
+## CI integration job added locally
+- Added a separate GitHub Actions job with an ephemeral `postgres:16` service and dedicated `binance_onchain_test` database. It sets only CI-local DB credentials, `TEST_POSTGRES_ALLOWED_HOST=localhost`, and runs the existing database identity/target guard before migrations/tests.
+- It runs the actual DB-backed integration modules: on-chain, Layer 1, claim registry, event lifecycle, legacy compatibility, adapter atomicity, publication/recovery, and scheduled entrypoint acceptance.
+- Fresh-process test assertions now distinguish loopback CI PostgreSQL (TLS not required by the local target guard) from remote database targets (the existing guard still enforces allowlisted host, TLS, and channel binding).
+
+## Scheduled entrypoint acceptance added
+- New `tests/test_scheduled_postgres_acceptance.py` calls the real `main.run_once()` with the actual PostgreSQL publication store and run-lease adapter. A deterministic empty scanner drives the safe no-candidate branch. It asserts durable `NO_CANDIDATE_OR_BLOCKED` finalization, lease release, no SQLite fallback file, no network/provider HTTP, no publisher call, and no new publication attempt/quota reservation.
+- This is acceptance of the scheduled no-candidate fail-closed path only. It does not prove a complete positive discovery-to-publication run.
+
+## Verification
+- Compileall passed.
+- Targeted local tests: 23 run, 0 failed, 1 DB-backed acceptance test skipped because no local DSN was supplied.
+- Full local suite: **780 passed, 0 failed, 59 skipped** (41.680 sec); skipped DB tests are not counted as acceptance.
+- Workflow YAML parse and `git diff --check` passed.
+- Hosted PostgreSQL service job is not yet verified; wait for the GitHub Actions check before marking DB-backed acceptance green.
+
+## Still open
+- B-PG-02 remains OPEN pending hosted PostgreSQL service job success and positive-path scheduled acceptance.
+- B-SCORE-01 remains OPEN: scheduled runtime supplies no approved opportunity policy/factors and correctly persists DEFER. Positive editorial/content/publication acceptance requires owner-approved weights/thresholds and evidence-backed factor derivation. Do not fabricate a policy or force PROCEED.
+- Neon remains suspended. No production DB, live provider, real media upload, Binance post, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.
