@@ -2345,3 +2345,11 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - B-PG-02 is **PARTIALLY ACCEPTED**, not closed: positive PROCEED content flow, stage-boundary failure injection within one scheduled run, and combined unknown-outcome reconciliation/duplicate-prevention acceptance remain open.
 - Fresh-process read verification of the two-candidate scheduled DEFER path has now been added locally and awaits another hosted PostgreSQL run.
 - B-SCORE-01 remains OPEN pending owner-approved scoring policy and evidence-backed factors. No Neon/production DB, live provider, real media upload, Binance post, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# FRESH-PROCESS SCHEDULED POSTGRES ACCEPTANCE — 2026-11-22
+
+- Latest commit `7498b129b54912d62b02a42a1950c4e07e6074ae` verifies scheduled PostgreSQL DEFER decisions and finalized run state from a separate Python process after `run_once()` completes.
+- Hosted run `44961716288`: mocked safety **788 passed, 0 failed, 60 skipped**; isolated PostgreSQL 16 integration job **89 tests, 0 failures**. Both jobs succeeded.
+- Fresh process revalidated the local test target guard, read two persisted DEFER decisions, verified `NO_CANDIDATE_OR_BLOCKED` run summary, and confirmed no active singleton lease.
+- B-PG-02 remains PARTIALLY ACCEPTED, not closed: positive PROCEED path, same-run stage-boundary failure injection, and combined unknown-outcome/duplicate-recovery remain open. B-SCORE-01 remains blocked on owner-approved scoring policy/factors. Project remains **PARTIAL — NOT PRODUCTION-READY**.

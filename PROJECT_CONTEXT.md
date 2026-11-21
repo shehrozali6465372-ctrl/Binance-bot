@@ -4215,3 +4215,12 @@ The most relevant candidate capabilities identified from the directory are:
 - B-PG-02 is **PARTIALLY ACCEPTED**: hosted PostgreSQL service and scheduled fail-closed discovery/research/decision path are green. It remains OPEN for positive `PROCEED` scheduled content flow, failure injection across all stage boundaries in one scheduled run, and combined unknown-publication reconciliation/duplicate-prevention acceptance.
 - B-SCORE-01 remains OPEN: runtime intentionally supplies no owner-approved scoring policy/factors, so the scheduled flow persists DEFER and cannot create editorial/content/publication records. Do not invent weights or force PROCEED.
 - Neon remains suspended. No production DB operation, live provider call, real media upload, Binance post, publisher/gateway change, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# FRESH-PROCESS SCHEDULED POSTGRES ACCEPTANCE — 2026-11-22
+
+- Latest commit `7498b129b54912d62b02a42a1950c4e07e6074ae` extends the two-candidate scheduled fail-closed test with a separate Python subprocess read of the persisted research-bound DEFER decisions, run status, cycle result, and singleton lease state.
+- Hosted GitHub Actions run `44961716288`: **both jobs success**. PostgreSQL integration job: **89 tests, 0 failures**; mocked safety job: **788 passed, 0 failed, 60 skipped**.
+- The fresh subprocess revalidated the isolated target guard and successfully read both DEFER decisions and the finalized `NO_CANDIDATE_OR_BLOCKED` run with no active lease. This is verified cross-process PostgreSQL durability for the current fail-closed scheduled path.
+- PR #14 remains OPEN / DRAFT / UNMERGED at `7498b129b54912d62b02a42a1950c4e07e6074ae`. The ephemeral PostgreSQL 16 service is stopped after CI. Neon remains suspended.
+- B-PG-02 remains partially accepted, not closed: positive PROCEED/content path, stage-boundary failure injection in one scheduled execution, and integrated unknown-outcome/duplicate recovery remain open. B-SCORE-01 still requires an owner-approved policy and evidence-backed factors. Project remains **PARTIAL — NOT PRODUCTION-READY**.
