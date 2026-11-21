@@ -3680,3 +3680,58 @@ Review the two-file diff, run compile/diff/credential scans, commit application/
 - B-PG-01 remains BLOCKED for new DB-backed tests. The branch and endpoint are correctly isolated, but the active test process lacks the required DSN and exact host allowlist, and the only available read-only session returned TLS false.
 - Next safe action is to provision/authorize dedicated disposable test credentials and host allowlist into the active RDC test environment without exposing secrets, then run direct psycopg identity/TLS preflight. Only after it returns the exact disposable database/host and `pg_stat_ssl.ssl=true` may the five adapter crash-rollback tests be implemented and executed.
 - Existing historical 19 November acceptance (750 passed, 0 failed) is preserved; it was not repeated. Process-kill adapter tests remain NOT IMPLEMENTED / NOT EXECUTED. Production remains untouched; SQLite remains runtime default; project remains PARTIAL — NOT PRODUCTION-READY.
+
+
+# RESEARCH UPDATE — 2026-11-21 (Binance Skills Hub evaluation)
+
+## Scope and safety
+- User requested deep research of the official Binance Skills Hub: https://www.binance.com/en/skills.
+- This was a documentation-level review of the public directory and skill descriptions, not an execution, installation, source-code security audit, live API test, or performance benchmark of every skill.
+- No skill was installed, invoked, connected, configured, or integrated. No Binance account action, wallet operation, trading action, media upload, or Square post was performed.
+- This research note does not authorize code changes, provider calls, credentials, publishing, trading, or financial operations.
+
+## Findings relevant to the existing 21-module Binance Square Write-to-Earn Agent
+The most relevant candidate capabilities identified from the directory are:
+1. `crypto-market-rank` — trending/social-hype and Smart Money ranking signals; potential supplemental input to Module 1 market intelligence and opportunity discovery.
+2. `query-token-info` — token metadata, market metrics, holders, liquidity and OHLCV; potential structured enrichment for research and evidence collection.
+3. `query-token-audit` — contract-risk indicators such as honeypot and ownership-related checks; potential supplemental risk evidence for Modules 7/11. It is not a complete independent smart-contract audit or proof that a token is safe.
+4. `binance-wallet-tracker` — tracked wallet activity and Smart Money signals; potential supplemental intelligence for Modules 9/10.
+5. `binance-leaderboard` — trader/wallet performance discovery; potential wallet research input.
+6. `trading-signal` — Smart Money trade-signal feed; potential catalyst/discovery input, not a verified trading recommendation.
+7. `meme-rush` — new meme-token launches, migration lifecycle and trending narratives; potential discovery input.
+
+## Architecture assessment
+- These skills should be treated as optional external intelligence providers behind isolated adapters, not as replacements for the existing 21-module pipeline.
+- Potential future flow: discovery/ranking -> token metadata -> contract-risk evidence -> wallet/signal enrichment -> existing provenance, freshness, evidence verification and opportunity evaluation.
+- External results must retain provider identity, original source/provenance, retrieval timestamp, freshness, chain/network and raw response reference where permitted. Cross-provider independence must be verified; multiple skills may rely on overlapping underlying providers/data and must not automatically count as independent corroboration.
+- Binance Web3 wallet analytics are not equivalent to raw blockchain ingestion. They do not replace Module 9 provider workers, RPC ingestion, checkpointing, event persistence, or Module 10 graph construction.
+- Token audit indicators are supplemental evidence only; do not treat them as a security guarantee.
+- Trading signals and leaderboard rankings are research signals, not validated predictions or authorization to trade.
+- No direct path from these skills to publication is approved. All content must continue through the existing evidence, factual QA, policy, editorial, visual QA, publication authorization and durable publishing gates.
+
+## Security and integration gates before any future adoption
+- Inspect the exact official repository source, pinned commit/version, all SKILL.md instructions, referenced files, scripts, package dependencies and install hooks.
+- Verify outbound network destinations, credential handling, logging behavior, CLI argument exposure, permissions and package supply-chain risk.
+- Establish read-only access wherever possible; deny wallet transfers, trading, account writes and publishing permissions to research agents.
+- Test rate limits, error handling, response schema stability, data freshness, provider outages and chain coverage in an isolated environment.
+- Add contract tests and provenance/freshness validation before considering an adapter production-eligible.
+- Require explicit user approval before installation, credential provisioning, live provider calls that may incur cost, trading, transfers, or publishing.
+
+## Prioritization — research recommendation only, not approved implementation
+- First evaluation group: `crypto-market-rank`, `query-token-info`, `query-token-audit`, and `binance-wallet-tracker`.
+- Second evaluation group: `binance-leaderboard`, `trading-signal`, and `meme-rush`.
+- `square-post` is a direct new-post publishing capability and is not a recommended replacement for the existing publisher. Keep it separate from diagnostics and existing publication authorization.
+- Account/trading/wallet/payment/P2P skills (including `binance`, `binance-agentic-wallet`, `p2p`, `payment-assistant`, `fiat` and `onchain-pay-open-api`) are outside the current content-intelligence scope and should not be granted to this agent.
+
+## Official research entry points
+- Skills directory: https://www.binance.com/en/skills
+- Official skills repository: https://github.com/binance/binance-skills-hub
+- Binance Academy skill overview: https://www.binance.com/en/academy/articles/what-are-ai-agent-skills
+- Binance Academy installation/use overview: https://www.binance.com/en/academy/articles/binance-ai-agent-skills-how-to-install-and-use-them
+- Individual skill documentation is linked from the official directory; exact versions and runtime behavior must be rechecked before any future adoption.
+
+## Project status impact
+- This research identifies potential external intelligence sources; it does not close any existing module gap or production blocker.
+- No implementation, tests, configuration, workflow, database, publisher, gateway, credentials, merge or deployment changed as part of this research.
+- Project remains PARTIAL — NOT PRODUCTION-READY. Existing Module 9 integration and PostgreSQL TLS preflight blockers remain unchanged.
+- Next step, only if separately approved: source-level security and contract review of the first evaluation group, followed by an integration-gap proposal. Do not install or execute skills as part of that review.
