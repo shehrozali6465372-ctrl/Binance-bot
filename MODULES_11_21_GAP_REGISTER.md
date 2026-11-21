@@ -31,8 +31,11 @@ This section supersedes the prior 2026-11-21 statement that the full suite and a
 - This does not close the separate fresh-process recovery, crash/restart, database failover/reconnect, full scheduled discovery-to-publication recovery, production DB architecture/cutover review, or operational owner-approval requirements.
 - Module 21 and the overall project remain **PARTIAL — NOT PRODUCTION-READY**.
 
-## Immediate next action
-- Review the test-only diff, update/push this checkpoint to the existing PR #14 branch only after confirming the remote branch still equals the recorded parent SHA, then verify GitHub PR head. Hosted CI must be checked independently; do not infer CI success from local tests.
+## Push verification and next action
+- Commit `1447870363da66dbbd7775ccfbe4917d9a351306` (`Add PostgreSQL adapter rollback acceptance tests`) was pushed to the existing PR #14 head branch. Push exited 0; GitHub commit fetch returned the exact commit and matching test/document diff.
+- The remote branch was confirmed at the new SHA after push. PR #14 remains OPEN / DRAFT / UNMERGED; no duplicate PR was created.
+- GitHub workflow-runs query for this SHA returned zero PR-triggered runs. Hosted CI remains NOT VERIFIED; do not call local test success hosted CI success.
+- Next: continue with the remaining Module 21 operational gaps, not duplicate the five rollback cases. Keep endpoint suspended and require separate approval for any new DB window.
 
 ---
 
