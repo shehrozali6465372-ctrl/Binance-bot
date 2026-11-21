@@ -1,3 +1,41 @@
+# CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-21 (PostgreSQL adapter rollback acceptance)
+
+This section supersedes the prior 2026-11-21 statement that the full suite and adapter rollback tests were still pending. Older entries remain historical.
+
+## Exact repository state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Worktree: `/tmp/binance-w2e-continuation`; local branch: `work/module9-continuation-local`.
+- Parent HEAD before this test-only addition: `1282a3f3ecf07f7c0c939ce706ef96fb26dc4e08`.
+- Existing PR #14 remains OPEN / DRAFT / UNMERGED; target branch `layer-1/module9-onchain-continuation`, base `layer-1/module9-onchain-intelligence`. Do not create another PR, merge, deploy, or touch `main`.
+- New local test file: `tests/test_postgres_adapter_atomicity.py`. No application runtime code changed.
+
+## Disposable PostgreSQL adapter rollback acceptance — 2026-11-21
+- User explicitly approved resuming the existing disposable Neon test endpoint for this test window.
+- Target was verified before connecting: Neon project `orange-glade-36037611`, branch `br-falling-butterfly-az03rryi` (`module9-pg-lease-fencing-disposable`), endpoint `ep-autumn-frost-azvk3fj4` (`module9-disposable-test`), database `binance_onchain_test`, role `binance_bot_staging_owner`.
+- Remote DB preflight passed: exact direct endpoint host allowlist, `sslmode=require`, `channel_binding=require`, database identity `binance_onchain_test`, and psycopg client-side TLS `ssl_in_use=True`. The credential file `/tmp/binance-postgres-test.env` remains mode `0600`; never display or commit its contents.
+- Added four PostgreSQL failure-injection tests in `tests/test_postgres_adapter_atomicity.py`:
+  1. `PostgresPublicationStore.save_claim_registry`: injected insert failure leaves no row for the exact immutable verification ID.
+  2. `PostgresLayer1Store.save_announcement`: injected failure on the second evidence-table insert rolls back the preceding revision insert.
+  3. `PostgresLegacyDatabase.save_post`: injected insert failure leaves no legacy post-history row.
+  4. `PostgresOnChainStore.save_verified`: injected observation insert failure rolls back the earlier asset-mapping insert.
+- Fifth adapter case reuses the existing `tests.test_onchain_postgres.PostgresOnChainIngestionTests.test_failure_after_event_insert_rolls_back_event_journal_and_checkpoint`: malformed canonical block timestamp fails after event insertion and verifies event, checkpoint and block journal all roll back.
+- Focused five-case run: **5 passed, 0 failed**. The first attempt found a test assertion defect (it counted all historical claim snapshots rather than checking the exact verification ID); the assertion was corrected and the complete focused batch passed.
+- These four new tests are PostgreSQL trigger-based transactional failure-injection/rollback tests, not four forced process-kill tests. The existing Module 21 test `test_postgres_open_transaction_is_rolled_back_after_worker_process_kill` separately provides true worker-process-kill evidence for an open transaction.
+- Full repository suite with the guarded disposable PostgreSQL DSN enabled: **772 tests, 0 failures, 0 errors, 0 skipped**, 477.163 seconds. This includes all DB-gated integration tests and the new rollback tests. Exit code 0.
+- `compileall` for `main.py`, `image_engine.py`, `layer1`, and `tests`: PASS. `git diff --check`: PASS.
+- Neon endpoint was explicitly suspended after testing; API response state `idle`, `suspended_at=2026-11-21T09:16:16Z`. Do not resume again without a new approval.
+- Safety: only the disposable `binance_onchain_test` database was used. No production DB, production credential, runtime/publisher configuration, scheduled workflow, real provider API, media upload, Binance Square post, Pinterest Pin, deployment or merge was touched.
+
+## Updated Module 21 assessment
+- Five adapter transaction rollback cases now have execution evidence (four newly added PostgreSQL failure-injection tests plus the existing on-chain ingestion rollback test).
+- This does not close the separate fresh-process recovery, crash/restart, database failover/reconnect, full scheduled discovery-to-publication recovery, production DB architecture/cutover review, or operational owner-approval requirements.
+- Module 21 and the overall project remain **PARTIAL — NOT PRODUCTION-READY**.
+
+## Immediate next action
+- Review the test-only diff, update/push this checkpoint to the existing PR #14 branch only after confirming the remote branch still equals the recorded parent SHA, then verify GitHub PR head. Hosted CI must be checked independently; do not infer CI success from local tests.
+
+---
+
 # CURRENT AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-21 (PostgreSQL test TLS guard push verified)
 
 This section supersedes earlier branch-head, push-status, and PostgreSQL test-guard notes. Historical entries remain for traceability.
