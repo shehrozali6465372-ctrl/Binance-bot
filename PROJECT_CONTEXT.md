@@ -3825,3 +3825,13 @@ The most relevant candidate capabilities identified from the directory are:
 - Latest focused helper run: `/tmp/binance-pg-venv/bin/python -m unittest tests.test_postgres_test_support -v` — **8 passed, 0 failed**.
 - Full repository suite remains NOT RUN in this isolated venv because it does not contain the project's full application/test dependencies (for example Pillow); no global or broad dependency install was attempted. The 15-test focused selection and compileall had passed before these two additional guard tests; re-run the combined focused selection after the final edit.
 - No DB environment variables were exported into the test process, and no DB migrations/writes were run. The Neon endpoint remains suspended. The guard code and tests remain local, uncommitted and unpushed; hosted CI has not validated them.
+
+
+# FINAL LOCAL REVIEW — 2026-11-21 (17 focused checks green)
+
+- After adding the two remote-target edge cases, the final focused command passed: `/tmp/binance-pg-venv/bin/python -m unittest tests.test_postgres_test_support tests.test_publication_postgres.PublicationPostgresStateMachineTests tests.test_layer1_postgres_contract -v` — **17 passed, 0 failed**.
+- `/tmp/binance-pg-venv/bin/python -m compileall -q .` passed and `git diff --check` passed after the final edits.
+- The 8 shared-guard tests cover remote TLS true/false, exact host allowlist, database identity, mandatory channel binding, rejection of weak `sslmode=prefer`, rejection of remote `hostaddr` overrides, and local loopback behavior.
+- Final local base before code commit: `9e36a171f3cb458ff2bb072da588712008222150`, exactly the current GitHub continuation branch head at sync time. The guard code changes remain uncommitted/unpushed in the local worktree; no GitHub code change or hosted CI result is claimed.
+- No DSN/host environment variables were exported to the test process; all DB integration classes were therefore not run. No migrations, database writes, or adapter crash/rollback tests occurred. Full suite remains unrun because this isolated venv intentionally contains only the optional psycopg driver, not the complete application test dependencies.
+- Next action: preserve the focused-test evidence, commit the reviewed test-only change on the local continuation branch, then push only to the existing PR #14 head after confirming the branch has not moved. Never create another PR, merge or deploy based on this change.
