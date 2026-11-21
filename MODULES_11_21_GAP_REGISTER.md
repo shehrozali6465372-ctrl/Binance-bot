@@ -2373,3 +2373,12 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Historical production row counts / coverage were not inspected: no local DB files exist in the worktree; Neon remains suspended; CI PostgreSQL data is disposable synthetic acceptance data. No production DB access, Neon wake, or live provider API request was made. Therefore historical calibration readiness remains NOT VERIFIED.
 - Binance public API docs distinguish current order-book depth snapshots from timestamped klines/trades; scikit-learn TimeSeriesSplit documents future-to-past leakage risk and equal-spacing assumptions. Audit records time-based walk-forward validation, event/asset leakage grouping, and need for prospective depth/spread collection where relevant.
 - No runtime code, schema, data, credentials, workflow, publisher, gateway or publishing behaviour changed. `factors=None` / `policy=None`; Module 14 remains fail-closed. B-SCORE-01 remains OPEN; project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# MODULE 14 FACTOR PROVENANCE CONTRACT — 2026-11-22
+
+- Added `MODULE14_FACTOR_PROVENANCE_CONTRACT.md` as a design-only contract for factor assessment and subfeature provenance, point-in-time cutoffs, replayability, immutable decision snapshots, source lineage, and required tests.
+- Contract requires each factor to carry explicit READY/MISSING/STALE/CONFLICTED/UNVERIFIED state; non-READY factors have no numeric value. Each subfeature must bind exact evidence refs, payload hashes, provider/published/observed timestamps, measurement windows, transformations, baseline versions, dependency groups and quality flags.
+- Decision digest must bind provenance, not merely six final numbers. Any future snapshot schema change requires versioning, backward compatibility, SQLite/PostgreSQL validator review and fresh-process replay tests.
+- Added an important novelty limitation: Binance CMS title/publish-date fingerprints can change the source_id included in event identity; unresolved provider revision correlation means existing event material-change comparator cannot safely claim continuity for those edits.
+- No code, database/schema, credentials, provider calls, CI workflow, publisher, gateway, Neon, or runtime behavior changed. Module 14 remains fail-closed; B-SCORE-01 remains OPEN.

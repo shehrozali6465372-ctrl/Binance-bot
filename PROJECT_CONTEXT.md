@@ -4239,3 +4239,10 @@ The most relevant candidate capabilities identified from the directory are:
 - Corrected the initial proposal: `EventLifecycleStore._has_material_event_change()` exists and is used by announcement lifecycle sync; it is deterministic lexical normalization, not general semantic NLP. The missing work is safe wiring/testing at Module 14 and a separate editorial-angle duplicate detector.
 - Historical production dataset sufficiency is NOT VERIFIED. No production rows were queried, no Neon wake, and no provider API calls. Repository storage support does not establish adequate sample count, time coverage, or independently adjudicated labels. Neon remains suspended; CI PostgreSQL uses synthetic disposable fixtures.
 - Runtime unchanged and fail-closed (`factors=None`, `policy=None`). B-SCORE-01 remains OPEN. No publisher/gateway/DB/schema/workflow changes.
+
+
+## 2026-11-22 — Module 14 factor provenance contract
+- Added `MODULE14_FACTOR_PROVENANCE_CONTRACT.md` as a design-only contract; no implementation or runtime activation.
+- Specifies factor assessment status, typed subfeature provenance, exact evidence references and payload hashes, source/provider/publication/observation timestamps, measurement windows, transformation and baseline versions, dependency groups, quality flags, reviewer adjudication, point-in-time invariants and deterministic replay.
+- Requires immutable decision digest to bind complete factor provenance, with explicit snapshot schema version/backward compatibility before implementation. Lists failure, leakage, asset-mismatch, source-independence, reorg, CMS revision-correlation, LLM-override and hard-gate tests.
+- No database/production rows accessed, Neon remains suspended, no live provider calls. Runtime remains `factors=None` / `policy=None` and DEFER. B-SCORE-01 remains OPEN; project remains **PARTIAL — NOT PRODUCTION-READY**.

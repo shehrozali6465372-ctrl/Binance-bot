@@ -127,11 +127,12 @@ Consequently:
 - It would be inaccurate to say that no material-delta comparator exists. A deterministic comparator already exists in `EventLifecycleStore._has_material_event_change()` and is used during announcement lifecycle synchronization.
 - The actual Module 14 gap is that `main.py` currently passes `materially_new=False` to `OpportunityEvaluationEngine.evaluate()`; the event-lifecycle result is not wired into this parameter.
 - The current `duplicate_angle` input is derived from a publication cooldown. A cooldown is not a semantic duplicate detector.
+- Critical identity interaction: for Binance CMS records, `source_id` is a payload fingerprint containing catalog ID + publish date + title. `EventLifecycleStore.event_identity()` includes `source_id`; therefore a title or publish-date edit can produce a different event ID, preventing the existing comparator from seeing the previous revision. The code correctly marks these records `UNRESOLVED_NO_STABLE_PROVIDER_ID`; do not wire `materially_new` from this comparator for those cases as if continuity were proven. Body-only changes may remain comparable when the fingerprint identity remains stable, but that is not a general revision guarantee.
 - Binance CMS announcement records can use a payload fingerprint rather than a stable provider article ID; those records explicitly carry `UNRESOLVED_NO_STABLE_PROVIDER_ID` revision correlation status.
 
 **Next required work**
-1. Define a stable event/revision/angle linkage using source evidence and event lifecycle IDs.
-2. Wire the existing material-change result only after tests prove correct event/asset scope and no false update on timestamp-only or wording-only changes.
+1. Define a stable event/revision/angle linkage using source evidence and event lifecycle IDs. For Binance CMS fingerprint records, require a provider-stable ID or a separately validated conservative correlation key; do not guess continuity from title similarity alone.
+2. Wire the existing material-change result only after tests prove correct event/asset scope, stable revision identity, and no false update on timestamp-only or wording-only changes.
 3. Build a semantic coverage comparison for editorial angles using prior briefs/drafts/posts, with human-reviewed false-positive/false-negative samples.
 4. Treat unresolved source revision identity as missing evidence, not as proof of novelty.
 
