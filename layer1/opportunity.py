@@ -105,6 +105,7 @@ class OpportunityEvaluationEngine:
         policy: Optional[OpportunityPolicy],
         now: Optional[str] = None,
         eligibility_max_age_seconds: int = 300,
+        asset_id: str = "",
     ) -> OpportunityDecision:
         reasons = []
         score = None
@@ -123,6 +124,8 @@ class OpportunityEvaluationEngine:
                 raise ValueError(name + " must be a boolean")
         if not isinstance(eligibility_status, str) or not isinstance(research_completeness, str) or not isinstance(event_state, str):
             raise ValueError("opportunity gate states must be strings")
+        if not isinstance(asset_id, str) or len(asset_id) > 256:
+            raise ValueError("opportunity asset_id must be a string of at most 256 characters")
         if (
             isinstance(eligibility_max_age_seconds, bool)
             or not isinstance(eligibility_max_age_seconds, int)
@@ -224,6 +227,7 @@ class OpportunityEvaluationEngine:
             {
                 "policy": policy_snapshot,
                 "inputs": {
+                    "asset_id": asset_id,
                     "eligibility_status": eligibility_status,
                     "eligibility_verified_at": verified.isoformat(),
                     "effective_eligibility_max_age_seconds": (

@@ -4754,6 +4754,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                         materially_new=False,
                         factors=None,
                         policy=None,
+                        asset_id=str(asset_id),
                     )
                     OpportunityDecisionStore(
                         publisher.postgres_store if publisher.postgres_store is not None else claim_connection

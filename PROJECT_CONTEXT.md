@@ -4170,3 +4170,30 @@ The most relevant candidate capabilities identified from the directory are:
 - The next hosted PostgreSQL run (`44961083412`) confirmed the run-summary serialization fix: the real `run_once()` returned normally and persisted the run outcome. The new discovery test then failed before research because the runtime's default `min_candidates` is 3 while the deterministic fixture intentionally supplies 2 candidates.
 - This was a test-fixture configuration error, not a production defect. The scenario now explicitly sets `min_candidates=2`, which is within the validated minimum, so it reaches the two-candidate research/decision path.
 - No production scoring or candidate thresholds were changed. A fresh hosted run is required to verify the corrected fixture.
+
+
+# OPPORTUNITY DECISION IDENTITY COLLISION FIX — 2026-11-22
+
+## Root cause
+- Hosted PostgreSQL run `44961218985` reached the scheduled discovery path with two distinct, eligible candidates. Layer 1 persisted both candidates, but only one research package/decision was saved; the other candidate was skipped by the existing per-candidate error boundary.
+- Code inspection of `OpportunityEvaluationEngine.evaluate()` and `_decision_digest()` found that the immutable decision input snapshot did not include canonical asset identity. Two assets with otherwise identical eligibility/research/event inputs and no scoring policy therefore generated the same `decision_id`; the PostgreSQL store correctly rejected rebinding that ID to a second research package.
+
+## Fix
+- Added optional `asset_id` to `OpportunityEvaluationEngine.evaluate()`, validated it as a bounded string, and included it in the immutable input snapshot/digest.
+- The scheduled runtime now passes the candidate's canonical `asset_id` into the opportunity engine. Identical decisions for different assets now have distinct immutable IDs; same-asset/same-input decisions remain deterministic/idempotent.
+- Added TDD regression `test_identical_opportunity_inputs_for_different_assets_have_distinct_decision_ids`. RED observed before implementation (`unexpected keyword argument 'asset_id'`); GREEN after implementation.
+- Focused suites (opportunity, SQLite end-to-end, publication adapter safety, scheduled persistence): **88 run, 0 failures, 27 skipped** (27 DB-backed cases skipped locally because no DSN). Compileall and diff check passed.
+- The scheduled PostgreSQL integration test now captures candidate research-stage failures for precise diagnostics. The fix is local/uncommitted at this checkpoint; hosted verification is pending.
+
+## Status
+- The previous hosted run remains failed because of the duplicate decision ID; it must not be counted as acceptance.
+- B-PG-02 remains OPEN until the corrected CI job passes. B-SCORE-01 remains OPEN: the current runtime correctly DEFERs each asset because there is no owner-approved scoring policy/factor derivation. No scoring policy was invented.
+- Neon remains suspended. No production DB operation, provider API call, media upload, real Binance post, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# LOCAL FULL-SUITE VERIFICATION — 2026-11-22 (asset-bound decision IDs)
+
+- After the asset-bound opportunity decision ID change, the complete local suite ran: **788 passed, 0 failed, 60 skipped** (40.407 seconds). The 60 skips include DB-backed PostgreSQL tests because TEST_POSTGRES_DSN/allowlist were explicitly absent; they are not counted as DB acceptance.
+- Focused opportunity/end-to-end/publication/scheduled safety suite: **88 run, 0 failures, 27 skipped**.
+- `compileall -q main.py image_engine.py layer1 tests` and `git diff --check` passed.
+- The hosted PostgreSQL service job still needs a fresh run against the latest commit to prove two distinct research packages and DEFER decisions persist, with no editorial/draft/auth/quota/publication side effects.

@@ -2318,3 +2318,19 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 
 - Run `44961083412` verified the private-registry summary serialization fix, then the new test stopped at the runtime's default `min_candidates=3` with only two deterministic fixtures, before reaching research.
 - Corrected only the test configuration to explicitly set `min_candidates=2` (valid lower bound). No production scoring or discovery thresholds changed. Await fresh hosted PostgreSQL verification.
+
+
+# OPPORTUNITY DECISION IDENTITY COLLISION — 2026-11-22
+
+- Hosted run `44961218985` reached two eligible scheduled candidates and persisted Layer 1 discovery for both, but only one research package/decision was saved.
+- Root cause: the opportunity decision digest omitted canonical asset identity. Two candidates with identical gate inputs and unconfigured scoring policy could produce the same decision ID. PostgreSQL correctly rejected binding that ID to a different research package.
+- Added optional bounded `asset_id` to `OpportunityEvaluationEngine.evaluate()`, included it in the immutable decision input snapshot, and passed the candidate's canonical asset ID from scheduled runtime. This preserves deterministic identity per asset and avoids cross-asset collision.
+- TDD regression: RED before implementation; GREEN after. Focused local suites: **88 run, 0 failures, 27 skipped** (DB-backed cases skipped without local DSN). Compileall and diff check passed.
+- Next hosted PostgreSQL run must verify both research packages and DEFER decisions persist. Previous run remains failed; B-PG-02 stays OPEN. B-SCORE-01 remains OPEN. No Neon/production DB, live provider, media upload, Binance post, merge or deployment occurred.
+
+
+# ASSET-BOUND DECISION ID LOCAL VERIFICATION — 2026-11-22
+
+- Complete local suite after the decision identity fix: **788 passed, 0 failed, 60 skipped** (40.407 sec). The 60 skipped cases include DB-backed PostgreSQL tests because no local DSN/allowlist were supplied.
+- Focused opportunity/end-to-end/publication/scheduled safety suite: **88 run, 0 failures, 27 skipped**.
+- Compileall and diff check passed. Await fresh hosted PostgreSQL service-container acceptance for the full two-candidate scheduled research/defer path.

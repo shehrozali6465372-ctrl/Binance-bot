@@ -44,6 +44,14 @@ class OpportunityEvaluationEngineTests(unittest.TestCase):
         self.assertEqual(first.score, 90)
         self.assertEqual(first.decision_id, second.decision_id)
 
+    def test_identical_opportunity_inputs_for_different_assets_have_distinct_decision_ids(self):
+        first = self.evaluate(asset_id="coingecko:asset-one")
+        second = self.evaluate(asset_id="coingecko:asset-two")
+
+        self.assertEqual(first.state, "PROCEED")
+        self.assertEqual(second.state, "PROCEED")
+        self.assertNotEqual(first.decision_id, second.decision_id)
+
     def test_unlisted_asset_is_rejected_even_with_maximum_score(self):
         result = self.evaluate(eligibility_status="NOT_ELIGIBLE")
         self.assertEqual(result.state, "REJECT")

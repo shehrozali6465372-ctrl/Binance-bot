@@ -276,9 +276,18 @@ class ScheduledPostgresFailClosedAcceptanceTests(unittest.TestCase):
                 "reservations": store.conn.execute("SELECT COUNT(*) AS count FROM publication_quota_reservations").fetchone()["count"],
             }
             run_id = None
+            research_failures = []
+            original_debug = main.LOGGER.debug
+
+            def capture_research_failure(message, *args, **kwargs):
+                if isinstance(message, str) and "Research package failed" in message:
+                    research_failures.append((message, args))
+                return original_debug(message, *args, **kwargs)
+
             try:
                 with (
                     patch.object(main, "CONFIG", config),
+                    patch.object(main.LOGGER, "debug", side_effect=capture_research_failure),
                     patch.object(main, "_verify_persistence_integrity", return_value=True),
                     patch.object(main, "_retry_pending_push"),
                     patch.object(main, "_load_post_history", return_value={}),
@@ -308,7 +317,7 @@ class ScheduledPostgresFailClosedAcceptanceTests(unittest.TestCase):
                     "WHERE payload_json->>'asset_id'=ANY(%s)",
                     (list(asset_ids),),
                 ).fetchall()
-                self.assertEqual(len(package_rows), 2)
+                self.assertEqual(len(package_rows), 2, f"research failures: {research_failures!r}")
                 self.assertTrue(all(row["payload_json"]["completeness"] == "READY" for row in package_rows))
 
                 decisions = store.conn.execute(
