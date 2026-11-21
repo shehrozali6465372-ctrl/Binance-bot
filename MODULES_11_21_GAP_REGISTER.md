@@ -2334,3 +2334,14 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Complete local suite after the decision identity fix: **788 passed, 0 failed, 60 skipped** (40.407 sec). The 60 skipped cases include DB-backed PostgreSQL tests because no local DSN/allowlist were supplied.
 - Focused opportunity/end-to-end/publication/scheduled safety suite: **88 run, 0 failures, 27 skipped**.
 - Compileall and diff check passed. Await fresh hosted PostgreSQL service-container acceptance for the full two-candidate scheduled research/defer path.
+
+
+# HOSTED POSTGRESQL ACCEPTANCE PASS — 2026-11-22
+
+- GitHub Actions run `44961574348`, commit `a6b58e33650389b0e1dcfc6daddaa5b3e3582510`: mocked safety job and isolated PostgreSQL 16 integration job both **success**.
+- Mocked suite: **788 passed, 0 failed, 60 skipped** (DB-backed tests skipped in the DSN-less job).
+- Real PostgreSQL service integration job: **89 tests, 0 failures**. Target guard passed before migrations/tests.
+- Both scheduled entrypoint acceptance cases passed. The two-candidate case exercised actual `run_once()` → Layer 1 PG persistence → two READY research packages → two asset-bound DEFER decisions; it asserted no editorial/draft/authorization/quota/attempt/content-generation/publisher side effects. The no-candidate case verified durable run finalization and lease release.
+- B-PG-02 is **PARTIALLY ACCEPTED**, not closed: positive PROCEED content flow, stage-boundary failure injection within one scheduled run, and combined unknown-outcome reconciliation/duplicate-prevention acceptance remain open.
+- Fresh-process read verification of the two-candidate scheduled DEFER path has now been added locally and awaits another hosted PostgreSQL run.
+- B-SCORE-01 remains OPEN pending owner-approved scoring policy and evidence-backed factors. No Neon/production DB, live provider, real media upload, Binance post, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.

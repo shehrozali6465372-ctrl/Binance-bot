@@ -359,6 +359,55 @@ class ScheduledPostgresFailClosedAcceptanceTests(unittest.TestCase):
                     store.conn.execute("SELECT COUNT(*) AS count FROM layer1_run_lease WHERE lease_name='agent'").fetchone()["count"],
                     0,
                 )
+
+                import subprocess
+                import sys
+                child_source = """
+import json
+import os
+from tests.postgres_test_support import validate_postgres_test_target
+from layer1.publication_postgres import PostgresPublicationStore
+
+dsn = os.environ["TEST_POSTGRES_DSN"]
+validate_postgres_test_target(dsn, os.environ["TEST_POSTGRES_ALLOWED_HOST"])
+assets = json.loads(os.environ["SCHEDULED_TEST_ASSET_IDS"])
+run_id = os.environ["SCHEDULED_TEST_RUN_ID"]
+store = PostgresPublicationStore(dsn)
+decisions = store.conn.execute(
+    "SELECT d.state,p.payload_json->>'asset_id' AS asset_id "
+    "FROM opportunity_decisions d "
+    "JOIN layer1_research_package_versions p ON p.package_id=d.research_package_id "
+    "WHERE p.payload_json->>'asset_id'=ANY(%s) ORDER BY asset_id",
+    (assets,),
+).fetchall()
+run = store.conn.execute(
+    "SELECT status,summary_json FROM layer1_runs WHERE run_id=%s", (run_id,),
+).fetchone()
+lease_count = store.conn.execute(
+    "SELECT COUNT(*) AS count FROM layer1_run_lease WHERE lease_name='agent'",
+).fetchone()["count"]
+print(json.dumps({
+    "decisions": [{"asset_id": row["asset_id"], "state": row["state"]} for row in decisions],
+    "run_status": run["status"] if run else None,
+    "cycle_result": run["summary_json"]["cycle_result"] if run else None,
+    "lease_count": lease_count,
+}, sort_keys=True))
+store.close()
+"""
+                child_env = os.environ.copy()
+                child_env["SCHEDULED_TEST_ASSET_IDS"] = json.dumps(list(asset_ids))
+                child_env["SCHEDULED_TEST_RUN_ID"] = run_id
+                child = subprocess.run(
+                    [sys.executable, "-c", child_source],
+                    check=True, capture_output=True, text=True,
+                    env=child_env, timeout=20,
+                )
+                child_result = json.loads(child.stdout)
+                self.assertEqual(len(child_result["decisions"]), 2)
+                self.assertTrue(all(item["state"] == "DEFER" for item in child_result["decisions"]))
+                self.assertEqual(child_result["run_status"], "NO_CANDIDATE_OR_BLOCKED")
+                self.assertEqual(child_result["cycle_result"], "NO_CANDIDATE_OR_BLOCKED")
+                self.assertEqual(child_result["lease_count"], 0)
             finally:
                 if run_id is None:
                     current_runs = store.conn.execute(

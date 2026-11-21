@@ -4197,3 +4197,21 @@ The most relevant candidate capabilities identified from the directory are:
 - Focused opportunity/end-to-end/publication/scheduled safety suite: **88 run, 0 failures, 27 skipped**.
 - `compileall -q main.py image_engine.py layer1 tests` and `git diff --check` passed.
 - The hosted PostgreSQL service job still needs a fresh run against the latest commit to prove two distinct research packages and DEFER decisions persist, with no editorial/draft/auth/quota/publication side effects.
+
+
+# HOSTED POSTGRESQL ACCEPTANCE PASS — 2026-11-22
+
+## Verified GitHub Actions run
+- Workflow run `44961574348` on commit `a6b58e33650389b0e1dcfc6daddaa5b3e3582510`: both jobs completed **success**.
+- Mocked safety job: **788 passed, 0 failed, 60 skipped**. Skips are the DB-backed tests excluded from the DSN-less mocked job.
+- Isolated PostgreSQL 16 service job: **89 tests run, 0 failures, OK**. The target guard passed before migration/test execution. This is real PostgreSQL service-container acceptance, not Neon or production DB acceptance.
+- The scheduled acceptance tests both passed: real `main.run_once()` no-candidate lease/finalization path, and two-candidate discovery → actual Layer 1 PostgreSQL persistence → READY research packages → asset-bound DEFER decisions. Assertions confirmed no editorial brief, draft, authorization, quota reservation, publication attempt, content generation, or publisher call after DEFER.
+- The opportunity decision ID collision is fixed: identical gate inputs for different canonical assets now produce distinct immutable decision IDs.
+
+## Further hardening in progress
+- Extended the two-candidate scheduled acceptance to verify the durable DEFER decisions, run status and released lease from a separate fresh Python process. This tests cross-process durability, not just same-process reads. The fresh-process extension is local and awaits a new hosted run.
+
+## Remaining blockers
+- B-PG-02 is **PARTIALLY ACCEPTED**: hosted PostgreSQL service and scheduled fail-closed discovery/research/decision path are green. It remains OPEN for positive `PROCEED` scheduled content flow, failure injection across all stage boundaries in one scheduled run, and combined unknown-publication reconciliation/duplicate-prevention acceptance.
+- B-SCORE-01 remains OPEN: runtime intentionally supplies no owner-approved scoring policy/factors, so the scheduled flow persists DEFER and cannot create editorial/content/publication records. Do not invent weights or force PROCEED.
+- Neon remains suspended. No production DB operation, live provider call, real media upload, Binance post, publisher/gateway change, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.
