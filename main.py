@@ -4821,6 +4821,11 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
         )
     except Exception as exc:
         LOGGER.error("Layer 1 evidence persistence failed; stopping cycle: %s", type(exc).__name__)
+        if config.persistence_backend == "postgresql" and _is_postgres_connection_failure(exc):
+            # Let the scheduler's connection-failure policy stop this run and
+            # require supervised recovery instead of recording a false-success
+            # NO_CANDIDATE_OR_BLOCKED cycle on a broken durable store.
+            raise
         return False
 
     if len(candidates) < CONFIG.min_candidates:

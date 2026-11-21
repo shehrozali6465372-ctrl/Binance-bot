@@ -46,6 +46,47 @@ class ScheduledPersistenceSafetyTests(unittest.TestCase):
                         posted_symbols=set(),
                     )
 
+    def test_postgres_layer1_persistence_connection_loss_propagates_to_scheduler(self):
+        """A PostgreSQL Layer 1 persistence outage must not be recorded as an ordinary empty cycle."""
+        import psycopg
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                main.CONFIG, database_path=str(Path(tmp) / "agent.db"),
+                dry_run=True, persistence_backend="postgresql",
+                postgres_dsn="postgresql://test", max_daily_posts=6,
+            )
+
+            class Database:
+                def get_today_post_count(self):
+                    return 0
+
+                def get_posted_hours_dict(self, hours):
+                    return {}
+
+            class Publisher:
+                db = Database()
+                postgres_store = object()
+
+            class Scanner:
+                def _universe(self):
+                    return [object()]
+
+            class HotSearch:
+                def get_trending(self, force_refresh=False):
+                    return []
+
+            with patch.object(main, "CONFIG", config), \
+                 patch.object(main, "_verify_persistence_integrity", return_value=True), \
+                 patch.object(main, "_retry_pending_push"), \
+                 patch.object(main, "_load_post_history", return_value={}), \
+                 patch.object(main, "_persist_layer1_market_intelligence", side_effect=psycopg.OperationalError("synthetic Layer 1 database outage")):
+                with self.assertRaises(psycopg.OperationalError):
+                    main._run_once_impl(
+                        config, scanner=Scanner(), announcement_engine=object(),
+                        research=object(), generator=object(), publisher=Publisher(),
+                        posted_symbols=set(), hot_search_engine=HotSearch(),
+                    )
+
     def test_postgres_connection_loss_during_history_lookup_is_not_treated_as_empty_history(self):
         """A broken PostgreSQL connection must abort, not erase duplicate history."""
         import psycopg

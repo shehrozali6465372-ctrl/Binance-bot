@@ -1,3 +1,25 @@
+# LATEST AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-21 (Fail-closed Layer 1 PostgreSQL outages)
+
+This entry records a second scheduled-runtime persistence correction. Earlier entries remain historical.
+
+## Defect reproduced and corrected
+- Repository/worktree: `shehrozali6465372-ctrl/Binance-bot`, `/tmp/binance-w2e-continuation`; local branch `work/module9-continuation-local`.
+- Parent commit: `387e07053ac65b893d8af5cc5d07bb71540a0bcd`; existing PR #14 remains the only target. Do not create another PR, merge, deploy, or touch `main`.
+- Audit found the Layer 1 persistence boundary in `_run_once_impl()` caught every exception, logged the failure, and returned `False`. A PostgreSQL `OperationalError` could therefore be finalized as an ordinary `NO_CANDIDATE_OR_BLOCKED` cycle rather than triggering the scheduler's supervised-stop/reconciliation policy.
+- TDD RED: added `test_postgres_layer1_persistence_connection_loss_propagates_to_scheduler`; it failed because the synthetic psycopg `OperationalError` was swallowed.
+- GREEN: when PostgreSQL is selected, psycopg transport/session failures (`OperationalError` / `InterfaceError`) now propagate from the Layer 1 persistence boundary. The scheduler's existing handler then stops the process for supervised restart and publication-state reconciliation. Non-connection Layer 1 failures retain the prior blocked-cycle behavior.
+- Together with the preceding PostgreSQL 72-hour cooldown-history fix, the focused scheduled-persistence, end-to-end pipeline, publisher-safety and authorization suites now report **75 passed, 0 failed**.
+- Full local suite after both changes, with PostgreSQL DSN/allowlist unset: **777 tests, 0 failures, 58 skipped**. The 58 are guarded PostgreSQL integration tests and are not counted as passes. The previously approved separate live disposable-Neon recovery batch remains **22 passed**; it was not repeated for these deterministic exception-propagation changes.
+- `python -m compileall -q main.py layer1 tests` and `git diff --check`: PASS.
+
+## Safety and scope
+- Application change is limited to propagating PostgreSQL transport/session failures from the Layer 1 persistence catch boundary. The previous commit separately made the 72-hour cooldown-history read fail closed for PostgreSQL; SQLite best-effort behavior is unchanged.
+- No production database, provider API, media upload, Binance Square publication, Pinterest Pin, scheduled workflow dispatch, merge or deployment was performed. No publisher configuration was changed.
+- Disposable Neon remains suspended. No additional database-backed test was required for this isolated exception-policy regression.
+- Project remains **PARTIAL — NOT PRODUCTION-READY**. Remaining release gaps include database failover/reconnect drills, full scheduled discovery-to-publication recovery acceptance, production DB architecture/cutover review, and production owner approval.
+
+---
+
 # LATEST AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-21 (Fail-closed PostgreSQL cooldown-history read)
 
 This entry records a separate scheduled-runtime safety correction after the approved PostgreSQL recovery window. Earlier entries remain historical.
