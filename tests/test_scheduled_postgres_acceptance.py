@@ -255,6 +255,7 @@ class ScheduledPostgresFailClosedAcceptanceTests(unittest.TestCase):
                 publish_log_path=str(Path(directory) / "publish.log"),
                 post_interval=0,
                 max_iterations=1,
+                min_candidates=2,
                 dry_run=True,
                 publisher_enabled=False,
                 image_required=False,

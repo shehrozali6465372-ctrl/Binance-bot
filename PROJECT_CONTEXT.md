@@ -4163,3 +4163,10 @@ The most relevant candidate capabilities identified from the directory are:
 - This fix is not yet pushed or hosted-verified at this checkpoint. The previous DB run `44960855077` remains failed and must not be reported as accepted.
 - Next: push this narrow fix to the existing PR #14 branch, then require a fresh PostgreSQL service-container run. The full scheduled test should now persist two READY research packages and two DEFER decisions, release its lease, and create no editorial/draft/authorization/quota/publication records.
 - B-PG-02 and B-SCORE-01 remain OPEN until the hosted run is green and owner-approved scoring is supplied. No Neon/production DB operation, live provider call, real post, merge or deployment occurred. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# SCHEDULED ACCEPTANCE FIXTURE THRESHOLD CORRECTION — 2026-11-22
+
+- The next hosted PostgreSQL run (`44961083412`) confirmed the run-summary serialization fix: the real `run_once()` returned normally and persisted the run outcome. The new discovery test then failed before research because the runtime's default `min_candidates` is 3 while the deterministic fixture intentionally supplies 2 candidates.
+- This was a test-fixture configuration error, not a production defect. The scenario now explicitly sets `min_candidates=2`, which is within the validated minimum, so it reaches the two-candidate research/decision path.
+- No production scoring or candidate thresholds were changed. A fresh hosted run is required to verify the corrected fixture.

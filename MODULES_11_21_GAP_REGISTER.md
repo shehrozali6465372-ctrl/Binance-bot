@@ -2312,3 +2312,9 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Hardened the DB integration test cleanup to remove a run lease acquired before a test failure.
 - Focused local tests: **23 run, 0 failures, 2 DB-backed skipped** (no local DSN). Compileall and diff check passed.
 - Fix is local only at this checkpoint; push to existing PR #14 and wait for fresh PostgreSQL CI. Previous run remains failed. B-PG-02/B-SCORE-01 remain OPEN; project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# ACCEPTANCE FIXTURE THRESHOLD CORRECTION — 2026-11-22
+
+- Run `44961083412` verified the private-registry summary serialization fix, then the new test stopped at the runtime's default `min_candidates=3` with only two deterministic fixtures, before reaching research.
+- Corrected only the test configuration to explicitly set `min_candidates=2` (valid lower bound). No production scoring or discovery thresholds changed. Await fresh hosted PostgreSQL verification.
