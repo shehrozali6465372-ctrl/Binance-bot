@@ -154,7 +154,7 @@ A new timestamp, refreshed market quote, newly scraped copy, or translated/rephr
 
 **Existing inputs:** event IDs / revisions / lifecycle transitions, source IDs and hashes, publication history, research package versions, editorial brief / draft history and asset identity.
 
-**Known limitation:** current `duplicate_angle` is derived from a publication cooldown and `materially_new` is hardcoded false in scheduled runtime. A bounded semantic duplicate detector and structured material-delta evidence are required before this factor can be trusted.
+**Known limitation (corrected after the 2026-11-22 feature audit):** `EventLifecycleStore._has_material_event_change()` already provides a deterministic lexical material-change comparator and announcement synchronization uses it. It normalizes selected function words/aliases while preserving entities, numbers, negation, action/status and event time; it explicitly is not general semantic NLP. The scheduled Module 14 call in `main.py` still passes `materially_new=False`, so the existing lifecycle result is not wired to this gate. `duplicate_angle` remains cooldown-derived, not semantic editorial-angle comparison. The required work is tested integration of the existing event-level comparator plus a separate validated editorial-angle duplicate detector—not reimplementing an existing capability.
 
 ### 4.6 Risk control — `risk_control`
 
@@ -216,7 +216,7 @@ The current repository does not demonstrate all the following. Treat them as imp
 2. Structured source-dependency / syndication grouping so repeated reports do not masquerade as independent confirmation.
 3. Persisted order-book spread and depth observations (plus timestamp / sampling window) for material liquidity-sensitive claims.
 4. Asset-specific and event-category-specific market baselines, benchmark selection, and explicit event windows.
-5. A verified semantic material-delta / duplicate-angle record tied to exact prior briefs, drafts, and publications.
+5. A verified material-delta record using the existing bounded EventLifecycle comparator (with event/asset scope tests), plus a distinct semantic editorial-angle duplicate record tied to exact prior briefs, drafts, and publications.
 6. Complete risk inputs for market manipulation indicators, verified project/security events, on-chain mapping/finality, and attribution quality.
 7. An immutable factor provenance structure: factor value, factor subfeatures, source refs, rule IDs, missing fields, window, code/rubric version, and reviewer override trail.
 8. Independent labels for whether a historical research package was editorial-worthy at its original cutoff, not merely whether it later received high engagement or its token price rose.
