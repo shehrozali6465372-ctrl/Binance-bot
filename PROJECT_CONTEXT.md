@@ -3817,3 +3817,11 @@ The most relevant candidate capabilities identified from the directory are:
 - Test process environment did not contain `TEST_POSTGRES_DSN` or `TEST_POSTGRES_ALLOWED_HOST`; no DB-backed integration suite or migration was run. The new guard tests use fake connections for deterministic unit checks; the earlier live read-only psycopg TLS probe is separate evidence.
 - Latest GitHub context update itself is documentation-only. Hosted CI was not rerun/verified for the new local, unpushed code. Do not claim CI passed or that the code changes are on GitHub yet.
 - Next step: inspect the complete diff and all PostgreSQL test entry points one more time, then commit the test-only guard correction locally if review is clean. Before pushing, verify the exact PR #14 head still matches `17c5068c663b8a5eb6eec6099b654d18a8024c28` and push only to `layer-1/module9-onchain-continuation`; do not create another PR. DB-backed adapter crash/rollback tests remain NOT IMPLEMENTED / NOT EXECUTED. Project remains PARTIAL — NOT PRODUCTION-READY.
+
+
+# FOLLOW-UP — 2026-11-21 (additional PostgreSQL guard edge-case tests)
+
+- Extended `tests/test_postgres_test_support.py` from six to eight focused tests. Added explicit rejection of remote `sslmode=prefer` and remote `hostaddr` override before any connection attempt; renamed the false-TLS test to accurately say client connection TLS.
+- Latest focused helper run: `/tmp/binance-pg-venv/bin/python -m unittest tests.test_postgres_test_support -v` — **8 passed, 0 failed**.
+- Full repository suite remains NOT RUN in this isolated venv because it does not contain the project's full application/test dependencies (for example Pillow); no global or broad dependency install was attempted. The 15-test focused selection and compileall had passed before these two additional guard tests; re-run the combined focused selection after the final edit.
+- No DB environment variables were exported into the test process, and no DB migrations/writes were run. The Neon endpoint remains suspended. The guard code and tests remain local, uncommitted and unpushed; hosted CI has not validated them.
