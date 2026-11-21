@@ -2127,3 +2127,11 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Full path must still prove durable run lease, discovery/evidence persistence, quota, authorization, publisher attempt ledger, reconciliation, fresh-process recovery and zero real Binance publication side effects.
 - SQLite remains runtime default; production database cutover and architecture approval remain pending.
 - Project remains **PARTIAL — NOT PRODUCTION-READY**. No production DB writes, real Binance post, publisher activation, merge or deployment.
+
+
+# LATEST GAP REGISTER UPDATE — 2026-11-21 (CI dependency failure)
+
+- Existing PR #14 CI run `44913324014` failed because `.github/workflows/phase1-safety-tests.yml` installed Pillow but omitted the optional PostgreSQL driver required by mocked tests. The job log shows 10 errors, each `ModuleNotFoundError: No module named 'psycopg'`; this was a CI dependency setup defect, not a test assertion or application compile failure.
+- Workflow now installs `requirements-onchain-postgres.txt` in the mocked test job. That file includes the existing `psycopg[binary]>=3.2,<4` requirement. No live DB connection is enabled by installing the driver.
+- Verification: PostgreSQL target guard + scheduled persistence suites **24 passed**; full suite **775 tests, exit code 0**; compileall and diff check passed. `TEST_POSTGRES_DSN` remains absent, so DB integration/restart/failover acceptance is still unverified.
+- The workflow fix and documentation are local only until the next verified push to the existing PR #14 branch. Project remains **PARTIAL — NOT PRODUCTION-READY**.
