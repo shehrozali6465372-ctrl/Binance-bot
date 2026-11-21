@@ -2353,3 +2353,12 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Hosted run `44961716288`: mocked safety **788 passed, 0 failed, 60 skipped**; isolated PostgreSQL 16 integration job **89 tests, 0 failures**. Both jobs succeeded.
 - Fresh process revalidated the local test target guard, read two persisted DEFER decisions, verified `NO_CANDIDATE_OR_BLOCKED` run summary, and confirmed no active singleton lease.
 - B-PG-02 remains PARTIALLY ACCEPTED, not closed: positive PROCEED path, same-run stage-boundary failure injection, and combined unknown-outcome/duplicate-recovery remain open. B-SCORE-01 remains blocked on owner-approved scoring policy/factors. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# MODULE 14 EVIDENCE-FIRST POLICY PROPOSAL — 2026-11-22
+
+- Prepared `MODULE14_OPPORTUNITY_SCORING_POLICY_PROPOSAL.md` as a documentation-only, non-activating proposal after live research against current Binance Square Community Guidelines, Binance Spot API documentation, CoinGecko API docs, CFTC, FATF, BIS event-study work, 2025/2026 academic event-study research, and 2026 Federal Reserve model-risk guidance.
+- Preserves the six locked factors: evidence strength, timeliness, materiality, audience usefulness, novelty, and risk control. Defines factor questions, subdimensions, source mappings, missing-data rules, cross-factor double-count controls, hard gates, historical point-in-time calibration, out-of-time validation, shadow-mode governance, and activation criteria.
+- No weights, thresholds, per-factor floors, or numeric scoring rubric were guessed or activated. Research coefficients from papers and Module 7 weights are not reused as Module 14 parameters.
+- Proposal documents the current implementation gaps: no factor providers, runtime still passes `factors=None` / `policy=None`, `unsupported_causal_framing=False` and `materially_new=False` are currently hardcoded, and duplicate-angle is only cooldown-derived. It also records missing market depth/spread, source dependency, semantic material-delta and factor provenance inputs.
+- No application code, database, provider credentials, CI workflow, publisher, gateway, Neon endpoint, or publishing behaviour changed. Runtime remains fail-closed with `DEFER`; B-SCORE-01 remains OPEN. Project remains **PARTIAL — NOT PRODUCTION-READY**.
