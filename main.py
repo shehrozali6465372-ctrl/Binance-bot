@@ -5409,6 +5409,10 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                 ttl_seconds=60,
             )
         except Exception as exc:
+            # A PostgreSQL transport/session failure is not an ordinary policy
+            # denial. Preserve the RESERVED quota and propagate so the scheduler
+            # stops for supervised recovery instead of recording a blocked cycle.
+            _raise_if_postgres_connection_failure(config, exc)
             quota_engine.mark_quota_status(reservation_id, "RELEASED")
             LOGGER.warning(
                 "Publication authorization denied for $%s: %s",
@@ -6158,6 +6162,12 @@ def _is_postgres_connection_failure(exc: BaseException) -> bool:
     except ImportError:
         return False
     return isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError))
+
+
+def _raise_if_postgres_connection_failure(config, exc: BaseException) -> None:
+    """Keep durable PostgreSQL connection failures out of normal blocked-cycle paths."""
+    if config.persistence_backend == "postgresql" and _is_postgres_connection_failure(exc):
+        raise exc
 
 
 def main_loop() -> None:

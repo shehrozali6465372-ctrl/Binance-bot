@@ -2204,3 +2204,22 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Workflow now installs `requirements-onchain-postgres.txt` in the mocked test job. That file includes the existing `psycopg[binary]>=3.2,<4` requirement. No live DB connection is enabled by installing the driver.
 - Verification: PostgreSQL target guard + scheduled persistence suites **24 passed**; full suite **775 tests, exit code 0**; compileall and diff check passed. `TEST_POSTGRES_DSN` remains absent, so DB integration/restart/failover acceptance is still unverified.
 - The workflow fix and documentation are local only until the next verified push to the existing PR #14 branch. Project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+# LATEST GAP REGISTER UPDATE — 2026-11-21 (publication authorization DB failure boundary)
+
+## Additional code-level gap closed locally
+- In `main.py`, publication-authorization exceptions were all treated as normal policy denials. A PostgreSQL `OperationalError`/`InterfaceError` could be caught, quota release attempted, and the cycle returned as a normal blocked result.
+- Added a PostgreSQL-only connection-failure propagation guard before quota release. Transport/session failures now reach the existing supervised-restart path and preserve the reservation fence. Ordinary policy/validation errors still release quota; SQLite behavior is unchanged.
+- Added two regression tests. RED was observed before implementation; both passed after the fix.
+- Focused suites: **77 passed, 0 failed**. Full local suite: **779 passed, 0 failed, 58 skipped**. Compileall and diff check passed. The 58 skips include PostgreSQL DB integration tests; no DSN was supplied and no new database acceptance occurred.
+- Current change is local/uncommitted on `work/module9-continuation-local` at base SHA `f42d0f24c81d90227098a20ab72ea0581adbd312`. Live GitHub branch lookup returned the same SHA; cached `origin` tracking ref was stale. PR #14 has not yet received this change, and hosted CI has not tested it.
+
+## B-PG-02 — STILL OPEN: complete scheduled PostgreSQL pipeline acceptance
+- Existing SQLite end-to-end test covers evidence/lifecycle/research/opportunity/editorial/draft/text QA/image/visual QA/authorization, but not the complete scheduled `run_once()` orchestration on PostgreSQL.
+- Separate PostgreSQL tests already cover run-lease worker termination and recovery, durable publication attempts, fresh-process unknown-outcome reconciliation, quota fencing, and mocked publisher transport. Do not misstate these as one complete scheduled-flow acceptance.
+- Still required: one isolated end-to-end scheduled harness using real PostgreSQL adapters, deterministic discovery/research/content/image fakes, network-disabled publisher transport, failure injection at stage boundaries, fresh-process verification of durable records, unknown outcome reconciliation, duplicate prevention, and proof of zero real Binance/provider side effects.
+- Neon endpoint remains suspended. No migrations, DB writes, endpoint wake, provider API call, real media upload, Binance post, merge or deployment occurred in this step.
+
+## Status
+- Project remains **PARTIAL — NOT PRODUCTION-READY**. SQLite remains runtime default. Production DB cutover, full scheduled PostgreSQL acceptance, backend termination/restart/HA/DNS failover and owner architecture approval remain open.

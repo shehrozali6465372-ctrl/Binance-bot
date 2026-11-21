@@ -4014,3 +4014,41 @@ The most relevant candidate capabilities identified from the directory are:
 - Corrected `.github/workflows/phase1-safety-tests.yml`: the test setup now installs Pillow plus `requirements-onchain-postgres.txt` (which resolves the existing `psycopg[binary]>=3.2,<4` optional driver requirement). No application runtime defaults or production workflows were changed.
 - Verified locally in `/tmp/binance-fulltest-venv`: installed requirements were already satisfied; focused PostgreSQL target-guard + scheduled-persistence suites **24 passed, 0 failed**. Full exact unittest discovery rerun completed with **775 tests, exit code 0**; PostgreSQL integration cases remain skipped because `TEST_POSTGRES_DSN` is intentionally absent. Compileall and `git diff --check` passed.
 - The workflow correction is currently a local change only at this checkpoint; it has not yet been committed or pushed. Next: verify the full-suite skip summary, commit only the workflow and these checkpoint notes, push to the existing PR #14 branch after confirming its current remote head, then verify the new GitHub Actions run. Do not create a PR, merge, deploy, start Neon, or enable publishing.
+
+
+# LATEST CONTINUATION CHECKPOINT — 2026-11-21 (PostgreSQL authorization failure boundary)
+
+## Exact repository state
+- RDC device: `localhost` (`bd830869-fbae-4825-ae7b-5044d6161090`), online.
+- Worktree: `/tmp/binance-w2e-continuation`.
+- Local branch: `work/module9-continuation-local`.
+- Starting local HEAD: `f42d0f24c81d90227098a20ab72ea0581adbd312`.
+- Live GitHub lookup (`git ls-remote origin refs/heads/layer-1/module9-onchain-continuation`) returned the same SHA. The cached local `origin` tracking ref was stale at `df7c4f245f1f93ff137ee0a416c10e1eb4f761b3`; this was not a live remote divergence.
+- Existing PR #14 remains the only PR. Its last verified CI run before this new local edit was `44919089511` (success) at the starting SHA. No commit or push has yet been made for this latest change.
+- Current uncommitted application/test changes: `main.py` and `tests/test_scheduled_persistence_safety.py`. No other source files changed in this latest step.
+
+## Additional PostgreSQL failure-boundary fix
+- Audit of `_run_once_impl()` found that the publication-authorization `except Exception` block treated every error as a normal policy denial, attempted to release the quota reservation, and returned `False`.
+- In PostgreSQL mode, a psycopg `OperationalError` or `InterfaceError` from authorization or event-lifecycle reads is a transport/session failure, not a policy denial. If the connection briefly recovers before quota release, the old code could hide the outage and finalize the run lease as `NO_CANDIDATE_OR_BLOCKED`.
+- Added `_raise_if_postgres_connection_failure()` and invoke it before quota release. PostgreSQL transport/session failures now propagate to the existing scheduler supervised-restart path; the reservation remains fenced rather than being released on an uncertain DB session. Ordinary authorization/policy errors still release the reservation and block the cycle. SQLite behavior is unchanged.
+- Added two tests: PostgreSQL authorization connection failure propagates; SQLite authorization errors retain the existing behavior.
+- TDD: both new tests failed before the helper existed (RED), then passed after implementation (GREEN).
+
+## Verification after this source change
+- New targeted regressions: **2 passed, 0 failed**.
+- Focused safety/end-to-end/publisher/authorization suites: **77 passed, 0 failed** (7.909 seconds).
+- Full suite: `env -u TEST_POSTGRES_DSN -u TEST_POSTGRES_ALLOWED_HOST PYTHONPATH=. /tmp/binance-bot-verify-venv/bin/python -m unittest discover -s tests -q` — **779 passed, 0 failed, 58 skipped** (41.137 seconds, exit code 0).
+- The 58 skips include DB-backed PostgreSQL integration tests because the DSN/allowlist were intentionally absent. These results are local mocked/unit-suite evidence, NOT a new PostgreSQL database acceptance run.
+- `python3 -m compileall -q main.py layer1 tests` passed. `git diff --check` passed before this documentation append.
+- The first two test attempts used the system Python and were invalid environment attempts (pytest unavailable; system Python lacked Pillow). The successful runs used the existing isolated `/tmp/binance-bot-verify-venv`; no dependency installation was performed.
+
+## Pipeline audit findings and remaining gate
+- Existing `tests/test_end_to_end_pipeline.py` validates evidence → lifecycle → research → opportunity decision → editorial brief → draft/text QA → image/visual QA → publication authorization using SQLite. It does not drive the complete scheduled `run_once()` orchestration against PostgreSQL.
+- PostgreSQL integration tests separately cover run-lease worker termination/recovery, durable publication attempts, fresh-process unknown-outcome reconciliation, quota fencing, and mocked publisher transport. These tests do not collectively prove one complete scheduled discovery-to-publication run with all PostgreSQL adapters and stage persistence.
+- B-PG-02 therefore remains OPEN: build/execute a full scheduled PostgreSQL acceptance harness with deterministic provider fakes and network-disabled publisher transport, including fresh-process verification and zero real Binance side effects.
+- The disposable Neon endpoint remains suspended. No new DB-backed test, migration, DB write, endpoint wake, provider call, real media upload, Binance post, publisher/gateway change, merge, or deployment occurred in this step.
+- No prior test suite was repeated except where the new code change required it. Do not rerun the 22-test Neon acceptance without a new narrowly scoped reason and authorization.
+- Project remains **PARTIAL — NOT PRODUCTION-READY**; SQLite remains runtime default. No claim of full 21-module production acceptance is made.
+
+## Next exact action
+- Review the 26-line source/test diff and the appended documentation, refresh the stale remote-tracking ref with a fetch, and verify the remote branch still points to the expected starting SHA. Then commit the narrow fix and documentation and push only to `layer-1/module9-onchain-continuation`; verify PR #14 and hosted CI afterward. Do not create another PR, merge, deploy, resume Neon, or enable publishing.

@@ -10,6 +10,22 @@ import main
 
 
 class ScheduledPersistenceSafetyTests(unittest.TestCase):
+    def test_postgres_authorization_connection_loss_is_propagated_without_quota_release(self):
+        import psycopg
+        config = replace(main.CONFIG, persistence_backend="postgresql")
+        error = psycopg.OperationalError("synthetic authorization connection loss")
+
+        with self.assertRaises(psycopg.OperationalError) as raised:
+            main._raise_if_postgres_connection_failure(config, error)
+
+        self.assertIs(raised.exception, error)
+
+    def test_sqlite_authorization_errors_keep_existing_blocked_cycle_behavior(self):
+        config = replace(main.CONFIG, persistence_backend="sqlite")
+        error = OSError("ordinary authorization validation error")
+
+        self.assertIsNone(main._raise_if_postgres_connection_failure(config, error))
+
     def test_postgres_connection_loss_during_posted_hours_lookup_aborts_pipeline(self):
         """A failed PostgreSQL cooldown-history read must not become empty history."""
         import psycopg
