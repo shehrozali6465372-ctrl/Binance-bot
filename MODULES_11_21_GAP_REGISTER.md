@@ -2104,3 +2104,26 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 ## Adapter crash rollback — NOT IMPLEMENTED / NOT EXECUTED
 - The five narrow process-kill tests remain design-only. Do not repeat historical 750/750 PostgreSQL suite. Run only after B-PG-01 direct TLS preflight succeeds.
 - No production DB/config, publisher, workflow, Binance account, merge or deployment was touched. Project remains PARTIAL — NOT PRODUCTION-READY.
+
+
+# LATEST GAP REGISTER UPDATE — 2026-11-21 (continuous scheduler PostgreSQL failure boundary)
+
+## Code-level gap closed locally
+- `main_loop()` previously swallowed a PostgreSQL connection/session failure from `get_posted_symbols()` and substituted an empty set. In PostgreSQL mode this could allow the scheduler to continue without trustworthy duplicate history.
+- Added fail-closed classification for psycopg `OperationalError` and `InterfaceError`. History-read connection loss now stops before pipeline execution; connection loss during `run_once()` stops with a non-zero exit and explicit reconciliation-before-retry log. No automatic retry or uncertain-publication replay is performed.
+- Added `try/finally` ownership cleanup around continuous scheduler initialization and execution. Publisher DB closes if constructed; shared PostgreSQL store closes even when `PostPublisher` initialization fails.
+- Regression tests cover history lookup loss, mid-iteration loss, both resource closures, and publisher-constructor failure. The constructor cleanup test failed before the fix and passed after it.
+
+## Verification
+- Scheduled persistence suite: **16 passed, 0 failed**.
+- Full repository suite: **775 passed, 0 failed, 58 skipped**, 38.836 seconds, exit code 0.
+- Skips include PostgreSQL integration tests because `TEST_POSTGRES_DSN` was absent. This run is NOT PostgreSQL backend/restart/failover acceptance.
+- Compileall and `git diff --check` passed. A separate synthetic mid-iteration psycopg connection-loss test verified non-zero exit and closure of both resources.
+- Local-only, uncommitted changes at HEAD `a7c7e809d2a576d6062772cb7f086f03fccac776`, branch `work/module9-continuation-local`: `main.py`, `tests/test_scheduled_persistence_safety.py`, and documentation. Existing PR #14 remote branch still matched the pre-change HEAD at the final remote check; no commit/push/PR/merge/deployment occurred.
+
+## Remaining operational acceptance — NOT VERIFIED
+- Actual PostgreSQL backend termination, server restart, HA failover, DNS/endpoint failover and transparent reconnect.
+- Controlled disposable PostgreSQL crash/rollback tests and full scheduled 21-module recovery acceptance; requires separately authorized active DB endpoint and test DSN.
+- Full path must still prove durable run lease, discovery/evidence persistence, quota, authorization, publisher attempt ledger, reconciliation, fresh-process recovery and zero real Binance publication side effects.
+- SQLite remains runtime default; production database cutover and architecture approval remain pending.
+- Project remains **PARTIAL — NOT PRODUCTION-READY**. No production DB writes, real Binance post, publisher activation, merge or deployment.

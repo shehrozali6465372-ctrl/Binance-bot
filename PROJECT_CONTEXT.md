@@ -3904,3 +3904,37 @@ The most relevant candidate capabilities identified from the directory are:
 - Final local base before code commit: `9e36a171f3cb458ff2bb072da588712008222150`, exactly the current GitHub continuation branch head at sync time. The guard code changes remain uncommitted/unpushed in the local worktree; no GitHub code change or hosted CI result is claimed.
 - No DSN/host environment variables were exported to the test process; all DB integration classes were therefore not run. No migrations, database writes, or adapter crash/rollback tests occurred. Full suite remains unrun because this isolated venv intentionally contains only the optional psycopg driver, not the complete application test dependencies.
 - Next action: preserve the focused-test evidence, commit the reviewed test-only change on the local continuation branch, then push only to the existing PR #14 head after confirming the branch has not moved. Never create another PR, merge or deploy based on this change.
+
+
+# LATEST CONTINUATION UPDATE — 2026-11-21 (continuous scheduler PostgreSQL failure boundary)
+
+## Exact checkpoint and worktree
+- Authorized RDC device: `localhost` (`bd830869-fbae-4825-ae7b-5044d6161090`), online.
+- Repository/worktree: `/tmp/binance-w2e-continuation`.
+- Local branch: `work/module9-continuation-local`.
+- Local HEAD at inspection: `a7c7e809d2a576d6062772cb7f086f03fccac776`.
+- Existing remote PR head branch `layer-1/module9-onchain-continuation` independently resolved to the same SHA at final check. No commit, push, PR creation, merge or deployment occurred.
+- Local changes are uncommitted and confined to `main.py`, `tests/test_scheduled_persistence_safety.py`, and this context/gap documentation update.
+
+## Continuous scheduler failure-boundary hardening
+- Source inspection found `main_loop()` silently converted a failed `get_posted_symbols()` query into an empty history set. For the PostgreSQL backend, a psycopg connection/session failure could therefore continue the loop without trustworthy duplicate history.
+- Added `_is_postgres_connection_failure()` to identify psycopg `OperationalError` and `InterfaceError` without classifying ordinary SQL/application errors as transport failures.
+- In PostgreSQL mode, connection/session loss during history lookup now exits non-zero before pipeline execution. Connection/session loss during `run_once()` now exits non-zero and logs that publication state must be reconciled before retry. It does not automatically retry or replay an uncertain publication.
+- Wrapped the continuous scheduler resource lifecycle in `try/finally`; the publisher DB is closed when constructed and the shared PostgreSQL store is closed even if publisher initialization fails.
+- Added regressions for history-read connection loss, connection loss during `run_once()`, resource cleanup on both paths, and cleanup when `PostPublisher` construction fails.
+- The new startup-constructor regression was observed failing before the cleanup refactor (store close list remained empty), then passed after the fix. The history-read regression was observed failing before the fail-closed connection classification, then passed after the fix.
+
+## Verification evidence
+- Focused scheduled persistence suite: **16 passed, 0 failed**.
+- Combined scheduled persistence + PostgreSQL runtime adapter selection: **25 passed, 0 failed** in the earlier focused run (before the two additional regressions).
+- Full repository command: `/tmp/binance-fulltest-venv/bin/python -m unittest discover -s tests -v` — **775 passed, 0 failed, 58 skipped**, 38.836 seconds; process exit code 0.
+- The 58 skipped tests include PostgreSQL integration tests gated on `TEST_POSTGRES_DSN`; the variable was not configured in the test process. The full suite used isolated venv `/tmp/binance-fulltest-venv` (Pillow and psycopg present), not system Python. No dependency installation or system environment modification occurred during this continuation.
+- `/tmp/binance-fulltest-venv/bin/python -m compileall -q main.py tests/test_scheduled_persistence_safety.py` passed; `git diff --check` passed.
+- A separate synthetic mid-iteration `psycopg.OperationalError` check verified non-zero exit and closure of both publisher DB and PostgreSQL store. No external network or real publisher was invoked.
+
+## Explicit limits / next work
+- This change is a fail-closed supervised-restart boundary, NOT automatic reconnect, backend restart acceptance, HA failover, DNS/endpoint failover, or full 21-module restart recovery.
+- No `TEST_POSTGRES_DSN` was supplied, no PostgreSQL DB integration test ran in this full-suite invocation, and no database endpoint was started. Keep the previously suspended disposable Neon endpoint suspended unless separately authorized.
+- No migrations, DDL, DB writes, production DB access, Binance API publication, media upload, publisher/gateway/earning workflow modification, merge or deployment occurred.
+- Next: inspect the exact final diff for scope/security, run compile/diff checks after documentation changes, then decide whether to commit locally. Before any push, re-check the existing PR #14 remote head and reconcile only against that branch; never create a duplicate PR. Do not claim hosted CI for these local changes.
+- Project remains **PARTIAL — NOT PRODUCTION-READY**. SQLite remains runtime default. Actual PostgreSQL backend termination, server restart, HA/DNS/endpoint failover, reconnect, and full scheduled discovery-to-publication recovery remain open.

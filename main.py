@@ -6140,6 +6140,15 @@ def _create_runtime_postgres_store(config):
     return PostgresPublicationStore(config.postgres_dsn)
 
 
+def _is_postgres_connection_failure(exc: BaseException) -> bool:
+    """Identify psycopg transport/session failures without matching SQL errors."""
+    try:
+        import psycopg
+    except ImportError:
+        return False
+    return isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError))
+
+
 def main_loop() -> None:
     """Main loop that runs continuously with configured interval."""
     config = CONFIG
@@ -6163,48 +6172,69 @@ def main_loop() -> None:
     research = ResearchEngine()
     generator = DeepSeekGenerator(config)
     postgres_store = _create_runtime_postgres_store(config)
-    publisher = PostPublisher(config, postgres_store=postgres_store)
-    publisher_db = publisher.db
-    
+    publisher_db = None
+
     iteration = 0
     posted_symbols = set()
-    
-    LOGGER.info("=" * 60)
-    LOGGER.info("Binance Square Auto Poster — Opportunity Intelligence Engine")
-    LOGGER.info("Interval: %d seconds (%.1f hours)", interval, interval / 3600)
-    LOGGER.info("Max iterations: %s", "unlimited" if max_iter <= 0 else str(max_iter))
-    LOGGER.info("Live market data: %s", config.live_market_data)
-    LOGGER.info("Dry run: %s", config.dry_run)
-    LOGGER.info("Publisher enabled: %s", config.publisher_enabled)
-    LOGGER.info("=" * 60)
-    
-    while True:
-        iteration += 1
-        LOGGER.info("--- Iteration %d ---", iteration)
-        
+
+    try:
+        publisher = PostPublisher(config, postgres_store=postgres_store)
+        publisher_db = publisher.db
+
+        LOGGER.info("=" * 60)
+        LOGGER.info("Binance Square Auto Poster — Opportunity Intelligence Engine")
+        LOGGER.info("Interval: %d seconds (%.1f hours)", interval, interval / 3600)
+        LOGGER.info("Max iterations: %s", "unlimited" if max_iter <= 0 else str(max_iter))
+        LOGGER.info("Live market data: %s", config.live_market_data)
+        LOGGER.info("Dry run: %s", config.dry_run)
+        LOGGER.info("Publisher enabled: %s", config.publisher_enabled)
+        LOGGER.info("=" * 60)
+
+        while True:
+            iteration += 1
+            LOGGER.info("--- Iteration %d ---", iteration)
+
+            try:
+                posted_symbols = publisher_db.get_posted_symbols(hours=48)
+            except Exception as exc:
+                if config.persistence_backend == "postgresql" and _is_postgres_connection_failure(exc):
+                    LOGGER.error(
+                        "PostgreSQL connection unavailable during history lookup (%s); "
+                        "stopping scheduler for supervised restart",
+                        type(exc).__name__,
+                    )
+                    raise SystemExit(1) from None
+                posted_symbols = set()
+
+            try:
+                run_once(config, scanner, announcement_engine, research, generator, publisher, posted_symbols, hot_search_engine)
+            except Exception as exc:
+                _log_iteration_failure(iteration, exc)
+                if config.persistence_backend == "postgresql" and _is_postgres_connection_failure(exc):
+                    LOGGER.error(
+                        "PostgreSQL connection unavailable during scheduled execution (%s); "
+                        "stopping scheduler for supervised restart; publication state must be reconciled before retry",
+                        type(exc).__name__,
+                    )
+                    raise SystemExit(1) from None
+
+            if 0 < max_iter <= iteration:
+                LOGGER.info("Reached max_iterations=%d, stopping.", max_iter)
+                break
+
+            LOGGER.info("Waiting %d seconds (%.1f hours) until next post...", interval, interval / 3600)
+            sleep_chunk = min(interval, 60)
+            slept = 0
+            while slept < interval:
+                time.sleep(sleep_chunk)
+                slept += sleep_chunk
+    finally:
         try:
-            posted_symbols = publisher_db.get_posted_symbols(hours=48)
-        except Exception:
-            posted_symbols = set()
-        
-        try:
-            run_once(config, scanner, announcement_engine, research, generator, publisher, posted_symbols, hot_search_engine)
-        except Exception as e:
-            _log_iteration_failure(iteration, e)
-        
-        if 0 < max_iter <= iteration:
-            LOGGER.info("Reached max_iterations=%d, stopping.", max_iter)
-            break
-        
-        LOGGER.info("Waiting %d seconds (%.1f hours) until next post...", interval, interval / 3600)
-        sleep_chunk = min(interval, 60)
-        slept = 0
-        while slept < interval:
-            time.sleep(sleep_chunk)
-            slept += sleep_chunk
-    publisher_db.close()
-    if postgres_store is not None:
-        postgres_store.close()
+            if publisher_db is not None:
+                publisher_db.close()
+        finally:
+            if postgres_store is not None:
+                postgres_store.close()
 
 
 def main() -> None:

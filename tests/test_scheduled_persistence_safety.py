@@ -9,6 +9,103 @@ import main
 
 
 class ScheduledPersistenceSafetyTests(unittest.TestCase):
+    def test_postgres_connection_loss_during_history_lookup_is_not_treated_as_empty_history(self):
+        """A broken PostgreSQL connection must abort, not erase duplicate history."""
+        import psycopg
+        config = replace(
+            main.CONFIG, post_interval=60, max_iterations=1, dry_run=True,
+            persistence_backend="postgresql", postgres_dsn="postgresql://test",
+        )
+
+        closed = []
+
+        class BrokenDatabase:
+            def get_posted_symbols(self, hours):
+                raise psycopg.OperationalError("synthetic connection loss")
+            def close(self):
+                closed.append("publisher_db")
+
+        class FakeStore:
+            def close(self):
+                closed.append("postgres_store")
+
+        class FakePublisher:
+            def __init__(self, cfg, postgres_store=None):
+                self.db = BrokenDatabase()
+                self.postgres_store = postgres_store
+
+        store = FakeStore()
+        with patch.object(main, "CONFIG", config), \
+             patch.object(main, "MarketScanner"), \
+             patch.object(main, "BinanceAnnouncementEngine"), \
+             patch.object(main, "HotSearchEngine"), \
+             patch.object(main, "ResearchEngine"), \
+             patch.object(main, "DeepSeekGenerator"), \
+             patch.object(main, "_create_runtime_postgres_store", return_value=store), \
+             patch.object(main, "PostPublisher", FakePublisher), \
+             patch.object(main, "run_once") as run_once:
+            with self.assertRaises(SystemExit):
+                main.main_loop()
+        run_once.assert_not_called()
+        self.assertEqual(closed, ["publisher_db", "postgres_store"])
+
+    def test_postgres_connection_loss_during_run_once_stops_and_closes_resources(self):
+        import psycopg
+        config = replace(
+            main.CONFIG, post_interval=60, max_iterations=1, dry_run=True,
+            persistence_backend="postgresql", postgres_dsn="postgresql://test",
+        )
+        closed = []
+
+        class Database:
+            def get_posted_symbols(self, hours):
+                return set()
+            def close(self):
+                closed.append("publisher_db")
+
+        class Store:
+            def close(self):
+                closed.append("postgres_store")
+
+        class Publisher:
+            def __init__(self, cfg, postgres_store=None):
+                self.db = Database()
+
+        with patch.object(main, "CONFIG", config), \
+             patch.object(main, "MarketScanner"), \
+             patch.object(main, "BinanceAnnouncementEngine"), \
+             patch.object(main, "HotSearchEngine"), \
+             patch.object(main, "ResearchEngine"), \
+             patch.object(main, "DeepSeekGenerator"), \
+             patch.object(main, "_create_runtime_postgres_store", return_value=Store()), \
+             patch.object(main, "PostPublisher", Publisher), \
+             patch.object(main, "run_once", side_effect=psycopg.OperationalError("synthetic connection loss")):
+            with self.assertRaises(SystemExit):
+                main.main_loop()
+        self.assertEqual(closed, ["publisher_db", "postgres_store"])
+
+    def test_main_loop_closes_postgres_store_when_publisher_initialization_fails(self):
+        config = replace(
+            main.CONFIG, persistence_backend="postgresql", postgres_dsn="postgresql://test",
+        )
+        closed = []
+
+        class Store:
+            def close(self):
+                closed.append("postgres_store")
+
+        with patch.object(main, "CONFIG", config), \
+             patch.object(main, "MarketScanner"), \
+             patch.object(main, "BinanceAnnouncementEngine"), \
+             patch.object(main, "HotSearchEngine"), \
+             patch.object(main, "ResearchEngine"), \
+             patch.object(main, "DeepSeekGenerator"), \
+             patch.object(main, "_create_runtime_postgres_store", return_value=Store()), \
+             patch.object(main, "PostPublisher", side_effect=RuntimeError("publisher init failed")):
+            with self.assertRaisesRegex(RuntimeError, "publisher init failed"):
+                main.main_loop()
+        self.assertEqual(closed, ["postgres_store"])
+
     def test_quota_count_database_failure_blocks_instead_of_resetting_to_zero(self):
         class BrokenPostgresDatabase:
             def get_today_post_count(self):
