@@ -34,16 +34,10 @@ _LEGACY_TEST_DSN = os.environ.get("TEST_POSTGRES_DSN")
 class PostgresLegacyDatabaseIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from psycopg.conninfo import conninfo_to_dict
-        info = conninfo_to_dict(_LEGACY_TEST_DSN)
-        host = info.get("host", "")
-        database = info.get("dbname") or info.get("database")
-        allowed_host = os.environ.get("TEST_POSTGRES_ALLOWED_HOST", "").strip()
-        if (database != "binance_onchain_test" or not allowed_host or host != allowed_host
-                or info.get("sslmode") not in {"require", "verify-ca", "verify-full"}):
-            raise RuntimeError(
-                "legacy PostgreSQL tests require binance_onchain_test on exact TEST_POSTGRES_ALLOWED_HOST with TLS"
-            )
+        from tests.postgres_test_support import validate_postgres_test_target
+        validate_postgres_test_target(
+            _LEGACY_TEST_DSN, os.environ.get("TEST_POSTGRES_ALLOWED_HOST", "").strip()
+        )
         from layer1.publication_postgres import apply_publication_postgres_migrations
         apply_publication_postgres_migrations(_LEGACY_TEST_DSN)
 

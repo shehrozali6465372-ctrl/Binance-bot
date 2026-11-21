@@ -209,21 +209,10 @@ _TEST_PUBLICATION_DSN = os.environ.get("TEST_POSTGRES_DSN")
 class PublicationPostgresIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from psycopg.conninfo import conninfo_to_dict
-        info = conninfo_to_dict(_TEST_PUBLICATION_DSN)
-        host = info.get("host", "")
-        database = info.get("dbname") or info.get("database")
-        allowed_host = os.environ.get("TEST_POSTGRES_ALLOWED_HOST", "").strip()
-        if (
-            database != "binance_onchain_test"
-            or not allowed_host
-            or host != allowed_host
-            or info.get("sslmode") not in {"require", "verify-ca", "verify-full"}
-        ):
-            raise RuntimeError(
-                "publication PostgreSQL tests require binance_onchain_test on the exact "
-                "TEST_POSTGRES_ALLOWED_HOST with TLS"
-            )
+        from tests.postgres_test_support import validate_postgres_test_target
+        validate_postgres_test_target(
+            _TEST_PUBLICATION_DSN, os.environ.get("TEST_POSTGRES_ALLOWED_HOST", "").strip()
+        )
         from layer1.publication_postgres import apply_publication_postgres_migrations
         apply_publication_postgres_migrations(_TEST_PUBLICATION_DSN)
 
@@ -1533,14 +1522,11 @@ class PublicationPostgresEventLifecycleTests(unittest.TestCase):
         import os
         import sqlite3
         import uuid
-        from psycopg.conninfo import conninfo_to_dict
+        from tests.postgres_test_support import validate_postgres_test_target
         from layer1.publication_postgres import PostgresPublicationStore, apply_publication_postgres_migrations
 
         dsn = os.environ["TEST_POSTGRES_DSN"]
-        info = conninfo_to_dict(dsn)
-        self.assertEqual(info.get("dbname") or info.get("database"), "binance_onchain_test")
-        self.assertEqual(info.get("host"), os.environ.get("TEST_POSTGRES_ALLOWED_HOST"))
-        self.assertIn(info.get("sslmode"), {"require", "verify-ca", "verify-full"})
+        validate_postgres_test_target(dsn, os.environ.get("TEST_POSTGRES_ALLOWED_HOST", "").strip())
         apply_publication_postgres_migrations(dsn)
         store = PostgresPublicationStore(dsn)
         connection = sqlite3.connect(":memory:")

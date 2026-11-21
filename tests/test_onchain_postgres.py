@@ -28,24 +28,8 @@ class PostgresAdapterContractTests(unittest.TestCase):
 def _dedicated_local_test_dsn():
     if not TEST_DSN:
         return False
-    from psycopg.conninfo import conninfo_to_dict
-    info = conninfo_to_dict(TEST_DSN)
-    host = info.get("host", "")
-    database = info.get("dbname") or info.get("database")
-    hostaddr = info.get("hostaddr", "")
-    local_host = host in {"localhost", "127.0.0.1", "::1"} or host.startswith("/")
-    allowed_remote_host = os.environ.get("TEST_POSTGRES_ALLOWED_HOST", "").strip()
-    remote_host_allowed = (
-        bool(allowed_remote_host) and host == allowed_remote_host
-        and info.get("sslmode") in {"require", "verify-ca", "verify-full"}
-    )
-    local_hostaddr = not hostaddr or hostaddr in {"127.0.0.1", "::1"}
-    if (database != "binance_onchain_test" or not (local_host or remote_host_allowed)
-            or not local_hostaddr or info.get("service")):
-        raise RuntimeError(
-            "TEST_POSTGRES_DSN must target binance_onchain_test on localhost or an exact "
-            "TEST_POSTGRES_ALLOWED_HOST with TLS"
-        )
+    from tests.postgres_test_support import validate_postgres_test_target
+    validate_postgres_test_target(TEST_DSN, os.environ.get("TEST_POSTGRES_ALLOWED_HOST", "").strip())
     return True
 
 
