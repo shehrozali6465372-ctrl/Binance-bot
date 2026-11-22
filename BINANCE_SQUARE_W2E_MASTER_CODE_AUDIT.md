@@ -819,7 +819,7 @@ The focused batches now exercise all major module families, but the full suite a
 
 ## 27. Consolidated blocker register — latest reconciled status (22 November 2026)
 
-This register is authoritative over earlier duplicate/stale status text in the report. It contains **33 unique finding IDs**; repeated references to the same ID are one finding, not additional blockers.
+This register is authoritative over earlier duplicate/stale status text in the report. It contains **34 unique finding IDs**; repeated references to the same ID are one finding, not additional blockers.
 
 | Finding ID | Severity | Latest disposition |
 |---|---:|---|
@@ -852,10 +852,24 @@ This register is authoritative over earlier duplicate/stale status text in the r
 | AUD-GIT-001 | CRITICAL (original) | PARTIALLY CLOSED — active branch guard rejects main/detached/unknown, but trusted workflow-ref allowlist is absent |
 | AUD-GIT-002 | HIGH (original) | CLOSED for active `_try_git_push()` path — explicit pathspec prevents unrelated staged files entering its commit; does not close legacy image uploader path |
 | AUD-GIT-003 | HIGH | OPEN — clean local commit ahead of origin is not detected/retried |
+| AUD-GIT-006 | MEDIUM | OPEN — scheduled-run delivery far below configured cadence; cause not isolated |
 | AUD-IMG-001 | HIGH | OPEN — legacy image uploader retains separate unsafe Git/REST repository mutation path; no active main publication call site was found in reviewed path |
 | AUD-SCORE-001 | MEDIUM | OPEN — active MarketScanner coefficients lack documented empirical/source justification |
 | AUD-CODE-001 | MEDIUM | REVIEW / CLEANUP — Skills Hub scoring/provider subsystem appears unreachable from current runtime; not independently established as a direct production exploit |
 | AUD-WF-001 | — | SUPERSEDED by AUD-WF-002; do not count separately as an active blocker |
+
+
+### AUD-GIT-006 — scheduled-run trigger cadence and pending-run replacement
+- **Severity:** MEDIUM
+- **Status:** OPEN — observed schedule delivery is materially below the configured cron cadence; the cause of the missing intervals is not established.
+- The live default-branch workflow `.github/workflows/run_bot.yml` is configured with `schedule: "*/5 * * * *"`, job timeout of five minutes, concurrency group `binance-square-bot`, and `cancel-in-progress: false`. It does not set the optional `queue` property.
+- Read-only GitHub Actions API inspection on 2026-11-22 fetched the latest 100 workflow runs for `main`: 92 were schedule events; only 4 scheduled runs were present in the trailing 24 hours (288 nominal five-minute intervals). Across the 92 schedule runs, observed inter-run gaps ranged from 183.6 to 632.6 minutes; median gap was 372.1 minutes. The latest four scheduled runs completed in 17, 35, 27 and 33 seconds respectively.
+- These observations prove that the recorded schedule-run cadence is far below the configured five-minute cadence in the inspected window. They do **not** establish why events were absent or prove that concurrency replacement caused the gaps. No run-history evidence inspected here establishes a specific GitHub outage or account-level scheduling cause.
+- Official GitHub Actions documentation states that a concurrency group permits one running and, by default, one pending run; a newly queued run replaces/cancels an existing pending run. `queue: max` permits up to 100 pending runs. GitHub also documents that scheduled events can be delayed or dropped under high load and that schedule triggers run only from the default branch. These platform behaviors make missed ticks possible, but do not by themselves explain the measured multi-hour gaps.
+- **Operational impact:** if the intended contract is continuous five-minute opportunity scanning, the current observed delivery does not meet that cadence. If missed ticks are acceptable, that policy is not currently made explicit in the workflow contract. The PostgreSQL run lease serializes runs that actually start; it cannot create a run for a schedule event that was never delivered.
+- **Required closure:** define whether missed ticks are acceptable or require catch-up; instrument expected-vs-actual scheduled-run timestamps and alert on a justified gap; if catch-up is required, use durable, idempotent scheduled-run keys/queueing rather than blindly setting `queue: max`, which can create stale backlog. Add tests for missed-tick detection, idempotent catch-up and bounded backlog. Do not change the live schedule or concurrency policy until the catch-up contract is approved.
+- **No fix applied:** no workflow, database, schedule, publisher, credential, deployment or live run was changed or triggered during this audit.
+
 
 ### Reconciliations and counting rules
 - `AUD-GIT-001` and `AUD-GIT-002` original section statuses are superseded by Section 25 and this register. The branch guard is partial closure; path-scoped commit is closed only for the active helper. `AUD-IMG-001` remains independent and open.
