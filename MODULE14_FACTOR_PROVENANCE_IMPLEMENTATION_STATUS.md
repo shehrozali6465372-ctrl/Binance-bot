@@ -86,3 +86,14 @@ The validator does not establish that source IDs exist, payload hashes match act
 - Focused verification: **123 tests passed, 1 skipped** across registry resolver/opportunity/evidence suites; PostgreSQL opportunity unit group **5 tests passed, 2 DSN-gated skipped**. `compileall` and `git diff --check` passed.
 - The real PostgreSQL end-to-end test was not run because `TEST_POSTGRES_DSN` is not configured. Do not claim PostgreSQL runtime acceptance. No Neon/production DB was accessed.
 - Remaining v3 work: factor-specific claim support and independence semantics, source adapter contract review, full isolated PostgreSQL acceptance with DSN, crash/fresh-process replay acceptance. Runtime stays disabled pending policy/provider approval.
+
+
+## Factor claim support and source-independence — 2026-11-22
+- Added optional v3 `claim_refs` to subfeature provenance; malformed/duplicate IDs are rejected. V1/v2 schema semantics are unchanged.
+- Registry-bound v3 validation now requires explicit verified claim support for READY `evidence_strength` and `materiality` subfeatures. Claims are reconstructed and their IDs recomputed; claim asset/subject, claim type, verification state, contradiction state, unresolved issues, and exact supporting-evidence linkage are checked against the selected digest-verified registry.
+- Every source record used by these two factors must be covered by a referenced claim's supporting IDs and linked from the claim's own `evidence_ids`. Evidence references alone are not accepted as claim support.
+- Added conservative dependency grouping across shared `source_family`, `lineage_id`, or `content_hash`. Claim independent-source counts are recomputed from exact supporting EvidenceRecords and compared with the stored verification result; inflated/mismatched counts fail closed.
+- No global independence minimum, factor score, weight, threshold, freshness window, provider ranking or rubric was selected. Source grouping is a provenance deduplication primitive, not a claim of real-world independence/authenticity.
+- Focused tests: **137 passed, 0 failed, 3 skipped** across claim support, registry resolution, opportunity, evidence verification and PostgreSQL opportunity tests. PostgreSQL DSN-gated acceptance remains unrun.
+- Full local discovery after this change: **602 tests run, 60 skipped, 34 errors**. The errors are environment/dependency import failures caused by missing Pillow/PIL and psycopg; this is not a full-suite pass.
+- Remaining: source adapter contract review, PostgreSQL v3 E2E under isolated TEST_POSTGRES_DSN, fresh-process replay/crash acceptance, empirical source-quality and historical-data validation, and separately approved factor rubrics/providers. Runtime remains `factors=None`, `policy=None`; B-SCORE-01 OPEN; project PARTIAL — NOT PRODUCTION-READY.

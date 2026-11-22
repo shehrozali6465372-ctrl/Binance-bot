@@ -6,7 +6,7 @@ import json
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence
 
 
 FACTOR_NAMES = (
@@ -106,7 +106,8 @@ def _validate_v2_subfeature(
     }
     if schema_version == 3:
         required.add("source_provenance")
-    if not isinstance(subfeature, dict) or set(subfeature) != required:
+    optional = {"claim_refs"} if schema_version == 3 else set()
+    if not isinstance(subfeature, dict) or not required.issubset(subfeature) or set(subfeature) - required - optional:
         raise ValueError("factor subfeature provenance fields are incomplete or unknown")
     _required_text(subfeature["feature_key"], "subfeature feature_key")
     if subfeature["asset_id"] != asset_id:
@@ -123,6 +124,11 @@ def _validate_v2_subfeature(
     if availability == "AVAILABLE" and not refs:
         raise ValueError("available factor subfeature requires at least one source reference")
     if schema_version == 3:
+        if "claim_refs" in subfeature:
+            claim_refs = subfeature["claim_refs"]
+            if (not isinstance(claim_refs, list) or any(not isinstance(value, str) or not value.strip() for value in claim_refs)
+                    or len(claim_refs) != len(set(claim_refs))):
+                raise ValueError("v3 factor claim references are invalid")
         provenance = subfeature["source_provenance"]
         if (not isinstance(provenance, list) or len(provenance) != len(refs)
                 or any(not isinstance(item, dict) for item in provenance)):
@@ -198,6 +204,185 @@ def _validate_v2_subfeature(
         if subfeature["raw_value"] is not None or subfeature["normalized_value"] is not None:
             raise ValueError("unavailable factor subfeature cannot contain measured values")
         _required_text(missing_reason, "subfeature missing_reason")
+
+
+
+def group_independent_evidence_records(evidence_records: Sequence[object]) -> tuple[tuple[object, ...], ...]:
+    """Group records that share any known origin/dependency token.
+
+    A group is one provenance cluster, not a claim that its members are copies.
+    Missing lineage/content hashes are not fabricated; source_family remains the
+    conservative fallback so two records from one provider family never inflate
+    an independent-source count.
+    """
+    records = tuple(evidence_records)
+    parent = list(range(len(records)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        a, b = find(left), find(right)
+        if a != b:
+            parent[b] = a
+
+    seen: dict[tuple[str, str], int] = {}
+    for index, record in enumerate(records):
+        tokens = []
+        for field, namespace in (("source_family", "family"), ("lineage_id", "lineage"), ("content_hash", "content")):
+            value = getattr(record, field, None)
+            if isinstance(value, str) and value.strip():
+                tokens.append((namespace, value.strip()))
+        for token in tokens:
+            previous = seen.get(token)
+            if previous is None:
+                seen[token] = index
+            else:
+                union(index, previous)
+
+    grouped: dict[int, list[object]] = {}
+    for index, record in enumerate(records):
+        grouped.setdefault(find(index), []).append(record)
+    return tuple(tuple(grouped[key]) for key in sorted(grouped))
+
+
+def validate_factor_claim_support(
+    *, factor_name: str, claim_refs: Sequence[str], source_refs: Sequence[str],
+    registry_payload: Mapping[str, object], expected_asset_id: str,
+) -> tuple[dict[str, object], ...]:
+    """Resolve factor evidence to explicit, verified claim results in one registry.
+
+    Evidence strength and materiality require claim-level support. Other factors
+    may use direct measurements, but any supplied claim_refs are still checked.
+    This validates linkage/state, not semantic truth beyond the claim verifier.
+    """
+    from layer1.evidence_verification import Claim, EvidenceRecord
+
+    if factor_name not in FACTOR_NAMES:
+        raise ValueError("factor name is not recognized for claim support")
+    required_claim_factors = {"evidence_strength", "materiality"}
+    if not isinstance(claim_refs, (list, tuple)) or any(
+        not isinstance(value, str) or len(value) != _SHA256_LENGTH
+        or any(char not in "0123456789abcdef" for char in value)
+        for value in claim_refs
+    ) or len(claim_refs) != len(set(claim_refs)):
+        raise ValueError("factor claim references are invalid")
+    if factor_name in required_claim_factors and not claim_refs:
+        raise ValueError("factor claim references are required for this factor")
+    if not isinstance(source_refs, (list, tuple)) or any(
+        not isinstance(value, str) or not value for value in source_refs
+    ) or len(source_refs) != len(set(source_refs)):
+        raise ValueError("factor source references are invalid for claim support")
+    if not isinstance(registry_payload, Mapping):
+        raise ValueError("claim registry payload is required for claim support")
+    raw_claims = registry_payload.get("claims")
+    raw_results = registry_payload.get("results")
+    raw_evidence = registry_payload.get("evidence_records")
+    if (not isinstance(raw_claims, list) or not isinstance(raw_results, list)
+            or not isinstance(raw_evidence, list)):
+        raise ValueError("claim registry claims/evidence/results are invalid")
+
+    evidence_by_id = {}
+    from dataclasses import fields as dataclass_fields
+    evidence_fields = {item.name for item in dataclass_fields(EvidenceRecord)}
+    for raw in raw_evidence:
+        if not isinstance(raw, Mapping) or set(raw) != evidence_fields | {"evidence_id"}:
+            raise ValueError("claim registry contains invalid evidence provenance")
+        values = {key: raw[key] for key in evidence_fields}
+        try:
+            record = EvidenceRecord(**values)
+            record.validate()
+        except (TypeError, ValueError):
+            raise ValueError("claim registry contains invalid evidence provenance") from None
+        if raw.get("evidence_id") != record.evidence_id or record.evidence_id in evidence_by_id:
+            raise ValueError("claim registry evidence identity is invalid or ambiguous")
+        evidence_by_id[record.evidence_id] = record
+
+    claims_by_id = {}
+    for raw in raw_claims:
+        if not isinstance(raw, Mapping):
+            raise ValueError("claim registry contains an invalid claim")
+        values = {key: value for key, value in raw.items() if key != "claim_id"}
+        if isinstance(values.get("evidence_ids"), list):
+            values["evidence_ids"] = tuple(values["evidence_ids"])
+        try:
+            claim = Claim(**values)
+            claim.validate()
+        except (TypeError, ValueError):
+            raise ValueError("claim registry contains an invalid claim") from None
+        if raw.get("claim_id") != claim.claim_id or claim.claim_id in claims_by_id:
+            raise ValueError("claim registry claim identity is invalid or ambiguous")
+        claims_by_id[claim.claim_id] = claim
+
+    results_by_id = {}
+    for raw in raw_results:
+        if not isinstance(raw, Mapping):
+            raise ValueError("claim registry contains an invalid verification result")
+        claim_id = raw.get("claim_id")
+        if not isinstance(claim_id, str) or claim_id in results_by_id:
+            raise ValueError("claim registry verification result identity is invalid or ambiguous")
+        results_by_id[claim_id] = raw
+
+    validated = []
+    covered_evidence = set()
+    for claim_id in claim_refs:
+        claim = claims_by_id.get(claim_id)
+        result = results_by_id.get(claim_id)
+        if claim is None or result is None:
+            raise ValueError("factor claim reference does not resolve in selected registry")
+        if claim.asset_id != expected_asset_id and claim.subject != expected_asset_id:
+            raise ValueError("factor claim asset identity does not match decision asset")
+        if claim.claim_type not in {"CONFIRMED_FACT", "SOURCE_ASSERTION"}:
+            raise ValueError("factor claim type is not eligible as verified claim support")
+        if result.get("state") not in {"VERIFIED", "CORROBORATED"}:
+            raise ValueError("factor claim is not VERIFIED or CORROBORATED")
+        supporting = result.get("supporting_evidence_ids")
+        contradicting = result.get("contradicting_evidence_ids")
+        issues = result.get("issues")
+        valid_evidence_ids = lambda values: (
+            isinstance(values, (list, tuple)) and all(
+                isinstance(value, str) and len(value) == _SHA256_LENGTH
+                and all(char in "0123456789abcdef" for char in value)
+                for value in values
+            )
+        )
+        if (not valid_evidence_ids(supporting) or not supporting
+                or not valid_evidence_ids(contradicting) or contradicting
+                or not isinstance(issues, (list, tuple))
+                or any(not isinstance(issue, str) or not issue for issue in issues)
+                or issues):
+            raise ValueError("factor claim verification contains contradiction or unresolved issues")
+        evidence_ids = result.get("evidence_ids")
+        if (not valid_evidence_ids(evidence_ids)
+                or not set(supporting).issubset(set(evidence_ids))):
+            raise ValueError("factor claim supporting evidence linkage is invalid")
+        if not set(supporting).intersection(source_refs):
+            raise ValueError("verified claim does not support referenced factor evidence")
+        if not set(supporting).issubset(set(claim.evidence_ids)):
+            raise ValueError("factor claim supporting evidence is not linked by the claim")
+        try:
+            supporting_records = tuple(evidence_by_id[value] for value in supporting)
+        except KeyError:
+            raise ValueError("factor claim supporting evidence is missing from registry") from None
+        actual_independent_count = len(group_independent_evidence_records(supporting_records))
+        recorded_independent_count = result.get("independent_source_count")
+        if (isinstance(recorded_independent_count, bool)
+                or not isinstance(recorded_independent_count, int)
+                or recorded_independent_count != actual_independent_count):
+            raise ValueError("factor claim independent-source count does not match provenance groups")
+        covered_evidence.update(supporting)
+        validated.append({
+            "claim_id": claim_id, "state": result["state"],
+            "claim_type": claim.claim_type,
+            "supporting_evidence_ids": sorted(supporting),
+            "independent_source_count": actual_independent_count,
+        })
+    if factor_name in required_claim_factors and not set(source_refs).issubset(covered_evidence):
+        raise ValueError("factor source evidence contains records not supported by referenced claims")
+    return tuple(validated)
 
 
 def resolve_factor_source_provenance(
@@ -425,11 +610,18 @@ def validate_registry_bound_opportunity_input_snapshot(
     cutoff = inputs["decision_cutoff_at"]
     for factor in inputs["factor_assessments"]:
         for subfeature in factor["subfeatures"]:
-            resolve_factor_source_provenance(
+            resolved_records = resolve_factor_source_provenance(
                 subfeature, registry_snapshot,
                 expected_registry_verification_id=registry_id,
                 expected_asset_id=inputs["asset_id"],
                 decision_cutoff_at=cutoff,
+            )
+            validate_factor_claim_support(
+                factor_name=factor["factor_name"],
+                claim_refs=subfeature.get("claim_refs", []),
+                source_refs=[record.evidence_id for record in resolved_records],
+                registry_payload=registry_snapshot["payload"],
+                expected_asset_id=inputs["asset_id"],
             )
     return 3
 

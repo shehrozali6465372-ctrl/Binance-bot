@@ -6,7 +6,7 @@ import json
 import unittest
 from dataclasses import asdict
 
-from layer1.evidence_verification import EvidenceRecord
+from layer1.evidence_verification import Claim, EvidenceRecord, EvidenceVerificationEngine
 
 
 class RegistryBoundFactorSourceResolutionTests(unittest.TestCase):
@@ -21,15 +21,20 @@ class RegistryBoundFactorSourceResolutionTests(unittest.TestCase):
             content_hash="b" * 64, lineage_id="binance-snapshot:001",
             is_primary=True, source_status="ACCEPTED",
         )
-        self.payload = {
-            "claims": [],
-            "evidence_records": [asdict(self.record) | {"evidence_id": self.record.evidence_id}],
-            "results": [], "unresolved_issues": [],
-        }
+        self.claim = Claim(
+            text=f"Source assertion: coingecko:bitcoin market.price = 65000.0",
+            subject="coingecko:bitcoin", claim_key="market.price", value=65000.0,
+            observed_at="2026-11-21T11:59:45Z", evidence_ids=(self.record.evidence_id,),
+            asset_id="coingecko:bitcoin", unit="usd", timeframe="spot",
+            claim_type="SOURCE_ASSERTION", impact="MEDIUM",
+        )
+        self.registry_object = EvidenceVerificationEngine().verify((self.claim,), (self.record,))
+        self.payload = self.registry_object.to_dict()
         self.registry_id = self._digest(self.payload)
         self.registry = {"verification_id": self.registry_id, "payload": self.payload}
         self.subfeature = {
             "source_refs": [self.record.evidence_id],
+            "claim_refs": [self.claim.claim_id],
             "source_payload_hashes": [self.record.content_hash],
             "source_provenance": [asdict(self.record) | {"evidence_id": self.record.evidence_id}],
         }
@@ -150,6 +155,7 @@ class RegistryBoundFactorSourceResolutionTests(unittest.TestCase):
             "asset_id": "coingecko:bitcoin", "availability": "AVAILABLE",
             "raw_value": 1.0, "normalized_value": None, "unit": "count",
             "source_refs": [self.record.evidence_id],
+            "claim_refs": [self.claim.claim_id],
             "source_payload_hashes": [self.record.content_hash],
             "source_provenance": [asdict(self.record) | {"evidence_id": self.record.evidence_id}],
             "provider_timestamp": None, "event_at": None, "event_time_semantics": None,
@@ -188,6 +194,28 @@ class RegistryBoundFactorSourceResolutionTests(unittest.TestCase):
             ),
             3,
         )
+
+    def test_registry_bound_v3_ready_evidence_strength_requires_claim_refs(self):
+        from layer1.opportunity import validate_registry_bound_opportunity_input_snapshot
+        snapshot = self._v3_snapshot()
+        evidence_factor = next(
+            item for item in snapshot["inputs"]["factor_assessments"]
+            if item["factor_name"] == "evidence_strength"
+        )
+        evidence_factor["subfeatures"][0].pop("claim_refs")
+        with self.assertRaisesRegex(ValueError, "claim references are required"):
+            validate_registry_bound_opportunity_input_snapshot(snapshot, self.registry)
+
+    def test_registry_bound_v3_ready_materiality_requires_claim_refs(self):
+        from layer1.opportunity import validate_registry_bound_opportunity_input_snapshot
+        snapshot = self._v3_snapshot()
+        materiality_factor = next(
+            item for item in snapshot["inputs"]["factor_assessments"]
+            if item["factor_name"] == "materiality"
+        )
+        materiality_factor["subfeatures"][0].pop("claim_refs")
+        with self.assertRaisesRegex(ValueError, "claim references are required"):
+            validate_registry_bound_opportunity_input_snapshot(snapshot, self.registry)
 
     def test_registry_bound_v3_snapshot_rejects_missing_registry_reference(self):
         from layer1.opportunity import validate_registry_bound_opportunity_input_snapshot

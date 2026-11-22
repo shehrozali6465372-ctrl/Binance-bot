@@ -201,3 +201,13 @@ The next required phase is factor-specific semantic/provenance resolution and em
 - Mocked safety job: 813 tests, 0 failures, 61 skipped; Python compilation passed.
 - Isolated PostgreSQL integration job: 92 tests, successful; target guard passed. This used the CI PostgreSQL 16 service container only.
 - PR #14 remains OPEN / DRAFT / UNMERGED. Runtime remains factors=None and policy=None; B-SCORE-01 remains OPEN.
+
+
+## 10. V3 claim linkage and dependency grouping — implementation note (2026-11-22)
+
+- V3 subfeatures may include `claim_refs`, exact Claim IDs in the same digest-verified ClaimRegistry. V1/v2 contracts are unchanged.
+- READY `evidence_strength` and `materiality` subfeatures require claim references. Each referenced claim must resolve to a recomputed Claim ID, match the canonical decision asset by `asset_id` or `subject`, use `CONFIRMED_FACT` or `SOURCE_ASSERTION`, and have a `VERIFIED` or `CORROBORATED` result with no contradiction or unresolved issue.
+- The subfeature's source refs must be covered by the referenced claim results' `supporting_evidence_ids`, and those IDs must be present in the Claim's own `evidence_ids`. A raw evidence reference does not establish claim support.
+- The persisted independent-source count is recomputed from supporting EvidenceRecords. Records are grouped together when they share any non-empty source family, lineage ID or content hash; transitive shared-origin relationships collapse into one dependency group.
+- This is conservative duplicate/dependency handling only. It does not prove source authenticity or authority and does not establish a universal minimum independent-source threshold. Those require claim/factor-specific approved rubrics and empirical evidence.
+- Runtime scoring remains disabled; no weights, thresholds, factor values, providers or source trust rankings are activated.
