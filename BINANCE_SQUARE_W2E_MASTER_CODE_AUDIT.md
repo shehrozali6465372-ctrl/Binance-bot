@@ -1108,3 +1108,11 @@ Reasons production readiness cannot be approved:
 - No production DB/Neon connection, production migration, live publishing workflow dispatch, Binance API POST, deployment or merge.
 - The 879-test hosted mocked suite supersedes the local full-suite dependency limitation for repository CI. Local focused suite remains 71 passed / 0 failed; local unfiltered discovery was blocked by absent Pillow/psycopg in the RDC environment.
 - `AUD-PUB-001` and `AUD-PUB-002` are now IMPLEMENTED — HOSTED CI VERIFIED for the tested SQLite paths. Production multiprocess load/SLO verification and overall project readiness remain separate. Project remains NO-GO / PARTIAL / NOT PRODUCTION-READY because other critical/high findings remain open.
+
+
+#### AUD-GIT-007 mitigation update — 2026-11-23
+- User explicitly approved temporarily changing the default-branch workflow `.github/workflows/run_bot.yml` from `DRY_RUN: "0"` to `DRY_RUN: "1"`.
+- Applied only that one-line workflow change directly to `main` using GitHub Contents API. Commit: `4525cabe1260fd5b25414010d2cf16b387119edd`; resulting workflow blob: `4dfc5f3b1acc48c22d0c3763776dcbdadf7d6c6f`.
+- Read-after-write verification on `main` confirmed `DRY_RUN: "1"`; schedule and Square credential injection remain otherwise unchanged. No workflow dispatch or manual run was triggered. The latest Actions run list contained only older completed runs at verification time; no in-progress run was shown.
+- **Important residual side effect:** inspected main-branch `main.py` generates/uploads a Binance image before invoking `publisher.publish()`; that image-upload path is not guarded by `dry_run`. The one-line mitigation prevents the content publish call but does not establish zero Binance network activity or prevent image uploads. No broader code change was made because approval was limited to the workflow dry-run switch.
+- Status: live content publishing is temporarily switched to dry-run on default branch; full no-network diagnostic mode is not established. AUD-GIT-007 remains OPEN until code/workflow safeguards are aligned and independently verified.
