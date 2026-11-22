@@ -890,136 +890,124 @@ def _retry_pending_push() -> bool:
 
 
 def _verify_persistence_integrity() -> bool:
-    """Verify that the persistence layer is intact before publishing.
-    
-    Returns True if history is reliable (safe to publish).
-    Returns False if integrity cannot be guaranteed (must fail CLOSED).
-    
-    Failure scenarios:
-    - JSONL exists in git history but is missing from checkout → cache+git both failed
-    - JSONL exists but is empty and git had content → file was truncated/corrupted
-    - Any situation where we cannot guarantee we have the full post history
-    
-    When this returns False, the system MUST NOT publish — it cannot
-    guarantee it won't repeat a recently posted coin.
-    """
-    path = Path(_POST_HISTORY_FILE)
-    
-    import subprocess
-    
-    if path.exists():
-        try:
-            size = path.stat().st_size
-            if size > 0:
-                LOGGER.info("INTEGRITY OK: %s has %d bytes (%d lines) — history loaded",
-                           _POST_HISTORY_FILE, size, len(path.read_text().strip().split(chr(10))) if size > 0 else 0)
-                return True  # Has content — history is usable
-            
-            # File exists but is EMPTY — possibly truncated
-            LOGGER.warning("INTEGRITY: %s exists but is empty (0 bytes)", _POST_HISTORY_FILE)
-            
-            # Check if git ever had this file with content
-            git_log = subprocess.run(
-                ["git", "log", "--oneline", "-1", "--", _POST_HISTORY_FILE],
-                capture_output=True, timeout=10
-            )
-            if git_log.stdout.strip():
-                # File exists in git but is empty locally.
-                # Check if git always had it empty (fresh deployment) or
-                # if content was lost (corruption).
-                import subprocess as _sp
-                _size_check = _sp.run(
-                    ["git", "show", "HEAD:published_posts.jsonl"],
-                    capture_output=True, timeout=10
-                )
-                _git_size = len(_size_check.stdout.strip())
-                if _git_size > 0:
-                    # Git has content — cache likely overwrote checkout with stale 0-byte.
-                    # Restore from git instead of failing closed.
-                    LOGGER.warning("INTEGRITY RESTORE: %s is empty locally but has %d bytes in git. "
-                                   "Restoring from git (cache overwrote checkout).",
-                                   _POST_HISTORY_FILE, _git_size)
-                    restored_content = _size_check.stdout
-                    if isinstance(restored_content, bytes):
-                        restored_content = restored_content.decode("utf-8", errors="replace")
-                    try:
-                        path.write_text(restored_content, encoding="utf-8")
-                        new_size = path.stat().st_size
-                        LOGGER.info("INTEGRITY RESTORE OK: Restored %s from git (%d bytes)",
-                                    _POST_HISTORY_FILE, new_size)
-                        return True
-                    except Exception as restore_err:
-                        LOGGER.warning("INTEGRITY RESTORE FAILED: Could not restore %s: %s. "
-                                       "Failing closed.", _POST_HISTORY_FILE, restore_err)
-                        return False
-                else:
-                    # File was always empty in git — fresh deployment, safe
-                    LOGGER.info("INTEGRITY: %s is empty in git too — fresh deployment, safe to proceed",
-                               _POST_HISTORY_FILE)
-                    path.write_text("", encoding="utf-8")
-                    return True
-            else:
-                # New file, never committed — first run scenario
-                LOGGER.info("INTEGRITY: %s is new (never committed) — safe to proceed",
-                           _POST_HISTORY_FILE)
-                return True
-        except subprocess.TimeoutExpired:
-            LOGGER.warning("INTEGRITY: git log check timed out — allowing (safe default)")
-            return True
-        except Exception as e:
-            LOGGER.warning("INTEGRITY: check error: %s — allowing", e)
-            return True
-    
-    # File does NOT exist on disk
-    LOGGER.warning("INTEGRITY: %s does not exist on disk", _POST_HISTORY_FILE)
-    
-    try:
-        # Check if git ever had this file
-        git_log = subprocess.run(
-            ["git", "log", "--oneline", "-1", "--", _POST_HISTORY_FILE],
-            capture_output=True, timeout=10
-        )
-        if git_log.stdout.strip():
-            # File existed in git but is not in checkout — cache or cache restore may have failed.
-            # Restore from git instead of failing closed.
-            LOGGER.warning("INTEGRITY RESTORE: %s exists in git history but is missing from checkout. "
-                           "Restoring from git.", _POST_HISTORY_FILE)
-            try:
-                git_content = subprocess.run(
-                    ["git", "show", "HEAD:published_posts.jsonl"],
-                    capture_output=True, timeout=10
-                )
-                restored = git_content.stdout
-                if isinstance(restored, bytes):
-                    restored = restored.decode("utf-8", errors="replace")
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(restored, encoding="utf-8")
-                new_size = path.stat().st_size
-                LOGGER.info("INTEGRITY RESTORE OK: Restored %s from git (%d bytes)",
-                            _POST_HISTORY_FILE, new_size)
-                return True
-            except Exception as restore_err:
-                LOGGER.warning("INTEGRITY RESTORE FAILED: Could not restore %s: %s. "
-                               "Failing closed.", _POST_HISTORY_FILE, restore_err)
-                return False
-        else:
-            # Never committed — brand new repo, first run
-            LOGGER.info("INTEGRITY: %s has no git history — assuming first run ever", _POST_HISTORY_FILE)
-            # Create the file so subsequent runs have it
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("", encoding="utf-8")
-                LOGGER.info("INTEGRITY: Created empty %s for first run", _POST_HISTORY_FILE)
-            except Exception:
-                pass
-            return True
-    except subprocess.TimeoutExpired:
-        LOGGER.warning("INTEGRITY: git log check timed out — allowing")
-        return True
-    except Exception as e:
-        LOGGER.warning("INTEGRITY: git check error: %s — allowing", e)
-        return True
+    """Fail closed unless local publication history is valid and includes Git history.
 
+    Git is the durable baseline for the JSONL ledger. The working file may contain
+    additional uncommitted records from the current run, but it may never omit a
+    committed record or contain malformed/incomplete JSONL. Any uncertainty about
+    repository state or Git command success blocks the scheduled pipeline.
+    """
+    import subprocess
+    from collections import Counter
+
+    path = Path(_POST_HISTORY_FILE)
+
+    def _run_git(args):
+        result = subprocess.run(args, capture_output=True, timeout=10)
+        if result.returncode != 0:
+            stderr = result.stderr
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            LOGGER.warning("INTEGRITY: Git command failed (%s): %s", args[1], str(stderr)[:300])
+            raise RuntimeError("Git history verification failed")
+        return result.stdout
+
+    def _decode(raw, label):
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="strict")
+        if not isinstance(raw, str):
+            raise ValueError(f"{label} is not text")
+        records = []
+        if not raw:
+            return records
+        lines = raw.splitlines()
+        if raw and not raw.endswith(("\n", "\r")):
+            # A final newline is not required, but the final record must parse fully.
+            pass
+        for line_number, line in enumerate(lines, 1):
+            if not line.strip():
+                raise ValueError(f"{label} contains a blank line at {line_number}")
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise ValueError(f"{label} line {line_number} is not a JSON object")
+            symbol = record.get("symbol")
+            timestamp = record.get("timestamp")
+            if not isinstance(symbol, str) or not symbol.strip():
+                raise ValueError(f"{label} line {line_number} has no valid symbol")
+            if not isinstance(timestamp, str) or not timestamp.strip():
+                raise ValueError(f"{label} line {line_number} has no valid timestamp")
+            datetime.fromisoformat(timestamp)
+            records.append(record)
+        return records
+
+    try:
+        repo_root_raw = _run_git(["git", "rev-parse", "--show-toplevel"])
+        repo_root = Path(repo_root_raw.decode("utf-8").strip() if isinstance(repo_root_raw, bytes) else repo_root_raw.strip()).resolve()
+        resolved_path = path.resolve()
+        relative_path = Path(os.path.relpath(str(resolved_path), str(repo_root)))
+        if relative_path == Path("..") or ".." in relative_path.parts:
+            raise ValueError("publication history path is outside the Git repository")
+        git_path = relative_path.as_posix()
+
+        # Distinguish a valid unborn branch from a broken Git invocation. An
+        # unborn branch is a legitimate first-run state only when both its HEAD
+        # symbolic ref and repository status can be verified successfully.
+        head_check = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"], capture_output=True, timeout=10
+        )
+        if head_check.returncode == 0:
+            log_output = _run_git(["git", "log", "-1", "--format=%H", "--", git_path])
+            has_committed_history = bool(log_output.strip())
+        else:
+            branch_ref_raw = _run_git(["git", "symbolic-ref", "-q", "HEAD"])
+            branch_ref = branch_ref_raw.decode("utf-8").strip() if isinstance(branch_ref_raw, bytes) else branch_ref_raw.strip()
+            if not branch_ref.startswith("refs/heads/"):
+                raise ValueError("unborn repository does not have a valid local branch ref")
+            branch_refs = _run_git(["git", "for-each-ref", "--format=%(refname)", branch_ref])
+            if branch_refs.strip():
+                raise ValueError("branch ref exists although HEAD is unresolved")
+            _run_git(["git", "status", "--porcelain"])
+            has_committed_history = False
+        committed_raw = b""
+        committed_records = []
+        if has_committed_history:
+            committed_raw = _run_git(["git", "show", f"HEAD:{git_path}"])
+            committed_records = _decode(committed_raw, "committed publication history")
+
+        local_exists = path.exists()
+        local_raw = path.read_bytes() if local_exists else b""
+        if local_raw:
+            local_records = _decode(local_raw, "local publication history")
+            if has_committed_history:
+                canonical = lambda item: json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                local_counts = Counter(canonical(item) for item in local_records)
+                committed_counts = Counter(canonical(item) for item in committed_records)
+                if committed_counts - local_counts:
+                    LOGGER.error("INTEGRITY BLOCKED: local history is missing one or more committed records")
+                    return False
+            LOGGER.info("INTEGRITY OK: validated %d local history records; committed baseline preserved", len(local_records))
+            return True
+
+        # Missing/empty local history can be recovered only from a successfully
+        # verified Git baseline. Never interpret Git errors as a first-run state.
+        if committed_raw:
+            _decode(committed_raw, "committed publication history")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(committed_raw)
+            LOGGER.warning("INTEGRITY RESTORE OK: restored %s from verified Git history (%d bytes)",
+                           _POST_HISTORY_FILE, len(committed_raw))
+            return True
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+        LOGGER.info("INTEGRITY: verified repository has no committed publication history; initialized empty ledger")
+        return True
+    except (subprocess.TimeoutExpired, OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
+        LOGGER.error("INTEGRITY BLOCKED: could not prove publication history integrity: %s", exc)
+        return False
+    except Exception as exc:
+        LOGGER.error("INTEGRITY BLOCKED: unexpected verification error: %s", exc)
+        return False
 
 def _check_jsonl_cooldown(symbol: str, catalyst_type: str = "") -> bool:
     """Final cooldown check by reading the JSONL file directly.

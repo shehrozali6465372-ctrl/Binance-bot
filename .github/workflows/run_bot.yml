@@ -35,12 +35,6 @@ jobs:
           pip install Pillow
           pip install -r requirements-announcement-importer.txt
 
-      - name: Restore post history cache
-        uses: actions/cache/restore@v4
-        with:
-          path: published_posts.jsonl
-          key: post-history-${{ github.ref_name }}
-
       - name: Run Binance Square Agent
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -70,13 +64,6 @@ jobs:
           REPETITION_SOFT_HOURS: "24"
 
         run: python main.py
-
-      - name: Save post history cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: published_posts.jsonl
-          key: post-history-${{ github.ref_name }}
 
       - name: Upload artifacts
         if: always()
