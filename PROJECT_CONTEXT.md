@@ -4288,3 +4288,21 @@ The most relevant candidate capabilities identified from the directory are:
 - Code head cfca027d5d2cf2831948eff0b620c4fddb4fa600: mocked safety suite **815 tests, 0 failures, 61 skipped**; isolated PostgreSQL integration **92 tests, successful**; disposable PostgreSQL target guard PASS.
 - PostgreSQL JSONB ClaimRegistry tamper rejection passed alongside v2 opportunity round-trip, asset binding and decision digest tamper tests. ClaimRegistry read paths preserve serializer modes and verify stored snapshot digest.
 - Source-reference resolution remains open: V2 source_refs are still structural only; registry-bound v3 is not implemented. Runtime remains factors=None, policy=None; B-SCORE-01 OPEN.
+
+
+## MODULE 14 — REGISTRY-BOUND V3 PREFLIGHT CONTINUATION — 2026-11-22
+- Continuation worktree: `/tmp/binance-w2e-continuation`; local branch `work/module9-continuation-local`; starting HEAD `0a70a7c22f47d4f6022f5598f58ca02fb7d266f8`.
+- Added `resolve_factor_source_provenance()` and schema-v3 structural validation plus `validate_registry_bound_opportunity_input_snapshot()`. V3 requires exact registry verification ID and per-source provenance; resolver verifies registry digest, reconstructs EvidenceRecords/recomputes IDs, compares all copied provenance fields, checks asset and cutoff, and matches hashes only to non-empty content hashes. No fabricated hashes for current on-chain adapters.
+- SQLite decision store and PostgreSQL decision-input validation fail closed for v3 because exact registry-by-ID resolution is not yet wired into durable save/load. V3 is preflight-only, not persisted or active. V1/v2 compatibility preserved.
+- Focused local verification: **120 tests passed, 0 failures** across registry resolver, opportunity and evidence-verification suites. `compileall` and `git diff --check` were run earlier in this continuation; final rerun pending.
+- Full local discovery: **586 tests discovered, 59 skipped, 34 errors** due current worktree environment missing Pillow/PIL and psycopg; PostgreSQL DSN absent so DB integration tests skipped. Do not claim full-suite pass.
+- No production/Neon DB, live provider, media upload, publisher, gateway, real post, merge or deployment touched. Runtime remains `factors=None`, `policy=None`, fail-closed DEFER. B-SCORE-01 remains OPEN.
+- Next: add exact-ID ClaimRegistry load methods to SQLite/PostgreSQL stores, resolve v3 transactionally on decision save and re-verify on decision load, add isolated PostgreSQL and fresh-process tests; then add factor-specific claim verification and independence checks. Do not activate scoring.
+
+
+## Module 14 update — exact registry-bound v3 persistence — 2026-11-22
+- Added exact verification-ID loaders for SQLite and PostgreSQL ClaimRegistry snapshots with stored digest verification.
+- Integrated v3 source resolution into SQLite and PostgreSQL opportunity decision save/load paths. Save checks exact registry and package asset; load re-verifies decision digest and exact source registry. SQLite save keeps validation in the decision transaction; PostgreSQL registry lookup uses FOR SHARE during transactional binding.
+- SQLite v3 positive roundtrip and registry-tamper rejection passed. Missing exact registry rejected. PostgreSQL exact-ID loader unit test passed; DSN-gated full PostgreSQL v3 roundtrip/tamper test added but NOT run (TEST_POSTGRES_DSN absent).
+- Focused tests: 123 passed, 1 skipped; PostgreSQL opportunity group 5 passed, 2 skipped. compileall and diff check passed.
+- Remaining: factor-specific claim support/independence, full isolated PostgreSQL CI acceptance, crash/fresh-process replay; no scoring activation. Full test suite still previously had dependency errors (Pillow/PIL and psycopg missing).

@@ -938,10 +938,26 @@ class PostgresPublicationStore:
                 package_payload = json.loads(package_payload)
             if not isinstance(package_payload, dict):
                 raise ValueError("opportunity decision research package payload is invalid")
-            from layer1.opportunity import validate_opportunity_input_snapshot
-            if snapshot["inputs"].get("schema_version") == 2:
+            from layer1.opportunity import (
+                validate_opportunity_input_snapshot,
+                validate_registry_bound_opportunity_input_snapshot,
+            )
+            schema_version = snapshot["inputs"].get("schema_version")
+            if schema_version == 2:
                 validate_opportunity_input_snapshot(
                     snapshot, expected_asset_id=package_payload.get("asset_id"),
+                )
+            elif schema_version == 3:
+                validate_opportunity_input_snapshot(
+                    snapshot, expected_asset_id=package_payload.get("asset_id"),
+                )
+                registry = self.load_claim_registry_by_verification_id(
+                    snapshot["inputs"]["registry_verification_id"],
+                )
+                if registry is None:
+                    raise ValueError("v3 opportunity decision references a missing claim registry snapshot")
+                validate_registry_bound_opportunity_input_snapshot(
+                    snapshot, registry, expected_asset_id=package_payload.get("asset_id"),
                 )
             existing = self.conn.execute(
                 "SELECT research_package_id,state,score,reasons_json,policy_version,input_snapshot_json FROM opportunity_decisions WHERE decision_id=%s FOR UPDATE",
@@ -980,6 +996,15 @@ class PostgresPublicationStore:
             decision_id=row["decision_id"], state=row["state"], score=row["score"],
             reasons=reasons, policy_version=row["policy_version"], input_snapshot=snapshot,
         )
+        inputs = snapshot.get("inputs")
+        if isinstance(inputs, dict) and inputs.get("schema_version") == 3:
+            from layer1.opportunity import validate_registry_bound_opportunity_input_snapshot
+            registry = self.load_claim_registry_by_verification_id(
+                inputs["registry_verification_id"],
+            )
+            if registry is None:
+                raise ValueError("v3 opportunity decision references a missing claim registry snapshot")
+            validate_registry_bound_opportunity_input_snapshot(snapshot, registry)
         return {"decision_id":row["decision_id"],"research_package_id":row["research_package_id"],
                 "state":row["state"],"score":row["score"],"reasons":reasons,"policy_version":row["policy_version"],
                 "input_snapshot":snapshot,"created_at":row["created_at"].isoformat()}
@@ -1102,6 +1127,26 @@ class PostgresPublicationStore:
             )
         return verification_id
 
+    def load_claim_registry_by_verification_id(self, verification_id: str) -> Optional[dict]:
+        """Load and digest-verify one exact immutable claim registry snapshot."""
+        if not _is_sha256(verification_id):
+            raise ValueError("claim registry verification ID must be lowercase SHA-256")
+        row = self.conn.execute(
+            "SELECT verification_id,payload_json FROM layer1_claim_verification_runs "
+            "WHERE verification_id=%s FOR SHARE",
+            (verification_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = row["payload_json"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        from layer1.evidence_verification import verify_claim_registry_payload
+        verify_claim_registry_payload(
+            row["verification_id"], payload, ensure_ascii=False,
+        )
+        return {"verification_id": row["verification_id"], "payload": payload}
+
     def load_latest_claim_registry(self) -> Optional[dict]:
         """Load the newest persisted claim-verification snapshot."""
         row = self.conn.execute(
@@ -1114,9 +1159,7 @@ class PostgresPublicationStore:
         if isinstance(payload, str):
             payload = json.loads(payload)
         from layer1.evidence_verification import verify_claim_registry_payload
-        verify_claim_registry_payload(
-            row["verification_id"], payload, ensure_ascii=False,
-        )
+        verify_claim_registry_payload(row["verification_id"], payload, ensure_ascii=False)
         return {"verification_id": row["verification_id"], "payload": payload}
 
     def save_research_package(

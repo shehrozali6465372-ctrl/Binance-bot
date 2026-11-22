@@ -92,7 +92,9 @@ def _utc_timestamp(value, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _validate_v2_subfeature(subfeature, *, asset_id: str, cutoff: datetime) -> None:
+def _validate_v2_subfeature(
+    subfeature, *, asset_id: str, cutoff: datetime, schema_version: int = 2,
+) -> None:
     required = {
         "feature_key", "asset_id", "availability", "raw_value", "normalized_value",
         "unit", "source_refs", "source_payload_hashes", "provider_timestamp",
@@ -102,6 +104,8 @@ def _validate_v2_subfeature(subfeature, *, asset_id: str, cutoff: datetime) -> N
         "baseline_id", "baseline_version", "source_dependency_group",
         "quality_flags", "missing_reason",
     }
+    if schema_version == 3:
+        required.add("source_provenance")
     if not isinstance(subfeature, dict) or set(subfeature) != required:
         raise ValueError("factor subfeature provenance fields are incomplete or unknown")
     _required_text(subfeature["feature_key"], "subfeature feature_key")
@@ -118,6 +122,16 @@ def _validate_v2_subfeature(subfeature, *, asset_id: str, cutoff: datetime) -> N
         raise ValueError("factor subfeature source references are invalid")
     if availability == "AVAILABLE" and not refs:
         raise ValueError("available factor subfeature requires at least one source reference")
+    if schema_version == 3:
+        provenance = subfeature["source_provenance"]
+        if (not isinstance(provenance, list) or len(provenance) != len(refs)
+                or any(not isinstance(item, dict) for item in provenance)):
+            raise ValueError("v3 factor source provenance must match source references")
+        provenance_ids = [item.get("evidence_id") for item in provenance]
+        if (any(not isinstance(value, str) or not value.strip() for value in provenance_ids)
+                or len(provenance_ids) != len(set(provenance_ids))
+                or set(provenance_ids) != set(refs)):
+            raise ValueError("v3 factor source provenance IDs must match source references")
     hashes = subfeature["source_payload_hashes"]
     if (not isinstance(hashes, list)
             or any(not isinstance(value, str) or len(value) != _SHA256_LENGTH
@@ -186,6 +200,114 @@ def _validate_v2_subfeature(subfeature, *, asset_id: str, cutoff: datetime) -> N
         _required_text(missing_reason, "subfeature missing_reason")
 
 
+def resolve_factor_source_provenance(
+    subfeature, registry_snapshot, *, expected_registry_verification_id: str,
+    expected_asset_id: str, decision_cutoff_at: str,
+):
+    """Resolve exact v3-style evidence references against one immutable registry.
+
+    This is deliberately additive to v1/v2 snapshot validation. It verifies the
+    persisted registry digest, reconstructs EvidenceRecord identities, compares
+    every copied provenance field, and enforces asset and point-in-time bounds.
+    It does not infer claim support, source authority, or independence.
+    """
+    from dataclasses import asdict, fields
+    from layer1.evidence_verification import (
+        EvidenceRecord, verify_claim_registry_payload,
+    )
+
+    if not isinstance(registry_snapshot, Mapping):
+        raise ValueError("claim registry snapshot is required for source resolution")
+    registry_id = registry_snapshot.get("verification_id")
+    payload = registry_snapshot.get("payload")
+    if registry_id != expected_registry_verification_id:
+        raise ValueError("claim registry snapshot ID does not match factor provenance")
+    verified = False
+    for ensure_ascii in (True, False):
+        try:
+            verify_claim_registry_payload(registry_id, payload, ensure_ascii=ensure_ascii)
+            verified = True
+            break
+        except ValueError:
+            continue
+    if not verified:
+        raise ValueError("claim registry snapshot digest mismatch")
+
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("evidence_records"), list):
+        raise ValueError("claim registry evidence records are invalid")
+    if not isinstance(subfeature, Mapping):
+        raise ValueError("factor subfeature source provenance is invalid")
+    refs = subfeature.get("source_refs")
+    copied = subfeature.get("source_provenance")
+    if (not isinstance(refs, list) or not refs
+            or any(not isinstance(ref, str) or not ref.strip() for ref in refs)
+            or len(refs) != len(set(refs))):
+        raise ValueError("factor source references are invalid")
+    if (not isinstance(copied, list) or len(copied) != len(refs)
+            or any(not isinstance(item, Mapping) for item in copied)):
+        raise ValueError("factor per-source provenance does not match source references")
+
+    cutoff = _utc_timestamp(decision_cutoff_at, "decision_cutoff_at")
+    _required_text(expected_asset_id, "expected asset identity")
+    record_fields = {item.name for item in fields(EvidenceRecord)}
+    by_id = {}
+    for raw in payload["evidence_records"]:
+        if not isinstance(raw, Mapping) or set(raw) != record_fields | {"evidence_id"}:
+            raise ValueError("claim registry evidence record fields are invalid")
+        evidence_id = raw.get("evidence_id")
+        values = {key: raw[key] for key in record_fields}
+        try:
+            record = EvidenceRecord(**values)
+            record.validate()
+        except (TypeError, ValueError):
+            raise ValueError("claim registry evidence record is invalid") from None
+        if record.evidence_id != evidence_id:
+            raise ValueError("claim registry evidence record identity mismatch")
+        previous = by_id.get(evidence_id)
+        if previous is not None and previous != record:
+            raise ValueError("claim registry contains ambiguous evidence references")
+        by_id[evidence_id] = record
+
+    copied_by_id = {}
+    for item in copied:
+        evidence_id = item.get("evidence_id")
+        if not isinstance(evidence_id, str) or evidence_id in copied_by_id:
+            raise ValueError("factor per-source provenance contains duplicate or invalid evidence IDs")
+        copied_by_id[evidence_id] = item
+    if set(copied_by_id) != set(refs):
+        raise ValueError("factor source provenance does not match source references")
+
+    resolved = []
+    payload_hashes = set()
+    for evidence_id in refs:
+        record = by_id.get(evidence_id)
+        if record is None:
+            raise ValueError("factor evidence reference does not exist in selected claim registry")
+        if record.asset_id != expected_asset_id:
+            raise ValueError("factor evidence asset identity does not match decision asset")
+        for field in ("published_at", "updated_at", "observed_at", "event_at"):
+            value = getattr(record, field)
+            if value is not None and _utc_timestamp(value, "evidence " + field) > cutoff:
+                raise ValueError("factor evidence timestamp is after decision cutoff")
+        expected_copy = asdict(record) | {"evidence_id": record.evidence_id}
+        if dict(copied_by_id[evidence_id]) != expected_copy:
+            raise ValueError("factor copied source provenance does not match registry record")
+        if record.content_hash:
+            if (len(record.content_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in record.content_hash)):
+                raise ValueError("registry source content hash is not lowercase SHA-256")
+            payload_hashes.add(record.content_hash)
+        resolved.append(record)
+
+    supplied_hashes = subfeature.get("source_payload_hashes")
+    if (not isinstance(supplied_hashes, list)
+            or any(not isinstance(value, str) for value in supplied_hashes)
+            or len(supplied_hashes) != len(set(supplied_hashes))
+            or set(supplied_hashes) != payload_hashes):
+        raise ValueError("factor source payload hashes do not match registry source records")
+    return tuple(resolved)
+
+
 def validate_opportunity_input_snapshot(snapshot, *, expected_asset_id=None) -> int:
     """Validate legacy v1 or strict v2 opportunity snapshot; return schema version.
 
@@ -209,12 +331,17 @@ def validate_opportunity_input_snapshot(snapshot, *, expected_asset_id=None) -> 
         if "factor_assessments" in inputs:
             raise ValueError("versioned factor assessments require schema_version")
         return 1
-    if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2):
+    if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2, 3):
         raise ValueError("opportunity decision snapshot schema version is unsupported")
     if version == 1:
         if "factor_assessments" in inputs:
             raise ValueError("legacy schema cannot contain versioned factor assessments")
         return 1
+    if version == 3:
+        registry_id = inputs.get("registry_verification_id")
+        if (not isinstance(registry_id, str) or len(registry_id) != _SHA256_LENGTH
+                or any(char not in "0123456789abcdef" for char in registry_id)):
+            raise ValueError("v3 opportunity snapshot requires a lowercase registry verification SHA-256")
     asset_id = _required_text(inputs.get("asset_id"), "opportunity snapshot asset_id")
     if expected_asset_id is not None and asset_id != expected_asset_id:
         raise ValueError("opportunity snapshot asset identity does not match expected asset")
@@ -269,14 +396,43 @@ def validate_opportunity_input_snapshot(snapshot, *, expected_asset_id=None) -> 
         if any(not isinstance(key, str) or not key.strip() for key in feature_keys) or len(feature_keys) != len(set(feature_keys)):
             raise ValueError("factor assessment subfeature keys must be unique non-empty identifiers")
         for subfeature in subfeatures:
-            _validate_v2_subfeature(subfeature, asset_id=asset_id, cutoff=cutoff)
+            _validate_v2_subfeature(
+                subfeature, asset_id=asset_id, cutoff=cutoff, schema_version=version,
+            )
         if status == "READY" and any(
             item["availability"] != "AVAILABLE" for item in subfeatures
         ):
             raise ValueError("READY factor assessment cannot depend on unavailable subfeatures")
     if seen != set(FACTOR_NAMES):
-        raise ValueError("version 2 snapshot requires all six factors exactly once")
-    return 2
+        raise ValueError("versioned snapshot requires all six factors exactly once")
+    return version
+
+
+def validate_registry_bound_opportunity_input_snapshot(
+    snapshot, registry_snapshot, *, expected_asset_id=None,
+) -> int:
+    """Validate v3 structure and resolve every source against its exact registry."""
+    version = validate_opportunity_input_snapshot(
+        snapshot, expected_asset_id=expected_asset_id,
+    )
+    if version != 3:
+        raise ValueError("registry-bound source resolution requires opportunity schema version 3")
+    inputs = snapshot["inputs"]
+    registry_id = inputs["registry_verification_id"]
+    if (not isinstance(registry_snapshot, Mapping)
+            or registry_snapshot.get("verification_id") != registry_id):
+        raise ValueError("claim registry snapshot ID does not match v3 opportunity snapshot")
+    cutoff = inputs["decision_cutoff_at"]
+    for factor in inputs["factor_assessments"]:
+        for subfeature in factor["subfeatures"]:
+            resolve_factor_source_provenance(
+                subfeature, registry_snapshot,
+                expected_registry_verification_id=registry_id,
+                expected_asset_id=inputs["asset_id"],
+                decision_cutoff_at=cutoff,
+            )
+    return 3
+
 
 def _decision_digest(
     *, state: str, score: Optional[float], reasons: tuple[str, ...],
@@ -525,6 +681,10 @@ class OpportunityDecisionStore:
         if not isinstance(connection, sqlite3.Connection):
             raise TypeError("opportunity decision store requires SQLite connection")
         self.connection = connection
+        from layer1.evidence_verification import ClaimRegistryStore
+        # Initialize the shared registry table before any decision transaction;
+        # its constructor commits schema setup, so never instantiate it in save().
+        self.registry_store = ClaimRegistryStore(connection)
         self.connection.execute("""
         CREATE TABLE IF NOT EXISTS opportunity_decisions (
             decision_id TEXT PRIMARY KEY,
@@ -589,6 +749,14 @@ class OpportunityDecisionStore:
             raise ValueError("opportunity decision ID does not match its immutable input snapshot")
         reasons_json = json.dumps(decision.reasons, separators=(",", ":"))
         with self.connection:
+            inputs = snapshot.get("inputs")
+            if isinstance(inputs, dict) and inputs.get("schema_version") == 3:
+                registry = self.registry_store.load_by_verification_id(
+                    inputs["registry_verification_id"],
+                )
+                if registry is None:
+                    raise ValueError("v3 opportunity decision references a missing claim registry snapshot")
+                validate_registry_bound_opportunity_input_snapshot(snapshot, registry)
             existing = self.connection.execute(
                 "SELECT research_package_id, state, score, reasons_json, policy_version, input_snapshot_json "
                 "FROM opportunity_decisions WHERE decision_id=?",
@@ -616,3 +784,34 @@ class OpportunityDecisionStore:
                  datetime.now(timezone.utc).isoformat(), decision.input_snapshot_json),
             )
         return decision.decision_id
+
+    def load(self, decision_id: str) -> Optional[dict]:
+        if (not isinstance(decision_id, str) or len(decision_id) != 64
+                or any(char not in "0123456789abcdef" for char in decision_id)):
+            raise ValueError("opportunity decision ID must be lowercase SHA-256")
+        row = self.connection.execute(
+            "SELECT decision_id,research_package_id,state,score,reasons_json,policy_version,input_snapshot_json,created_at "
+            "FROM opportunity_decisions WHERE decision_id=?",
+            (decision_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        reasons = json.loads(row[4])
+        snapshot = json.loads(row[6])
+        verify_opportunity_decision_digest(
+            decision_id=row[0], state=row[2], score=row[3], reasons=reasons,
+            policy_version=row[5], input_snapshot=snapshot,
+        )
+        inputs = snapshot.get("inputs")
+        if isinstance(inputs, dict) and inputs.get("schema_version") == 3:
+            registry = self.registry_store.load_by_verification_id(
+                inputs["registry_verification_id"],
+            )
+            if registry is None:
+                raise ValueError("v3 opportunity decision references a missing claim registry snapshot")
+            validate_registry_bound_opportunity_input_snapshot(snapshot, registry)
+        return {
+            "decision_id": row[0], "research_package_id": row[1], "state": row[2],
+            "score": row[3], "reasons": reasons, "policy_version": row[5],
+            "input_snapshot": snapshot, "created_at": row[7],
+        }

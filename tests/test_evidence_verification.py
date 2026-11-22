@@ -1196,6 +1196,34 @@ class ClaimRegistrySnapshotIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "digest mismatch"):
             store.load_latest_claim_registry()
 
+    def test_postgres_claim_registry_loader_fetches_exact_verification_id(self):
+        from layer1.publication_postgres import PostgresPublicationStore
+        payload = {
+            "claims": [], "evidence_records": [], "results": [],
+            "unresolved_issues": [{"issue": "exact-id"}],
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        verification_id = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        row = {"verification_id": verification_id, "payload_json": payload}
+
+        class FakeConnection:
+            def __init__(self):
+                self.query = None
+                self.params = None
+            def execute(self, query, params):
+                self.query, self.params = query, params
+                return self
+            def fetchone(self):
+                return row
+
+        store = object.__new__(PostgresPublicationStore)
+        store.conn = FakeConnection()
+        loaded = store.load_claim_registry_by_verification_id(verification_id)
+        self.assertEqual(loaded, {"verification_id": verification_id, "payload": payload})
+        self.assertEqual(store.conn.params, (verification_id,))
+        with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
+            store.load_claim_registry_by_verification_id("not-a-digest")
+
 
 if __name__ == "__main__":
     unittest.main()

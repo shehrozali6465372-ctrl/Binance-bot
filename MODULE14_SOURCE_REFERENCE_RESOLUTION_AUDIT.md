@@ -84,3 +84,17 @@ Implementation should begin with TDD against synthetic ClaimRegistry fixtures. P
 ## Hosted confirmation — 2026-11-22
 - ClaimRegistry SQLite/PostgreSQL read-time digest checks and the actual PostgreSQL JSONB tamper test passed hosted CI. The mocked safety suite passed 815 tests (0 failures, 61 skipped); isolated PostgreSQL integration passed 92 tests.
 - This closes only persisted registry-snapshot digest integrity. Exact factor source_refs resolution and per-source provenance binding remain open.
+
+
+## Resolver implementation progress — 2026-11-22
+A first additive resolver primitive, `resolve_factor_source_provenance()`, is implemented and locally tested. It validates the exact registry snapshot digest, reconstructs EvidenceRecords and recomputes evidence IDs, compares complete per-source provenance copies, checks asset/cutoff boundaries, and matches source payload hashes only to non-empty registry content hashes. Synthetic adapters without content hashes are accepted only with no payload hash supplied. Focused verification passed 116 tests across resolver, opportunity and evidence-verification suites.
+
+This does not yet complete the proposed v3 schema: the resolver is not wired into decision snapshot validation or SQLite/PostgreSQL persistence; factor-specific claim support and independence checks are not implemented. It must remain a precondition primitive, not a factor approval signal. Runtime remains fail-closed.
+
+
+## V3 preflight boundary — 2026-11-22
+The resolver is now exposed through a schema-version-3 preflight validator. V3 requires the exact registry verification ID and per-subfeature source_provenance matching source_refs. The validator resolves each source against the selected digest-verified registry. Decision persistence is deliberately blocked for v3 in both SQLite and PostgreSQL validation until those stores can load the exact registry by ID and repeat resolution transactionally/on read. Focused tests: 120 passed. Full local discovery: 586 discovered, 59 skipped, 34 environment/dependency errors (Pillow and psycopg absent); PostgreSQL DSN not configured. No production DB, Neon, provider, publisher or gateway was touched.
+
+
+## Exact-ID persistence integration — 2026-11-22
+Exact registry lookup and decision persistence are now wired for v3. SQLite and PostgreSQL can load a registry by its exact verification ID and verify its stored digest. SQLite decision save validates the referenced registry within its transaction; SQLite load revalidates it. PostgreSQL decision save validates the exact registry and package asset within its transaction; PostgreSQL load revalidates it. PostgreSQL exact registry lookup uses a row share lock during transactional binding. Tests include SQLite positive round-trip and registry tamper rejection, missing-registry rejection, PostgreSQL exact-ID loader unit coverage, and a DSN-gated PostgreSQL end-to-end round-trip/tamper test. Local focused run: 123 passed, 1 skipped; PostgreSQL opportunity group: 5 passed, 2 skipped because DSN is unavailable. PostgreSQL E2E is not yet accepted.

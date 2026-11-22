@@ -1779,13 +1779,26 @@ class ClaimRegistryStore:
             )
         return verification_id
 
-    def load_latest(self) -> Optional[dict[str, Any]]:
+    def load_by_verification_id(self, verification_id: str) -> Optional[dict[str, Any]]:
+        if (not isinstance(verification_id, str) or len(verification_id) != 64
+                or any(char not in "0123456789abcdef" for char in verification_id)):
+            raise ValueError("claim registry verification ID must be lowercase SHA-256")
         row = self.connection.execute(
             "SELECT verification_id, payload_json FROM layer1_claim_verification_runs "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1"
+            "WHERE verification_id=?",
+            (verification_id,),
         ).fetchone()
         if row is None:
             return None
         payload = json.loads(row[1])
         verify_claim_registry_payload(row[0], payload, ensure_ascii=True)
         return {"verification_id": row[0], "payload": payload}
+
+    def load_latest(self) -> Optional[dict[str, Any]]:
+        row = self.connection.execute(
+            "SELECT verification_id FROM layer1_claim_verification_runs "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return self.load_by_verification_id(row[0])

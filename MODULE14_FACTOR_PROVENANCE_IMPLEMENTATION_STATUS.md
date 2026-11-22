@@ -56,3 +56,33 @@ The validator does not establish that source IDs exist, payload hashes match act
 - Code head cfca027d5d2cf2831948eff0b620c4fddb4fa600 passed hosted CI: mocked safety suite **815 tests, 0 failures, 61 skipped**; isolated PostgreSQL integration **92 tests, successful**; isolated database target guard PASS.
 - The PostgreSQL integration run included ClaimRegistry JSONB payload tamper rejection, fresh-process registry load, v2 opportunity snapshot round-trip, research-package asset binding and decision digest tamper rejection.
 - Local focused run: **112 tests, 0 failures, 2 DSN-gated skips**. No production DB or Neon data accessed.
+
+
+## Registry-bound source resolver implementation — 2026-11-22
+- Added `resolve_factor_source_provenance()` as an additive resolver primitive. It requires the exact expected ClaimRegistry verification ID, verifies the stored registry payload digest using the historical SQLite/PostgreSQL serializer modes, reconstructs and validates every EvidenceRecord, recomputes evidence IDs, and rejects ambiguous/missing references.
+- Requires per-source provenance copies to match the complete EvidenceRecord serialization, including trust fields omitted from `evidence_id` (publisher, source kind, source URL, primary flag and source status).
+- Enforces exact canonical asset identity and published/updated/observed/event timestamps at or before the decision cutoff.
+- Compares `source_payload_hashes` to non-empty registry `content_hash` values only. Records from adapters without a content hash (including current on-chain observation/summary adapters) require an empty hash list; no synthetic payload hash is created.
+- Added 9 synthetic unit tests covering successful resolution, unknown IDs, publisher tampering, registry digest mismatch, wrong registry ID, cross-asset evidence, cutoff violations, mismatched payload hashes, and adapters without original payload hashes.
+- Focused run: `tests.test_opportunity_registry_resolution`, `tests.test_opportunity`, and `tests.test_evidence_verification`: **116 tests passed, 0 failures**.
+- Important boundary: this is a resolver primitive only. It is NOT yet wired into a schema-version-3 decision snapshot validator, SQLite/PostgreSQL decision persistence, or factor-specific claim/independence rules. Do not describe v3 as fully implemented or accept a READY factor based on this function alone. Runtime remains disabled (`factors=None`, `policy=None`); no provider, DB, publisher or gateway activation.
+
+
+## V3 preflight extension — 2026-11-22
+- Added structural schema-version-3 validation: requires a lowercase SHA-256 `registry_verification_id` and per-subfeature `source_provenance` entries whose evidence IDs exactly match `source_refs`. V1/v2 semantics remain unchanged.
+- Added `validate_registry_bound_opportunity_input_snapshot()`, which resolves every v3 subfeature against the exact digest-verified ClaimRegistry snapshot and checks the canonical asset and decision cutoff.
+- SQLite decision persistence and PostgreSQL decision-input validation explicitly reject v3 until exact registry resolution is integrated into both persistence/load paths. This prevents the new structural format from being mistaken for a fully registry-verified durable decision.
+- Focused verification after v3 preflight and persistence guards: **120 tests passed, 0 failures** across resolver, opportunity and evidence-verification suites.
+- `compileall` and `git diff --check` passed before the latest v3 edits; rerun required after final edits.
+- Full local discovery on this worktree: **586 tests discovered, 59 skipped, 34 errors**. Observed errors are environment/dependency blockers, notably missing `Pillow (PIL)` and `psycopg`, plus tests importing `main.py` that transitively require Pillow. This is not a full-suite pass. PostgreSQL integration remains skipped because `TEST_POSTGRES_DSN` is absent; no DB was opened.
+- V3 is therefore **preflight-only, not production-ready or persisted**. Next work: exact-ID ClaimRegistry loaders for SQLite/PostgreSQL, transactionally bind/resolve v3 on save and re-verify on load, add isolated PostgreSQL integration/fresh-process tests, then implement factor-specific claim support and source independence. Runtime remains disabled.
+
+
+## V3 exact-registry persistence integration — 2026-11-22
+- Added exact-ID ClaimRegistry loaders: SQLite `ClaimRegistryStore.load_by_verification_id()` and PostgreSQL `PostgresPublicationStore.load_claim_registry_by_verification_id()`. Both validate the requested lowercase SHA-256 ID and recompute the stored payload digest using the store's historical serializer mode. PostgreSQL exact lookup uses `FOR SHARE` so a registry row cannot be concurrently modified while a decision is being bound inside the transaction.
+- SQLite `OpportunityDecisionStore.save()` now resolves the exact registry within its existing decision transaction and refuses missing/tampered snapshots. SQLite `load()` verifies the decision digest, reloads the exact registry and repeats v3 source resolution. Registry store schema initialization occurs in the decision-store constructor, not inside save(), avoiding an accidental commit of the outer decision transaction.
+- PostgreSQL `save_opportunity_decision()` resolves the exact registry within its existing transaction, verifies decision/package asset identity, and validates every v3 source reference before insert. `load_opportunity_decision()` re-verifies the decision digest and exact registry source references before returning v3 records.
+- Added SQLite positive save/load plus tampered-registry rejection and missing-registry rejection; added exact-ID PostgreSQL loader unit test and a DSN-gated PostgreSQL end-to-end v3 save/load/tamper-rejection test.
+- Focused verification: **123 tests passed, 1 skipped** across registry resolver/opportunity/evidence suites; PostgreSQL opportunity unit group **5 tests passed, 2 DSN-gated skipped**. `compileall` and `git diff --check` passed.
+- The real PostgreSQL end-to-end test was not run because `TEST_POSTGRES_DSN` is not configured. Do not claim PostgreSQL runtime acceptance. No Neon/production DB was accessed.
+- Remaining v3 work: factor-specific claim support and independence semantics, source adapter contract review, full isolated PostgreSQL acceptance with DSN, crash/fresh-process replay acceptance. Runtime stays disabled pending policy/provider approval.
