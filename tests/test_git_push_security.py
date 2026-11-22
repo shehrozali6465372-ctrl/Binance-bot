@@ -43,6 +43,44 @@ class GitPushSecurityTests(unittest.TestCase):
         self.assertEqual(git_env["GIT_CONFIG_KEY_0"], "http.https://github.com/.extraheader")
         self.assertEqual(git_env["GIT_CONFIG_VALUE_0"], expected_header)
         self.assertNotIn(token, repr(commands))
+        commit_command = next(command for command in commands if "commit" in command)
+        self.assertIn("--", commit_command)
+        self.assertIn(main._POST_HISTORY_FILE, commit_command)
+        self.assertIn("posts/", commit_command)
+
+    def test_main_branch_is_never_committed_or_pushed(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return subprocess.CompletedProcess(command, 0, stdout="main", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="abc1234", stderr="")
+
+        with patch.dict(os.environ, {
+            "GH_TOKEN": "test-token", "GITHUB_REPOSITORY": "owner/repository",
+        }, clear=False), patch("subprocess.run", side_effect=fake_run):
+            self.assertFalse(main._try_git_push(max_retries=1))
+
+        self.assertFalse(any(command[:2] in (["git", "add"], ["git", "push"]) for command in calls))
+        self.assertFalse(any("commit" in command for command in calls))
+
+    def test_detached_head_is_never_committed_or_pushed(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return subprocess.CompletedProcess(command, 0, stdout="HEAD", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="abc1234", stderr="")
+
+        with patch.dict(os.environ, {
+            "GH_TOKEN": "test-token", "GITHUB_REPOSITORY": "owner/repository",
+        }, clear=False), patch("subprocess.run", side_effect=fake_run):
+            self.assertFalse(main._try_git_push(max_retries=1))
+
+        self.assertFalse(any(command[:2] in (["git", "add"], ["git", "push"]) for command in calls))
+        self.assertFalse(any("commit" in command for command in calls))
 
     def test_missing_token_skips_git_without_running_subprocess(self):
         with patch.dict(os.environ, {"GH_TOKEN": "", "GITHUB_TOKEN": "", "GITHUB_REPOSITORY": "owner/repository"}, clear=False), patch("subprocess.run") as run:

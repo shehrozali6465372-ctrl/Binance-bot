@@ -724,6 +724,8 @@ def _try_git_push(max_retries: int = 3) -> bool:
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True, timeout=5, text=True
         )
+        if branch_check.returncode != 0:
+            raise RuntimeError("git could not determine the current branch")
         current_branch = branch_check.stdout.strip()
         sha_check = _sp.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -735,7 +737,14 @@ def _try_git_push(max_retries: int = 3) -> bool:
         LOGGER.debug("Could not get git state: %s", e)
         current_branch = "unknown"
         current_sha = "unknown"
-    
+
+    if current_branch in ("", "HEAD", "unknown", "main"):
+        LOGGER.error(
+            "Git push REFUSED: no safe named non-main branch is available (branch=%r)",
+            current_branch,
+        )
+        return False
+
     for attempt in range(1, max_retries + 1):
         LOGGER.debug("Git push attempt %d/%d", attempt, max_retries)
         try:
@@ -749,7 +758,8 @@ def _try_git_push(max_retries: int = 3) -> bool:
             )
             commit_result = _sp.run(
                 ["git", "-c", "user.name=bot", "-c", "user.email=bot@bot.com",
-                 "commit", "-m", f"Auto-save: post records [{utc_now()[:10]}]"],
+                 "commit", "-m", f"Auto-save: post records [{utc_now()[:10]}]",
+                 "--", _POST_HISTORY_FILE, "posts/"],
                 capture_output=True, timeout=30
             )
             if commit_result.returncode != 0:
