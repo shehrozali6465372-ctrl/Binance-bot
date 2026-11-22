@@ -819,7 +819,7 @@ The focused batches now exercise all major module families, but the full suite a
 
 ## 27. Consolidated blocker register — latest reconciled status (22 November 2026)
 
-This register is authoritative over earlier duplicate/stale status text in the report. It contains **34 unique finding IDs**; repeated references to the same ID are one finding, not additional blockers.
+This register is authoritative over earlier duplicate/stale status text in the report. It contains **35 unique finding IDs**; repeated references to the same ID are one finding, not additional blockers.
 
 | Finding ID | Severity | Latest disposition |
 |---|---:|---|
@@ -853,6 +853,7 @@ This register is authoritative over earlier duplicate/stale status text in the r
 | AUD-GIT-002 | HIGH (original) | CLOSED for active `_try_git_push()` path — explicit pathspec prevents unrelated staged files entering its commit; does not close legacy image uploader path |
 | AUD-GIT-003 | HIGH | OPEN — clean local commit ahead of origin is not detected/retried |
 | AUD-GIT-006 | MEDIUM | OPEN — scheduled-run delivery far below configured cadence; cause not isolated |
+| AUD-GIT-007 | HIGH | OPEN — live default-branch scheduled publisher lacks PR branch's explicit default-off publisher gate |
 | AUD-IMG-001 | HIGH | OPEN — legacy image uploader retains separate unsafe Git/REST repository mutation path; no active main publication call site was found in reviewed path |
 | AUD-SCORE-001 | MEDIUM | OPEN — active MarketScanner coefficients lack documented empirical/source justification |
 | AUD-CODE-001 | MEDIUM | REVIEW / CLEANUP — Skills Hub scoring/provider subsystem appears unreachable from current runtime; not independently established as a direct production exploit |
@@ -869,6 +870,19 @@ This register is authoritative over earlier duplicate/stale status text in the r
 - **Operational impact:** if the intended contract is continuous five-minute opportunity scanning, the current observed delivery does not meet that cadence. If missed ticks are acceptable, that policy is not currently made explicit in the workflow contract. The PostgreSQL run lease serializes runs that actually start; it cannot create a run for a schedule event that was never delivered.
 - **Required closure:** define whether missed ticks are acceptable or require catch-up; instrument expected-vs-actual scheduled-run timestamps and alert on a justified gap; if catch-up is required, use durable, idempotent scheduled-run keys/queueing rather than blindly setting `queue: max`, which can create stale backlog. Add tests for missed-tick detection, idempotent catch-up and bounded backlog. Do not change the live schedule or concurrency policy until the catch-up contract is approved.
 - **No fix applied:** no workflow, database, schedule, publisher, credential, deployment or live run was changed or triggered during this audit.
+
+
+
+### AUD-GIT-007 — default-branch scheduled workflow does not include PR publisher safeguards
+- **Severity:** HIGH
+- **Status:** OPEN — confirmed branch/configuration drift; live publication path is enabled on the default branch. No claim is made here that a particular scheduled run actually published a post.
+- GitHub's official workflow-events documentation states that `schedule` events run only from the repository's default branch and use the latest commit on that branch: https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+- Live `main` workflow `.github/workflows/run_bot.yml` (blob `108489069c61baf01e4cbb00497a9d312fd276c7`) sets `DRY_RUN: "0"` and injects `SQUARE_API_KEY`; its scheduled trigger is `*/5 * * * *`. It has no `PUBLISHER_ENABLED` environment gate.
+- Live `main.py` (blob `0a2d9345382c2b3ebf5abf0cb02ade9bbf03cd91`) parses `DRY_RUN=0` as `dry_run=False`. Its `PostPublisher.publish()` calls `_try_square_api()` when dry-run is false, and the latter uses the configured Square API key for the Binance Square content API. The scheduled `run_once()` path invokes `publisher.publish()`; no separate `PUBLISHER_ENABLED` guard exists in this main-branch code.
+- By contrast, PR #14 branch workflow blob `fcac84e6609f6dc9e181842c4b9bfbeb0c379d6a` sets `DRY_RUN: "1"`; its corresponding `main.py` has `publisher_enabled` defaulting false and refuses live publishing unless explicitly enabled. PR #14 is still OPEN / DRAFT / UNMERGED at head `7da0781f236498196b087a77d48231af217b588b`. Therefore these PR safeguards do not protect the default-branch scheduled execution today.
+- **Impact:** the currently scheduled default-branch workflow is capable of live Binance Square publishing under its configured credentials, using the older main-branch implementation. A safety claim based only on PR #14's dry-run/default-off controls does not describe the workflow that GitHub schedules today. Whether recent main-branch runs actually published content requires a separate read-only run-log/ledger verification; it is not inferred from configuration alone.
+- **Required closure:** decide and approve the intended production activation contract; ensure the default-branch workflow and code are aligned with that contract before treating PR safeguards as operational. Verify the live main-branch workflow config, publisher gate and audit trail after any approved change. Do not merge, deploy, toggle DRY_RUN, change credentials or dispatch the workflow as part of this audit.
+- **No production change:** no workflow, publisher code, credentials, schedule, deployment, manual dispatch or real Binance post was changed or triggered.
 
 
 ### Reconciliations and counting rules
