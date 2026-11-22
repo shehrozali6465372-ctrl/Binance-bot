@@ -445,5 +445,3 @@ class OpportunityFactorProvenanceSchemaTests(unittest.TestCase):
                 reasons=["TAMPERED"], policy_version="legacy-v1",
                 input_snapshot={"policy": {"version": "legacy-v1"}, "inputs": {"factor": 0.9}},
             )
-
-[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]

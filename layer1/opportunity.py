@@ -616,5 +616,3 @@ class OpportunityDecisionStore:
                  datetime.now(timezone.utc).isoformat(), decision.input_snapshot_json),
             )
         return decision.decision_id
-
-[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]

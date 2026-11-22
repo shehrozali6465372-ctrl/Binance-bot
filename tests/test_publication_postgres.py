@@ -1803,5 +1803,3 @@ class PublicationPostgresEventLifecycleTests(unittest.TestCase):
             store.conn.execute("DELETE FROM layer1_event_revisions WHERE event_id=%s", (event_id,))
             store.conn.execute("DELETE FROM layer1_event_lifecycle WHERE event_id=%s", (event_id,))
             store.close()
-
-[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]

@@ -1902,5 +1902,3 @@ def _load_latest_draft(store, draft_key: str) -> Optional[dict]:
         "editorial_brief_id": row["editorial_brief_id"], "approved_claim_ids": claims,
         "content": row["content"], "created_at": row["created_at"].isoformat(),
     }
-
-[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]

@@ -198,5 +198,3 @@ The next required phase is factor-specific semantic/provenance resolution and em
 - Focused local opportunity/PostgreSQL decision tests: **39 passed, 0 failed**. `compileall` and `git diff --check` passed.
 - Full local discovery did NOT pass: 574 tests, 59 skipped, 34 errors. Observed import errors include missing `PIL` (Pillow) and `psycopg` in this remote worktree; workflow installs these dependencies. No local PostgreSQL DSN was configured, so DSN-gated integration tests were skipped.
 - Added isolated PostgreSQL integration coverage for v2 snapshot round-trip, package asset identity mismatch rejection, and stored-row digest tamper detection. Awaiting hosted CI on the code commit.
-
-[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]

@@ -2406,5 +2406,3 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 
 
 - Latest focused local opportunity/PostgreSQL decision validation run after final compatibility and package-asset binding refinements: **40 passed, 0 failed**. Full discovery not rerun after those final small changes; CI remains the full-dependency acceptance gate.
-
-[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]

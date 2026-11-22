@@ -38,5 +38,3 @@ The validator does not establish that source IDs exist, payload hashes match act
 2. Verify both isolated PostgreSQL CI jobs on the new commit.
 3. Review factor-specific semantic validation and source-reference resolution requirements.
 4. Only after empirical historical-data inventory and separate approval, design factor derivation and shadow evaluation. Do not activate scoring from schema tests alone.
-
-[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]
