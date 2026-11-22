@@ -121,6 +121,14 @@ class ClaimRegistryPostgresIntegrationTests(unittest.TestCase):
         latest = self.store.load_latest_claim_registry()
         self.assertEqual(latest["verification_id"], second_id)
         self.assertEqual(latest["payload"], second.to_dict())
+        self.store.conn.execute(
+            "UPDATE layer1_claim_verification_runs "
+            "SET payload_json=jsonb_set(payload_json,'{unresolved_issues,0,issue}','\"tampered-registry\"'::jsonb) "
+            "WHERE verification_id=%s",
+            (second_id,),
+        )
+        with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            self.store.load_latest_claim_registry()
 
 
 if __name__ == "__main__":

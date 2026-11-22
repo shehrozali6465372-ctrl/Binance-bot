@@ -2418,3 +2418,9 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - ClaimRegistry snapshot digest should be verified before use; evidence_id alone omits some trust fields. Some adapters do not expose original payload hashes.
 - Registry-bound v3 needs registry_verification_id, per-source provenance, exact evidence_id resolution, asset/cutoff validation and factor-specific claim/independence checks. See MODULE14_SOURCE_REFERENCE_RESOLUTION_AUDIT.md.
 - No implementation or runtime changes yet; B-SCORE-01 OPEN.
+
+
+## ClaimRegistry integrity follow-up — 2026-11-22
+- SQLite and PostgreSQL ClaimRegistry read paths now recompute verification_id and reject payload tampering. Historical serializer modes preserved.
+- Focused local tests: 112 passed, 0 failed, 2 DSN-gated skips. Actual PostgreSQL JSONB tamper rejection test added for CI.
+- Registry-bound factor source resolution remains open; v2 source_refs are structural only. Proposed v3 exact registry binding and per-source metadata not implemented.

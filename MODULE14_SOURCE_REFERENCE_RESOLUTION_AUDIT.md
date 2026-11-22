@@ -72,3 +72,10 @@ Implementation should begin with TDD against synthetic ClaimRegistry fixtures. P
 - Factor-specific semantic readiness: NOT IMPLEMENTED.
 - Runtime remains factors=None, policy=None; fail-closed DEFER.
 - B-SCORE-01 remains OPEN. Project remains PARTIAL — NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — ClaimRegistry digest gap closed
+- Current SQLite ClaimRegistryStore.load_latest() and PostgreSQL load_latest_claim_registry() now call verify_claim_registry_payload() and reject a payload whose verification_id does not match its canonical serialization.
+- Serializer compatibility is explicit: SQLite uses ensure_ascii=True (historical default); PostgreSQL uses ensure_ascii=False (historical explicit setting). This avoids changing existing verification IDs.
+- Added SQLite and PostgreSQL-loader tamper unit tests, including a non-ASCII payload test; added an actual PostgreSQL JSONB row-tamper integration test for CI.
+- Exact source_refs resolution against a selected ClaimRegistry, per-source metadata binding and original payload-byte verification remain open; do not treat v2 structural refs as verified.

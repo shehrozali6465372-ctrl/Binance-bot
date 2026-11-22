@@ -1142,5 +1142,60 @@ class EvidenceVerificationTests(unittest.TestCase):
                 ))
 
 
+class ClaimRegistrySnapshotIntegrityTests(unittest.TestCase):
+    def test_sqlite_claim_registry_loader_rejects_tampered_snapshot(self):
+        import sqlite3
+        from layer1.evidence_verification import ClaimRegistry, ClaimRegistryStore
+        connection = sqlite3.connect(":memory:")
+        try:
+            store = ClaimRegistryStore(connection)
+            registry = ClaimRegistry(
+                claims=(), evidence_records=(), results=(),
+                unresolved_issues=({"issue": "immutable-registry"},),
+            )
+            verification_id = store.save(registry)
+            self.assertEqual(store.load_latest()["verification_id"], verification_id)
+            tampered = json.dumps({
+                "claims": [], "evidence_records": [], "results": [],
+                "unresolved_issues": [{"issue": "tampered-registry"}],
+            }, sort_keys=True, separators=(",", ":"))
+            connection.execute(
+                "UPDATE layer1_claim_verification_runs SET payload_json=? WHERE verification_id=?",
+                (tampered, verification_id),
+            )
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                store.load_latest()
+        finally:
+            connection.close()
+
+    def test_postgres_claim_registry_loader_verifies_utf8_snapshot_digest(self):
+        from layer1.publication_postgres import PostgresPublicationStore
+        payload = {
+            "claims": [], "evidence_records": [], "results": [],
+            "unresolved_issues": [{"issue": "café"}],
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        verification_id = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        row = {"verification_id": verification_id, "payload_json": payload}
+
+        class FakeConnection:
+            def execute(self, query):
+                return self
+            def fetchone(self):
+                return row
+
+        store = object.__new__(PostgresPublicationStore)
+        store.conn = FakeConnection()
+        loaded = store.load_latest_claim_registry()
+        self.assertEqual(loaded["verification_id"], verification_id)
+        self.assertEqual(loaded["payload"], payload)
+        row["payload_json"] = {
+            "claims": [], "evidence_records": [], "results": [],
+            "unresolved_issues": [{"issue": "tampered"}],
+        }
+        with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            store.load_latest_claim_registry()
+
+
 if __name__ == "__main__":
     unittest.main()

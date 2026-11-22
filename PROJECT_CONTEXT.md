@@ -4276,3 +4276,9 @@ The most relevant candidate capabilities identified from the directory are:
 - See MODULE14_SOURCE_REFERENCE_RESOLUTION_AUDIT.md for read-only findings on EvidenceRecord IDs, ClaimRegistry snapshots, source lineage and adapter payload-hash availability.
 - V2 refs are structural only. ClaimRegistry verification_id binds the complete registry payload, but current loaders do not recompute it; EvidenceRecord.evidence_id omits some trust attributes. Several adapters lack original payload hashes, so these must not be fabricated.
 - Next design: registry-bound v3 with exact registry ID, per-source provenance, digest verification, exact evidence-ID resolution and factor-specific claim/independence checks. No code/runtime/DB/provider changes; B-SCORE-01 remains OPEN.
+
+
+## 2026-11-22 — ClaimRegistry snapshot integrity verification
+- Implemented shared ClaimRegistry snapshot digest verification on SQLite and PostgreSQL load paths. Tampered payloads now fail closed; serializer modes preserve historical IDs.
+- Focused tests: 112 passed, 0 failed, 2 DSN-gated skips; actual PostgreSQL JSONB tamper test added for hosted isolated integration.
+- Source reference resolution is still not implemented: v2 source_refs are not resolved against an exact registry snapshot, and original payload-byte integrity is not uniformly available across adapters. Registry-bound v3 remains next; no runtime/provider activation.

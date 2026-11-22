@@ -63,6 +63,32 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def verify_claim_registry_payload(
+    verification_id: str, payload: Mapping[str, Any], *, ensure_ascii: bool = True,
+) -> bool:
+    """Verify a persisted ClaimRegistry snapshot against its immutable digest.
+
+    SQLite's historical writer uses json.dumps' ensure_ascii=True default;
+    PostgreSQL's writer explicitly uses ensure_ascii=False. Callers must retain
+    the serializer mode used by the corresponding store to preserve old IDs.
+    """
+    if (not isinstance(verification_id, str) or len(verification_id) != 64
+            or any(char not in "0123456789abcdef" for char in verification_id)):
+        raise ValueError("claim registry verification ID must be lowercase SHA-256")
+    if not isinstance(payload, Mapping):
+        raise ValueError("claim registry stored payload must be an object")
+    try:
+        canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=ensure_ascii, allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError("claim registry stored payload is not finite JSON") from None
+    if _digest(canonical) != verification_id:
+        raise ValueError("claim registry stored payload digest mismatch")
+    return True
+
+
 def _scalar(value: Any) -> bool:
     if value is None or isinstance(value, (dict, list, tuple, set)):
         return False
@@ -1760,4 +1786,6 @@ class ClaimRegistryStore:
         ).fetchone()
         if row is None:
             return None
-        return {"verification_id": row[0], "payload": json.loads(row[1])}
+        payload = json.loads(row[1])
+        verify_claim_registry_payload(row[0], payload, ensure_ascii=True)
+        return {"verification_id": row[0], "payload": payload}

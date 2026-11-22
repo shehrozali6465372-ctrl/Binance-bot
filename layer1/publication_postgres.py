@@ -1113,6 +1113,10 @@ class PostgresPublicationStore:
         payload = row["payload_json"]
         if isinstance(payload, str):
             payload = json.loads(payload)
+        from layer1.evidence_verification import verify_claim_registry_payload
+        verify_claim_registry_payload(
+            row["verification_id"], payload, ensure_ascii=False,
+        )
         return {"verification_id": row["verification_id"], "payload": payload}
 
     def save_research_package(

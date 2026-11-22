@@ -44,3 +44,9 @@ The validator does not establish that source IDs exist, payload hashes match act
 - Read-only audit completed; see MODULE14_SOURCE_REFERENCE_RESOLUTION_AUDIT.md.
 - V2 currently validates source_refs and source_payload_hashes structurally only. It does not resolve IDs against a persisted ClaimRegistry or verify hashes against payload bytes.
 - Proposed next format is registry-bound v3 with exact registry_verification_id, per-source provenance, digest-verified ClaimRegistry resolution, exact asset/cutoff checks, and factor-specific independence/claim support rules. Not implemented or activated.
+
+
+## ClaimRegistry snapshot integrity — 2026-11-22
+- Added verify_claim_registry_payload() to SQLite and PostgreSQL ClaimRegistry load paths. Both recompute verification_id and reject stored payload tampering while preserving historical serializer modes (SQLite ensure_ascii=True; PostgreSQL ensure_ascii=False).
+- Focused local run across evidence verification, opportunity and PostgreSQL decision validation: **112 tests, 0 failures, 2 DSN-gated skips**; compileall and diff-check passed.
+- Actual PostgreSQL JSONB tamper rejection test added to the isolated CI job. Registry-bound v3 source resolution remains unimplemented.
