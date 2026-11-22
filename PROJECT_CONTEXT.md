@@ -4552,3 +4552,59 @@ The most relevant candidate capabilities identified from the directory are:
 - User approved changing only `.github/workflows/run_bot.yml` on default branch `main`: `DRY_RUN: "0" -> DRY_RUN: "1"`.
 - Applied commit: `4525cabe1260fd5b25414010d2cf16b387119edd`. Verified main workflow blob `4dfc5f3b1acc48c22d0c3763776dcbdadf7d6c6f` contains `DRY_RUN: "1"`; cron and Square credential injection remain unchanged. No workflow dispatch was triggered.
 - Residual risk: main-branch image generation/upload occurs before publisher dry-run check and is not gated by `DRY_RUN`; do not describe this as zero outbound network activity. No code changes were made beyond the approved workflow variable.
+
+## 2026-11-23 — four-part project progress and execution plan
+
+This entry records the overall project assessment and agreed execution order as of 2026-11-23. It does not supersede the detailed historical evidence below or claim that unresolved work is complete.
+
+## Four-part progress assessment
+
+1. **Coding and mock testing — LARGELY COMPLETE, NOT CLOSED**
+   - The 21-module codebase has substantial implementation and regression-test coverage.
+   - The latest recorded hosted safety CI for the SQLite publication fixes is GitHub Actions run `45041348631`: mocked-safety-tests PASS (**879 tests, 62 skipped**) and isolated PostgreSQL integration acceptance PASS.
+   - This is evidence for that commit/workflow, not proof that every current local/uncommitted change is hosted or that every module is production-accepted.
+   - Outstanding code/audit items remain, including on-chain trust/provenance, Module 14 scoring provenance/calibration, PostgreSQL worker/store compatibility, bounded provider response reads, Git branch synchronization/push safety and scheduled-run delivery/catch-up policy. Some findings are pre-activation blockers; do not imply all require the same remediation.
+   - Preserve local-only/uncommitted work; do not stage, commit or push unrelated dirty files.
+
+2. **Architecture closure — NOT CLOSED**
+   - The locked architecture and module boundaries exist, but implementation-level trust boundaries, storage contracts, provenance semantics, operational recovery and scoring governance still have unresolved acceptance decisions.
+   - Formal closure requires the critical interfaces and decisions to be reconciled against implementation, tests and the gap register; a document being present is not architecture sign-off.
+
+3. **Deployment — PARTIAL**
+   - GitHub Actions scheduled workflow and PostgreSQL integration paths exist. PR #14 remains OPEN / DRAFT / UNMERGED; it is not active on the default branch.
+   - On 2026-11-23 the user approved the narrow default-branch workflow mitigation: `.github/workflows/run_bot.yml` on `main` changed `DRY_RUN: "0"` to `DRY_RUN: "1"`, commit `4525cabe1260fd5b25414010d2cf16b387119edd`. Schedule and secret injection were not changed; no workflow dispatch was run.
+   - Residual caveat: the default-branch image upload path occurs before the publisher dry-run check and may still make an outbound Binance media-upload request. Therefore this change blocks content publishing through the publisher dry-run path but does NOT prove zero Binance network activity.
+   - Full target-environment deployment, configuration, operational monitoring and recovery acceptance are not established by the cited CI tests.
+
+4. **Production readiness — NO-GO / NOT PRODUCTION-READY**
+   - Do not declare production readiness until critical/high blockers, end-to-end safety and recovery acceptance, environment-specific verification, operational ownership and explicit release approval are complete.
+   - No real Binance Square post or Pinterest Pin is permitted during diagnostics. No publisher activation, merge or deployment without explicit authorization.
+
+## Agreed execution order
+
+1. **Coding and audit closure:** inspect the latest exact state; continue only open findings; close critical/high issues with evidence-backed fixes and scoped approvals. First inspect the remaining default-branch dry-run image-upload side effect. Do not change publisher/gateway behavior without approval.
+2. **Mock and integration testing:** run focused tests for each change, then regression and cross-module suites; test retries, duplicates, concurrency, failure recovery and PostgreSQL behavior against an approved disposable target only. Clearly distinguish local tests, hosted CI and live-database acceptance.
+3. **Architecture closure:** reconcile 21 module contracts, persistence and provenance boundaries, event/data flows, scoring policy governance and operational decisions; update locked architecture and gap register only when evidence supports closure.
+4. **Deployment and production acceptance:** verify deployment configuration, secrets handling, health/monitoring, recovery and end-to-end acceptance in a controlled environment; then issue a documented GO/NO-GO. Production remains disabled until explicit owner approval.
+
+## Operating constraints reaffirmed
+
+- Continue the existing project; do not reinstall/restart OpenClaw, use Codex, or recreate the PR.
+- Do not work directly on `main` for ordinary feature continuation. The one approved workflow-only mitigation above is an exception with exact narrow scope.
+- Inspect before modifying; preserve dirty worktree state and unrelated files.
+- Never expose credentials or secret values.
+- Do not publish real Binance Square content or Pinterest Pins during diagnostic/testing work.
+- Do not change publisher, publishing gateway, production database, deployment, workflow schedule or credentials without specific approval.
+- No merge of PR #14 without explicit approval.
+- Evidence-backed scoring only: no invented factor weights, thresholds, TTLs, source provenance or calibration claims.
+- After any authorized remote write, fetch the file/PR again and verify the resulting commit/blob SHA.
+
+## Exact GitHub checkpoint at time of update
+
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Context target: existing branch `layer-1/module9-onchain-continuation`.
+- PR #14: OPEN / DRAFT / UNMERGED; base `layer-1/module9-onchain-intelligence`; head `01821e777d5aeba6221a113d9930ed8b8a72c600` before this documentation update.
+- The main-branch workflow-only mitigation commit is `4525cabe1260fd5b25414010d2cf16b387119edd`; this is a separate default-branch change and is not a PR merge.
+- Overall assessment: **Coding/mock testing LARGELY COMPLETE; Architecture NOT CLOSED; Deployment PARTIAL; Production NO-GO.**
+- Next action: inspect (read-only) the exact `main`-branch image upload call path and dry-run guard, document the precise outbound side effect, and request narrow approval before any code change. Do not repeat already-passed tests or previous fixes without a new reason.
+
