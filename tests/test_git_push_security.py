@@ -88,5 +88,68 @@ class GitPushSecurityTests(unittest.TestCase):
             run.assert_not_called()
 
 
+    def test_short_sha_failure_aborts_before_staging(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return subprocess.CompletedProcess(command, 0, stdout="feature/test\n", stderr="")
+            if command[:3] == ["git", "rev-parse", "--short"]:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="bad revision")
+            return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+        with patch.dict(os.environ, {"GH_TOKEN": "test-token", "GITHUB_REPOSITORY": "owner/repository"}), patch("subprocess.run", side_effect=fake_run):
+            self.assertFalse(main._try_git_push(max_retries=1))
+
+        self.assertFalse(any(command[:2] == ["git", "add"] for command in calls))
+        self.assertFalse(any("commit" in command for command in calls))
+
+    def test_first_git_add_failure_aborts_without_commit_or_push(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return subprocess.CompletedProcess(command, 0, stdout="feature/test\n", stderr="")
+            if command[:3] == ["git", "rev-parse", "--short"]:
+                return subprocess.CompletedProcess(command, 0, stdout="abc1234\n", stderr="")
+            if command[:2] == ["git", "add"]:
+                return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"index locked")
+            return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+        with patch.dict(os.environ, {"GH_TOKEN": "test-token", "GITHUB_REPOSITORY": "owner/repository"}), patch("subprocess.run", side_effect=fake_run):
+            self.assertFalse(main._try_git_push(max_retries=1))
+
+        self.assertFalse(any("commit" in command for command in calls))
+        self.assertFalse(any(command[:2] == ["git", "push"] for command in calls))
+
+    def test_second_git_add_failure_aborts_without_commit_or_push(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return subprocess.CompletedProcess(command, 0, stdout="feature/test\n", stderr="")
+            if command[:3] == ["git", "rev-parse", "--short"]:
+                return subprocess.CompletedProcess(command, 0, stdout="abc1234\n", stderr="")
+            if command[:2] == ["git", "add"] and command[-1] == "posts/":
+                return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"pathspec error")
+            if command[:2] == ["git", "add"]:
+                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+            return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+        with patch.dict(os.environ, {"GH_TOKEN": "test-token", "GITHUB_REPOSITORY": "owner/repository"}), patch("subprocess.run", side_effect=fake_run):
+            self.assertFalse(main._try_git_push(max_retries=1))
+
+        self.assertFalse(any("commit" in command for command in calls))
+        self.assertFalse(any(command[:2] == ["git", "push"] for command in calls))
+
+    def test_pending_push_status_failure_is_not_treated_as_clean(self):
+        with patch.dict(os.environ, {"GH_TOKEN": "test-token", "GITHUB_REPOSITORY": "owner/repository"}), patch.object(main.Path, "exists", return_value=True), patch("subprocess.run", return_value=subprocess.CompletedProcess(["git", "status"], 128, stdout=b"", stderr=b"fatal")):
+            self.assertFalse(main._retry_pending_push())
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -737,6 +737,8 @@ def _try_git_push(max_retries: int = 3) -> bool:
             ["git", "rev-parse", "--short", "HEAD"],
             capture_output=True, timeout=5, text=True
         )
+        if sha_check.returncode != 0 or not sha_check.stdout.strip():
+            raise RuntimeError("git could not determine the current commit")
         current_sha = sha_check.stdout.strip()
         LOGGER.info("Git state: branch=%s sha=%s", current_branch, current_sha)
     except Exception as e:
@@ -754,14 +756,18 @@ def _try_git_push(max_retries: int = 3) -> bool:
     for attempt in range(1, max_retries + 1):
         LOGGER.debug("Git push attempt %d/%d", attempt, max_retries)
         try:
-            _sp.run(
-                ["git", "add", _POST_HISTORY_FILE],
-                capture_output=True, timeout=30
-            )
-            _sp.run(
-                ["git", "add", "posts/"],
-                capture_output=True, timeout=30
-            )
+            for add_target in (_POST_HISTORY_FILE, "posts/"):
+                add_result = _sp.run(
+                    ["git", "add", add_target],
+                    capture_output=True, timeout=30
+                )
+                if add_result.returncode != 0:
+                    add_error = add_result.stderr.decode("utf-8", errors="replace")
+                    LOGGER.warning(
+                        "Git staging failed for %s (attempt %d/%d): %s",
+                        add_target, attempt, max_retries, add_error[:200],
+                    )
+                    return False
             commit_result = _sp.run(
                 ["git", "-c", "user.name=bot", "-c", "user.email=bot@bot.com",
                  "commit", "-m", f"Auto-save: post records [{utc_now()[:10]}]",
@@ -875,6 +881,13 @@ def _retry_pending_push() -> bool:
             ["git", "status", "--porcelain", _POST_HISTORY_FILE, "posts/"],
             capture_output=True, timeout=15
         )
+        if status_result.returncode != 0:
+            status_error = status_result.stderr.decode("utf-8", errors="replace").strip()
+            LOGGER.warning(
+                "Startup retry check: git status failed (exit=%s): %s",
+                status_result.returncode, status_error[:200],
+            )
+            return False
         status_output = status_result.stdout.decode("utf-8", errors="replace").strip()
         
         if not status_output:
