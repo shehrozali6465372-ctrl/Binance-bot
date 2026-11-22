@@ -978,10 +978,16 @@ class EvidenceVerificationEngine:
     @staticmethod
     def evidence_from_trend_signal(item: TrendSignal) -> tuple[EvidenceRecord, ...]:
         item.validate()
+        # Gainer/volume topics are two derived views over the same MarketScanner
+        # universe, not two independent publishers. Keep one dependency family
+        # even when the upstream market observation omitted its content hash.
+        market_derived = item.source in {"market_gainer", "market_volume"}
+        source_family = "market_scanner_derived" if market_derived else item.source
+        source_kind = "MARKET" if market_derived else "SOCIAL"
         return tuple(
             EvidenceRecord(
                 source_id=item.source_item_id or item.content_hash,
-                source_family=item.source, source_kind="SOCIAL", publisher=item.source,
+                source_family=source_family, source_kind=source_kind, publisher=item.source,
                 subject=asset_id,
                 claim_key="trend.topic:" + _digest(item.topic.casefold())[:16], value=item.topic.strip().casefold(),
                 published_at=item.observed_at, observed_at=item.observed_at,
@@ -1106,7 +1112,7 @@ class EvidenceVerificationEngine:
         trend_topics = sorted({
             item.value for item in matching
             if item.claim_key.startswith("trend.topic:")
-            and item.source_kind == "SOCIAL" and isinstance(item.value, str)
+            and item.source_kind in {"SOCIAL", "MARKET"} and isinstance(item.value, str)
         })
         summary_ids = sorted({
             item.value for item in matching
@@ -1196,7 +1202,7 @@ class EvidenceVerificationEngine:
                     item for item in evidence_records
                     if item.claim_key == trend_key and item.subject == subject
                     and item.asset_id == asset_id and item.value == topic
-                    and item.source_kind == "SOCIAL" and item.source_status == "ACCEPTED"
+                    and item.source_kind in {"SOCIAL", "MARKET"} and item.source_status == "ACCEPTED"
                 ]
                 if candidates:
                     latest_observed = max(_timestamp(item.observed_at) for item in candidates)

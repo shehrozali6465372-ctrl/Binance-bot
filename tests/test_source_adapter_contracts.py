@@ -5,7 +5,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from layer1.evidence_verification import EvidenceRecord
-from layer1.foundation import MarketObservation
+from layer1.foundation import MarketObservation, TrendSignal
 from layer1.onchain import OnChainObservation, OnChainValidationResult
 
 
@@ -39,6 +39,36 @@ class SourceAdapterHashContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "data_hash must be a lowercase SHA-256"):
             observation.validate()
+
+    def test_market_derived_trend_labels_do_not_count_as_independent_sources_without_hash(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+        engine = EvidenceVerificationEngine()
+        gainer = TrendSignal(
+            topic="ABC_SURGE", source="market_gainer", observed_at=self.now,
+            asset_ids=("coingecko:abc",), source_item_id="coingecko:abc",
+        )
+        volume = TrendSignal(
+            topic="ABC_VOLUME", source="market_volume", observed_at=self.now,
+            asset_ids=("coingecko:abc",), source_item_id="coingecko:abc",
+        )
+        records = (
+            engine.evidence_from_trend_signal(gainer)
+            + engine.evidence_from_trend_signal(volume)
+        )
+        self.assertEqual(
+            EvidenceVerificationEngine._independent_source_count(records), 1,
+        )
+        self.assertTrue(all(item.source_kind == "MARKET" for item in records))
+        context = engine.append_asset_evidence_context(
+            "", records, subject="coingecko:abc", asset_id="coingecko:abc",
+        )
+        self.assertIn("Trend topic: abc_surge", context)
+        claims = engine.claims_from_research_package(
+            context, records, subject="coingecko:abc", asset_id="coingecko:abc",
+            observed_at=self.now,
+        )
+        self.assertEqual(len(claims), 2)
+        self.assertTrue(all(claim.evidence_ids for claim in claims))
 
     def test_onchain_observation_adapter_does_not_claim_raw_payload_hash(self):
         observation = OnChainObservation(

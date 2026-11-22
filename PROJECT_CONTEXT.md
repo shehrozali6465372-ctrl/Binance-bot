@@ -4325,3 +4325,10 @@ The most relevant candidate capabilities identified from the directory are:
 - TDD RED confirmed malformed hash values were accepted before the change. GREEN focused run: **98 tests passed, 0 failed** across adapter contract, evidence verification, announcement importer and event graph. Compileall and diff-check passed.
 - No providers called, DB accessed, migrations run, production/Neon target touched, Module 9 runtime changed, scoring activated, publisher/gateway changed or real post made.
 - Next: verify upstream CMS/trend hash preimages and retained source material; design explicit hash-kind semantics before using normalized projection/local/aggregate fingerprints as source payload hashes; then extend v3 provenance schema without breaking v1/v2 compatibility. Runtime remains `factors=None`, `policy=None`; B-SCORE-01 OPEN; project PARTIAL — NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — Market-derived trend independence correction
+- Further adapter audit found `market_gainer` and `market_volume` are both derived from the same `MarketScanner._universe()` data. If the source market hash was absent, their different labels could incorrectly count as independent sources.
+- TDD RED reproduced independent-source count 2 for two labels over one scanner. GREEN normalizes both to `source_family=market_scanner_derived`, types them as `MARKET`, and keeps research trend rendering/claim linkage working for both MARKET and SOCIAL trend records.
+- Latest verification: 99 focused adapter/evidence/importer/event-graph tests passed; 14 additional research-package tests passed, excluding one test blocked by missing PIL via `main.py`. Compileall and diff-check passed.
+- This is a conservative dependency-grouping correction, not a source independence/authenticity proof or scoring approval. Runtime remains `factors=None`, `policy=None`; B-SCORE-01 OPEN.

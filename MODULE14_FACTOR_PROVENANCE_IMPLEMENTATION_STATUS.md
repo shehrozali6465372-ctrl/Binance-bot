@@ -105,3 +105,10 @@ The validator does not establish that source IDs exist, payload hashes match act
 - Added strict lowercase SHA-256 format validation for non-empty `MarketObservation.data_hash` and `EvidenceRecord.content_hash`; empty remains allowed where a source has no payload digest. This is format validation, not preimage verification.
 - TDD: malformed-hash tests failed before implementation; all focused adapter/evidence/importer/event-graph tests now pass: **98 passed, 0 failed**. `compileall` and `git diff --check` pass.
 - Remaining: verify upstream CMS and trend hash preimages/retention; introduce explicit hash-kind semantics before calling any canonical projection/local/aggregate fingerprint an original source-payload hash; add provider raw-response hash only where exact bytes/object are retained. No provider requests, DB access, migrations, runtime scoring or publisher changes.
+
+
+## Market-derived trend provenance correction — 2026-11-22
+- TDD identified `market_gainer` and `market_volume` as two views over one MarketScanner universe. Without an underlying content hash, their separate source labels had incorrectly produced two independence groups.
+- Both now use `source_family=market_scanner_derived` and `source_kind=MARKET`. Trend context rendering and package claim extraction now accept both MARKET and SOCIAL trend evidence.
+- Regression failed before the fix (count 2), then passed with count 1 plus context/claim linkage. Latest adapter/evidence/importer/event-graph batch: **99 passed**; 14 research-package tests passed excluding one PIL-blocked main-import test.
+- No provider or DB access; no score activation.
