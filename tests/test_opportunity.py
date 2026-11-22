@@ -179,3 +179,271 @@ class OpportunityEvaluationEngineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpportunityFactorProvenanceSchemaTests(unittest.TestCase):
+    """Versioned provenance schema must be strict while legacy snapshots replay."""
+
+    def setUp(self):
+        import copy
+        self.copy = copy
+        self.cutoff = "2026-11-21T12:00:00Z"
+        self.asset_id = "coingecko:bitcoin"
+        self.snapshot = {
+            "policy": {"policy_version": "proposal-only-test-v1"},
+            "inputs": {
+                "schema_version": 2,
+                "asset_id": self.asset_id,
+                "decision_cutoff_at": self.cutoff,
+                "factor_assessments": [self._factor(name) for name in FACTOR_NAMES],
+            },
+        }
+
+    def _factor(self, name):
+        return {
+            "factor_name": name,
+            "assessment_status": "READY",
+            "value": 72.5,
+            "rubric_version": "unapproved-fixture-rubric-v1",
+            "feature_pipeline_version": "fixture-pipeline-v1",
+            "source_contract_version": "fixture-source-contract-v1",
+            "subfeatures": [{
+                "feature_key": name + ".fixture_signal",
+                "asset_id": self.asset_id,
+                "availability": "AVAILABLE",
+                "raw_value": 123.0,
+                "normalized_value": 0.725,
+                "unit": "fixture_unit",
+                "source_refs": ["evidence:" + name + ":1"],
+                "source_payload_hashes": ["a" * 64],
+                "provider_timestamp": "2026-11-21T11:59:00Z",
+                "event_at": None,
+                "event_time_semantics": None,
+                "published_at": "2026-11-21T11:58:00Z",
+                "updated_at": "2026-11-21T11:59:00Z",
+                "observed_at": "2026-11-21T11:59:30Z",
+                "window_start_at": "2026-11-21T11:00:00Z",
+                "window_end_at": "2026-11-21T11:59:00Z",
+                "transformation_id": "fixture-normalizer",
+                "transformation_version": "1",
+                "baseline_id": "fixture-baseline",
+                "baseline_version": "1",
+                "source_dependency_group": "fixture-source-family",
+                "quality_flags": [],
+                "missing_reason": None,
+            }],
+            "reason_codes": [],
+            "evaluated_at": "2026-11-21T12:00:00Z",
+            "decision_cutoff_at": self.cutoff,
+        }
+
+    def validate(self, snapshot=None, expected_asset_id=None):
+        from layer1.opportunity import validate_opportunity_input_snapshot
+        return validate_opportunity_input_snapshot(
+            self.snapshot if snapshot is None else snapshot,
+            expected_asset_id=expected_asset_id,
+        )
+
+    def test_accepts_complete_versioned_provenance_envelope(self):
+        self.assertEqual(self.validate(expected_asset_id=self.asset_id), 2)
+
+    def test_preserves_legacy_snapshot_compatibility(self):
+        legacy = {"policy": {"version": "legacy-v1"}, "inputs": {"factor": 0.9}}
+        self.assertEqual(self.validate(legacy), 1)
+        self.assertEqual(self.validate({"policy": None, "inputs": ["legacy", 1]}), 1)
+
+    def test_rejects_versioned_snapshot_for_different_research_asset(self):
+        with self.assertRaisesRegex(ValueError, "snapshot asset identity"):
+            self.validate(expected_asset_id="coingecko:ethereum")
+
+    def test_rejects_missing_factor_assessment(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        malformed["inputs"]["factor_assessments"].pop()
+        with self.assertRaisesRegex(ValueError, "all six factors"):
+            self.validate(malformed)
+
+    def test_rejects_numeric_value_for_non_ready_factor(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        factor = malformed["inputs"]["factor_assessments"][0]
+        factor["assessment_status"] = "STALE"
+        factor["reason_codes"] = ["SOURCE_TOO_OLD"]
+        with self.assertRaisesRegex(ValueError, "non-READY"):
+            self.validate(malformed)
+
+    def test_rejects_ready_factor_without_source_references(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        malformed["inputs"]["factor_assessments"][0]["subfeatures"][0]["source_refs"] = []
+        with self.assertRaisesRegex(ValueError, "source reference"):
+            self.validate(malformed)
+
+    def test_rejects_evidence_observed_after_decision_cutoff(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        malformed["inputs"]["factor_assessments"][0]["subfeatures"][0]["observed_at"] = "2026-11-21T12:00:01Z"
+        with self.assertRaisesRegex(ValueError, "after decision cutoff"):
+            self.validate(malformed)
+
+    def test_rejects_subfeature_for_different_asset(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        malformed["inputs"]["factor_assessments"][0]["subfeatures"][0]["asset_id"] = "coingecko:ethereum"
+        with self.assertRaisesRegex(ValueError, "asset identity"):
+            self.validate(malformed)
+
+    def test_rejects_malformed_source_payload_hash(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        malformed["inputs"]["factor_assessments"][0]["subfeatures"][0]["source_payload_hashes"] = ["not-a-hash"]
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            self.validate(malformed)
+
+    def test_rejects_future_event_time_without_scheduled_event_semantics(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        subfeature = malformed["inputs"]["factor_assessments"][0]["subfeatures"][0]
+        subfeature["event_at"] = "2026-11-22T12:00:00Z"
+        with self.assertRaisesRegex(ValueError, "future event_at"):
+            self.validate(malformed)
+
+    def test_accepts_future_event_time_only_when_explicitly_scheduled(self):
+        valid = self.copy.deepcopy(self.snapshot)
+        subfeature = valid["inputs"]["factor_assessments"][0]["subfeatures"][0]
+        subfeature["event_at"] = "2026-11-22T12:00:00Z"
+        subfeature["event_time_semantics"] = "SCHEDULED_FUTURE_EVENT"
+        self.assertEqual(self.validate(valid), 2)
+
+    def test_rejects_ready_factor_that_depends_on_unavailable_subfeature(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        subfeature = malformed["inputs"]["factor_assessments"][0]["subfeatures"][0]
+        subfeature["availability"] = "STALE"
+        subfeature["raw_value"] = None
+        subfeature["normalized_value"] = None
+        subfeature["source_refs"] = []
+        subfeature["missing_reason"] = "STALE_SOURCE"
+        with self.assertRaisesRegex(ValueError, "READY factor assessment cannot depend"):
+            self.validate(malformed)
+
+    def test_rejects_normalized_feature_without_baseline_provenance(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        subfeature = malformed["inputs"]["factor_assessments"][0]["subfeatures"][0]
+        subfeature["baseline_id"] = None
+        subfeature["baseline_version"] = None
+        with self.assertRaisesRegex(ValueError, "requires baseline provenance"):
+            self.validate(malformed)
+
+    def test_rejects_duplicate_subfeature_keys_within_factor(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        subfeature = self.copy.deepcopy(malformed["inputs"]["factor_assessments"][0]["subfeatures"][0])
+        malformed["inputs"]["factor_assessments"][0]["subfeatures"].append(subfeature)
+        with self.assertRaisesRegex(ValueError, "subfeature keys must be unique"):
+            self.validate(malformed)
+
+    def test_rejects_non_utc_timestamp_offsets(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        malformed["inputs"]["factor_assessments"][0]["subfeatures"][0]["observed_at"] = "2026-11-21T16:59:30+05:00"
+        with self.assertRaisesRegex(ValueError, "UTC ISO-8601"):
+            self.validate(malformed)
+
+    def test_rejects_not_applicable_until_rubric_approval_exists(self):
+        malformed = self.copy.deepcopy(self.snapshot)
+        malformed["inputs"]["factor_assessments"][0]["assessment_status"] = "NOT_APPLICABLE"
+        malformed["inputs"]["factor_assessments"][0]["value"] = None
+        malformed["inputs"]["factor_assessments"][0]["reason_codes"] = ["NOT_APPROVED"]
+        with self.assertRaisesRegex(ValueError, "status is not approved"):
+            self.validate(malformed)
+
+    def test_decision_digest_rejects_malformed_versioned_snapshot(self):
+        import json
+        from layer1.opportunity import _decision_digest
+        malformed = self.copy.deepcopy(self.snapshot)
+        malformed["inputs"]["factor_assessments"] = []
+        encoded = json.dumps(malformed, sort_keys=True, separators=(",", ":"))
+        with self.assertRaisesRegex(ValueError, "all six factors"):
+            _decision_digest(
+                state="DEFER", score=None, reasons=("INVALID",),
+                policy_version="UNCONFIGURED", input_snapshot_json=encoded,
+            )
+
+    def test_decision_digest_binds_and_validates_versioned_provenance(self):
+        import json
+        from layer1.opportunity import _decision_digest
+        encoded = json.dumps(self.snapshot, sort_keys=True, separators=(",", ":"))
+        first = _decision_digest(
+            state="DEFER", score=None, reasons=("PROVENANCE_FIXTURE_ONLY",),
+            policy_version="UNCONFIGURED", input_snapshot_json=encoded,
+        )
+        changed = self.copy.deepcopy(self.snapshot)
+        changed["inputs"]["factor_assessments"][0]["subfeatures"][0]["source_refs"] = ["evidence:changed"]
+        changed_encoded = json.dumps(changed, sort_keys=True, separators=(",", ":"))
+        second = _decision_digest(
+            state="DEFER", score=None, reasons=("PROVENANCE_FIXTURE_ONLY",),
+            policy_version="UNCONFIGURED", input_snapshot_json=changed_encoded,
+        )
+        self.assertNotEqual(first, second)
+
+
+    def test_sqlite_decision_store_accepts_versioned_provenance_and_replays_immutably(self):
+        import json
+        import sqlite3
+        from layer1.opportunity import OpportunityDecision, OpportunityDecisionStore, _decision_digest
+        encoded = json.dumps(self.snapshot, sort_keys=True, separators=(",", ":"))
+        reasons = ("PROVENANCE_FIXTURE_ONLY",)
+        decision_id = _decision_digest(
+            state="DEFER", score=None, reasons=reasons,
+            policy_version="UNCONFIGURED", input_snapshot_json=encoded,
+        )
+        decision = OpportunityDecision("DEFER", None, reasons, "UNCONFIGURED", decision_id, encoded)
+        connection = sqlite3.connect(":memory:")
+        try:
+            store = OpportunityDecisionStore(connection)
+            self.assertEqual(store.save("research:package:v2", decision), decision_id)
+            self.assertEqual(store.save("research:package:v2", decision), decision_id)
+        finally:
+            connection.close()
+
+    def test_postgres_input_validator_accepts_valid_versioned_provenance(self):
+        import json
+        from layer1.opportunity import OpportunityDecision, _decision_digest
+        from layer1.publication_postgres import validate_opportunity_decision_input
+        encoded = json.dumps(self.snapshot, sort_keys=True, separators=(",", ":"))
+        reasons = ("PROVENANCE_FIXTURE_ONLY",)
+        decision_id = _decision_digest(
+            state="DEFER", score=None, reasons=reasons,
+            policy_version="UNCONFIGURED", input_snapshot_json=encoded,
+        )
+        decision = OpportunityDecision("DEFER", None, reasons, "UNCONFIGURED", decision_id, encoded)
+        validate_opportunity_decision_input("research:package:v2", decision)
+
+    def test_read_digest_verifier_accepts_legacy_and_v2_records(self):
+        import json
+        from layer1.opportunity import _decision_digest, verify_opportunity_decision_digest
+        legacy = {"policy": {"version": "legacy-v1"}, "inputs": {"factor": 0.9}}
+        legacy_json = json.dumps(legacy, sort_keys=True, separators=(",", ":"))
+        legacy_reasons = ("LEGACY_REPLAY",)
+        legacy_id = _decision_digest(
+            state="DEFER", score=None, reasons=legacy_reasons,
+            policy_version="legacy-v1", input_snapshot_json=legacy_json,
+        )
+        self.assertTrue(verify_opportunity_decision_digest(
+            decision_id=legacy_id, state="DEFER", score=None,
+            reasons=list(legacy_reasons), policy_version="legacy-v1",
+            input_snapshot=legacy,
+        ))
+        v2_json = json.dumps(self.snapshot, sort_keys=True, separators=(",", ":"))
+        v2_reasons = ("PROVENANCE_FIXTURE_ONLY",)
+        v2_id = _decision_digest(
+            state="DEFER", score=None, reasons=v2_reasons,
+            policy_version="UNCONFIGURED", input_snapshot_json=v2_json,
+        )
+        self.assertTrue(verify_opportunity_decision_digest(
+            decision_id=v2_id, state="DEFER", score=None,
+            reasons=list(v2_reasons), policy_version="UNCONFIGURED",
+            input_snapshot=self.snapshot,
+        ))
+
+    def test_read_digest_verifier_rejects_stored_snapshot_tampering(self):
+        from layer1.opportunity import verify_opportunity_decision_digest
+        with self.assertRaisesRegex(ValueError, "digest"):
+            verify_opportunity_decision_digest(
+                decision_id="0" * 64, state="DEFER", score=None,
+                reasons=["TAMPERED"], policy_version="legacy-v1",
+                input_snapshot={"policy": {"version": "legacy-v1"}, "inputs": {"factor": 0.9}},
+            )
+
+[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]

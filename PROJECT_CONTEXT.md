@@ -4254,3 +4254,13 @@ The most relevant candidate capabilities identified from the directory are:
 - Existing generic snapshots require explicit legacy compatibility. Existing migration 0001 checksum is immutable; future DDL must be additive in a new numbered migration.
 - TDD implementation design is versioned schema, status/value invariants, point-in-time provenance, SQLite/PostgreSQL parity, read-time digest verification, and fresh-process replay.
 - No application code, tests, schema, DB, providers, runtime, publisher, gateway, CI or publishing behavior changed. Runtime remains `factors=None` / `policy=None`, fail-closed. B-SCORE-01 OPEN; project remains PARTIAL — NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — Module 14 v2 provenance implementation checkpoint
+- Implemented strict versioned snapshot validation: legacy v1 digests remain compatible; v2 requires six factor assessments, explicit readiness states and subfeature provenance. The decision digest validates and binds the full v2 envelope.
+- PostgreSQL input validation uses the shared validator. PostgreSQL decision reads recompute and verify stored digests; PostgreSQL save checks v2 asset identity against the linked research-package payload. SQLite save uses the shared digest validator.
+- V2 structural checks include source-reference/hash formats, asset binding, UTC point-in-time cutoff, measurement windows, scheduled future event semantics, normalized transformation/baseline provenance, duplicate feature keys, and READY/non-READY value invariants. No migration was needed.
+- Focused local opportunity/PostgreSQL decision tests: **40 passed, 0 failed**. Compileall and diff-check passed.
+- Full local discovery previously reported 574 tests, 59 skipped, 34 errors; observed import errors included missing Pillow (PIL) and psycopg in this worktree. The CI workflow installs those dependencies. Full discovery was not rerun after the final small compatibility refinements; hosted CI is the full-dependency gate.
+- Isolated PostgreSQL CI tests added for v2 round-trip, research-package asset mismatch rejection, and tampered-row digest detection. Awaiting CI on this commit.
+- Structural validation does not prove source IDs exist, hashes match actual payload bytes, sources are authentic/independent, claims are supported, or factor values are correctly derived. No OpportunityEvaluationEngine, six-factor interface, main.py, provider, runtime, publisher, gateway, database schema, or migration activation. Runtime remains factors=None, policy=None; B-SCORE-01 OPEN; project PARTIAL — NOT PRODUCTION-READY.

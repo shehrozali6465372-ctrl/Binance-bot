@@ -928,11 +928,21 @@ class PostgresPublicationStore:
         snapshot = json.loads(decision.input_snapshot_json)
         with self.conn.transaction():
             package = self.conn.execute(
-                "SELECT package_id FROM layer1_research_package_versions WHERE package_id=%s FOR SHARE",
+                "SELECT package_id,payload_json FROM layer1_research_package_versions WHERE package_id=%s FOR SHARE",
                 (research_package_id,),
             ).fetchone()
             if package is None:
                 raise ValueError("opportunity decision research package does not exist")
+            package_payload = package["payload_json"]
+            if isinstance(package_payload, str):
+                package_payload = json.loads(package_payload)
+            if not isinstance(package_payload, dict):
+                raise ValueError("opportunity decision research package payload is invalid")
+            from layer1.opportunity import validate_opportunity_input_snapshot
+            if snapshot["inputs"].get("schema_version") == 2:
+                validate_opportunity_input_snapshot(
+                    snapshot, expected_asset_id=package_payload.get("asset_id"),
+                )
             existing = self.conn.execute(
                 "SELECT research_package_id,state,score,reasons_json,policy_version,input_snapshot_json FROM opportunity_decisions WHERE decision_id=%s FOR UPDATE",
                 (decision.decision_id,),
@@ -965,6 +975,11 @@ class PostgresPublicationStore:
         if row is None: return None
         reasons = row["reasons_json"] if isinstance(row["reasons_json"], list) else json.loads(row["reasons_json"])
         snapshot = row["input_snapshot_json"] if isinstance(row["input_snapshot_json"], dict) else json.loads(row["input_snapshot_json"])
+        from layer1.opportunity import verify_opportunity_decision_digest
+        verify_opportunity_decision_digest(
+            decision_id=row["decision_id"], state=row["state"], score=row["score"],
+            reasons=reasons, policy_version=row["policy_version"], input_snapshot=snapshot,
+        )
         return {"decision_id":row["decision_id"],"research_package_id":row["research_package_id"],
                 "state":row["state"],"score":row["score"],"reasons":reasons,"policy_version":row["policy_version"],
                 "input_snapshot":snapshot,"created_at":row["created_at"].isoformat()}
@@ -1727,7 +1742,7 @@ def validation_advisory_lock_key(draft_hash: str, image_hash: Optional[str]) -> 
 
 
 def validate_opportunity_decision_input(research_package_id: str, decision) -> None:
-    from layer1.opportunity import OpportunityDecision
+    from layer1.opportunity import OpportunityDecision, validate_opportunity_input_snapshot
     if not isinstance(research_package_id, str) or not research_package_id.strip():
         raise ValueError("opportunity decision requires a research package ID")
     if not isinstance(decision, OpportunityDecision):
@@ -1745,8 +1760,7 @@ def validate_opportunity_decision_input(research_package_id: str, decision) -> N
         snapshot = json.loads(decision.input_snapshot_json)
     except (TypeError, json.JSONDecodeError):
         raise ValueError("opportunity decision input snapshot is invalid") from None
-    if not isinstance(snapshot, dict) or set(snapshot) != {"policy", "inputs"}:
-        raise ValueError("opportunity decision input snapshot is invalid")
+    validate_opportunity_input_snapshot(snapshot)
     json.dumps(snapshot, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
@@ -1888,3 +1902,5 @@ def _load_latest_draft(store, draft_key: str) -> Optional[dict]:
         "editorial_brief_id": row["editorial_brief_id"], "approved_claim_ids": claims,
         "content": row["content"], "created_at": row["created_at"].isoformat(),
     }
+
+[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]

@@ -2390,3 +2390,21 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Applied migration checksum means migration 0001 is immutable; any future DDL must be additive in a new numbered migration.
 - Recommended TDD sequence: legacy reader, strict versioned schema, status/value and point-in-time provenance invariants, adapter parity, read-time digest verification, fresh-process replay.
 - Design only; no code/test/schema/data/DB/provider/runtime/publisher/gateway/CI changes. Module 14 remains fail-closed. B-SCORE-01 OPEN.
+
+
+# MODULE 14 — FACTOR PROVENANCE V2 IMPLEMENTATION — 2026-11-22
+- Implemented shared version-aware snapshot validator. Legacy v1 replay is preserved; v2 requires all six factor assessments and strict factor/subfeature provenance shape.
+- Digest validation now binds the complete v2 provenance; PostgreSQL input validation shares the schema validator; PostgreSQL load verifies stored digest. SQLite save uses shared digest validation. No DDL/migration.
+- Tests added for point-in-time UTC timestamps, asset binding, source-ref/hash shape, status/value invariants, future scheduled event semantics, normalized baseline/transformation provenance, SQLite replay, PostgreSQL validator parity and stored tamper rejection. New isolated PostgreSQL v2 round-trip tests are DSN-gated and await CI verification.
+- Structural validation does not resolve source IDs, verify payload hashes against payload bytes, establish source authenticity/independence, prove claim support, or derive factor values. No runtime/provider/engine changes; factors and policy remain None. B-SCORE-01 OPEN.
+
+
+## 2026-11-22 — Module 14 v2 test outcome
+- Focused local tests: 39 passed, 0 failed; compileall and diff-check passed.
+- Full local unittest discovery: 574 tests, 59 skipped, 34 errors. Missing local Pillow (`PIL`) and `psycopg` dependencies caused observed import failures; the CI workflow installs them. Do not call this a full-suite pass. Local PostgreSQL integration unavailable because TEST_POSTGRES_DSN is unset.
+- Hosted CI for the new code changes is pending. V2 Postgres round-trip, research-package asset binding and tampered-row rejection are included in the isolated CI test job.
+
+
+- Latest focused local opportunity/PostgreSQL decision validation run after final compatibility and package-asset binding refinements: **40 passed, 0 failed**. Full discovery not rerun after those final small changes; CI remains the full-dependency acceptance gate.
+
+[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]

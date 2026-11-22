@@ -1,6 +1,6 @@
 # Module 14 — Factor Provenance and Point-in-Time Evidence Contract
 
-**Status:** DESIGN CONTRACT — NOT IMPLEMENTED / NOT ACTIVE
+**Status:** PARTIALLY IMPLEMENTED — V2 STRUCTURAL VALIDATION AND DIGEST REPLAY ONLY; NOT ACTIVE FOR SCORING
 **Date:** 2026-11-22
 **Parent documents:** `MODULE14_OPPORTUNITY_SCORING_POLICY_PROPOSAL.md`, `MODULE14_FEATURE_DATA_AVAILABILITY_AUDIT.md`
 **Runtime effect:** NONE. The scheduled path must continue to pass `factors=None` and `policy=None`.
@@ -58,6 +58,7 @@ Every subfeature must retain:
 - `source_refs`: one or more exact evidence IDs, observation IDs, event/revision IDs or provider record IDs;
 - `source_payload_hashes`: hashes of exact source payloads where the underlying record may be revised;
 - `provider_timestamp`: timestamp asserted by provider/source, if supplied;
+- `event_at` plus `event_time_semantics`: event time and whether it is an observed event time or an explicitly scheduled future event;
 - `published_at` / `updated_at`: source publication and update timestamps where applicable;
 - `observed_at`: when this system retrieved/observed the source;
 - `window_start_at` / `window_end_at`: exact interval for any aggregate or time-series calculation;
@@ -120,7 +121,7 @@ A high risk_control value must mean risks are identified and responsibly bounded
 
 ## 7. Immutable decision snapshot compatibility
 
-The current decision snapshot outer shape is `{"policy": ..., "inputs": ...}`. A future, separately reviewed implementation may extend `inputs` with a versioned `factor_assessments` collection while preserving deterministic canonical JSON and SHA-256 digest binding.
+The current decision snapshot outer shape remains `{"policy": ..., "inputs": ...}`. Version 2 is now supported by a strict structural validator through `inputs.schema_version = 2` and a `factor_assessments` collection, while snapshots without a schema version retain legacy v1 replay semantics. Both versions remain bound by deterministic canonical JSON and SHA-256 digest binding.
 
 Before implementation, review all consumers and validators:
 - `OpportunityEvaluationEngine.evaluate()` snapshot construction and `_decision_digest()`;
@@ -161,3 +162,41 @@ This is a design contract only. It does not authorize:
 - activating PROCEED or publishing content.
 
 Those steps require separate scoped review and approval. Until then, keep `factors=None`, `policy=None`, and DEFER.
+
+
+## 10. Implementation status — 2026-11-22
+
+Implemented in the continuation branch (structural/persistence layer only):
+
+- `validate_opportunity_input_snapshot()` accepts legacy v1 snapshots without rewriting them and validates strict v2 snapshots.
+- V2 requires all six locked factor names exactly once, explicit assessment state, finite 0–100 values only for READY, and reason codes with null values for non-READY states.
+- V2 subfeatures require exact asset identity, unique feature keys, explicit units, source references for AVAILABLE features, correctly shaped SHA-256 payload hashes, observed-at UTC timestamp, and paired measurement-window boundaries.
+- Provider/published/updated/observed timestamps and measurement-window end cannot be after the decision cutoff. Future `event_at` is accepted only with `SCHEDULED_FUTURE_EVENT` semantics.
+- Normalized values require transformation and baseline ID/version provenance. NOT_APPLICABLE is rejected until an approved rubric explicitly supports it.
+- `_decision_digest()` validates the snapshot before hashing, so all factor provenance fields are included in the immutable digest.
+- PostgreSQL input validation uses the same validator. PostgreSQL decision reads recompute and verify the digest; the helper handles PostgreSQL NUMERIC/Decimal scores.
+- SQLite decision saves use the same digest path and therefore validate v2 snapshots while preserving legacy v1 records.
+- No database migration was needed. No applied migration file was changed.
+
+Verified locally so far:
+- Focused local run: **40 tests passed, 0 failures** across opportunity and PostgreSQL decision validation/digest unit tests.
+- Full local discovery: **574 tests, 59 skipped, 34 errors**. Import failures observed include missing `PIL` (Pillow) and `psycopg`; the workflow installs both via its explicit dependency steps. This is not a clean full-suite pass. DSN-gated PostgreSQL tests were not run locally.
+- PostgreSQL live integration test cases were added to the isolated CI suite, including v2 persistence round-trip, research-package asset binding, and tampered-row read rejection. Hosted verification for this code commit remains pending.
+
+Important limits — this is NOT factor approval or provider acceptance:
+- The validator checks structure and timestamp relationships only. It does not resolve source_refs against the evidence store, prove that payload hashes match fetched payload bytes, establish source authenticity/authority, prove independence of source families, or verify claim-level support.
+- It does not verify that a rubric/pipeline/source-contract version is approved, nor reproduce a numeric factor value from its subfeatures.
+- It cannot infer from generic schema fields whether a measurement window or payload hash is semantically mandatory for a particular feature; factor-specific semantic validators remain required.
+- It does not verify human audience-usefulness adjudication, semantic novelty, risk severity, prohibited-content classification, or source-specific freshness policy.
+- `OpportunityEvaluationEngine`, its six-factor interface, `main.py` scheduled call, and provider integrations remain unchanged. No factor provider is wired. Runtime remains `factors=None`, `policy=None`, fail-closed DEFER.
+- No scoring weights, thresholds, floors, source trust rankings, or factor values were selected or activated. No production DB or Neon data was accessed; no live provider requests were made; no publisher/gateway changes or real posts occurred.
+
+The next required phase is factor-specific semantic/provenance resolution and empirical dataset validation. This requires separate review before connecting any factor provider or changing runtime behavior.
+
+
+## 2026-11-22 — Module 14 v2 provenance verification update
+- Focused local opportunity/PostgreSQL decision tests: **39 passed, 0 failed**. `compileall` and `git diff --check` passed.
+- Full local discovery did NOT pass: 574 tests, 59 skipped, 34 errors. Observed import errors include missing `PIL` (Pillow) and `psycopg` in this remote worktree; workflow installs these dependencies. No local PostgreSQL DSN was configured, so DSN-gated integration tests were skipped.
+- Added isolated PostgreSQL integration coverage for v2 snapshot round-trip, package asset identity mismatch rejection, and stored-row digest tamper detection. Awaiting hosted CI on the code commit.
+
+[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]

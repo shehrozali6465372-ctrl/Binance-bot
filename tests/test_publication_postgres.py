@@ -1336,6 +1336,140 @@ class PublicationPostgresOpportunityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "decision"):
             validate_opportunity_decision_input("package:1", object())
 
+    def test_opportunity_decision_input_validation_rejects_malformed_v2_provenance(self):
+        import json
+        from layer1.opportunity import OpportunityDecision
+        from layer1.publication_postgres import validate_opportunity_decision_input
+        malformed = {
+            "policy": None,
+            "inputs": {
+                "schema_version": 2,
+                "asset_id": "coingecko:bitcoin",
+                "decision_cutoff_at": "2026-11-21T12:00:00Z",
+                "factor_assessments": [],
+            },
+        }
+        decision = OpportunityDecision(
+            "DEFER", None, ("PROVENANCE_MISSING",), "UNCONFIGURED",
+            "a" * 64, json.dumps(malformed),
+        )
+        with self.assertRaisesRegex(ValueError, "all six factors"):
+            validate_opportunity_decision_input("package:1", decision)
+
+    def test_postgres_decision_loader_rejects_stored_digest_mismatch(self):
+        from datetime import datetime, timezone
+        from decimal import Decimal
+        from layer1.opportunity import _decision_digest
+        from layer1.publication_postgres import PostgresPublicationStore
+        snapshot = {"policy": {"version": "legacy-v1"}, "inputs": {"factor": 0.9}}
+        reasons = ["REPLAY_TEST"]
+        decision_id = _decision_digest(
+            state="PROCEED", score=90.0, reasons=tuple(reasons),
+            policy_version="legacy-v1",
+            input_snapshot_json='{"inputs":{"factor":0.9},"policy":{"version":"legacy-v1"}}',
+        )
+        row = {
+            "decision_id": decision_id, "research_package_id": "package:1",
+            "state": "PROCEED", "score": Decimal("90.0"), "reasons_json": reasons,
+            "policy_version": "legacy-v1", "input_snapshot_json": snapshot,
+            "created_at": datetime.now(timezone.utc),
+        }
+
+        class FakeConnection:
+            def execute(self, query, params):
+                return self
+            def fetchone(self):
+                return row
+
+        store = object.__new__(PostgresPublicationStore)
+        store.conn = FakeConnection()
+        loaded = store.load_opportunity_decision(decision_id)
+        self.assertEqual(loaded["decision_id"], decision_id)
+        row["input_snapshot_json"] = {
+            "policy": {"version": "legacy-v1"}, "inputs": {"factor": 0.8},
+        }
+        with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            store.load_opportunity_decision(decision_id)
+
+    @unittest.skipUnless(__import__("os").environ.get("TEST_POSTGRES_DSN"), "TEST_POSTGRES_DSN is not configured")
+    def test_versioned_factor_provenance_decision_roundtrips_in_postgres(self):
+        import hashlib, json, os, uuid
+        from layer1.opportunity import FACTOR_NAMES, OpportunityDecision, _decision_digest
+        from layer1.publication_postgres import PostgresPublicationStore
+        store = PostgresPublicationStore(os.environ["TEST_POSTGRES_DSN"])
+        suffix = uuid.uuid4().hex
+        research_key = "test-opportunity-v2:" + suffix
+        asset_id = "coingecko:bitcoin"
+        cutoff = "2026-11-21T12:00:00Z"
+        factor_assessments = []
+        for name in FACTOR_NAMES:
+            factor_assessments.append({
+                "factor_name": name, "assessment_status": "READY", "value": 72.5,
+                "rubric_version": "fixture-only-unapproved-v1",
+                "feature_pipeline_version": "fixture-pipeline-v1",
+                "source_contract_version": "fixture-source-v1",
+                "subfeatures": [{
+                    "feature_key": name + ".fixture", "asset_id": asset_id,
+                    "availability": "AVAILABLE", "raw_value": 10.0,
+                    "normalized_value": 0.5, "unit": "fixture_unit",
+                    "source_refs": ["evidence:" + name], "source_payload_hashes": ["a" * 64],
+                    "provider_timestamp": "2026-11-21T11:59:00Z", "event_at": None,
+                    "event_time_semantics": None, "published_at": "2026-11-21T11:58:00Z",
+                    "updated_at": "2026-11-21T11:59:00Z", "observed_at": "2026-11-21T11:59:30Z",
+                    "window_start_at": "2026-11-21T11:00:00Z", "window_end_at": "2026-11-21T11:59:00Z",
+                    "transformation_id": "fixture-transform", "transformation_version": "1",
+                    "baseline_id": "fixture-baseline", "baseline_version": "1",
+                    "source_dependency_group": "fixture-source-family", "quality_flags": [],
+                    "missing_reason": None,
+                }],
+                "reason_codes": [], "evaluated_at": cutoff, "decision_cutoff_at": cutoff,
+            })
+        snapshot_obj = {"policy": None, "inputs": {
+            "schema_version": 2, "asset_id": asset_id,
+            "decision_cutoff_at": cutoff, "factor_assessments": factor_assessments,
+        }}
+        snapshot = json.dumps(snapshot_obj, sort_keys=True, separators=(",", ":"))
+        reasons = ("PROVENANCE_SCHEMA_ROUNDTRIP_TEST_ONLY",)
+        decision_id = _decision_digest(
+            state="DEFER", score=None, reasons=reasons,
+            policy_version="UNCONFIGURED", input_snapshot_json=snapshot,
+        )
+        decision = OpportunityDecision("DEFER", None, reasons, "UNCONFIGURED", decision_id, snapshot)
+        payload = {"asset_id": asset_id, "test": suffix}
+        package_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        try:
+            package = store.save_research_package(
+                research_key=research_key, package_hash=package_hash,
+                cutoff_at=cutoff, payload=payload,
+            )
+            import copy
+            wrong_asset_snapshot = copy.deepcopy(snapshot_obj)
+            wrong_asset_snapshot["inputs"]["asset_id"] = "coingecko:ethereum"
+            for assessment in wrong_asset_snapshot["inputs"]["factor_assessments"]:
+                for subfeature in assessment["subfeatures"]:
+                    subfeature["asset_id"] = "coingecko:ethereum"
+            wrong_asset_json = json.dumps(wrong_asset_snapshot, sort_keys=True, separators=(",", ":"))
+            wrong_asset_id = _decision_digest(
+                state="DEFER", score=None, reasons=reasons,
+                policy_version="UNCONFIGURED", input_snapshot_json=wrong_asset_json,
+            )
+            wrong_asset_decision = OpportunityDecision(
+                "DEFER", None, reasons, "UNCONFIGURED", wrong_asset_id, wrong_asset_json,
+            )
+            with self.assertRaisesRegex(ValueError, "asset identity"):
+                store.save_opportunity_decision(package["package_id"], wrong_asset_decision)
+            store.save_opportunity_decision(package["package_id"], decision)
+            loaded = store.load_opportunity_decision(decision_id)
+            self.assertEqual(loaded["input_snapshot"], snapshot_obj)
+            self.assertEqual(loaded["state"], "DEFER")
+        finally:
+            store.conn.execute(
+                "DELETE FROM opportunity_decisions WHERE research_package_id IN (SELECT package_id FROM layer1_research_package_versions WHERE research_key=%s)",
+                (research_key,),
+            )
+            store.conn.execute("DELETE FROM layer1_research_package_versions WHERE research_key=%s", (research_key,))
+            store.close()
+
     @unittest.skipUnless(__import__("os").environ.get("TEST_POSTGRES_DSN"), "TEST_POSTGRES_DSN is not configured")
     def test_opportunity_decision_is_research_bound_idempotent_and_immutable(self):
         import hashlib, json, os, uuid
@@ -1357,6 +1491,12 @@ class PublicationPostgresOpportunityTests(unittest.TestCase):
             loaded = store.load_opportunity_decision(decision_id)
             self.assertEqual(loaded["research_package_id"], package["package_id"])
             self.assertEqual(loaded["input_snapshot"], json.loads(snapshot))
+            store.conn.execute(
+                "UPDATE opportunity_decisions SET input_snapshot_json=jsonb_set(input_snapshot_json,'{inputs,factor}','0.8'::jsonb) WHERE decision_id=%s",
+                (decision_id,),
+            )
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                store.load_opportunity_decision(decision_id)
             conflicting = OpportunityDecision("DEFER", 90.0, reasons, "test-v1", decision_id, snapshot)
             with self.assertRaisesRegex(ValueError, "digest|immutable"):
                 store.save_opportunity_decision(package["package_id"], conflicting)
@@ -1663,3 +1803,5 @@ class PublicationPostgresEventLifecycleTests(unittest.TestCase):
             store.conn.execute("DELETE FROM layer1_event_revisions WHERE event_id=%s", (event_id,))
             store.conn.execute("DELETE FROM layer1_event_lifecycle WHERE event_id=%s", (event_id,))
             store.close()
+
+[executed on device: localhost (bd830869-fbae-4825-ae7b-5044d6161090)]
