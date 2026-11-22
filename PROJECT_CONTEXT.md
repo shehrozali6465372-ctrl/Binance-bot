@@ -4546,3 +4546,9 @@ The most relevant candidate capabilities identified from the directory are:
 - PR #14's workflow is `DRY_RUN=1`; its `main.py` adds `publisher_enabled=False` by default and requires explicit enablement for live publication. PR #14 remains OPEN / DRAFT / UNMERGED. Those PR controls are not active in the default-branch scheduled workflow.
 - Read-only logs for the four latest scheduled main-branch runs showed successful live publication in run `44994076788` (2026-11-22 06:31:34 UTC) and run `44942640356` (2026-11-21 19:45:59 UTC). The other two reviewed runs had no matching publish-success line. Post URLs and body content were not reproduced. These were pre-existing scheduled runs, not posts initiated by this audit.
 - Finding AUD-GIT-007: HIGH / OPEN. Actual main-branch live publication is confirmed; PR #14's dry-run/default-off safeguards are not active in scheduled main. No workflow dispatch, config/credential change, deployment, merge or audit-initiated Binance post occurred. Closure requires owner-approved production activation policy and alignment of default-branch code/workflow; do not assume PR safeguards are active before merge.
+
+
+## 2026-11-23 — approved temporary main workflow dry-run mitigation
+- User approved changing only `.github/workflows/run_bot.yml` on default branch `main`: `DRY_RUN: "0" -> DRY_RUN: "1"`.
+- Applied commit: `4525cabe1260fd5b25414010d2cf16b387119edd`. Verified main workflow blob `4dfc5f3b1acc48c22d0c3763776dcbdadf7d6c6f` contains `DRY_RUN: "1"`; cron and Square credential injection remain unchanged. No workflow dispatch was triggered.
+- Residual risk: main-branch image generation/upload occurs before publisher dry-run check and is not gated by `DRY_RUN`; do not describe this as zero outbound network activity. No code changes were made beyond the approved workflow variable.
