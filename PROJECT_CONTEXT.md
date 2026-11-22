@@ -4246,3 +4246,11 @@ The most relevant candidate capabilities identified from the directory are:
 - Specifies factor assessment status, typed subfeature provenance, exact evidence references and payload hashes, source/provider/publication/observation timestamps, measurement windows, transformation and baseline versions, dependency groups, quality flags, reviewer adjudication, point-in-time invariants and deterministic replay.
 - Requires immutable decision digest to bind complete factor provenance, with explicit snapshot schema version/backward compatibility before implementation. Lists failure, leakage, asset-mismatch, source-independence, reorg, CMS revision-correlation, LLM-override and hard-gate tests.
 - No database/production rows accessed, Neon remains suspended, no live provider calls. Runtime remains `factors=None` / `policy=None` and DEFER. B-SCORE-01 remains OPEN; project remains **PARTIAL — NOT PRODUCTION-READY**.
+
+
+## 2026-11-22 — Module 14 factor-provenance code-level review
+- Read-only review completed at `9899b9d5a01be342f8f64414b1a740257830935c`; see `MODULE14_FACTOR_PROVENANCE_IMPLEMENTATION_REVIEW.md`.
+- Current `_decision_digest()` binds arbitrary JSON under legacy `policy` / `inputs` shape but does not enforce factor-provenance schema or schema version. SQLite and PostgreSQL persistence require shared version-aware validation; PostgreSQL load currently does not recompute digest.
+- Existing generic snapshots require explicit legacy compatibility. Existing migration 0001 checksum is immutable; future DDL must be additive in a new numbered migration.
+- TDD implementation design is versioned schema, status/value invariants, point-in-time provenance, SQLite/PostgreSQL parity, read-time digest verification, and fresh-process replay.
+- No application code, tests, schema, DB, providers, runtime, publisher, gateway, CI or publishing behavior changed. Runtime remains `factors=None` / `policy=None`, fail-closed. B-SCORE-01 OPEN; project remains PARTIAL — NOT PRODUCTION-READY.
