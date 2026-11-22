@@ -1040,14 +1040,14 @@ Reasons production readiness cannot be approved:
 
 **Approval:** The user explicitly approved implementation of both `AUD-PUB-001` and `AUD-PUB-002` in this existing continuation worktree. This section supersedes the OPEN implementation status recorded in Section 32; it does not change the overall production-readiness verdict.
 
-### AUD-PUB-001 — implemented locally; hosted CI pending
+### AUD-PUB-001 — implementation pushed; hosted CI PASS
 - SQLite `publish()` now acquires `BEGIN IMMEDIATE` before its final persisted event/duplicate-policy checks and holds the SQLite write fence through `urllib` request dispatch and response-header receipt. Competing SQLite writers cannot change event lifecycle state, insert a previously absent event for a `NO_EVENT` authorization, add recent posts, or create a competing quota reservation between the final check and POST dispatch.
 - The response body is read only after the SQLite transaction has been released. This avoids holding the write lock during body parsing and subsequent local persistence. The request uses `min(HTTP_TIMEOUT_SECONDS, 15)` as its socket timeout and the existing bounded response reader (1 MiB + 1 byte detection); urllib's socket timeout is not a strict total wall-clock deadline.
 - `validate_persisted_duplicate_policy()` now reuses an already active SQLite transaction instead of issuing a nested `BEGIN IMMEDIATE`.
 - Deterministic multi-connection tests prove that event withdrawal, `NO_EVENT` insertion, recent-post insertion and a competing quota reservation are blocked at the mocked transport dispatch boundary. A separate response-body test proves the lock is released before body reading. Pre-gate event withdrawal and `NO_EVENT` insertion are rejected without invoking transport; the existing post-insertion regression also confirms no transport call when the conflicting record wins before the final gate.
 - Operational trade-off: SQLite has a database-wide writer lock, not PostgreSQL-style row/advisory locks. Competing writers may wait or receive `database is locked` depending on their connection timeout. The test uses a second connection with a 50 ms timeout and verifies this behavior. The lock is deliberately limited to final validation + request dispatch/header acquisition, not response-body reading or local post persistence. This does not establish a multi-process production load/SLO benchmark.
 
-### AUD-PUB-002 — implemented locally; hosted CI pending
+### AUD-PUB-002 — implementation pushed; hosted CI PASS
 - Added an additive `authorization_id` column migration to the SQLite `publication_attempts` ledger. When the authorization engine initializes, it safely backfills pre-existing in-flight attempts only from a non-empty bound reservation whose symbol exactly matches; it does not invent identities for missing/mismatched rows. A migration regression preserves the old attempt and verifies the new column.
 - `PublicationAuthorizationEngine.bind_attempt()` now verifies that the reservation exists, is RESERVED and unbound, has an authorization identity, and belongs to the same symbol as the attempt. It binds the reservation and copies the same authorization ID to the attempt in one SQLite transaction.
 - `PostPublisher._finish_attempt()` preserves the legacy ledger-only path only when the quota table truly does not exist. If the quota table exists, it now requires exactly one reservation bound to the attempt; checks matching attempt ID, symbol and authorization ID; and enforces the allowed quota source-state transition. Missing, RELEASED, identity-mismatched, wrong-symbol, duplicate or illegal-state reservations raise inside the transaction, rolling back the attempt update.
@@ -1064,6 +1064,19 @@ Reasons production readiness cannot be approved:
 ### Scope and current disposition
 - Only `main.py`, `layer1/publication_authorization.py` and `tests/test_publisher_safety.py` were intentionally changed for these fixes. Pre-existing unrelated dirty files and the unrelated pre-existing `main.py` `expected_base_asset` edit were preserved and must not be swept into the code commit.
 - No real Binance request, live Square post, production DB/Neon connection, production migration, workflow dispatch, deployment, PR merge or gateway restart was performed.
-- Hosted CI has not yet verified this implementation at this section's writing. After selective commit/push to the existing PR #14 branch, verify both mocked-safety and isolated PostgreSQL checks. Do not create another PR or merge.
-- `AUD-PUB-001` and `AUD-PUB-002` are **IMPLEMENTED LOCALLY — HOSTED CI PENDING**, not closed/certified until the existing PR checks pass and the pushed commit is confirmed.
+- Hosted GitHub Actions run `45041348631` completed successfully on commit `3d9ba509d2743c307e8d003419e048982bd5c9b1`: `mocked-safety-tests` PASS (**879 tests, 62 skipped**) and `Isolated PostgreSQL integration acceptance` PASS. The isolated DB target was verified before migrations. `gh pr checks 14` reports both checks PASS.
+- PR #14 remains OPEN / Draft / Unmerged. Its head, the remote continuation branch and local HEAD all equal `3d9ba509d2743c307e8d003419e048982bd5c9b1`. No second PR was created and no merge was performed.
+- `AUD-PUB-001` and `AUD-PUB-002` are **IMPLEMENTED — HOSTED CI VERIFIED** for the tested code paths. This does not certify production deployment, multiprocess load/SLO behavior, production SQLite configuration or the overall 21-module system; those remain operational/independent readiness work.
 - Project remains **NO-GO / PARTIAL / NOT PRODUCTION-READY** because independent critical/high findings remain open, including `AUD-ONCHAIN-001`, `AUD-MAIN-002`, `AUD-GIT-003`, Module 14 policy readiness, visual QA and Module 21 operator recovery.
+
+
+## 34. Hosted verification of approved SQLite publication fixes — 22 November 2026
+- Commit `3d9ba509d2743c307e8d003419e048982bd5c9b1` was pushed fast-forward to the existing `layer-1/module9-onchain-continuation` branch.
+- GitHub Actions run `45041348631` completed with conclusion `success`:
+  - `mocked-safety-tests`: PASS — **879 tests, 62 skipped**; dependencies installed; Python compile step passed.
+  - `Isolated PostgreSQL integration acceptance`: PASS — test database target validated before migrations; isolated service container initialized and stopped normally.
+- `gh pr checks 14`: both required checks PASS. PR #14 remains OPEN / Draft / Unmerged. Local HEAD, remote branch SHA and PR head SHA were independently verified equal to `3d9ba509d2743c307e8d003419e048982bd5c9b1`.
+- Node.js 20 deprecation warning remains for existing `actions/checkout@v4` and `actions/setup-python@v5`; it did not fail either job.
+- No production DB/Neon connection, production migration, live publishing workflow dispatch, Binance API POST, deployment or merge.
+- The 879-test hosted mocked suite supersedes the local full-suite dependency limitation for repository CI. Local focused suite remains 71 passed / 0 failed; local unfiltered discovery was blocked by absent Pillow/psycopg in the RDC environment.
+- `AUD-PUB-001` and `AUD-PUB-002` are now IMPLEMENTED — HOSTED CI VERIFIED for the tested SQLite paths. Production multiprocess load/SLO verification and overall project readiness remain separate. Project remains NO-GO / PARTIAL / NOT PRODUCTION-READY because other critical/high findings remain open.
