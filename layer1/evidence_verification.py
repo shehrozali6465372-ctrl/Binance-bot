@@ -172,6 +172,8 @@ class EvidenceRecord:
                 raise ValueError(f"evidence {name} must be a string or unavailable")
         if self.source_url is not None and not isinstance(self.source_url, str):
             raise ValueError("evidence source URL must be a string or unavailable")
+        if self.content_hash and not re.fullmatch(r"[0-9a-f]{64}", self.content_hash):
+            raise ValueError("evidence content_hash must be a lowercase SHA-256 digest")
         _timestamp(self.published_at)
         _timestamp(self.observed_at)
         if self.updated_at:

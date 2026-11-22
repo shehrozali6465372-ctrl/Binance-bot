@@ -55,6 +55,15 @@ class EvidenceVerificationTests(unittest.TestCase):
     def setUp(self):
         self.engine = EvidenceVerificationEngine()
 
+    def test_evidence_record_rejects_malformed_nonempty_content_hash(self):
+        malformed = record(content_hash="sha256:not-a-hex-digest")
+        with self.assertRaisesRegex(ValueError, "content_hash must be a lowercase SHA-256"):
+            malformed.validate()
+
+    def test_evidence_record_accepts_absent_content_hash_for_normalized_onchain_identity(self):
+        normalized = record(content_hash="")
+        normalized.validate()
+
     def test_asset_scoped_registry_excludes_other_assets_before_draft_rendering(self):
         btc = record(
             value=100.0, source_id="btc-market", asset_id="coingecko:btc",

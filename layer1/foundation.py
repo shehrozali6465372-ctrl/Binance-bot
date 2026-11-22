@@ -688,6 +688,8 @@ class MarketObservation:
             raise ValueError("market observation metadata fields must be mappings")
         if not isinstance(self.data_hash, str) or not isinstance(self.cache_hit, bool):
             raise ValueError("market observation hash/cache metadata is invalid")
+        if self.data_hash and not re.fullmatch(r"[0-9a-f]{64}", self.data_hash):
+            raise ValueError("market observation data_hash must be a lowercase SHA-256 digest")
         _parse_time(self.observed_at)
         for timestamp_name in ("published_at", "source_timestamp"):
             timestamp = getattr(self, timestamp_name)

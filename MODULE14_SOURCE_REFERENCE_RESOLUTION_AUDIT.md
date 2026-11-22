@@ -112,3 +112,37 @@ The following supersedes the earlier historical statements above that factor-spe
 - Focused tests cover positive claim binding, missing claim refs, unverified/contradicted claims, cross-asset claims, evidence-reference mismatch, inflated independence counts, shared family/lineage grouping and shared payload hashes across different families.
 - Focused verification after this change: **139 tests passed, 0 failures, 3 skipped** across claim support, registry resolution, opportunity, evidence verification and PostgreSQL opportunity tests. Skips include DSN-gated PostgreSQL acceptance; no PostgreSQL DB was accessed.
 - Runtime scoring remains disabled. The implementation does not select weights, thresholds, factor values, source rankings or independent-source minimums.
+
+
+## Source adapter contract audit — 2026-11-22
+
+This section records a direct code-path review of the adapters and upstream model validators. It supersedes the earlier broad statement that the adapters uniformly supply original-payload hashes: they do not.
+
+### Per-adapter findings
+
+| Adapter | Identity / family / lineage behavior | Hash meaning and limitation |
+|---|---|---|
+| Binance announcement importer → `evidence_from_announcement` | `source_id` is passed through from the CMS ledger; `source_family` is `publisher.casefold()` (currently one Binance family); `lineage_id` is `content_hash` when present, otherwise `source_id`. CMS rows may explicitly mark `source_id_kind=payload_fingerprint` and unresolved revision correlation when the source ID is a local catalog/date/title fingerprint rather than a provider article ID. | `content_hash` is supplied by the upstream CMS database and format-validated, but this repository does not recompute it from title/body or prove the upstream hash preimage. `raw_evidence_ref` is a locator, not byte verification. Treat as upstream-attested digest until the worker's hash algorithm and retained bytes are independently verified. |
+| Binance Spot `exchangeInfo` eligibility | Fixed family `binance_spot_exchange_info`; source ID includes symbol and observed-time digest; lineage equals the digest of the canonical pair projection. | Hash is computed from selected canonical fields (`symbol`, base/quote, trading status, spot permission, permission sets), not the full raw HTTP response. It is a normalized projection fingerprint, not a raw-response payload hash. |
+| Local publication history | Fixed family `local_publication_ledger`; source and lineage IDs are derived from the local symbol/value/observed-time assertion. | Hash is over a synthesized local ledger assertion (`symbol|value|observed_at`), not an external provider payload. It is useful for idempotent identity, not independent market evidence. |
+| Binance market ticker | Family is provider name; source ID/content hash are derived from canonical JSON serialization of the raw response payload; lineage uses that hash. | Raw response object is hashed after JSON canonicalization. This is a digest of the parsed JSON object, not transport bytes/headers. |
+| CoinGecko market item | Family is provider name; source ID/content hash are derived from canonical JSON serialization of the individual raw item; lineage uses that hash. | Digest covers the parsed item object; not original wire bytes. `last_updated` is required and used as source timestamp. |
+| Trend signal | Family is supplied source name; source ID is provider item ID when present, otherwise content hash; lineage is content hash. | Hash is supplied by the caller/upstream trend adapter. The local `TrendSignal` validator checks lowercase SHA-256 syntax but does not recompute it from source content. A provider item ID without a hash is allowed; in that case family is the fallback independence boundary. |
+| Module 9 on-chain observation | Family is `observation.provider`; source ID is Module 9 `observation_id`; current adapter supplies no `content_hash` and no `lineage_id`. | `observation_id` is an internal normalized observation identity, not evidence that the original RPC response bytes were retained or hashed. Independence grouping therefore conservatively falls back to provider family. |
+| Module 9 transfer summary | Fixed family `module9_canonical_store`; source ID is `summary_id`; no `content_hash` or `lineage_id` is supplied. | `summary_id` is a SHA-256 of a canonical aggregation fingerprint over normalized transfer/event fields, block hashes, totals, thresholds and time range. It is a derived aggregate fingerprint, not a raw provider payload hash. |
+
+### Contract hardening implemented
+
+- `MarketObservation.validate()` now rejects any non-empty `data_hash` that is not exactly 64 lowercase hexadecimal characters. Empty remains allowed for sources that do not provide a digest.
+- `EvidenceRecord.validate()` now applies the same rule to non-empty `content_hash`. Empty remains allowed; no synthetic raw-payload hash is fabricated for Module 9 observations/summaries.
+- This is format validation only. It does not prove the digest's preimage, origin, source authenticity, or transport-level integrity.
+- Added test-first regressions for malformed digest rejection, absent-hash compatibility, on-chain no-raw-hash behavior, and the Binance exchangeInfo canonical-projection hash distinction.
+- Focused run after these changes: **98 tests passed, 0 failures** across source adapter contracts, evidence verification, announcement importer and event graph. `compileall` and `git diff --check` passed.
+
+### Remaining adapter gaps / next decisions
+
+1. Verify the upstream CMS worker's exact content-hash preimage and retention path before treating announcement hashes as independently verifiable raw-content digests. Do not recompute from body alone until the worker contract is known.
+2. Preserve hash-kind distinctions (raw parsed response, canonical projection, upstream-supplied digest, local assertion fingerprint, aggregate fingerprint, absent) in a future additive provenance contract. Do not overload `source_payload_hashes` with non-raw fingerprints.
+3. Trend sources need a documented producer contract tying `content_hash` to retained source content; otherwise use source-item identity plus source-family fallback and do not assert payload integrity.
+4. On-chain evidence needs an optional provider response digest only if the actual adapter retains the complete canonical provider response or an independently verifiable canonical event payload. Normalized observation IDs and summary IDs must not be relabeled as raw-payload hashes.
+5. No adapter was invoked, no provider request was made, no database was accessed, and no Module 9 provider/runtime code was changed during this audit.
