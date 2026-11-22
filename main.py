@@ -34,6 +34,12 @@ def _open_binance_publish_no_redirect(request, *, timeout: int):
     return opener.open(request, timeout=timeout)
 
 
+# Bound the SQLite database-wide writer fence even if the general HTTP timeout
+# is configured higher. urllib's timeout is a socket inactivity timeout, not
+# a strict end-to-end wall-clock deadline.
+SQLITE_SUBMISSION_GUARD_MAX_SOCKET_TIMEOUT_SECONDS = 15
+
+
 def _read_bounded_binance_response(response, *, max_bytes: int = 1024 * 1024) -> bytes:
     """Bound response allocation after publication submission; overflow is ambiguous."""
     body = response.read(max_bytes + 1)
@@ -1375,13 +1381,16 @@ class Database:
                 )
                 """
             )
-            # Additive ledger migration for operator-audited reconciliation.
+            # Additive ledger migration for authorization binding and operator-audited reconciliation.
             ledger_columns = {
                 row["name"] for row in self.conn.execute(
                     "PRAGMA table_info(publication_attempts)"
                 ).fetchall()
             }
-            for column in ("reconciliation_note", "reconciliation_evidence", "reconciled_by", "reconciled_at"):
+            for column in (
+                "reconciliation_note", "reconciliation_evidence", "reconciled_by",
+                "reconciled_at", "authorization_id",
+            ):
                 if column not in ledger_columns:
                     self.conn.execute(f"ALTER TABLE publication_attempts ADD COLUMN {column} TEXT")
             self.conn.execute(
@@ -3911,7 +3920,7 @@ class PostPublisher:
             raise ValueError("unsupported publication attempt terminal status")
         with self.db.conn:
             attempt = self.db.conn.execute(
-                "SELECT id,status FROM publication_attempts WHERE idempotency_key=?",
+                "SELECT id,status,coin_symbol,authorization_id FROM publication_attempts WHERE idempotency_key=?",
                 (key,),
             ).fetchone()
             if attempt is None:
@@ -3943,27 +3952,41 @@ class PostPublisher:
                 # Legacy/private ledger-only callers may not have initialized the
                 # authorization schema. Normal authorized publishing creates it first.
                 return
-            quota = self.db.conn.execute(
-                "SELECT reservation_id,status FROM publication_quota_reservations WHERE attempt_id=?",
+            quotas = self.db.conn.execute(
+                "SELECT reservation_id,symbol,status,authorization_id,attempt_id "
+                "FROM publication_quota_reservations WHERE attempt_id=?",
                 (attempt["id"],),
-            ).fetchone()
-            if quota is None or quota["status"] == "RELEASED" or quota["status"] == status:
-                return
+            ).fetchall()
+            if len(quotas) != 1:
+                raise RuntimeError("publication attempt must have exactly one bound quota reservation")
+            quota = quotas[0]
+            if (
+                not quota["authorization_id"]
+                or quota["authorization_id"] != attempt["authorization_id"]
+            ):
+                raise RuntimeError("quota reservation authorization identity does not match publication attempt")
+            if (
+                quota["attempt_id"] != attempt["id"]
+                or str(quota["symbol"]).upper() != str(attempt["coin_symbol"]).upper()
+            ):
+                raise RuntimeError("quota reservation identity does not match publication attempt")
             quota_status = str(quota["status"])
-            allowed_quota_sources = {
-                "FAILED_CONFIRMED": {"RESERVED", "SUBMITTING", "PUBLICATION_UNKNOWN"},
-                "PUBLICATION_UNKNOWN": {"SUBMITTING", "PUBLICATION_UNKNOWN"},
-                "PUBLISHED_CONFIRMED": {"SUBMITTING", "PUBLICATION_UNKNOWN"},
-            }
-            if quota_status not in allowed_quota_sources[status]:
-                raise RuntimeError("quota reservation state is inconsistent with publication attempt")
-            quota_updated = self.db.conn.execute(
-                "UPDATE publication_quota_reservations SET status=?, updated_at=? "
-                "WHERE reservation_id=? AND status=?",
-                (status, now, quota["reservation_id"], quota_status),
-            )
-            if quota_updated.rowcount != 1:
-                raise RuntimeError("quota reservation changed during publication finalization")
+            if quota_status != status:
+                allowed_quota_sources = {
+                    "FAILED_CONFIRMED": {"RESERVED", "SUBMITTING", "PUBLICATION_UNKNOWN"},
+                    "PUBLICATION_UNKNOWN": {"SUBMITTING", "PUBLICATION_UNKNOWN"},
+                    "PUBLISHED_CONFIRMED": {"SUBMITTING", "PUBLICATION_UNKNOWN"},
+                }
+                if quota_status not in allowed_quota_sources[status]:
+                    raise RuntimeError("quota reservation state is inconsistent with publication attempt")
+                quota_updated = self.db.conn.execute(
+                    "UPDATE publication_quota_reservations SET status=?, updated_at=? "
+                    "WHERE reservation_id=? AND attempt_id=? AND authorization_id=? AND status=?",
+                    (status, now, quota["reservation_id"], attempt["id"],
+                     attempt["authorization_id"], quota_status),
+                )
+                if quota_updated.rowcount != 1:
+                    raise RuntimeError("quota reservation changed during publication finalization")
 
     def publish(
         self, coin: Dict[str, Any], content: str,
@@ -4153,11 +4176,29 @@ class PostPublisher:
             )
             mark_quota("SUBMITTING")
         except Exception as exc:
-            mark_quota("RELEASED")
-            self._finish_attempt(key, "FAILED_CONFIRMED", error="quota attempt binding failed")
+            try:
+                mark_quota("RELEASED")
+            except Exception as quota_error:
+                LOGGER.error(
+                    "Could not release an unbound quota reservation (%s)",
+                    type(quota_error).__name__,
+                )
+            try:
+                self._finish_attempt(key, "FAILED_CONFIRMED", error="quota attempt binding failed")
+            except Exception as ledger_error:
+                # A missing/mismatched reservation must not be papered over by
+                # finalizing the attempt. Leave it SUBMITTING as a durable fence.
+                LOGGER.critical(
+                    "Quota binding failed and attempt could not be finalized (%s); "
+                    "attempt remains fenced and no request was sent",
+                    type(ledger_error).__name__,
+                )
             return PublishResult(
                 status="FAILED_CONFIRMED",
-                error=f"quota attempt binding failed: {type(exc).__name__}",
+                error=(
+                    f"quota attempt binding failed: {type(exc).__name__}; "
+                    "no request was sent and the attempt remains fenced if finalization failed"
+                ),
             )
         payload = {"contentType": 1, "bodyTextOnly": self._limit_hashtags(content)}
         if images:
@@ -4169,55 +4210,58 @@ class PostPublisher:
         }
 
         try:
-            # Complete every local/persisted authorization check and construct the
-            # request before entering the network-submission section. Any exception
-            # here is a known no-submit outcome, never PUBLICATION_UNKNOWN.
-            try:
-                final_event_reasons = quota_engine.validate_persisted_event_binding(authorization)
-                duplicate_reasons = quota_engine.validate_persisted_duplicate_policy(
-                    authorization, exclude_idempotency_key=key,
-                )
-                if final_event_reasons:
-                    self._finish_attempt(
-                        key, "FAILED_CONFIRMED",
-                        error="event provenance changed before submission: " + ",".join(final_event_reasons),
-                    )
-                    return PublishResult(
-                        status="FAILED_CONFIRMED",
-                        error="event provenance changed before submission: " + ",".join(final_event_reasons),
-                    )
-                if duplicate_reasons:
-                    self._finish_attempt(
-                        key, "FAILED_CONFIRMED",
-                        error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
-                    )
-                    return PublishResult(
-                        status="FAILED_CONFIRMED",
-                        error="persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons),
-                    )
-                request = urllib.request.Request(
-                    self.API_URL,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers=headers,
-                    method="POST",
-                )
-            except Exception as preflight_error:
-                message = (
-                    "Pre-submit authorization failed; no Binance request was sent: "
-                    f"{type(preflight_error).__name__}"
-                )
+            # SQLite has no row-level advisory locks. Hold BEGIN IMMEDIATE from
+            # the final persisted checks through urllib's request dispatch and
+            # response headers. Release it before reading the bounded response
+            # body or doing local persistence so writers are blocked only across
+            # the actual check-to-POST boundary, not response-body processing.
+            preflight_error = None
+            response = None
+            with self.db.conn:
+                self.db.conn.execute("BEGIN IMMEDIATE")
                 try:
-                    self._finish_attempt(key, "FAILED_CONFIRMED", error=message)
+                    final_event_reasons = quota_engine.validate_persisted_event_binding(authorization)
+                    duplicate_reasons = quota_engine.validate_persisted_duplicate_policy(
+                        authorization, exclude_idempotency_key=key,
+                    )
+                    if final_event_reasons:
+                        preflight_error = "event provenance changed before submission: " + ",".join(final_event_reasons)
+                    elif duplicate_reasons:
+                        preflight_error = "persisted duplicate policy changed before submission: " + ",".join(duplicate_reasons)
+                    else:
+                        request = urllib.request.Request(
+                            self.API_URL,
+                            data=json.dumps(payload).encode("utf-8"),
+                            headers=headers,
+                            method="POST",
+                        )
+                except Exception as validation_error:
+                    preflight_error = (
+                        "Pre-submit authorization failed; no Binance request was sent: "
+                        f"{type(validation_error).__name__}"
+                    )
+                if preflight_error is None:
+                    # open() sends the POST and waits for response headers. The
+                    # configured socket timeout constrains connection/header I/O;
+                    # response-body reading happens after the SQLite lock is free.
+                    response = _open_binance_publish_no_redirect(
+                        request,
+                        timeout=min(
+                            self.config.http_timeout_seconds,
+                            SQLITE_SUBMISSION_GUARD_MAX_SOCKET_TIMEOUT_SECONDS,
+                        ),
+                    )
+
+            if preflight_error:
+                try:
+                    self._finish_attempt(key, "FAILED_CONFIRMED", error=preflight_error)
                 except Exception as ledger_error:
                     LOGGER.critical(
                         "Could not persist known pre-submit rejection (%s); attempt remains fenced",
                         type(ledger_error).__name__,
                     )
-                return PublishResult(status="FAILED_CONFIRMED", error=message)
-
-            with _open_binance_publish_no_redirect(
-                request, timeout=self.config.http_timeout_seconds,
-            ) as response:
+                return PublishResult(status="FAILED_CONFIRMED", error=preflight_error)
+            with response:
                 http_status = response.status
                 body = _read_bounded_binance_response(response).decode("utf-8", errors="replace")
             parsed = json.loads(body)

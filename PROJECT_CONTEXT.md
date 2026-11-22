@@ -1,3 +1,43 @@
+# LATEST AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-22 (Registry hash semantics / opportunity schema v4)
+
+This is the current continuation checkpoint. Earlier entries remain historical; do not repeat completed work.
+
+## Exact repository state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Worktree: `/tmp/binance-w2e-continuation`; branch: `work/module9-continuation-local`.
+- HEAD before this uncommitted work: `d2e0ca4b96a33c500548f4726a0feb40430b532b`.
+- Existing remote target: `layer-1/module9-onchain-continuation`; existing PR #14 remains the only target, open/draft/unmerged. Do not create a duplicate PR, merge, deploy, or work on `main`.
+- Current changes are uncommitted in `layer1/evidence_verification.py`, `layer1/opportunity.py`, `layer1/publication_postgres.py`, `tests/test_evidence_verification.py`, and `tests/test_opportunity_registry_resolution.py`, plus this documentation update. No commit or push has been made.
+
+## Completed in this continuation
+- Added `EvidenceRecord.content_hash_kind`; it is bound in new ClaimRegistry schema-v2 payloads and per-source provenance but excluded from the historical `evidence_id` calculation. The enclosing registry digest binds it.
+- Preserved ClaimRegistry schema-v1 loading for historical payloads that do not contain the new field.
+- Classified audited hash producers: Binance CMS normalized payload SHA-256 (not transport bytes), Binance Spot exchangeInfo selected-projection fingerprint, local publication assertion fingerprint, and canonical parsed provider JSON for the relevant market/trend adapters. Unverified trend hash semantics remain `UNSPECIFIED`.
+- Module 9 observation and transfer-summary adapters still provide no content hash; no synthetic hash is created.
+- Added opportunity input schema v4 with per-evidence `{evidence_id, sha256, kind}` metadata resolved against the exact digest-verified registry. V4 rejects unclassified non-empty registry hashes and tampered/mismatched metadata.
+- Preserved opportunity v1/v2/v3 paths. Updated SQLite and PostgreSQL decision persistence/read validation branches to resolve v4 registry bindings.
+- Updated `MODULE14_SOURCE_REFERENCE_RESOLUTION_AUDIT.md` and `MODULE14_FACTOR_PROVENANCE_IMPLEMENTATION_STATUS.md` with this checkpoint.
+
+## Additional PostgreSQL v4 coverage
+- Added a DSN-gated PostgreSQL v4 save/load test including JSONB hash-kind tamper rejection. It is skipped locally because `TEST_POSTGRES_DSN` is not configured; no database was accessed.
+- Latest focused result after this test: **105 passed, 0 failed, 8 skipped**. `compileall` and `git diff --check`: PASS.
+
+## Verification
+- TDD RED: new tests failed before the new hash-kind field existed.
+- Focused suites: **105 passed, 0 failed, 8 skipped**.
+- `python -m compileall -q layer1 tests`: PASS.
+- `git diff --check`: PASS.
+- Full local discovery: **620 tests, 526 passed, 60 skipped, 34 errors**. Errors are missing environment dependencies (`Pillow/PIL` and `psycopg`); this is not a full-suite pass. `TEST_POSTGRES_DSN` is not configured, so PostgreSQL integration is not verified.
+
+## Safety and remaining work
+- No dependencies installed; no environment or secrets changed.
+- No production/Neon database access, provider API calls, live DeepSeek/Cloudflare inference, media upload, Binance Square post, Pinterest Pin, publisher/gateway change, deploy, merge or runtime activation.
+- No scoring weights, thresholds or providers were selected or enabled. The approved evidence-based scoring-policy research and factor-specific validation remain outstanding.
+- Next: audit all hash producers for coverage/unknown kinds; add explicit v4 tests for legacy registry v1 and PostgreSQL transaction/fresh-process paths; run isolated PostgreSQL acceptance only when the approved disposable test DSN is available; update docs/tests; then commit and push to the existing continuation branch and verify remote SHA. Do not push until the full diff is reviewed and tests are complete.
+- B-SCORE-01 remains OPEN. Module 14 and Module 21 production acceptance remain partial. Overall status: **PARTIAL — NOT PRODUCTION-READY**.
+
+---
+
 # LATEST AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-21 (Fail-closed Layer 1 PostgreSQL outages)
 
 This entry records a second scheduled-runtime persistence correction. Earlier entries remain historical.
@@ -2802,82 +2842,82 @@ Interpretation:
 ### Scope and authority
 
 - This remains **one Binance Square Write-to-Earn Agent project**, not separate projects. Development, testing and deployment have been distributed across stacked GitHub branches/PRs, several local worktrees, the ChatGPT Library, Neon test branches and a Render CMS worker.
-- Canonical repository: \`shehrozali6465372-ctrl/Binance-bot\`.
-- Default branch \`main\` was at \`5c94cca52d80a9786295772c905ae1f3cdc71159\` during this audit. \`PROJECT_CONTEXT.md\` is absent from \`main\` (GitHub contents API returned 404); the active project context is on the open PR #14 head branch, not the default branch.
-- PR #14 was OPEN / DRAFT / UNMERGED at pre-audit head \`28353d311f44b448357a92aab976d7477445d536\` (93 commits, 65 changed files). This audit supersedes the older tail note below that still calls \`1362947d5a1cda645fb2f7b58936f22252369b6a\` the latest branch commit.
+- Canonical repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Default branch `main` was at `5c94cca52d80a9786295772c905ae1f3cdc71159` during this audit. `PROJECT_CONTEXT.md` is absent from `main` (GitHub contents API returned 404); the active project context is on the open PR #14 head branch, not the default branch.
+- PR #14 was OPEN / DRAFT / UNMERGED at pre-audit head `28353d311f44b448357a92aab976d7477445d536` (93 commits, 65 changed files). This audit supersedes the older tail note below that still calls `1362947d5a1cda645fb2f7b58936f22252369b6a` the latest branch commit.
 - The locked architecture is a design contract, version 1.0 dated 2026-11-09. It defines 21 logical modules in one modular system; it does not describe 21 microservices and does not claim that all modules are implemented or production-ready.
-- Current PR #14 files include \`PROJECT_CONTEXT.md\`, \`Binance_Square_W2E_20x_LOCKED_Architecture.md\`, and \`MODULES_11_21_GAP_REGISTER.md\`. The current GitHub architecture blob SHA is \`8991f44b154dbb76bc86950d5a91b84541b54448\` (68,588 characters in the fetched file). The gap register's top status says cross-cutting blocker #1 has implementation and isolated PostgreSQL acceptance verified, while live operational cutover remains pending; its documented acceptance batch is 44 passed.
+- Current PR #14 files include `PROJECT_CONTEXT.md`, `Binance_Square_W2E_20x_LOCKED_Architecture.md`, and `MODULES_11_21_GAP_REGISTER.md`. The current GitHub architecture blob SHA is `8991f44b154dbb76bc86950d5a91b84541b54448` (68,588 characters in the fetched file). The gap register's top status says cross-cutting blocker #1 has implementation and isolated PostgreSQL acceptance verified, while live operational cutover remains pending; its documented acceptance batch is 44 passed.
 
 ### GitHub pull-request and branch map
 
 The repository had 14 PRs and 17 branches. PRs #4 and #5 are merged; the other 12 PRs are open. Current PR states and branch relationships:
 
 - #1 — Phase 1 publishing safety foundation: OPEN / DRAFT.
-- #2 — Isolated Binance CMS announcement listener: OPEN / DRAFT; base \`layer-1/completion-hardening\`, head \`feature/binance-cms-announcement-worker\`, SHA \`55ff3e6a409a6f2b7b944c43772140b788556223\`.
-- #3 — Isolated Binance CMS worker and scheduled ingestion: OPEN / DRAFT; base \`main\`, head \`integration/binance-cms-worker-main\`, SHA \`47e85384f2eeba2ac5bb4f2fb2cfa26ec4dc6558\`.
+- #2 — Isolated Binance CMS announcement listener: OPEN / DRAFT; base `layer-1/completion-hardening`, head `feature/binance-cms-announcement-worker`, SHA `55ff3e6a409a6f2b7b944c43772140b788556223`.
+- #3 — Isolated Binance CMS worker and scheduled ingestion: OPEN / DRAFT; base `main`, head `integration/binance-cms-worker-main`, SHA `47e85384f2eeba2ac5bb4f2fb2cfa26ec4dc6558`.
 - #4 — Manual CMS smoke dispatch: MERGED.
 - #5 — Neon worker TLS mode: MERGED.
-- #6 — CMS WebSocket startup error race: OPEN / DRAFT; base \`integration/binance-cms-worker-main\`, head \`fix/cms-websocket-startup-error-race\`, SHA \`1608f9f8130cc2aa7ec1142788e42c8df84e1c6c\`.
+- #6 — CMS WebSocket startup error race: OPEN / DRAFT; base `integration/binance-cms-worker-main`, head `fix/cms-websocket-startup-error-race`, SHA `1608f9f8130cc2aa7ec1142788e42c8df84e1c6c`.
 - #7 — Module 1 orchestration hardening: OPEN.
 - #8 — Module 2 market-data hardening: OPEN.
 - #9 — Module 3 Binance Spot eligibility: OPEN.
 - #10 — Module 4 announcement intelligence: OPEN.
 - #11 — Modules 5–6 candidate/trend intelligence: OPEN.
-- #12 — Module 8 market analysis: OPEN; head SHA \`f7e6fc511e146b6bfb6f25afb0009c369d8afd4a\`.
-- #13 — Module 9 on-chain foundation: OPEN / DRAFT; head SHA \`3afed37192b66c57aba2f17ba841a84a60227cda\`.
+- #12 — Module 8 market analysis: OPEN; head SHA `f7e6fc511e146b6bfb6f25afb0009c369d8afd4a`.
+- #13 — Module 9 on-chain foundation: OPEN / DRAFT; head SHA `3afed37192b66c57aba2f17ba841a84a60227cda`.
 - #14 — Modules 11–21 continuation: OPEN / DRAFT; base is PR #13's branch.
 
 PRs #7–#14 form a stacked Layer 1 development chain. Do not treat them as independent products or merge them out of order. PRs #2, #3 and #6 are the overlapping CMS worker workstream and must be reconciled separately.
 
 ### CMS worker duplication and deployed implementation
 
-- PR #2 and PR #3 touch 17 identical paths. Of those, 11 files have identical Git blob SHAs; six have different content: the two workflow files, worker README, \`announcement-worker/src/worker.js\`, scheduled-workflow tests and worker-lifecycle tests. They are parallel versions of the same CMS worker capability, not two separate products.
-- PR #6 is a follow-up to PR #3 and is 27 commits ahead of PR #3. Its startup-race fix attaches transport error/open/close listeners before awaiting the transport connection. It switches from the high-level \`Cms\` connection path to \`CmsWebsocketStreams\` / \`WebsocketStreamsBase\`, and removes the worker-managed ping/pong timers in favor of the SDK's signed-stream keepalive. This is a material transport/heartbeat change, not a trivial patch; do not merge PR #6 wholesale into PR #2 without reviewing the SDK contract and regression tests.
+- PR #2 and PR #3 touch 17 identical paths. Of those, 11 files have identical Git blob SHAs; six have different content: the two workflow files, worker README, `announcement-worker/src/worker.js`, scheduled-workflow tests and worker-lifecycle tests. They are parallel versions of the same CMS worker capability, not two separate products.
+- PR #6 is a follow-up to PR #3 and is 27 commits ahead of PR #3. Its startup-race fix attaches transport error/open/close listeners before awaiting the transport connection. It switches from the high-level `Cms` connection path to `CmsWebsocketStreams` / `WebsocketStreamsBase`, and removes the worker-managed ping/pong timers in favor of the SDK's signed-stream keepalive. This is a material transport/heartbeat change, not a trivial patch; do not merge PR #6 wholesale into PR #2 without reviewing the SDK contract and regression tests.
 - PR #2 and PR #3 have diverged from a common base; PR #2 is the more integrated feature branch and includes the Python importer and scheduled-agent wiring. PR #2 is the CMS branch deployed to Render.
-- Render service \`binance-cms-announcement-worker\` is a free-plan Node Web Service on \`feature/binance-cms-announcement-worker\`. Its latest successful deployment during this audit was commit \`55ff3e6a409a6f2b7b944c43772140b788556223\` (deployment \`dep-dbtp6nralhtc73fho520\`, 2026-11-16 23:36 UTC). This matches PR #2's current head. It is a CMS ingestion worker, not a Binance Square publisher.
-- **Deployed-branch code risk:** PR #2's \`announcement-worker/src/worker.js\` awaits \`client.websocketStreams.connect()\` before registering \`connection.on("error")\` (connect at line 180; error listener at line 276 in the fetched PR #2 file). PR #6's tests and fix target the early WebSocket error-listener race. The deployed PR #2 code therefore still has the same vulnerable listener ordering. This is a code-level risk, not proof that the live service has crashed. Reconcile/port the narrow fix after review; preserve the existing service and do not change deployment without approval.
+- Render service `binance-cms-announcement-worker` is a free-plan Node Web Service on `feature/binance-cms-announcement-worker`. Its latest successful deployment during this audit was commit `55ff3e6a409a6f2b7b944c43772140b788556223` (deployment `dep-dbtp6nralhtc73fho520`, 2026-11-16 23:36 UTC). This matches PR #2's current head. It is a CMS ingestion worker, not a Binance Square publisher.
+- **Deployed-branch code risk:** PR #2's `announcement-worker/src/worker.js` awaits `client.websocketStreams.connect()` before registering `connection.on("error")` (connect at line 180; error listener at line 276 in the fetched PR #2 file). PR #6's tests and fix target the early WebSocket error-listener race. The deployed PR #2 code therefore still has the same vulnerable listener ordering. This is a code-level risk, not proof that the live service has crashed. Reconcile/port the narrow fix after review; preserve the existing service and do not change deployment without approval.
 
 ### Local worktree inventory — preserve all existing state
 
-Eight local directories are checkouts of the canonical \`Binance-bot\` repository; one additional directory is a different repository whose relationship is unverified:
+Eight local directories are checkouts of the canonical `Binance-bot` repository; one additional directory is a different repository whose relationship is unverified:
 
-1. \`/tmp/binance-blocker1-fix\` — clean; branch \`layer-1/module9-onchain-continuation\`; HEAD \`28353d311f44b448357a92aab976d7477445d536\`. This was the clean pre-audit mirror of PR #14 at HEAD 28353d3; it has not been synchronized since the pre-audit checkout; treat it as a historical snapshot, not the current PR #14 mirror. Its worktree remains clean.
-2. \`/tmp/binance-deepseek-verify\` — branch \`layer-1/module9-onchain-continuation\`; HEAD \`9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9\`; 16 modified tracked files plus untracked \`tests/test_git_sync.py\`. Contains local, uncommitted follow-up changes for publication status mapping, publisher default-off gating, duplicate-policy recomputation, lifecycle transition validation, image-byte hash revalidation and token-safe Git push/retry. These changes are not in current PR #14 and must not be overwritten or assumed accepted.
-3. \`/tmp/binance-continue-85351\` — detached HEAD \`22391cbed66f6458bf33f8accd68837cdbee6b07\`; four modified files. Its modified evidence-verification source/test files are byte-identical to current PR #14; its local context/gap-register changes remain divergent and must be preserved.
-4. \`/tmp/binance-layer1-audit\` — branch \`layer-1/module9-onchain-intelligence\`; HEAD \`3afed37192b66c57aba2f17ba841a84a60227cda\`; 15 modified tracked files and 10 untracked paths, including a pre-existing \`.venv/\`. Local-only work adds worker lease/lifecycle/store-adapter code, a PostgreSQL migration, tests and a Module 9 integration workflow. These changes are not on GitHub PR #13.
-5. \`/tmp/binance-pr14-acceptance\` — detached HEAD \`a4677d705b313e04b54e479cd2871ce1609d717f\`; clean historical snapshot, 27 commits behind current PR #14.
-6. \`/tmp/binance-runtime-fix\` — detached HEAD \`4dd006834e0d265411119fa276ff2808d0ab701f\`; clean historical snapshot, 55 commits behind current PR #14.
-7. \`/tmp/binance-bot-check\` — feature-branch checkout at \`d47466f3aa10c7695929a4be18b3dad3367ef900\`; it is 39 commits behind PR #2's current head \`55ff3e6a409a6f2b7b944c43772140b788556223\`. Its local remote-tracking ref is stale. It has untracked \`.venv/\` and \`announcement-worker/node_modules/\`; preserve both.
-8. \`/tmp/Binance-bot-gh-review-loop\` — branch \`integration/binance-cms-worker-main\`; HEAD \`47e85384f2eeba2ac5bb4f2fb2cfa26ec4dc6558\`, matching PR #3; untracked \`announcement-worker/node_modules/\`; preserve.
-9. \`/tmp/binance-square-agent\` — different origin, \`stephen20250410/binance-square-agent\`; local \`main\` is two commits ahead of its origin and has an untracked \`README.live-poster.md\`. Its relationship to canonical \`Binance-bot\` is not established. Do not import or merge it as canonical project code without provenance review.
+1. `/tmp/binance-blocker1-fix` — clean; branch `layer-1/module9-onchain-continuation`; HEAD `28353d311f44b448357a92aab976d7477445d536`. This was the clean pre-audit mirror of PR #14 at HEAD 28353d3; it has not been synchronized since the pre-audit checkout; treat it as a historical snapshot, not the current PR #14 mirror. Its worktree remains clean.
+2. `/tmp/binance-deepseek-verify` — branch `layer-1/module9-onchain-continuation`; HEAD `9c02c85124a32e81dbdbf4d96aa76d37c20b0bc9`; 16 modified tracked files plus untracked `tests/test_git_sync.py`. Contains local, uncommitted follow-up changes for publication status mapping, publisher default-off gating, duplicate-policy recomputation, lifecycle transition validation, image-byte hash revalidation and token-safe Git push/retry. These changes are not in current PR #14 and must not be overwritten or assumed accepted.
+3. `/tmp/binance-continue-85351` — detached HEAD `22391cbed66f6458bf33f8accd68837cdbee6b07`; four modified files. Its modified evidence-verification source/test files are byte-identical to current PR #14; its local context/gap-register changes remain divergent and must be preserved.
+4. `/tmp/binance-layer1-audit` — branch `layer-1/module9-onchain-intelligence`; HEAD `3afed37192b66c57aba2f17ba841a84a60227cda`; 15 modified tracked files and 10 untracked paths, including a pre-existing `.venv/`. Local-only work adds worker lease/lifecycle/store-adapter code, a PostgreSQL migration, tests and a Module 9 integration workflow. These changes are not on GitHub PR #13.
+5. `/tmp/binance-pr14-acceptance` — detached HEAD `a4677d705b313e04b54e479cd2871ce1609d717f`; clean historical snapshot, 27 commits behind current PR #14.
+6. `/tmp/binance-runtime-fix` — detached HEAD `4dd006834e0d265411119fa276ff2808d0ab701f`; clean historical snapshot, 55 commits behind current PR #14.
+7. `/tmp/binance-bot-check` — feature-branch checkout at `d47466f3aa10c7695929a4be18b3dad3367ef900`; it is 39 commits behind PR #2's current head `55ff3e6a409a6f2b7b944c43772140b788556223`. Its local remote-tracking ref is stale. It has untracked `.venv/` and `announcement-worker/node_modules/`; preserve both.
+8. `/tmp/Binance-bot-gh-review-loop` — branch `integration/binance-cms-worker-main`; HEAD `47e85384f2eeba2ac5bb4f2fb2cfa26ec4dc6558`, matching PR #3; untracked `announcement-worker/node_modules/`; preserve.
+9. `/tmp/binance-square-agent` — different origin, `stephen20250410/binance-square-agent`; local `main` is two commits ahead of its origin and has an untracked `README.live-poster.md`. Its relationship to canonical `Binance-bot` is not established. Do not import or merge it as canonical project code without provenance review.
 
-The detached PR #14 snapshots are ancestors of the current PR #14 head, not independent project branches. The local dirty changes in \`binance-deepseek-verify\` and \`binance-layer1-audit\` are separate uncommitted work and must be preserved. No reset, clean, stash, checkout, force-push or worktree deletion was performed.
+The detached PR #14 snapshots are ancestors of the current PR #14 head, not independent project branches. The local dirty changes in `binance-deepseek-verify` and `binance-layer1-audit` are separate uncommitted work and must be preserved. No reset, clean, stash, checkout, force-push or worktree deletion was performed.
 
 ### Local verification performed during this audit
 
-- In \`/tmp/binance-deepseek-verify\`, the focused regression batch completed **236 tests, 0 failures, 24 skipped**. The skipped cases require a PostgreSQL test DSN. \`compileall\` and \`git diff --check\` passed. The run explicitly unset PostgreSQL DSNs and provider/publisher credentials; it did not contact providers, databases or Binance publishing endpoints. This is local follow-up evidence only, not PR #14 acceptance.
-- In \`/tmp/binance-layer1-audit\`, the focused Module 9 worker/lease/lifecycle batch completed **95 tests, 0 failures, 28 skipped** with PostgreSQL DSN and provider credentials unset. \`compileall\` and \`git diff --check\` passed. The skipped tests require PostgreSQL integration configuration. The local Module 9 document records an earlier 377-test PostgreSQL-enabled run on 2026-11-16; that historical run was not repeated in this audit.
-- The Module 9 local changes include a process-local \`OnChainWorkerRunner\`, durable scoped lease/fencing code and shared storage adapters. The current runtime still accepts on-chain aggregation as injected input; it does not construct/start the worker fleet or runner. Provider credentials and approved monitored-account seeds remain absent. Do not describe Module 9 as production-ready or runtime-integrated.
+- In `/tmp/binance-deepseek-verify`, the focused regression batch completed **236 tests, 0 failures, 24 skipped**. The skipped cases require a PostgreSQL test DSN. `compileall` and `git diff --check` passed. The run explicitly unset PostgreSQL DSNs and provider/publisher credentials; it did not contact providers, databases or Binance publishing endpoints. This is local follow-up evidence only, not PR #14 acceptance.
+- In `/tmp/binance-layer1-audit`, the focused Module 9 worker/lease/lifecycle batch completed **95 tests, 0 failures, 28 skipped** with PostgreSQL DSN and provider credentials unset. `compileall` and `git diff --check` passed. The skipped tests require PostgreSQL integration configuration. The local Module 9 document records an earlier 377-test PostgreSQL-enabled run on 2026-11-16; that historical run was not repeated in this audit.
+- The Module 9 local changes include a process-local `OnChainWorkerRunner`, durable scoped lease/fencing code and shared storage adapters. The current runtime still accepts on-chain aggregation as injected input; it does not construct/start the worker fleet or runner. Provider credentials and approved monitored-account seeds remain absent. Do not describe Module 9 as production-ready or runtime-integrated.
 
 ### Documentation source reconciliation
 
-- Before the 2026-11-18 inventory append, GitHub \`PROJECT_CONTEXT.md\` on PR #14 was 2,487 lines / 367,599 characters; the inventory, SDK addendum and subsequent corrections have since extended the file; do not use the pre-audit count as the current size. Its previous tail still named \`1362947d...\` as the latest commit; this 2026-11-18 inventory supersedes that statement.
-- The Library \`Binance_Square_W2E_Agent_Master_Context.md\` version 28 is a historical 2026-11-09 snapshot, not the current continuation record.
-- The Library contains eight byte-identical copies of the locked architecture document. They are identical to one another but **not equal to the current GitHub architecture file**: Library copies are 62,800 characters; the current GitHub version is 68,588 characters with blob SHA \`8991f44b154dbb76bc86950d5a91b84541b54448\`. Treat all eight Library copies as stale snapshots; do not use them to override the current GitHub architecture and do not delete them during this audit.
-- The Library's 2026-11-16 production-blocker register is historical and is not the same file/scope as the current GitHub \`MODULES_11_21_GAP_REGISTER.md\`. The latter's current top entry records blocker #1 as isolated PostgreSQL acceptance verified, with live operational cutover still pending.
-- GitHub \`ONCHAIN_INTELLIGENCE.md\` on PR #13 is the checked-in Module 9 document. The local Module 9 worktree's version is 558 lines and contains a further 87-line local-only addendum; that addendum is not on PR #13.
+- Before the 2026-11-18 inventory append, GitHub `PROJECT_CONTEXT.md` on PR #14 was 2,487 lines / 367,599 characters; the inventory, SDK addendum and subsequent corrections have since extended the file; do not use the pre-audit count as the current size. Its previous tail still named `1362947d...` as the latest commit; this 2026-11-18 inventory supersedes that statement.
+- The Library `Binance_Square_W2E_Agent_Master_Context.md` version 28 is a historical 2026-11-09 snapshot, not the current continuation record.
+- The Library contains eight byte-identical copies of the locked architecture document. They are identical to one another but **not equal to the current GitHub architecture file**: Library copies are 62,800 characters; the current GitHub version is 68,588 characters with blob SHA `8991f44b154dbb76bc86950d5a91b84541b54448`. Treat all eight Library copies as stale snapshots; do not use them to override the current GitHub architecture and do not delete them during this audit.
+- The Library's 2026-11-16 production-blocker register is historical and is not the same file/scope as the current GitHub `MODULES_11_21_GAP_REGISTER.md`. The latter's current top entry records blocker #1 as isolated PostgreSQL acceptance verified, with live operational cutover still pending.
+- GitHub `ONCHAIN_INTELLIGENCE.md` on PR #13 is the checked-in Module 9 document. The local Module 9 worktree's version is 558 lines and contains a further 87-line local-only addendum; that addendum is not on PR #13.
 
 ### Neon and production boundary
 
-- The prior read-only Neon inventory found only the \`Binance-bot-staging\` project, with staging and disposable Module 9 test branches/databases. No dedicated production Neon project/branch was identified. Do not relabel or promote any staging/disposable branch as production.
+- The prior read-only Neon inventory found only the `Binance-bot-staging` project, with staging and disposable Module 9 test branches/databases. No dedicated production Neon project/branch was identified. Do not relabel or promote any staging/disposable branch as production.
 - No Neon writes, promotions, credential reads, production schema changes, provider RPC calls, publisher activation or real Binance Square publication occurred during this audit.
-- Keep \`DRY_RUN=1\`; keep the production publisher disabled. Do not merge, deploy, change schedules/credentials, provision paid infrastructure or modify production resources without separate explicit approval.
+- Keep `DRY_RUN=1`; keep the production publisher disabled. Do not merge, deploy, change schedules/credentials, provision paid infrastructure or modify production resources without separate explicit approval.
 
 ### Exact continuation order
 
 1. Continue the single-project implementation registry from this inventory. Compare each source location against the current PR #14 / PR #13 code before deciding whether it is duplicate, superseded or unique.
 2. Reconcile the PR #6 WebSocket startup-race fix with deployed PR #2. Review the SDK transport/keepalive contract and port only the necessary tested behavior; do not merge PR #6 wholesale.
-3. Review the uncommitted \`binance-deepseek-verify\` follow-up patch against current PR #14, preserve all local changes, and only integrate after a complete diff/test review.
+3. Review the uncommitted `binance-deepseek-verify` follow-up patch against current PR #14, preserve all local changes, and only integrate after a complete diff/test review.
 4. Review the uncommitted Module 9 worker lease/lifecycle implementation, complete its PostgreSQL acceptance, and design runtime wiring only after the storage/lease contracts are accepted. Do not duplicate the existing worker implementations.
 5. Continue the known Layer 1 gaps from the 2026-11-16 review: Module 2 real Binance ticker acquisition; evidence-based Module 7 scoring; approved opportunity factors before Modules 14/16; structured DeepSeek ranking; policy-backed Module 18 analysis lane; independent OCR/vision checks for Module 20; and remaining Module 21 publication/recovery hardening.
 6. Keep all tests dry-run/mocked unless a separately approved isolated test target is explicitly configured. Never publish a real Binance Square post as a test.
@@ -2885,20 +2925,20 @@ The detached PR #14 snapshots are ancestors of the current PR #14 head, not inde
 
 ### CMS SDK keepalive implementation cross-check — 2026-11-18
 
-- Inspected the installed, lockfile-pinned \`@binance/cms@1.0.3\` and \`@binance/common@2.5.3\` package source in the local PR #3 CMS checkout. This was package-source inspection only; no live Binance connection was made.
-- The high-level \`Cms\` SDK path constructs a \`WebsocketStreamsBase\`, sets \`signedStreams = true\`, awaits \`websocketBase.connect()\`, and only then returns its \`WebsocketStreamsConnection\` wrapper. That confirms why an application cannot attach wrapper-level transport listeners before the handshake when it uses the high-level \`Cms.connect()\` call.
-- The pinned SDK itself schedules an empty WebSocket PING every 30 seconds for signed streams in \`WebsocketStreamsBase.onOpen()\`; the timer is bound to the socket and cleared during cleanup, and the open handler schedules it again after reconnect.
-- PR #2's worker also configures a 30-second application heartbeat and calls \`connection.pingServer()\` while waiting for PONG. Therefore the deployed PR #2 implementation runs a redundant application-level heartbeat alongside the SDK's own signed-stream keepalive. This is a code-level redundancy; no failure or provider-side rejection was observed in this audit.
-- PR #6 removes the application-level ping/pong timer and relies on the SDK keepalive, while attaching transport listeners before the initial handshake. That design is consistent with the inspected pinned SDK source. Before porting it, add explicit SDK contract assertions for the low-level \`CmsWebsocketStreams.WebsocketStreamsConnection\` and \`WebsocketStreamsBase\` exports and keepalive/reconnect behavior; PR #6's current \`sdk-contract.test.js\` directly asserts the high-level \`Cms\` constructor and URL but does not explicitly assert those low-level exports.
+- Inspected the installed, lockfile-pinned `@binance/cms@1.0.3` and `@binance/common@2.5.3` package source in the local PR #3 CMS checkout. This was package-source inspection only; no live Binance connection was made.
+- The high-level `Cms` SDK path constructs a `WebsocketStreamsBase`, sets `signedStreams = true`, awaits `websocketBase.connect()`, and only then returns its `WebsocketStreamsConnection` wrapper. That confirms why an application cannot attach wrapper-level transport listeners before the handshake when it uses the high-level `Cms.connect()` call.
+- The pinned SDK itself schedules an empty WebSocket PING every 30 seconds for signed streams in `WebsocketStreamsBase.onOpen()`; the timer is bound to the socket and cleared during cleanup, and the open handler schedules it again after reconnect.
+- PR #2's worker also configures a 30-second application heartbeat and calls `connection.pingServer()` while waiting for PONG. Therefore the deployed PR #2 implementation runs a redundant application-level heartbeat alongside the SDK's own signed-stream keepalive. This is a code-level redundancy; no failure or provider-side rejection was observed in this audit.
+- PR #6 removes the application-level ping/pong timer and relies on the SDK keepalive, while attaching transport listeners before the initial handshake. That design is consistent with the inspected pinned SDK source. Before porting it, add explicit SDK contract assertions for the low-level `CmsWebsocketStreams.WebsocketStreamsConnection` and `WebsocketStreamsBase` exports and keepalive/reconnect behavior; PR #6's current `sdk-contract.test.js` directly asserts the high-level `Cms` constructor and URL but does not explicitly assert those low-level exports.
 - Recommended reconciliation: keep one keepalive owner (the pinned SDK), retain explicit transport health/degradation state, and register transport listeners before starting the handshake. Do not merge the PR #6 branch wholesale into deployed PR #2; port and test the minimal contract-compatible change on the deployed branch only after approval.
 
 
 ### Post-audit context verification
 
-- The 2026-11-18 audit appended the cross-location inventory, CMS SDK keepalive/startup-race addendum and verification corrections to this \`PROJECT_CONTEXT.md\` on the PR #14 branch. The prior documentation-only commits for this audit were \`44d7cd96b0392daf582b82a390fb3259e92f6443\`, \`b8f76464d3fb97d799f8ab07d2087b5fb08c170a\`, and \`ce470b118d57288823e810bd21bf07695e36ff72\`.
+- The 2026-11-18 audit appended the cross-location inventory, CMS SDK keepalive/startup-race addendum and verification corrections to this `PROJECT_CONTEXT.md` on the PR #14 branch. The prior documentation-only commits for this audit were `44d7cd96b0392daf582b82a390fb3259e92f6443`, `b8f76464d3fb97d799f8ab07d2087b5fb08c170a`, and `ce470b118d57288823e810bd21bf07695e36ff72`.
 - PR #14 remains OPEN / DRAFT / UNMERGED. Verify the live PR head through GitHub metadata before any future update.
-- \`/tmp/binance-blocker1-fix\` remains clean at the pre-audit SHA \`28353d311f44b448357a92aab976d7477445d536\`; it was not pulled or modified and is a historical snapshot, not the current GitHub PR #14 head.
-- These updates changed only \`PROJECT_CONTEXT.md\`. No application source, workflow, database, credential, schedule or deployment was changed.
+- `/tmp/binance-blocker1-fix` remains clean at the pre-audit SHA `28353d311f44b448357a92aab976d7477445d536`; it was not pulled or modified and is a historical snapshot, not the current GitHub PR #14 head.
+- These updates changed only `PROJECT_CONTEXT.md`. No application source, workflow, database, credential, schedule or deployment was changed.
 
 
 ## FOUR-PLATFORM CANONICAL MASTER MAP — 2026-11-18
@@ -4332,3 +4372,155 @@ The most relevant candidate capabilities identified from the directory are:
 - TDD RED reproduced independent-source count 2 for two labels over one scanner. GREEN normalizes both to `source_family=market_scanner_derived`, types them as `MARKET`, and keeps research trend rendering/claim linkage working for both MARKET and SOCIAL trend records.
 - Latest verification: 99 focused adapter/evidence/importer/event-graph tests passed; 14 additional research-package tests passed, excluding one test blocked by missing PIL via `main.py`. Compileall and diff-check passed.
 - This is a conservative dependency-grouping correction, not a source independence/authenticity proof or scoring approval. Runtime remains `factors=None`, `policy=None`; B-SCORE-01 OPEN.
+
+
+## 2026-11-22 — Binance Square official Posting OpenAPI verified; prior blanket block withdrawn
+- Corrected the earlier incomplete interpretation in BINANCE_SQUARE_AUTOMATION_COMPLIANCE_REVIEW_2026-11-22.md. Binance officially documents a dedicated Square Posting OpenAPI key and its own OpenClaw-compatible square-post skill/tutorial. The documented API path is supported programmatic publishing; do not characterize all automation as prohibited.
+- One posting key per creator account; posting-only (no asset/trading scope); default documented cap 100 successful posts/day/key; official skill also documents 400 uploads/day.
+- Current retrieved skill supports text, up to 4-image posts, article with one cover, and video with generated cover. It only creates new posts; no scheduling/drafts, reading/listing, editing/deleting, comments/likes, or profile management.
+- Engineering must use the official Binance Skills Hub skill/API contract, never undocumented/browser automation. Enforce daily successful-post and upload counters, idempotent unknown-outcome recovery, secret-safe key handling, content quality and anti-spam controls.
+- No publisher/gateway/runtime/account/credentials/database/schedule changes; no key accessed and no live post made. Integration and production acceptance remain pending.
+- Sources: https://www.binance.com/en/skills/detail/binance/square-post ; https://www.binance.com/en/square/post/298569766519442 ; https://github.com/binance/binance-skills-hub/tree/main/skills/binance/square-post
+
+
+## 2026-11-22 — Existing publisher vs official Binance Square skill compatibility audit
+- Read-only inspection of `main.py::PostPublisher` confirms the existing project currently posts to `/bapi/composite/v1/public/pgc/openApi/content/add` with `X-Square-OpenAPI-Key`; it hand-builds requests rather than invoking the current official maintained `square-post` scripts. The endpoint/header match the documented OpenAPI operation but do not prove full skill contract compatibility.
+- Current publisher always sends `contentType=1` / `bodyTextOnly`, optionally passes `imageList` directly, and does not implement the official skill's upload/polling/media cover/video flows. Media/article/video compatibility is NOT VERIFIED.
+- Current publisher transforms content via `_limit_hashtags(content)`; official skill requires exact user text preservation. Exact-content preservation needs review. Current config name is `SQUARE_API_KEY`, whereas official skill expects `BINANCE_SQUARE_OPENAPI_KEY` or its config file; deployment secret mapping was not inspected.
+- Current publisher treats HTTP 5xx/504 as `PUBLICATION_UNKNOWN` and blocks blind retry. Official skill describes a special `/content/add` 504 case as successful but with unavailable ID/link. Do not downgrade the project's safe unknown state or claim a confirmed ID; design an evidence-backed durable reconciliation mapping first.
+- Do not modify publisher/gateway, install skill, inspect secret values, change deployment config, or publish live during this audit. Any future integration must preserve current authorization, durable attempt/quota, idempotency, secret safety and no-blind-retry controls, and invoke the official scripts behind the single gateway only after owner approval.
+- Status: official API/skill path verified; existing project publisher compatibility is **NOT VERIFIED / GAP IDENTIFIED**. No code/runtime change.
+- Official source: https://github.com/binance/binance-skills-hub/blob/main/skills/binance/square-post/SKILL.md (current metadata version 2.0.0), and https://www.binance.com/en/skills/detail/binance/square-post.
+
+
+## 2026-11-22 — Latest Module 14 continuation checkpoint
+- Active local worktree: `/tmp/binance-w2e-continuation`; branch `work/module9-continuation-local`; verified starting HEAD `d2e0ca4b96a33c500548f4726a0feb40430b532b`. Existing target branch is `layer-1/module9-onchain-continuation`; continue using existing PR #14 only.
+- Preserved all pre-existing modified and untracked files. No reset, stage, commit, push, merge or deployment performed.
+- Added TDD regression and validation guard: `EvidenceRecord.validate()` rejects a classified `content_hash_kind` when no `content_hash` is present. `UNSPECIFIED` remains valid for hashless Module 9 evidence; legacy non-empty hash records marked `UNSPECIFIED` remain readable, but v4 registry resolution rejects them.
+- Focused tests: **137 passed, 0 failed, 2 skipped** across evidence verification, opportunity and registry resolution. Both skips are PostgreSQL DSN-gated integration tests because `TEST_POSTGRES_DSN` is absent. `compileall` and `git diff --check` passed.
+- No DB/Neon access, migrations, publisher/gateway edits, scoring activation, live posts, secret access, commit, push, merge or deployment.
+- Next: continue Module 14 v4 edge-case audit with TDD, then run the isolated PostgreSQL v4 save/load/tamper and fresh-process acceptance only when an approved disposable `TEST_POSTGRES_DSN` is available. Keep runtime `factors=None`, `policy=None`, fail-closed DEFER. B-SCORE-01 OPEN; project PARTIAL — NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — Module 14 claim-result evidence uniqueness hardening
+- TDD exposed that a digest-valid ClaimRegistry verification result could repeat the same evidence ID in `supporting_evidence_ids`; set-based linkage checks accepted it. Repeated IDs did not increase the recomputed independent-source group count, but the registry result was still structurally malformed.
+- `validate_factor_claim_support()` now rejects duplicate IDs in supporting, contradicting and complete evidence ID lists before checking linkage and independent-source count.
+- RED test failed before the guard; GREEN focused run: **138 passed, 0 failed, 2 skipped** across `test_opportunity_registry_resolution`, `test_evidence_verification`, and `test_opportunity`. The two PostgreSQL integration tests are skipped because `TEST_POSTGRES_DSN` is absent. `compileall` and `git diff --check` passed.
+- No database/Neon access, migrations, publisher/gateway changes, scoring activation, live posts, commit, push, merge or deployment. Runtime remains `factors=None`, `policy=None`, fail-closed DEFER; B-SCORE-01 OPEN; project PARTIAL — NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — Module 14 ClaimRegistry result-set integrity
+- Continued registry-bound v3/v4 edge-case audit. A digest-valid ClaimRegistry could contain an orphan verification result (`claim_id` absent from claims), which the factor support path ignored. Added RED regression, then validation requiring every result ID to be a lowercase SHA-256 claim ID and exact equality between the complete claim-ID and result-ID sets. This also rejects missing result rows.
+- Combined with the immediately preceding duplicate evidence-ID guard, focused suite now reports **139 passed, 0 failed, 2 skipped** across opportunity registry resolution, evidence verification and opportunity tests. The two skips are PostgreSQL DSN-gated because `TEST_POSTGRES_DSN` is not configured. `compileall` and `git diff --check` pass.
+- No DB/Neon access, migrations, scoring activation, publisher/gateway changes, live posts, commit, push, merge or deployment. Runtime remains `factors=None`, `policy=None`, fail-closed DEFER; B-SCORE-01 OPEN; project PARTIAL — NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — Module 14 ClaimVerificationResult consistency hardening
+- `validate_factor_claim_support()` now validates the complete canonical ClaimVerificationResult shape and internal consistency for every registry result: allowed state, unique lowercase SHA-256 evidence references, non-negative integer independent-source count, issue structure, exact `evidence_ids` union, exact `source_lineage` mapping recomputed from supporting/contradicting EvidenceRecords, and recomputed independent-source count.
+- TDD RED reproduced forged source-lineage acceptance. Latest focused tests: **141 passed, 0 failed, 2 skipped**. PostgreSQL integration remains unverified because `TEST_POSTGRES_DSN` is absent. `compileall` and `git diff --check` passed.
+- No DB/Neon access, migrations, scoring activation, publisher/gateway changes, live posts, secret access, commit, push, merge or deployment. Module 14 scoring remains disabled/fail-closed; B-SCORE-01 OPEN; project PARTIAL — NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — Module 14 deterministic claim-verification replay
+- Extended ClaimRegistry validation beyond field consistency: reconstruct the exact claims and EvidenceRecords, replay `EvidenceVerificationEngine`, and compare every complete result against the persisted registry result.
+- TDD regression builds a digest-valid, internally coordinated forged claim/result that adds a different-asset record as supporting evidence, updates claim ID, evidence references, lineage and count, and re-digests the registry. The validator rejects it because the canonical verifier does not produce that result.
+- Latest focused run: **142 passed, 0 failed, 2 skipped** across registry resolution, evidence verification and opportunity tests. Two PostgreSQL DSN-gated tests skipped because `TEST_POSTGRES_DSN` is absent. `compileall` and `git diff --check` passed.
+- Replay ensures consistency with the existing deterministic verifier only; semantic rule completeness and source authenticity remain separate unresolved questions. No DB/Neon access, migration, scoring activation, publisher/gateway modification, live post, commit, push, merge or deployment.
+
+
+## 2026-11-22 — Module 14 source assertion rendering attribution
+- `render_claim_registry()` previously told the model to attribute `SOURCE_ASSERTION` claims to the named source but only rendered evidence IDs, not publisher names. Added publisher resolution from exact supporting EvidenceRecords and included those publisher names in the rendered assertion line. If none resolve, the renderer explicitly labels the source `UNAVAILABLE`.
+- TDD RED reproduced missing attribution. Latest focused suite: **143 passed, 0 failed, 2 skipped**; two PostgreSQL DSN-gated tests skipped because `TEST_POSTGRES_DSN` is absent. `compileall` and `git diff --check` passed.
+- Publisher naming is attribution context, not proof of source authority or truth. No DB/Neon access, migration, scoring activation, publisher/gateway modification, live post, commit, push, merge or deployment.
+
+
+## 2026-11-22 — Module 14 source-authority boundary hardening
+- Found and removed an unsafe authority heuristic in `EvidenceVerificationEngine.evidence_from_market_observation()`: `provider.startswith("binance_")` had marked both the legitimate `binance_spot` adapter label and arbitrary labels such as `binance_untrusted` as `is_primary=True`. Provider strings are caller-controlled provenance labels, not an authority registry.
+- All market-observation evidence is now `is_primary=False` until a separately reviewed, claim-scoped authority policy and verified adapter contract are available. Market evidence remains available for exact structured observation, attribution and lineage. Direct Binance CMS/Spot eligibility evidence paths are separate and were not changed.
+- Rendered research instructions now explicitly state that `VERIFIED/SOURCE_ASSERTION` means only that the named publisher made the assertion; it is not independently confirmed truth. This distinguishes attribution from authority and factual confirmation.
+- TDD RED reproduced the prefix-authority bug and ambiguous source-assertion prompt; GREEN tests now cover arbitrary `binance_*` labels and the explicit prompt rule. Focused verification: **151 passed, 0 failed, 2 skipped** across source-adapter contracts, evidence verification, opportunity registry resolution and opportunity tests. Two PostgreSQL DSN-gated tests skipped because `TEST_POSTGRES_DSN` is absent. `compileall` and `git diff --check` passed.
+- No provider calls, DB/Neon access, migrations, scoring activation, policy weights/thresholds, publisher/gateway edits, live posts, commit, push, merge or deployment. Module 14 runtime remains fail-closed (`factors=None`, `policy=None`); B-SCORE-01 OPEN; project PARTIAL — NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — Derived Module 9 aggregate no longer claims primary-source status
+- Extended Module 14 primary-source audit across remaining explicit primary evidence producers. Binance Spot `exchangeInfo` is primary for its narrow exchange listing/permission assertion; local publication ledger is primary for the project's own recorded publishing history; an individual Module 9 on-chain observation is primary only after exact matching Module 9 acceptance identity checks.
+- Found the Module 9 canonical transfer summary was also marked `is_primary=True`, despite being a derived aggregate over observations. Changed it to `is_primary=False` while retaining `source_status=ACCEPTED`, `source_kind=ONCHAIN`, threshold-qualified summary ID and exact asset/mapping/network provenance. This prevents a derived summary from impersonating an originating chain record in generic primary-source checks.
+- TDD RED reproduced the incorrect primary flag; GREEN tests confirm non-primary aggregate classification and preserved research-package claim linkage. No changes to Module 9 validation/finality/aggregation, scoring, database, publisher or runtime activation.
+
+
+## 2026-11-22 — Claim support diagnostics preserved after deterministic replay
+- Full discovery exposed four failures in the older `test_opportunity_claim_support` tests: the new registry replay correctly rejected forged/wrong-state/wrong-asset payloads, but its earlier generic error masked the factor-level actionable diagnostic expected by existing callers.
+- Added requested-claim asset and VERIFIED/CORROBORATED preflight before global registry consistency and deterministic replay. Full registry replay remains mandatory; no security check was removed. Updated the independent-source count diagnostic to explicitly identify mismatch against recomputed evidence grouping.
+- Compatibility tests: **9 passed**. Focused Module 14 batch: **151 passed, 0 failed, 2 skipped**. A fresh full discovery run is required to record the current complete result; earlier discovery had 630 tests, 4 failures and 34 dependency import errors, plus 61 skips. The 34 errors were primarily unavailable PIL/psycopg dependencies and not application test failures.
+
+
+## 2026-11-22 — Latest full local discovery evidence
+- After fixing the four assertion failures surfaced by the earlier discovery run, repeated `python -m unittest discover -s tests -q`: **630 tests discovered, 61 skipped, 34 errors, 0 assertion failures**. All 34 errors are import/runtime environment blockers involving unavailable dependencies, primarily `PIL` (Pillow) and `psycopg`; they are not a full-suite pass. No dependency installation was attempted.
+- Relevant Module 14 focused batch remains **151 passed, 0 failed, 2 skipped**; the two skips require `TEST_POSTGRES_DSN`, which is not configured. `compileall` and `git diff --check` passed.
+
+
+## 2026-11-22 — Live official-source checks for Module 14 authority boundaries
+- Reviewed current official documentation rather than inferring authority from provider names. Binance Spot docs define `exchangeInfo` as current exchange trading rules/symbol information and document the relevant symbol fields; this supports a narrow first-party assertion about Binance's own pair status/permissions, not a universal claim about token legitimacy or investment quality. Official refs: https://developers.binance.com/en/docs/products/spot/rest-api ; https://developers.binance.info/en/docs/catalog/core-trading-spot-trading/api/rest-api/general
+- Binance documents `/api/v3/ticker/24hr` and `/api/v3/exchangeInfo` as public market-data endpoints. Their first-party origin authenticates the provider of the observation, not global market representativeness or manipulation resistance: https://github.com/binance/binance-spot-api-docs/blob/master/faqs/market_data_only.md
+- CoinGecko describes its market data as aggregated across centralized and decentralized exchanges; this is its own product description, not independent proof of methodology or universal authority: https://www.coingecko.com/en/api
+- Ethereum JSON-RPC docs distinguish `latest`, `safe` and `finalized` block tags. Module 9 must still bind exact network, block/transaction, mapping and provider validation; a derived summary label is not chain-level proof: https://ethereum.org/developers/docs/apis/json-rpc/
+- No source ranking, factor weight, threshold or minimum independent-source count was selected. Module 14 policy remains disabled pending empirical validation and approval.
+- 2026-11-22: Binance Spot evidence adapter now requires an explicit expected base ticker and rejects exchangeInfo pairs whose `baseAsset` differs; runtime supplies the candidate ticker from the existing identity-proof flow. Regression test added. This closes adapter-level ticker/pair mismatch, not upstream asset identity proof.
+- 2026-11-22: Announcement evidence now preserves the CMS-provided digest but marks `content_hash_kind=UNSPECIFIED`; the in-repo importer has no access to the worker-side hash producer/canonical serialization contract, so `CANONICAL_NORMALIZED_PAYLOAD_SHA256` was unjustified.
+
+## 2026-11-22 — ClaimRegistry authenticity and storage authorization boundary
+- Completed read-only code/schema trace of ClaimRegistry persistence. `is_primary` is serialized and covered by the public snapshot SHA-256, but the digest is not a producer signature. `EvidenceRecord.evidence_id` does not include `source_kind`, `publisher`, `source_url`, `is_primary` or `source_status`; registry-bound resolution compares the complete stored record and replays the verifier, but the replay uses the same supplied provenance assertions.
+- SQLite and PostgreSQL loaders now verify snapshot digest integrity. This detects a payload edit if the expected digest remains unchanged; an actor able to rewrite both payload and digest can create a self-consistent forged snapshot, including changing `is_primary`.
+- PostgreSQL migration `0002_claim_verification_runs.sql` defines the table/key/index but no DB roles, grants/revokes, RLS policy or mutation-prevention trigger. SQLite registry schema has no append-only trigger. Application persistence methods are insert-only/idempotent, but deployed role grants were not inspected; no database/Neon access occurred.
+- No signed producer attestation, trusted ingestion identity, or externally protected digest/key exists in the inspected registry contract. Therefore `is_primary` remains an application-level adapter/source-role assertion under the current process/storage trust boundary, not cryptographically authenticated evidence.
+- Production prerequisite: define least-privilege DB writer/reader roles that cannot UPDATE/DELETE snapshots, separate migration/admin authority, protected audit/backup controls, and (if snapshots cross trust boundaries) a signed ingestion envelope or HMAC/signature key held outside the writable DB. Bind producer identity, adapter/version, exact payload, source identity and timestamp; validate rotation, revocation, replay protection and recovery. Do not invent a signature/key or label the existing SHA-256 digest as authentication.
+- Documentation-only disposition. No schema/migration, DB/Neon access, role changes, key generation, signature code, scoring activation, publisher/gateway changes, live posts, commit, push, merge or deployment. B-SCORE-01 remains OPEN; runtime remains fail-closed (`factors=None`, `policy=None`); project PARTIAL — NOT PRODUCTION-READY.
+
+## 2026-11-22 — Announcement derived evidence primary-role correction
+- Granular review found `evidence_from_announcement()` copied `is_primary=True` from Binance's original announcement content into two derived records: freshness (locally calculated from timestamps) and canonical asset ID (locally resolved by candidate ticker matching). Those values are not directly asserted by the publisher.
+- Changed `announcement.freshness` and `announcement.asset_id` records to `is_primary=False`. Original Binance `announcement.title`, `announcement.body` and `announcement.event_type` source assertions remain primary and attributed to Binance. Acceptance/freshness state, ticker mapping, source lineage and hash semantics are unchanged.
+- TDD RED reproduced the inherited primary flag on freshness; GREEN test asserts primary status only for original source content, not derived metadata. Focused importer/evidence tests: **10 passed, 0 failed**; compileall and diff check passed.
+- Remaining primary roles reviewed: Binance Spot exchangeInfo only for its own pair/permission claim after base-ticker and upstream asset mapping checks; local publication ledger only for the project's bounded latest-200-post assertion; individual Module 9 observations only after exact accepted validation identity matching. Market observations and derived on-chain aggregates remain non-primary.
+- No DB/Neon access, provider calls, migration, scoring activation, publisher/gateway change, live post, commit, push, merge or deployment. Source authenticity and deployed storage permissions remain separate unresolved controls; B-SCORE-01 OPEN; runtime fail-closed; project PARTIAL — NOT PRODUCTION-READY.
+
+## 2026-11-22 — Module 9 acceptance and mapping provenance audit checkpoint
+- Read-only audit confirms `OnChainIntelligenceEngine.validate()` performs structural identity, network, provider-label, finality and freshness checks, and worker adapters add provider page/range/header validation. However, `OnChainObservation` does not retain a raw/canonical provider response hash or signed response attestation; provider/endpoint/finality labels are caller-supplied fields.
+- `OnChainValidationResult` is a constructible dataclass, not an authenticated receipt. `evidence_from_onchain_observation()` trusts `status=ACCEPTED` plus matching observation/asset/mapping/network/provider IDs. Existing tests manually construct such an accepted result, proving the adapter alone cannot establish that the engine actually ran. Do not treat this as cryptographic validation.
+- `save_verified()` in SQLite/PostgreSQL reruns engine validation before persistence, but persisted status/read paths do not authenticate source response bytes. Storage authorization/tamper protection is a separate prerequisite.
+- Mapping `VERIFIED` is also caller-asserted: validation checks allowlisted source-type labels, HTTPS URL syntax, shape and network/representation consistency, but does not retrieve/capture the official source, prove exact contract/mint/issuer/decimals against it, record verifier identity, or enforce mapping expiry. Generic test URLs pass this source-type/URL gate; therefore it is not source-backed mapping verification.
+- Current `main.py` ClaimRegistry rebuild passes `onchain_summary_refs`, not `onchain_records`; individual observations are not shown as wired into this main registry path. Derived summaries remain non-primary.
+- Live official docs cross-check: Binance exchangeInfo supports current pair/base/quote/status/Spot permission assertions; CoinGecko ticker schema exposes coin_id, market identifier, base/target, stale/anomaly flags and last_fetch_at. These corroborate the narrow cross-provider identity check, not an on-chain contract/issuer mapping proof. See detailed source links and dispositions in `MODULE14_SOURCE_REFERENCE_RESOLUTION_AUDIT.md`.
+- Required before production: authenticated validation receipt/provenance binding; exact provider response identity/hash and parser version; auditable source-backed contract/mint/issuer mapping record with expiry/revalidation; adversarial tamper/fabrication tests; explicit decision about wiring individual observations into ClaimRegistry. Do not use a Python-only marker as a cryptographic signature.
+- Documentation-only audit. No code/schema/DB/Neon/key/publisher/gateway/scoring/runtime/commit/push/merge/deployment changes. B-SCORE-01 OPEN; fail-closed; PARTIAL — NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — Module 21 history integrity and workflow cache fixes (local verification)
+- Applied the approved `AUD-MAIN-001` fix in the existing continuation worktree: Git repository/ref checks, return-code and timeout enforcement, strict JSONL record validation, committed-baseline inclusion checks, and verified-only restoration. Git errors, malformed JSONL, broken refs and stale local history now fail closed.
+- Applied the approved `AUD-WF-002` fix: removed the Actions cache restore/save steps for `published_posts.jsonl`. Existing cache objects were not deleted; they are inert because this workflow no longer references them. Live GitHub Actions publishing remains guarded by the existing PostgreSQL-only persistence validation; workflow remains DRY_RUN=1.
+- TDD: 11 new persistence-integrity regressions pass; existing scheduled-persistence safety tests 21 pass; combined 32 pass. Tests used temporary import-only Pillow and psycopg shims because those packages are absent in RDC; no image processing or real PostgreSQL behavior was tested. `compileall` and `git diff --check` pass.
+- No workflow dispatch, real Binance post, production DB/migration, deployment, commit, push or merge. Hosted PR checks are pending. `AUD-GIT-003`, PostgreSQL acceptance, other audit findings and overall production NO-GO remain open. Preserve all pre-existing dirty files.
+
+## 2026-11-22 — PR #14 hosted verification for Module 21 history fixes
+- Commit 5c0a32088d15b3653ed39cad9ddf5ba919bfe066 pushed fast-forward to the existing layer-1/module9-onchain-continuation branch. PR #14 remains OPEN / Draft / Unmerged; GitHub PR head, remote branch and local HEAD match.
+- Hosted run 45039365667: mocked-safety-tests PASS (864 tests reported); Isolated PostgreSQL integration acceptance PASS (92 tests reported). gh pr checks 14: both PASS.
+- CI verified the isolated database target before migrations. No production DB/Neon access occurred. No run_bot.yml workflow was dispatched or newly scheduled after this push; no real Binance post occurred.
+- Only the intended workflow, integrity function and new regression tests were committed. Pre-existing unrelated dirty changes remain untouched. Documentation updates remain local/uncommitted.
+- Overall project remains NO-GO / PARTIAL / NOT PRODUCTION-READY; other critical/high findings remain open.
+
+
+## 2026-11-22 — Follow-on SQLite publication authorization/quota audit (read-only)
+- Reproduced AUD-PUB-002 in an isolated SQLite DB: _finish_attempt(..., PUBLISHED_CONFIRMED) returned normally and committed the attempt as PUBLISHED_CONFIRMED when its bound quota row was either deleted or changed to RELEASED. No network used. Existing atomic finalization test patches mark_quota_status, but _finish_attempt updates quota directly and bypasses that method; it does not test missing/RELEASED reservation states.
+- Reproduced AUD-PUB-001 with a second isolated SQLite connection: after final event validation, changed event lifecycle from CONFIRMED to WITHDRAWN at the mocked transport boundary. The publisher still returned PUBLISHED_CONFIRMED and called only the mocked transport; no external network or Binance post.
+- PostgreSQL comparison: authorized_submission_guard holds transaction + event/symbol advisory locks across bounded POST and revalidates persisted attempt, quota, event and duplicate policy.
+- SQLite is Config.from_env default; GitHub Actions live mode separately requires PostgreSQL, but other deployments can use SQLite. Actual deployed backend was not inspected.
+- Both findings remain OPEN. No code/schema/DB/Neon/publisher changes, no migrations, no real network, no live post. Fixes require separate explicit approval. Project remains NO-GO / PARTIAL / NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — Approved SQLite publication fixes (implementation and local tests)
+- User explicitly approved implementing `AUD-PUB-001` and `AUD-PUB-002` on the existing continuation branch/worktree; no new branch or PR created.
+- `AUD-PUB-001`: SQLite publisher now takes `BEGIN IMMEDIATE` across final event/duplicate checks and `urllib` POST dispatch/response-header receipt. The lock is released before response-body reading and local persistence. Multi-connection tests verify lifecycle withdrawal, `NO_EVENT` insertion, recent-post insertion and competing quota reservation cannot win during the dispatch fence; pre-gate conflicts block transport. A response-body test verifies the lock is already released before body reads. This uses SQLite's database-wide writer lock; concurrent writers may wait or receive `database is locked` according to their connection timeout. Tests used a 50 ms competing-connection timeout. The configured socket timeout constrains connect/header I/O but is not a strict total wall-clock deadline.
+- `AUD-PUB-002`: SQLite attempt ledger adds an additive `authorization_id` column. `bind_attempt()` verifies reservation/attempt symbol identity and copies the reservation's authorization ID to the attempt atomically. `_finish_attempt()` requires exactly one reservation bound to the attempt and verifies attempt ID, symbol, authorization ID and legal quota source state; missing, RELEASED, mismatched or illegal reservations raise and roll back attempt finalization. The no-quota-table legacy path remains separate. Binding failure is contained; no request is sent and an unfinalizable attempt remains fenced.
+- Added 14 publisher regression tests. Initial RED run: 8/8 original regression cases failed against the vulnerable implementation; GREEN run: 8/8 passed. Latest focused verification: `python -m unittest tests.test_publisher_safety tests.test_publication_authorization` — **71 passed, 0 failed**. `compileall` and `git diff --check` pass.
+- Broader local run before the final lock-boundary refinement: **821 passed, 0 failed, 63 skipped** excluding five modules requiring missing image/PostgreSQL dependencies. Unfiltered local discovery attempted 896 tests and reported 59 errors, 63 skipped; errors are environment blockers from missing Pillow and `psycopg`, not a full-suite pass. The final lock-boundary and socket-timeout refinements are covered by the latest 71-test focused run. Hosted CI with actual dependencies remains required.
+- Current code files intentionally changed: `main.py`, `layer1/publication_authorization.py`, `tests/test_publisher_safety.py`. Preserve every other dirty/untracked worktree file. `main.py` also contains a pre-existing unrelated `expected_base_asset=symbol` edit; do not stage it with these fixes.
+- No real Binance API request/post, production DB/Neon access, production migration, workflow dispatch, deployment, PR merge or gateway restart. Existing PR #14 only; push/hosted checks pending. Overall project remains **NO-GO / PARTIAL / NOT PRODUCTION-READY** due unrelated critical/high blockers.

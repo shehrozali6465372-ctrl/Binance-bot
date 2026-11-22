@@ -203,7 +203,7 @@ class PublisherSafetyTests(unittest.TestCase):
                     image_hashes=hashes,
                 )
         self.assertEqual(result.status, "FAILED_CONFIRMED")
-        self.assertIn("EVENT_LIFECYCLE_CHANGED_AFTER_AUTHORIZATION", result.error)
+        self.assertIn("EVENT_LIFECYCLE_CHANGED", result.error)
         urlopen.assert_not_called()
         attempt = self.publisher.db.conn.execute(
             "SELECT status FROM publication_attempts WHERE coin_symbol='BTC'"
@@ -632,6 +632,30 @@ class PublisherSafetyTests(unittest.TestCase):
         legacy.execute(
             "INSERT INTO post_analytics (id, coin_symbol, created_at, views) VALUES (1, 'BTC', '2026-01-01T00:00:00+00:00', 7)"
         )
+        legacy.execute("""
+            CREATE TABLE publication_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                coin_symbol TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                remote_post_id TEXT UNIQUE,
+                share_link TEXT,
+                http_status INTEGER,
+                error TEXT,
+                reconciliation_note TEXT,
+                reconciliation_evidence TEXT,
+                reconciled_by TEXT,
+                reconciled_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        legacy.execute(
+            "INSERT INTO publication_attempts "
+            "(idempotency_key,coin_symbol,content_hash,status,created_at,updated_at) "
+            "VALUES ('legacy-attempt','BTC','legacy-hash','SUBMITTING','2026-01-01','2026-01-01')"
+        )
         legacy.commit()
         legacy.close()
 
@@ -647,6 +671,17 @@ class PublisherSafetyTests(unittest.TestCase):
             }
             self.assertEqual((row["id"], row["coin_symbol"], row["views"]), (1, "BTC", 7))
             self.assertIn("remote_post_id", columns)
+            attempt_columns = {
+                item["name"] for item in migrated.conn.execute(
+                    "PRAGMA table_info(publication_attempts)"
+                ).fetchall()
+            }
+            self.assertIn("authorization_id", attempt_columns)
+            legacy_attempt = migrated.conn.execute(
+                "SELECT status,authorization_id FROM publication_attempts WHERE idempotency_key='legacy-attempt'"
+            ).fetchone()
+            self.assertEqual(legacy_attempt["status"], "SUBMITTING")
+            self.assertIsNone(legacy_attempt["authorization_id"])
             ledger = migrated.conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='publication_attempts'"
             ).fetchone()
@@ -954,6 +989,348 @@ class PublisherSafetyTests(unittest.TestCase):
         self.assertEqual(result.status, "FAILED_CONFIRMED")
         self.assertIn("RECENT_POST_COOLDOWN", result.error)
         urlopen.assert_not_called()
+
+
+    def _attempt_with_bound_quota(self, symbol, content):
+        from layer1.publication_authorization import PublicationAuthorizationEngine
+        coin, authorization, hashes = self._authorization({"symbol": symbol}, content)
+        key = self.publisher._idempotency_key(symbol, content, [])
+        digest = main.hashlib.sha256(content.encode("utf-8")).hexdigest()
+        self.assertIsNone(self.publisher._begin_attempt(key, symbol, digest))
+        attempt_id = self.publisher.db.conn.execute(
+            "SELECT id FROM publication_attempts WHERE idempotency_key=?", (key,),
+        ).fetchone()["id"]
+        engine = PublicationAuthorizationEngine(self.publisher.db.conn)
+        engine.bind_attempt(authorization.quota_reservation_id, attempt_id)
+        engine.mark_quota_status(authorization.quota_reservation_id, "SUBMITTING")
+        return key, authorization
+
+    def test_authorization_engine_backfills_legacy_bound_attempt_identity(self):
+        from layer1.publication_authorization import PublicationAuthorizationEngine
+        key, authorization = self._attempt_with_bound_quota(
+            "BACKFILL", "backfill legacy attempt authorization identity",
+        )
+        self.publisher.db.conn.execute(
+            "UPDATE publication_attempts SET authorization_id=NULL WHERE idempotency_key=?",
+            (key,),
+        )
+        self.publisher.db.conn.commit()
+        PublicationAuthorizationEngine(self.publisher.db.conn)
+        row = self.publisher.db.conn.execute(
+            "SELECT authorization_id FROM publication_attempts WHERE idempotency_key=?",
+            (key,),
+        ).fetchone()
+        self.assertEqual(row["authorization_id"], authorization.authorization_id)
+        self.publisher._finish_attempt(key, "PUBLISHED_CONFIRMED", post_id="synthetic-backfill")
+        attempt = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE idempotency_key=?", (key,),
+        ).fetchone()
+        quota = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_quota_reservations WHERE reservation_id=?",
+            (authorization.quota_reservation_id,),
+        ).fetchone()
+        self.assertEqual(attempt["status"], "PUBLISHED_CONFIRMED")
+        self.assertEqual(quota["status"], "PUBLISHED_CONFIRMED")
+
+    def test_finish_attempt_rolls_back_when_bound_quota_reservation_is_missing(self):
+        key, authorization = self._attempt_with_bound_quota("MISS", "missing bound quota")
+        self.publisher.db.conn.execute(
+            "DELETE FROM publication_quota_reservations WHERE reservation_id=?",
+            (authorization.quota_reservation_id,),
+        )
+        self.publisher.db.conn.commit()
+        with self.assertRaisesRegex(RuntimeError, "exactly one bound quota reservation"):
+            self.publisher._finish_attempt(key, "PUBLISHED_CONFIRMED", post_id="synthetic")
+        row = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE idempotency_key=?", (key,),
+        ).fetchone()
+        self.assertEqual(row["status"], "SUBMITTING")
+
+    def test_finish_attempt_rolls_back_when_bound_quota_reservation_was_released(self):
+        key, authorization = self._attempt_with_bound_quota("REL", "released bound quota")
+        self.publisher.db.conn.execute(
+            "UPDATE publication_quota_reservations SET status='RELEASED' WHERE reservation_id=?",
+            (authorization.quota_reservation_id,),
+        )
+        self.publisher.db.conn.commit()
+        with self.assertRaisesRegex(RuntimeError, "quota reservation state is inconsistent"):
+            self.publisher._finish_attempt(key, "PUBLISHED_CONFIRMED", post_id="synthetic")
+        row = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE idempotency_key=?", (key,),
+        ).fetchone()
+        self.assertEqual(row["status"], "SUBMITTING")
+
+    def test_finish_attempt_rejects_quota_authorization_identity_mismatch(self):
+        key, authorization = self._attempt_with_bound_quota("IDENT", "wrong quota identity")
+        self.publisher.db.conn.execute(
+            "UPDATE publication_quota_reservations SET authorization_id='forged-authorization' "
+            "WHERE reservation_id=?", (authorization.quota_reservation_id,),
+        )
+        self.publisher.db.conn.commit()
+        with self.assertRaisesRegex(RuntimeError, "authorization identity does not match"):
+            self.publisher._finish_attempt(key, "PUBLISHED_CONFIRMED", post_id="synthetic")
+        row = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE idempotency_key=?", (key,),
+        ).fetchone()
+        self.assertEqual(row["status"], "SUBMITTING")
+
+    def test_finish_attempt_rejects_illegal_bound_quota_source_state(self):
+        key, authorization = self._attempt_with_bound_quota("STATE", "illegal quota state")
+        self.publisher.db.conn.execute(
+            "UPDATE publication_quota_reservations SET status='RESERVED' WHERE reservation_id=?",
+            (authorization.quota_reservation_id,),
+        )
+        self.publisher.db.conn.commit()
+        with self.assertRaisesRegex(RuntimeError, "quota reservation state is inconsistent"):
+            self.publisher._finish_attempt(key, "PUBLISHED_CONFIRMED", post_id="synthetic")
+        row = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE idempotency_key=?", (key,),
+        ).fetchone()
+        self.assertEqual(row["status"], "SUBMITTING")
+
+    def test_sqlite_event_withdrawal_before_final_gate_blocks_network_post(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "WITHDRAW"}, "event withdrawal before final gate",
+            event_state="CONFIRMED",
+        )
+        self.publisher.db.conn.execute(
+            "UPDATE layer1_event_lifecycle SET state='WITHDRAWN' WHERE event_id=?",
+            (authorization.event_id,),
+        )
+        self.publisher.db.conn.commit()
+        with patch("main._open_binance_publish_no_redirect") as transport:
+            result = self.publisher.publish(
+                coin, "event withdrawal before final gate",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("EVENT_LIFECYCLE_CHANGED", result.error)
+        transport.assert_not_called()
+
+    def test_sqlite_no_event_insertion_before_final_gate_blocks_network_post(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "NOEVENT"}, "no-event insertion before final gate",
+        )
+        self.publisher.db.conn.execute(
+            "INSERT INTO layer1_event_lifecycle(event_id,asset_id,state,event_type) "
+            "VALUES (?, ?, 'CONFIRMED', 'listing')",
+            (authorization.event_id, authorization.asset_id),
+        )
+        self.publisher.db.conn.commit()
+        with patch("main._open_binance_publish_no_redirect") as transport:
+            result = self.publisher.publish(
+                coin, "no-event insertion before final gate",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("EVENT_LIFECYCLE_STATE_MISMATCH", result.error)
+        transport.assert_not_called()
+
+    def test_publish_does_not_escape_when_quota_binding_fails(self):
+        from layer1.publication_authorization import PublicationAuthorizationEngine
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BINDFAIL"}, "quota bind failure stays fenced",
+        )
+        with patch.object(
+            PublicationAuthorizationEngine, "bind_attempt",
+            side_effect=ValueError("synthetic binding mismatch"),
+        ):
+            with patch("main._open_binance_publish_no_redirect") as transport:
+                result = self.publisher.publish(
+                    coin, "quota bind failure stays fenced",
+                    authorization=authorization, image_hashes=hashes,
+                )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("no request was sent", result.error)
+        transport.assert_not_called()
+        attempt = self.publisher.db.conn.execute(
+            "SELECT status FROM publication_attempts WHERE coin_symbol='BINDFAIL'"
+        ).fetchone()
+        reservation = self.publisher.db.conn.execute(
+            "SELECT status,attempt_id FROM publication_quota_reservations WHERE reservation_id=?",
+            (authorization.quota_reservation_id,),
+        ).fetchone()
+        self.assertEqual(attempt["status"], "SUBMITTING")
+        self.assertEqual(reservation["status"], "RELEASED")
+        self.assertIsNone(reservation["attempt_id"])
+
+    def test_quota_attempt_binding_rejects_symbol_mismatch(self):
+        from layer1.publication_authorization import PublicationAuthorizationEngine
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "QUOTA"}, "quota symbol mismatch",
+        )
+        key = self.publisher._idempotency_key("OTHER", "different symbol", [])
+        digest = main.hashlib.sha256(b"different symbol").hexdigest()
+        self.assertIsNone(self.publisher._begin_attempt(key, "OTHER", digest))
+        attempt_id = self.publisher.db.conn.execute(
+            "SELECT id FROM publication_attempts WHERE idempotency_key=?", (key,),
+        ).fetchone()["id"]
+        engine = PublicationAuthorizationEngine(self.publisher.db.conn)
+        with self.assertRaisesRegex(ValueError, "cannot be bound"):
+            engine.bind_attempt(authorization.quota_reservation_id, attempt_id)
+        reservation = self.publisher.db.conn.execute(
+            "SELECT attempt_id,status FROM publication_quota_reservations WHERE reservation_id=?",
+            (authorization.quota_reservation_id,),
+        ).fetchone()
+        self.assertIsNone(reservation["attempt_id"])
+        self.assertEqual(reservation["status"], "RESERVED")
+
+    def _publish_with_second_connection_write_at_transport(self, *, mutation):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "FENCE"}, "sqlite submission fence content " + mutation,
+            event_state="CONFIRMED" if mutation == "withdraw" else "NO_EVENT",
+        )
+        second = sqlite3.connect(self.db_path, timeout=0.05)
+        write_errors = []
+        write_completed = []
+
+        def competing_write(request, *, timeout):
+            try:
+                if mutation == "withdraw":
+                    second.execute(
+                        "UPDATE layer1_event_lifecycle SET state='WITHDRAWN' WHERE event_id=?",
+                        (authorization.event_id,),
+                    )
+                elif mutation == "no_event_insert":
+                    second.execute(
+                        "INSERT INTO layer1_event_lifecycle(event_id,asset_id,state,event_type) "
+                        "VALUES (?, ?, 'CONFIRMED', 'listing')",
+                        (authorization.event_id, authorization.asset_id),
+                    )
+                elif mutation == "recent_post":
+                    second.execute(
+                        "INSERT INTO posts(created_at,coin_symbol,content) VALUES (?, ?, ?)",
+                        (main.utc_now(), "FENCE", "competing recent post"),
+                    )
+                elif mutation == "competing_reservation":
+                    second.execute(
+                        "INSERT INTO publication_quota_reservations "
+                        "(reservation_id,day_utc,symbol,status,created_at,updated_at) "
+                        "VALUES ('competing-reservation','2026-11-22','FENCE','RESERVED',?,?)",
+                        (main.utc_now(), main.utc_now()),
+                    )
+                second.commit()
+                write_completed.append(True)
+            except sqlite3.OperationalError as exc:
+                write_errors.append(str(exc))
+                second.rollback()
+            return FakeResponse({
+                "code": "000000",
+                "data": {"id": "synthetic-fenced-post", "shareLink": "https://example.invalid/synthetic-fenced-post"},
+            })
+
+        try:
+            with patch("main._open_binance_publish_no_redirect", side_effect=competing_write) as transport:
+                result = self.publisher.publish(
+                    coin, "sqlite submission fence content " + mutation,
+                    authorization=authorization, image_hashes=hashes,
+                )
+            self.assertEqual(result.status, "PUBLISHED_CONFIRMED", result.error)
+            transport.assert_called_once()
+            self.assertEqual(write_completed, [], "concurrent SQLite writer must not cross the submission fence")
+            self.assertEqual(len(write_errors), 1)
+            self.assertIn("locked", write_errors[0].lower())
+            if mutation == "withdraw":
+                state = self.publisher.db.conn.execute(
+                    "SELECT state FROM layer1_event_lifecycle WHERE event_id=?",
+                    (authorization.event_id,),
+                ).fetchone()[0]
+                self.assertEqual(state, "CONFIRMED")
+            elif mutation == "no_event_insert":
+                event = self.publisher.db.conn.execute(
+                    "SELECT 1 FROM layer1_event_lifecycle WHERE event_id=?",
+                    (authorization.event_id,),
+                ).fetchone()
+                self.assertIsNone(event)
+            elif mutation == "recent_post":
+                count = self.publisher.db.conn.execute(
+                    "SELECT COUNT(*) FROM posts WHERE coin_symbol='FENCE' AND content='competing recent post'"
+                ).fetchone()[0]
+                self.assertEqual(count, 0)
+            elif mutation == "competing_reservation":
+                row = self.publisher.db.conn.execute(
+                    "SELECT 1 FROM publication_quota_reservations WHERE reservation_id='competing-reservation'"
+                ).fetchone()
+                self.assertIsNone(row)
+        finally:
+            second.close()
+
+    def test_sqlite_submission_guard_caps_socket_timeout_at_fifteen_seconds(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "TIMEOUTCAP"}, "sqlite bounded submission timeout",
+        )
+        original_config = self.publisher.config
+        self.publisher.config = replace(original_config, http_timeout_seconds=45)
+        observed_timeouts = []
+
+        def transport(request, *, timeout):
+            observed_timeouts.append(timeout)
+            return FakeResponse({
+                "code": "000000",
+                "data": {"id": "synthetic-timeout-cap", "shareLink": "https://example.invalid/synthetic-timeout-cap"},
+            })
+
+        try:
+            with patch("main._open_binance_publish_no_redirect", side_effect=transport):
+                result = self.publisher.publish(
+                    coin, "sqlite bounded submission timeout",
+                    authorization=authorization, image_hashes=hashes,
+                )
+            self.assertEqual(result.status, "PUBLISHED_CONFIRMED", result.error)
+            self.assertEqual(observed_timeouts, [15])
+        finally:
+            self.publisher.config = original_config
+
+    def test_sqlite_submission_guard_releases_before_response_body_read(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BODYREAD"}, "sqlite response body outside write fence",
+            event_state="CONFIRMED",
+        )
+        second = sqlite3.connect(self.db_path, timeout=0.05)
+        writes = []
+
+        class UpdatingResponse(FakeResponse):
+            def read(inner_self, size=-1):
+                second.execute(
+                    "UPDATE layer1_event_lifecycle SET state='WITHDRAWN' WHERE event_id=?",
+                    (authorization.event_id,),
+                )
+                second.commit()
+                writes.append(True)
+                return super(UpdatingResponse, inner_self).read(size)
+
+        try:
+            response = UpdatingResponse({
+                "code": "000000",
+                "data": {"id": "synthetic-body-read-post", "shareLink": "https://example.invalid/synthetic-body-read-post"},
+            })
+            with patch("main._open_binance_publish_no_redirect", return_value=response) as transport:
+                result = self.publisher.publish(
+                    coin, "sqlite response body outside write fence",
+                    authorization=authorization, image_hashes=hashes,
+                )
+            self.assertEqual(result.status, "PUBLISHED_CONFIRMED", result.error)
+            transport.assert_called_once()
+            self.assertEqual(writes, [True])
+            state = self.publisher.db.conn.execute(
+                "SELECT state FROM layer1_event_lifecycle WHERE event_id=?",
+                (authorization.event_id,),
+            ).fetchone()[0]
+            self.assertEqual(state, "WITHDRAWN")
+        finally:
+            second.close()
+
+    def test_sqlite_submission_guard_serializes_event_withdrawal_through_transport(self):
+        self._publish_with_second_connection_write_at_transport(mutation="withdraw")
+
+    def test_sqlite_submission_guard_serializes_no_event_insertion_through_transport(self):
+        self._publish_with_second_connection_write_at_transport(mutation="no_event_insert")
+
+    def test_sqlite_submission_guard_serializes_recent_post_insertion_through_transport(self):
+        self._publish_with_second_connection_write_at_transport(mutation="recent_post")
+
+    def test_sqlite_submission_guard_serializes_competing_quota_reservation_through_transport(self):
+        self._publish_with_second_connection_write_at_transport(mutation="competing_reservation")
 
 
 if __name__ == "__main__":

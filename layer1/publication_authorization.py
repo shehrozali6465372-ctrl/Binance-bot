@@ -159,6 +159,31 @@ class PublicationAuthorizationEngine:
             "CREATE INDEX IF NOT EXISTS idx_publication_quota_day_status "
             "ON publication_quota_reservations(day_utc, status)"
         )
+        attempt_table = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='publication_attempts'"
+        ).fetchone()
+        if attempt_table is not None:
+            attempt_columns = {
+                row[1] for row in self.connection.execute(
+                    "PRAGMA table_info(publication_attempts)"
+                ).fetchall()
+            }
+            if "authorization_id" in attempt_columns:
+                # Safely backfill in-flight rows created before this additive
+                # column existed, but only when the bound reservation has the
+                # same symbol and a non-empty authorization identity.
+                self.connection.execute(
+                    "UPDATE publication_attempts SET authorization_id=("
+                    "SELECT q.authorization_id FROM publication_quota_reservations q "
+                    "WHERE q.attempt_id=publication_attempts.id "
+                    "AND UPPER(q.symbol)=UPPER(publication_attempts.coin_symbol) "
+                    "AND q.authorization_id IS NOT NULL) "
+                    "WHERE authorization_id IS NULL AND EXISTS ("
+                    "SELECT 1 FROM publication_quota_reservations q "
+                    "WHERE q.attempt_id=publication_attempts.id "
+                    "AND UPPER(q.symbol)=UPPER(publication_attempts.coin_symbol) "
+                    "AND q.authorization_id IS NOT NULL)"
+                )
         self.connection.commit()
 
     def reserve_daily_quota(
@@ -445,6 +470,18 @@ class PublicationAuthorizationEngine:
         now: Optional[str] = None, exclude_idempotency_key: Optional[str] = None,
     ) -> tuple[str, ...]:
         current = _parse_time(now or datetime.now(timezone.utc).isoformat())
+        # The SQLite publisher may already hold BEGIN IMMEDIATE across the final
+        # authorization check and bounded HTTP request. Reuse that transaction;
+        # issuing a nested BEGIN would fail and releasing it would reopen the race.
+        if self.connection.in_transaction:
+            return self._duplicate_policy_reasons(
+                symbol=authorization.symbol, asset_id=authorization.asset_id,
+                event_id=authorization.event_id, event_state=authorization.event_state,
+                content_hash=authorization.content_hash,
+                quota_reservation_id=authorization.quota_reservation_id,
+                now=current, repetition_hard_hours=authorization.repetition_hard_hours,
+                exclude_idempotency_key=exclude_idempotency_key,
+            )
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             return self._duplicate_policy_reasons(
@@ -499,13 +536,42 @@ class PublicationAuthorizationEngine:
         if isinstance(attempt_id, bool) or not isinstance(attempt_id, int) or attempt_id < 1:
             raise ValueError("publication attempt ID must be a positive integer")
         with self.connection:
+            reservation = self.connection.execute(
+                "SELECT symbol,authorization_id,status,attempt_id "
+                "FROM publication_quota_reservations WHERE reservation_id=?",
+                (reservation_id,),
+            ).fetchone()
+            attempt = self.connection.execute(
+                "SELECT coin_symbol,authorization_id FROM publication_attempts WHERE id=?",
+                (attempt_id,),
+            ).fetchone()
+            if (
+                reservation is None or attempt is None
+                or reservation["status"] != "RESERVED"
+                or reservation["attempt_id"] is not None
+                or not reservation["authorization_id"]
+                or str(reservation["symbol"]).upper() != str(attempt["coin_symbol"]).upper()
+                or (attempt["authorization_id"] is not None
+                    and attempt["authorization_id"] != reservation["authorization_id"])
+            ):
+                raise ValueError("quota reservation cannot be bound to this publication attempt")
+            timestamp = datetime.now(timezone.utc).isoformat()
             cursor = self.connection.execute(
                 "UPDATE publication_quota_reservations SET attempt_id=?, updated_at=? "
-                "WHERE reservation_id=? AND status='RESERVED' AND attempt_id IS NULL",
-                (attempt_id, datetime.now(timezone.utc).isoformat(), reservation_id),
+                "WHERE reservation_id=? AND status='RESERVED' AND attempt_id IS NULL "
+                "AND authorization_id=? AND UPPER(symbol)=?",
+                (attempt_id, timestamp, reservation_id, reservation["authorization_id"],
+                 str(attempt["coin_symbol"]).upper()),
             )
             if cursor.rowcount != 1:
                 raise ValueError("quota reservation cannot be bound to this publication attempt")
+            attempt_update = self.connection.execute(
+                "UPDATE publication_attempts SET authorization_id=? "
+                "WHERE id=? AND UPPER(coin_symbol)=? AND authorization_id IS NULL",
+                (reservation["authorization_id"], attempt_id, str(attempt["coin_symbol"]).upper()),
+            )
+            if attempt_update.rowcount != 1:
+                raise ValueError("publication attempt authorization identity could not be bound")
 
     def quota_status(self, reservation_id: str) -> Optional[str]:
         row = self.connection.execute(
