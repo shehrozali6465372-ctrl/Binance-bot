@@ -4532,3 +4532,10 @@ The most relevant candidate capabilities identified from the directory are:
 - `gh pr checks 14`: both checks PASS. PR #14 remains OPEN / Draft / Unmerged. Local HEAD, remote branch and PR head all equal commit `3d9ba509d2743c307e8d003419e048982bd5c9b1`.
 - `AUD-PUB-001` and `AUD-PUB-002`: IMPLEMENTED — HOSTED CI VERIFIED for tested SQLite paths. SQLite database-wide writer-lock operational trade-off and production multiprocess/SLO verification remain separate; this is not overall production certification.
 - No production DB/Neon connection, production migration, live Binance request/post, publishing workflow dispatch, deployment or merge. Existing unrelated dirty worktree files remain uncommitted and preserved. Project remains NO-GO / PARTIAL / NOT PRODUCTION-READY due unrelated critical/high blockers.
+
+
+## 2026-11-22 continuation — AUD-GIT-006 scheduled-run delivery audit
+- Read-only GitHub Actions API inspection of the live `main` workflow: latest 100 runs contained 92 schedule events; only 4 scheduled runs appeared in the trailing 24 hours versus 288 nominal five-minute cron intervals. Observed inter-run gaps across those schedule events: 183.6–632.6 minutes; median 372.1 minutes. Latest four completed runs took 17–35 seconds.
+- Main workflow config: `*/5 * * * *`, five-minute job timeout, concurrency group `binance-square-bot`, `cancel-in-progress: false`, no explicit `queue`. GitHub documents default single-pending replacement and possible schedule delay/drop under high load. Cause of the measured gaps is not established; no proof that concurrency replacement caused them.
+- Finding AUD-GIT-006 remains MEDIUM / OPEN. The durable PostgreSQL run lease only serializes runs that start; it cannot recover undelivered triggers. Closure requires an approved missed-tick/catch-up policy, telemetry/alerting and bounded idempotent catch-up if required. No live workflow or production behavior changed.
+- AUD-GIT-004 was not a distinct finding in the current master register; its core commit-success/push-failure recovery issue is already covered by AUD-GIT-003. Do not duplicate-count it.
