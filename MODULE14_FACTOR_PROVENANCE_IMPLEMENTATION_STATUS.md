@@ -38,3 +38,9 @@ The validator does not establish that source IDs exist, payload hashes match act
 2. Obtain a separately authorized, read-only historical-data inventory target; do not resume Neon or access production without new scope.
 3. Design factor derivation only after evidence availability, source lineage, timestamp coverage and human labels are empirically established.
 4. Keep shadow evaluation and any runtime activation behind separate explicit approval. Do not activate scoring from schema tests alone.
+
+
+## Source-reference resolution next phase — 2026-11-22
+- Read-only audit completed; see MODULE14_SOURCE_REFERENCE_RESOLUTION_AUDIT.md.
+- V2 currently validates source_refs and source_payload_hashes structurally only. It does not resolve IDs against a persisted ClaimRegistry or verify hashes against payload bytes.
+- Proposed next format is registry-bound v3 with exact registry_verification_id, per-source provenance, digest-verified ClaimRegistry resolution, exact asset/cutoff checks, and factor-specific independence/claim support rules. Not implemented or activated.

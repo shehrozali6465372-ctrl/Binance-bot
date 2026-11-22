@@ -4270,3 +4270,9 @@ The most relevant candidate capabilities identified from the directory are:
 - Final code head 756fc9100b848ba21a99c8f84374636b91a2d200: mocked safety CI passed (**813 tests, 0 failures, 61 skipped**); isolated PostgreSQL integration passed (**92 tests**); disposable PostgreSQL target guard PASS.
 - PR #14 remains OPEN / DRAFT / UNMERGED. Runtime scoring remains disabled; factors=None, policy=None. B-SCORE-01 remains OPEN. Project remains PARTIAL — NOT PRODUCTION-READY.
 - Structural provenance validation does not prove source-reference existence, payload hash-to-bytes integrity, source authenticity/independence, claim support, or factor-value derivation. These remain separate work before provider activation.
+
+
+## 2026-11-22 — Module 14 source-reference resolution design checkpoint
+- See MODULE14_SOURCE_REFERENCE_RESOLUTION_AUDIT.md for read-only findings on EvidenceRecord IDs, ClaimRegistry snapshots, source lineage and adapter payload-hash availability.
+- V2 refs are structural only. ClaimRegistry verification_id binds the complete registry payload, but current loaders do not recompute it; EvidenceRecord.evidence_id omits some trust attributes. Several adapters lack original payload hashes, so these must not be fabricated.
+- Next design: registry-bound v3 with exact registry ID, per-source provenance, digest verification, exact evidence-ID resolution and factor-specific claim/independence checks. No code/runtime/DB/provider changes; B-SCORE-01 remains OPEN.

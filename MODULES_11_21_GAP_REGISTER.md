@@ -2411,3 +2411,10 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 ## 2026-11-22 — Module 14 hosted acceptance
 - Final code head 756fc9100b848ba21a99c8f84374636b91a2d200: mocked safety suite 813 tests / 0 failures / 61 skipped; isolated PostgreSQL integration 92 tests successful; disposable DB target guard passed.
 - PR #14 remains open/draft/unmerged. No scoring policy or runtime provider activated; B-SCORE-01 OPEN. Structural provenance checks are not evidence of source authenticity, reference existence, or factor correctness.
+
+
+# MODULE 14 SOURCE-REFERENCE RESOLUTION — NEXT GAP — 2026-11-22
+- Current v2 source references and payload hashes are structural only; no exact ClaimRegistry lookup or original payload-byte verification.
+- ClaimRegistry snapshot digest should be verified before use; evidence_id alone omits some trust fields. Some adapters do not expose original payload hashes.
+- Registry-bound v3 needs registry_verification_id, per-source provenance, exact evidence_id resolution, asset/cutoff validation and factor-specific claim/independence checks. See MODULE14_SOURCE_REFERENCE_RESOLUTION_AUDIT.md.
+- No implementation or runtime changes yet; B-SCORE-01 OPEN.
