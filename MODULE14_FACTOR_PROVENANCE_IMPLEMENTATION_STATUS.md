@@ -18,7 +18,7 @@ Status: PARTIAL — structural snapshot validation and persistence digest verifi
 
 - Unit coverage for valid/invalid v2 envelopes, legacy compatibility, missing/duplicate factors, status/value invariants, missing source refs, wrong asset, malformed hashes, cutoff violations, scheduled future event semantics, baseline provenance, duplicate subfeature keys, UTC timestamps, digest binding, SQLite v2 replay, PostgreSQL validator parity, and stored digest mismatch.
 - Isolated PostgreSQL CI tests added for v2 persistence round-trip and tampered-row read rejection.
-- Local focused run: 36 tests passed, 1 PostgreSQL DSN-gated test skipped before the final additional cases were added. A final full suite and CI run are still required.
+- Latest focused local run: **40 tests passed, 0 failures**. Local full discovery was environment-blocked (574 tests, 59 skipped, 34 errors; missing Pillow and psycopg imports were observed). Hosted CI on final code head 756fc9100b848ba21a99c8f84374636b91a2d200 passed: mocked safety suite **813 tests, 0 failures, 61 skipped**; isolated PostgreSQL integration **92 tests, successful**; isolated database target guard PASS.
 
 ## Explicit limitations
 
@@ -34,7 +34,7 @@ The validator does not establish that source IDs exist, payload hashes match act
 
 ## Next
 
-1. Run the full local unittest suite.
-2. Verify both isolated PostgreSQL CI jobs on the new commit.
-3. Review factor-specific semantic validation and source-reference resolution requirements.
-4. Only after empirical historical-data inventory and separate approval, design factor derivation and shadow evaluation. Do not activate scoring from schema tests alone.
+1. Review factor-specific semantic validation and source-reference resolution requirements.
+2. Obtain a separately authorized, read-only historical-data inventory target; do not resume Neon or access production without new scope.
+3. Design factor derivation only after evidence availability, source lineage, timestamp coverage and human labels are empirically established.
+4. Keep shadow evaluation and any runtime activation behind separate explicit approval. Do not activate scoring from schema tests alone.

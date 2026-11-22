@@ -181,7 +181,7 @@ Implemented in the continuation branch (structural/persistence layer only):
 Verified locally so far:
 - Focused local run: **40 tests passed, 0 failures** across opportunity and PostgreSQL decision validation/digest unit tests.
 - Full local discovery: **574 tests, 59 skipped, 34 errors**. Import failures observed include missing `PIL` (Pillow) and `psycopg`; the workflow installs both via its explicit dependency steps. This is not a clean full-suite pass. DSN-gated PostgreSQL tests were not run locally.
-- PostgreSQL live integration test cases were added to the isolated CI suite, including v2 persistence round-trip, research-package asset binding, and tampered-row read rejection. Hosted verification for this code commit remains pending.
+- Hosted acceptance on final code head 756fc9100b848ba21a99c8f84374636b91a2d200 passed: mocked safety suite **813 tests, 0 failures, 61 skipped**; isolated PostgreSQL integration **92 tests, successful**; isolated database target guard PASS. The PostgreSQL job included v2 persistence round-trip, research-package asset mismatch rejection, and tampered-row read rejection.
 
 Important limits — this is NOT factor approval or provider acceptance:
 - The validator checks structure and timestamp relationships only. It does not resolve source_refs against the evidence store, prove that payload hashes match fetched payload bytes, establish source authenticity/authority, prove independence of source families, or verify claim-level support.
@@ -194,7 +194,10 @@ Important limits — this is NOT factor approval or provider acceptance:
 The next required phase is factor-specific semantic/provenance resolution and empirical dataset validation. This requires separate review before connecting any factor provider or changing runtime behavior.
 
 
-## 2026-11-22 — Module 14 v2 provenance verification update
-- Focused local opportunity/PostgreSQL decision tests: **39 passed, 0 failed**. `compileall` and `git diff --check` passed.
-- Full local discovery did NOT pass: 574 tests, 59 skipped, 34 errors. Observed import errors include missing `PIL` (Pillow) and `psycopg` in this remote worktree; workflow installs these dependencies. No local PostgreSQL DSN was configured, so DSN-gated integration tests were skipped.
-- Added isolated PostgreSQL integration coverage for v2 snapshot round-trip, package asset identity mismatch rejection, and stored-row digest tamper detection. Awaiting hosted CI on the code commit.
+
+
+## 2026-11-22 — Final hosted acceptance
+- Final code head: 756fc9100b848ba21a99c8f84374636b91a2d200 on the existing PR #14 branch.
+- Mocked safety job: 813 tests, 0 failures, 61 skipped; Python compilation passed.
+- Isolated PostgreSQL integration job: 92 tests, successful; target guard passed. This used the CI PostgreSQL 16 service container only.
+- PR #14 remains OPEN / DRAFT / UNMERGED. Runtime remains factors=None and policy=None; B-SCORE-01 remains OPEN.

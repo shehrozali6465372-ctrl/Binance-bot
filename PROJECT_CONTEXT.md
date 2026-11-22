@@ -4264,3 +4264,9 @@ The most relevant candidate capabilities identified from the directory are:
 - Full local discovery previously reported 574 tests, 59 skipped, 34 errors; observed import errors included missing Pillow (PIL) and psycopg in this worktree. The CI workflow installs those dependencies. Full discovery was not rerun after the final small compatibility refinements; hosted CI is the full-dependency gate.
 - Isolated PostgreSQL CI tests added for v2 round-trip, research-package asset mismatch rejection, and tampered-row digest detection. Awaiting CI on this commit.
 - Structural validation does not prove source IDs exist, hashes match actual payload bytes, sources are authentic/independent, claims are supported, or factor values are correctly derived. No OpportunityEvaluationEngine, six-factor interface, main.py, provider, runtime, publisher, gateway, database schema, or migration activation. Runtime remains factors=None, policy=None; B-SCORE-01 OPEN; project PARTIAL — NOT PRODUCTION-READY.
+
+
+## 2026-11-22 — Module 14 hosted acceptance complete
+- Final code head 756fc9100b848ba21a99c8f84374636b91a2d200: mocked safety CI passed (**813 tests, 0 failures, 61 skipped**); isolated PostgreSQL integration passed (**92 tests**); disposable PostgreSQL target guard PASS.
+- PR #14 remains OPEN / DRAFT / UNMERGED. Runtime scoring remains disabled; factors=None, policy=None. B-SCORE-01 remains OPEN. Project remains PARTIAL — NOT PRODUCTION-READY.
+- Structural provenance validation does not prove source-reference existence, payload hash-to-bytes integrity, source authenticity/independence, claim support, or factor-value derivation. These remain separate work before provider activation.
