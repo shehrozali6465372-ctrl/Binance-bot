@@ -2382,3 +2382,11 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - Decision digest must bind provenance, not merely six final numbers. Any future snapshot schema change requires versioning, backward compatibility, SQLite/PostgreSQL validator review and fresh-process replay tests.
 - Added an important novelty limitation: Binance CMS title/publish-date fingerprints can change the source_id included in event identity; unresolved provider revision correlation means existing event material-change comparator cannot safely claim continuity for those edits.
 - No code, database/schema, credentials, provider calls, CI workflow, publisher, gateway, Neon, or runtime behavior changed. Module 14 remains fail-closed; B-SCORE-01 remains OPEN.
+
+
+# MODULE 14 FACTOR-PROVENANCE CODE REVIEW — 2026-11-22
+- Read-only review found the current digest binds arbitrary JSON under the legacy `policy` / `inputs` shape without enforcing factor-provenance schema or snapshot version.
+- SQLite and PostgreSQL require shared version-aware validation/canonicalization; PostgreSQL read path does not recompute digest. Legacy generic snapshots/rows need explicit replay compatibility.
+- Applied migration checksum means migration 0001 is immutable; any future DDL must be additive in a new numbered migration.
+- Recommended TDD sequence: legacy reader, strict versioned schema, status/value and point-in-time provenance invariants, adapter parity, read-time digest verification, fresh-process replay.
+- Design only; no code/test/schema/data/DB/provider/runtime/publisher/gateway/CI changes. Module 14 remains fail-closed. B-SCORE-01 OPEN.
