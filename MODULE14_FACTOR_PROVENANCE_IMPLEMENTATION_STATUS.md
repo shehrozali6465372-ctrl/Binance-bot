@@ -50,3 +50,9 @@ The validator does not establish that source IDs exist, payload hashes match act
 - Added verify_claim_registry_payload() to SQLite and PostgreSQL ClaimRegistry load paths. Both recompute verification_id and reject stored payload tampering while preserving historical serializer modes (SQLite ensure_ascii=True; PostgreSQL ensure_ascii=False).
 - Focused local run across evidence verification, opportunity and PostgreSQL decision validation: **112 tests, 0 failures, 2 DSN-gated skips**; compileall and diff-check passed.
 - Actual PostgreSQL JSONB tamper rejection test added to the isolated CI job. Registry-bound v3 source resolution remains unimplemented.
+
+
+## Hosted verification — ClaimRegistry integrity follow-up
+- Code head cfca027d5d2cf2831948eff0b620c4fddb4fa600 passed hosted CI: mocked safety suite **815 tests, 0 failures, 61 skipped**; isolated PostgreSQL integration **92 tests, successful**; isolated database target guard PASS.
+- The PostgreSQL integration run included ClaimRegistry JSONB payload tamper rejection, fresh-process registry load, v2 opportunity snapshot round-trip, research-package asset binding and decision digest tamper rejection.
+- Local focused run: **112 tests, 0 failures, 2 DSN-gated skips**. No production DB or Neon data accessed.

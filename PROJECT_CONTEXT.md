@@ -4282,3 +4282,9 @@ The most relevant candidate capabilities identified from the directory are:
 - Implemented shared ClaimRegistry snapshot digest verification on SQLite and PostgreSQL load paths. Tampered payloads now fail closed; serializer modes preserve historical IDs.
 - Focused tests: 112 passed, 0 failed, 2 DSN-gated skips; actual PostgreSQL JSONB tamper test added for hosted isolated integration.
 - Source reference resolution is still not implemented: v2 source_refs are not resolved against an exact registry snapshot, and original payload-byte integrity is not uniformly available across adapters. Registry-bound v3 remains next; no runtime/provider activation.
+
+
+## 2026-11-22 — ClaimRegistry integrity hosted acceptance
+- Code head cfca027d5d2cf2831948eff0b620c4fddb4fa600: mocked safety suite **815 tests, 0 failures, 61 skipped**; isolated PostgreSQL integration **92 tests, successful**; disposable PostgreSQL target guard PASS.
+- PostgreSQL JSONB ClaimRegistry tamper rejection passed alongside v2 opportunity round-trip, asset binding and decision digest tamper tests. ClaimRegistry read paths preserve serializer modes and verify stored snapshot digest.
+- Source-reference resolution remains open: V2 source_refs are still structural only; registry-bound v3 is not implemented. Runtime remains factors=None, policy=None; B-SCORE-01 OPEN.

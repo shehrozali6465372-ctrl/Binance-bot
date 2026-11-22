@@ -79,3 +79,8 @@ Implementation should begin with TDD against synthetic ClaimRegistry fixtures. P
 - Serializer compatibility is explicit: SQLite uses ensure_ascii=True (historical default); PostgreSQL uses ensure_ascii=False (historical explicit setting). This avoids changing existing verification IDs.
 - Added SQLite and PostgreSQL-loader tamper unit tests, including a non-ASCII payload test; added an actual PostgreSQL JSONB row-tamper integration test for CI.
 - Exact source_refs resolution against a selected ClaimRegistry, per-source metadata binding and original payload-byte verification remain open; do not treat v2 structural refs as verified.
+
+
+## Hosted confirmation — 2026-11-22
+- ClaimRegistry SQLite/PostgreSQL read-time digest checks and the actual PostgreSQL JSONB tamper test passed hosted CI. The mocked safety suite passed 815 tests (0 failures, 61 skipped); isolated PostgreSQL integration passed 92 tests.
+- This closes only persisted registry-snapshot digest integrity. Exact factor source_refs resolution and per-source provenance binding remain open.

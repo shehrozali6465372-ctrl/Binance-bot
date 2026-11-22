@@ -2424,3 +2424,8 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - SQLite and PostgreSQL ClaimRegistry read paths now recompute verification_id and reject payload tampering. Historical serializer modes preserved.
 - Focused local tests: 112 passed, 0 failed, 2 DSN-gated skips. Actual PostgreSQL JSONB tamper rejection test added for CI.
 - Registry-bound factor source resolution remains open; v2 source_refs are structural only. Proposed v3 exact registry binding and per-source metadata not implemented.
+
+
+## 2026-11-22 — ClaimRegistry integrity hosted acceptance
+- Code head cfca027d5d2cf2831948eff0b620c4fddb4fa600: mocked suite 815 tests / 0 failures / 61 skipped; isolated PostgreSQL integration 92 tests successful; disposable DB target guard passed.
+- Registry snapshot digest verification and actual PostgreSQL JSONB tamper rejection passed. Exact source_refs resolution against registry and factor-specific semantic provenance remain open.
