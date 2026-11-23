@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from pathlib import Path
 
 # Image Intelligence
-from image_engine import ImageComposer, ImageUploader, should_upload_image
+from image_engine import ImageComposer, ImageUploader, should_generate_image, should_upload_image
 
 
 class _NoRedirectHTTPHandler(urllib.request.HTTPRedirectHandler):
@@ -203,6 +203,16 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("agent")
+
+
+def _generate_post_image_for_run(config, coin, draft_content):
+    """Skip external image inference entirely during dry-run execution."""
+    if not should_generate_image(dry_run=config.dry_run):
+        LOGGER.info("Image generation skipped during dry-run for $%s", coin.get("symbol", ""))
+        return None
+    return ImageComposer().generate_post_image(
+        coin=coin, draft_content=draft_content,
+    )
 
 
 def _log_iteration_failure(iteration: int, exc: Exception) -> None:
@@ -5340,11 +5350,9 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
     # ──────────────────────────────────────────────
     image_list: List[str] = []
     visual_result = None
+    img_path = None
     try:
-        composer = ImageComposer()
-        img_path = composer.generate_post_image(
-            coin=best_coin, draft_content=content,
-        )
+        img_path = _generate_post_image_for_run(config, best_coin, content)
         if img_path:
             from layer1.visual_quality import VisualQualityEngine
             image_metadata = json.loads(Path(str(img_path) + ".json").read_text(encoding="utf-8"))
@@ -5375,7 +5383,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                 img_path = None
         if not should_upload_image(dry_run=config.dry_run, image_path=img_path):
             LOGGER.info("Image upload deferred or skipped for $%s", best_coin["symbol"])
-        if config.image_required and (
+        if not config.dry_run and config.image_required and (
             not img_path or visual_result is None or visual_result.status != "PASS"
         ):
             LOGGER.warning("Required image generation/visual validation failed for $%s; skipping publication", best_coin["symbol"])
@@ -5383,7 +5391,7 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
     except Exception as e:
         LOGGER.warning("Image generation/upload failed for $%s: %s",
                       best_coin["symbol"], type(e).__name__)
-        if config.image_required:
+        if not config.dry_run and config.image_required:
             LOGGER.warning("Required image pipeline failed; skipping publication for $%s", best_coin["symbol"])
             return False
     

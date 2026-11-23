@@ -6,9 +6,12 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image
+
+import main
 
 from image_engine import (
     CloudflareImageArtifact, CloudflareWorkersAIImageGenerator, ImageComposer,
@@ -333,6 +336,28 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
         self.assertFalse(should_upload_image(dry_run=False, image_path=None))
         self.assertFalse(should_upload_image(dry_run=False, image_path=""))
         self.assertTrue(should_upload_image(dry_run=False, image_path="/tmp/image.png"))
+
+    def test_dry_run_pipeline_does_not_instantiate_image_composer(self):
+        config = SimpleNamespace(dry_run=True)
+        with patch("main.ImageComposer") as composer_class:
+            result = main._generate_post_image_for_run(
+                config, {"symbol": "ABC"}, "verified draft",
+            )
+        self.assertIsNone(result)
+        composer_class.assert_not_called()
+
+    def test_live_pipeline_generates_image_through_composer(self):
+        config = SimpleNamespace(dry_run=False)
+        expected_path = Path("/tmp/authorized-live-image.png")
+        with patch("main.ImageComposer") as composer_class:
+            composer_class.return_value.generate_post_image.return_value = expected_path
+            result = main._generate_post_image_for_run(
+                config, {"symbol": "ABC"}, "verified draft",
+            )
+        self.assertEqual(result, expected_path)
+        composer_class.return_value.generate_post_image.assert_called_once_with(
+            coin={"symbol": "ABC"}, draft_content="verified draft",
+        )
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

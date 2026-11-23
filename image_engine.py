@@ -95,6 +95,13 @@ class CloudflareImageArtifact:
     generated_at: str
 
 
+def should_generate_image(*, dry_run: bool) -> bool:
+    """Avoid paid/external image inference when the pipeline is in dry-run mode."""
+    if not isinstance(dry_run, bool):
+        raise TypeError("dry_run must be a boolean")
+    return not dry_run
+
+
 def should_upload_image(*, dry_run: bool, image_path: str | Path | None) -> bool:
     """Prevent external media side effects during dry-run and when no image exists."""
     if not isinstance(dry_run, bool):
