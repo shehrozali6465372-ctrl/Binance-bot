@@ -45,6 +45,7 @@ class AnnouncementImporterPostgresReceiptTests(unittest.TestCase):
                 id BIGSERIAL PRIMARY KEY,
                 source_id CHAR(64) NOT NULL,
                 content_hash CHAR(64) NOT NULL UNIQUE,
+                topic TEXT NOT NULL CHECK (topic = 'com_announcement_en'),
                 event_type TEXT NOT NULL,
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
@@ -55,6 +56,7 @@ class AnnouncementImporterPostgresReceiptTests(unittest.TestCase):
                 catalog_id TEXT NOT NULL,
                 catalog_name TEXT NOT NULL,
                 disclaimer TEXT NOT NULL,
+                raw_payload JSONB NOT NULL,
                 ingestion_receipt JSONB,
                 inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
@@ -105,13 +107,14 @@ class AnnouncementImporterPostgresReceiptTests(unittest.TestCase):
     def _insert_event(self, source_id, content_hash, receipt):
         self.admin.execute(
             f'''INSERT INTO "{self.schema}".binance_announcement_events
-               (source_id, content_hash, event_type, title, body, publisher, source_url,
-                published_at, observed_at, catalog_id, catalog_name, disclaimer, ingestion_receipt)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)''',
+               (source_id, content_hash, topic, event_type, title, body, publisher, source_url,
+                published_at, observed_at, catalog_id, catalog_name, disclaimer, raw_payload, ingestion_receipt)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)''',
             (
-                source_id, content_hash, "listing", self.payload["title"], self.payload["body"],
-                "Binance", self.payload["source_url"], self.published, self.published,
-                "48", self.payload["catalog_name"], self.payload["disclaimer"],
+                source_id, content_hash, "com_announcement_en", "listing",
+                self.payload["title"], self.payload["body"], "Binance", self.payload["source_url"],
+                self.published, self.published, "48", self.payload["catalog_name"],
+                self.payload["disclaimer"], json.dumps(self.payload),
                 json.dumps(receipt) if receipt is not None else None,
             ),
         )
