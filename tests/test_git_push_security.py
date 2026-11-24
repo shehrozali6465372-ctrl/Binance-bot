@@ -30,6 +30,7 @@ class GitPushSecurityTests(unittest.TestCase):
         with patch.dict(os.environ, {
             "GH_TOKEN": token,
             "GITHUB_REPOSITORY": "owner/repository",
+            "GITHUB_ACTIONS": "false",
             "GIT_CONFIG_COUNT": "0",
         }, clear=False), patch("subprocess.run", side_effect=fake_run):
             self.assertTrue(main._try_git_push(max_retries=1))
@@ -270,7 +271,7 @@ class GitPushSecurityTests(unittest.TestCase):
                     real_run(["git", "--git-dir", str(remote), "fetch", str(work), "HEAD:refs/heads/feature/history"], check=True, capture_output=True, text=True)
                     return subprocess.CompletedProcess(command, 0, stdout=b"simulated local bare remote update", stderr=b"")
                 return real_run(command, **kwargs)
-            with patch.dict(os.environ, {"GH_TOKEN":"test-token", "GITHUB_TOKEN":"", "GITHUB_REPOSITORY":"owner/repository"}, clear=False), patch.object(main, "_POST_HISTORY_FILE", "published_posts.jsonl"), patch("subprocess.run", side_effect=fake_run):
+            with patch.dict(os.environ, {"GH_TOKEN":"test-token", "GITHUB_TOKEN":"", "GITHUB_REPOSITORY":"owner/repository", "GITHUB_ACTIONS":"false"}, clear=False), patch.object(main, "_POST_HISTORY_FILE", "published_posts.jsonl"), patch("subprocess.run", side_effect=fake_run):
                 self.assertTrue(main._retry_pending_push())
             remote_head = subprocess.run(["git", "--git-dir", str(remote), "rev-parse", "refs/heads/feature/history"], check=True, capture_output=True, text=True).stdout.strip()
             self.assertEqual(remote_head, local_head)
