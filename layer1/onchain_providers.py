@@ -49,6 +49,40 @@ class ProviderTransportError(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
 
 
+def _max_provider_response_bytes_from_env(environ=os.environ) -> int:
+    raw = environ.get("ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES", "")
+    if not isinstance(raw, str) or re.fullmatch(r"[1-9][0-9]*", raw.strip()) is None:
+        raise ValueError("ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES must be an explicit positive integer")
+    return int(raw.strip())
+
+
+def _read_bounded_response(response, max_response_bytes: int) -> bytes:
+    headers = getattr(response, "headers", None)
+    content_length = headers.get("Content-Length") if headers is not None else None
+    if content_length is not None:
+        raw_length = str(content_length).strip()
+        if re.fullmatch(r"[0-9]+", raw_length) is None:
+            raise ProviderTransportError("INVALID_CONTENT_LENGTH", "provider response Content-Length is invalid")
+        if int(raw_length) > max_response_bytes:
+            raise ProviderTransportError("RESPONSE_TOO_LARGE", "provider response exceeded configured byte limit")
+
+    chunks = []
+    total = 0
+    while True:
+        # Read at most one byte beyond the remaining budget to detect an
+        # oversized/chunked response without buffering an unbounded body.
+        chunk = response.read(min(65536, max_response_bytes - total + 1))
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise ProviderTransportError("INVALID_RESPONSE_BODY", "provider response body is not bytes")
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_response_bytes:
+            raise ProviderTransportError("RESPONSE_TOO_LARGE", "provider response exceeded configured byte limit")
+        chunks.append(bytes(chunk))
+    return b"".join(chunks)
+
+
 def retry_provider_operation(
     operation: Callable[[], Any], *, attempts: int = 3,
     sleep: Callable[[float], None] = time.sleep,
@@ -111,7 +145,8 @@ class ReadOnlyJsonRpcTransport:
     """Small JSON-RPC HTTP transport that never logs endpoint URLs or bodies."""
 
     def __init__(self, endpoint: str, timeout_seconds: int = 10,
-                 request_style: str = "jsonrpc2", opener: Optional[Callable] = None):
+                 request_style: str = "jsonrpc2", opener: Optional[Callable] = None,
+                 max_response_bytes: Optional[int] = None):
         parsed = urlparse(endpoint)
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError("provider endpoint must be an HTTPS URL")
@@ -119,9 +154,13 @@ class ReadOnlyJsonRpcTransport:
             raise ValueError("unsupported JSON-RPC request style")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive integer")
+        if (isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int)
+                or max_response_bytes <= 0):
+            raise ValueError("max_response_bytes must be an explicit positive integer")
         self._endpoint = endpoint
         self._timeout_seconds = timeout_seconds
         self._request_style = request_style
+        self._max_response_bytes = max_response_bytes
         # Provider credentials may be embedded in endpoint paths; never follow
         # redirects to a different origin with those credentials in the URL.
         self._opener = opener if opener is not None else _open_without_redirect
@@ -143,7 +182,7 @@ class ReadOnlyJsonRpcTransport:
         request = Request(url, headers={"Accept": "application/json"}, method="GET")
         try:
             with self._opener(request, timeout=self._timeout_seconds) as response:
-                raw = response.read()
+                raw = _read_bounded_response(response, self._max_response_bytes)
         except HTTPError as exc:
             status = int(exc.code)
             reason = "RATE_LIMITED" if status == 429 else "HTTP_ERROR"
@@ -183,7 +222,7 @@ class ReadOnlyJsonRpcTransport:
         )
         try:
             with self._opener(request, timeout=self._timeout_seconds) as response:
-                raw = response.read()
+                raw = _read_bounded_response(response, self._max_response_bytes)
         except HTTPError as exc:
             status = int(exc.code)
             reason = "RATE_LIMITED" if status == 429 else "HTTP_ERROR"
@@ -372,7 +411,8 @@ class AlchemyReadOnlyAdapter:
     }
 
     def __init__(self, api_key: str, timeout_seconds: int = 10,
-                 transport_factory: Optional[Callable[[str, int], ReadOnlyJsonRpcTransport]] = None):
+                 transport_factory: Optional[Callable[[str, int], ReadOnlyJsonRpcTransport]] = None,
+                 max_response_bytes: Optional[int] = None):
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("Alchemy API key is required")
         if any(char in api_key for char in "/?#"):
@@ -381,8 +421,15 @@ class AlchemyReadOnlyAdapter:
             raise ValueError("timeout_seconds must be a positive integer")
         self._api_key = api_key.strip()
         self._timeout_seconds = timeout_seconds
+        if transport_factory is None and (
+            isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int)
+            or max_response_bytes <= 0
+        ):
+            raise ValueError("max_response_bytes must be an explicit positive integer")
         self._transport_factory = transport_factory or (
-            lambda endpoint, timeout: ReadOnlyJsonRpcTransport(endpoint, timeout)
+            lambda endpoint, timeout: ReadOnlyJsonRpcTransport(
+                endpoint, timeout, max_response_bytes=max_response_bytes,
+            )
         )
 
     @classmethod
@@ -390,7 +437,8 @@ class AlchemyReadOnlyAdapter:
         api_key = environ.get("ALCHEMY_API_KEY", "")
         if not api_key:
             raise ValueError("ALCHEMY_API_KEY is not configured")
-        return cls(api_key)
+        max_response_bytes = _max_provider_response_bytes_from_env(environ)
+        return cls(api_key, max_response_bytes=max_response_bytes)
 
     def _call(self, network_id: str, method: str, params: Optional[list] = None):
         allowed = self._READ_METHODS.get(network_id)
@@ -964,7 +1012,8 @@ class ChainstackXrplReadOnlyAdapter:
     """Read-only XRPL mainnet health probe through a Chainstack Global Node."""
 
     def __init__(self, endpoint: str, timeout_seconds: int = 10,
-                 transport_factory: Optional[Callable[[str, int], ReadOnlyJsonRpcTransport]] = None):
+                 transport_factory: Optional[Callable[[str, int], ReadOnlyJsonRpcTransport]] = None,
+                 max_response_bytes: Optional[int] = None):
         parsed = urlparse(endpoint)
         if (parsed.scheme != "https" or parsed.hostname != "xrpl-mainnet.core.chainstack.com"
                 or not parsed.path.strip("/")):
@@ -973,8 +1022,15 @@ class ChainstackXrplReadOnlyAdapter:
             raise ValueError("timeout_seconds must be a positive integer")
         self._endpoint = endpoint
         self._timeout_seconds = timeout_seconds
+        if transport_factory is None and (
+            isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int)
+            or max_response_bytes <= 0
+        ):
+            raise ValueError("max_response_bytes must be an explicit positive integer")
         self._transport_factory = transport_factory or (
-            lambda url, timeout: ReadOnlyJsonRpcTransport(url, timeout, request_style="xrpl")
+            lambda url, timeout: ReadOnlyJsonRpcTransport(
+                url, timeout, request_style="xrpl", max_response_bytes=max_response_bytes,
+            )
         )
 
     @classmethod
@@ -982,7 +1038,8 @@ class ChainstackXrplReadOnlyAdapter:
         endpoint = environ.get("CHAINSTACK_XRPL_ENDPOINT", "")
         if not endpoint:
             raise ValueError("CHAINSTACK_XRPL_ENDPOINT is not configured")
-        return cls(endpoint)
+        max_response_bytes = _max_provider_response_bytes_from_env(environ)
+        return cls(endpoint, max_response_bytes=max_response_bytes)
 
     def fetch_account_transactions(self, account: str,
                                    ledger_index_min: int, ledger_index_max: int,

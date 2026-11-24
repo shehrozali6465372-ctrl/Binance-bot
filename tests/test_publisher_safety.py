@@ -61,6 +61,34 @@ class PublisherSafetyTests(unittest.TestCase):
         os.chdir(self.old_cwd)
         self.tmp.cleanup()
 
+    def _save_test_editorial_brief(self, research_id, event_id, approved_claim_ids=("a" * 64,)):
+        from layer1.editorial_strategy import EditorialBrief, EditorialBriefStore, editorial_brief_payload_hash
+
+        payload = {
+            "event_id": event_id, "angle_id": "angle:" + research_id,
+            "research_package_id": research_id,
+            "research_question": "Explain the verified asset context",
+            "format": "MARKET_MOVEMENT_EXPLAINER", "angle": "Use only approved facts",
+            "audience": "Binance Square readers", "tone": "analytical and cautious",
+            "min_words": 20, "max_words": 120, "outline": ("State verified evidence",),
+            "approved_claim_ids": tuple(sorted(approved_claim_ids)),
+            "prohibited_claims": (), "uncertainty_notes": (),
+            "status": "READY", "policy_version": "publisher-safety-test-v1",
+        }
+        brief_hash = editorial_brief_payload_hash(payload)
+        brief = EditorialBrief(
+            event_id=event_id, angle_id=payload["angle_id"], brief_id=brief_hash,
+            version=0, research_package_id=research_id,
+            research_question=payload["research_question"], format=payload["format"],
+            angle=payload["angle"], audience=payload["audience"], tone=payload["tone"],
+            min_words=payload["min_words"], max_words=payload["max_words"],
+            outline=payload["outline"], approved_claim_ids=payload["approved_claim_ids"],
+            prohibited_claims=payload["prohibited_claims"],
+            uncertainty_notes=payload["uncertainty_notes"], status="READY",
+            brief_hash=brief_hash, policy_version=payload["policy_version"],
+        )
+        return EditorialBriefStore(self.publisher.db.conn).save(brief).brief_id
+
     def _authorization(self, coin, content, image_hashes=None, event_state="NO_EVENT"):
         from layer1.content_generation import DraftStore
         from layer1.publication_authorization import PublicationAuthorizationEngine
@@ -73,24 +101,13 @@ class PublisherSafetyTests(unittest.TestCase):
         draft_hash = main.hashlib.sha256(content.encode("utf-8")).hexdigest()
         draft_store = DraftStore(self.publisher.db.conn)
         research_id = "research:test:" + coin["asset_id"]
-        brief_id = "brief:test:" + draft_hash
+        event_id = "event:test" if event_state != "NO_EVENT" else "no-event:" + research_id
+        brief_id = self._save_test_editorial_brief(research_id, event_id)
         draft_store.save_draft(
             content, asset_id=coin["asset_id"],
             research_package_id=research_id,
             editorial_brief_id=brief_id,
             approved_claim_ids=("a" * 64,),
-        )
-        self.publisher.db.conn.execute("""
-            CREATE TABLE IF NOT EXISTS editorial_brief_versions (
-                event_id TEXT NOT NULL, angle_id TEXT NOT NULL, version INTEGER NOT NULL,
-                brief_id TEXT NOT NULL UNIQUE, research_package_id TEXT NOT NULL,
-                brief_hash TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
-            )
-        """)
-        self.publisher.db.conn.execute(
-            "INSERT OR IGNORE INTO editorial_brief_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (("event:test" if event_state != "NO_EVENT" else "no-event:" + research_id),
-             "angle:test", 1, brief_id, research_id, "b" * 64, "{}", main.utc_now()),
         )
         self.publisher.db.conn.execute("""
             CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
@@ -106,12 +123,13 @@ class PublisherSafetyTests(unittest.TestCase):
         self.publisher.db.conn.commit()
         draft_store.save_text_validation(
             draft_hash=draft_hash, status="PASS", reasons=(),
-            validation_version="content-verification-v1",
+            validation_version="content-verification-v2-claim-attribution",
+            verification_result=__import__("tests.evidence_fixtures", fromlist=["verifier_issued_content_result"]).verifier_issued_content_result(content, asset_id=coin["asset_id"], symbol=symbol),
         )
         for image_hash in hashes:
             draft_store.save_visual_validation(
                 draft_hash=draft_hash, image_hash=image_hash,
-                status="PASS", reasons=(), validation_version="visual-quality-v2",
+                status="PASS", reasons=(), validation_version="visual-quality-v3",
             )
         auth = engine.authorize(
             symbol=symbol, asset_id=coin["asset_id"], content=content,
@@ -180,6 +198,140 @@ class PublisherSafetyTests(unittest.TestCase):
             )
         self.assertEqual(result.status, "FAILED_CONFIRMED")
         self.assertIn("current visual validation version", result.error)
+        urlopen.assert_not_called()
+
+    def test_final_publisher_gate_rejects_later_reject_at_equal_timestamp(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "equal timestamp rejection content",
+        )
+        tied_time = self.publisher.db.conn.execute(
+            "SELECT created_at FROM content_draft_validation_results WHERE draft_hash=?",
+            (authorization.content_hash,),
+        ).fetchone()[0]
+        self.publisher.db.conn.execute(
+            "DELETE FROM content_draft_validation_results WHERE draft_hash=?",
+            (authorization.content_hash,),
+        )
+        self.publisher.db.conn.execute(
+            "INSERT OR IGNORE INTO validation_sequence_ledger(sequence) VALUES (2)"
+        )
+        self.publisher.db.conn.executemany(
+            "INSERT INTO content_draft_validation_results "
+            "(validation_id,draft_hash,status,reasons_json,validation_version,created_at,validation_sequence) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [
+                ("f" * 64, authorization.content_hash, "PASS", "[]", "text-v1", tied_time, 1),
+                ("a" * 64, authorization.content_hash, "REJECT", '["later rejection"]', "text-v2", tied_time, 2),
+            ],
+        )
+        self.publisher.db.conn.commit()
+        with patch("main._open_binance_publish_no_redirect") as urlopen:
+            result = self.publisher.publish(
+                coin, "equal timestamp rejection content",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("persisted text validation is not PASS", result.error)
+        urlopen.assert_not_called()
+
+    def test_final_publisher_gate_rejects_later_needs_revision_at_equal_timestamp(self):
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "equal timestamp revision content",
+        )
+        tied_time = self.publisher.db.conn.execute(
+            "SELECT created_at FROM content_draft_validation_results WHERE draft_hash=?",
+            (authorization.content_hash,),
+        ).fetchone()[0]
+        self.publisher.db.conn.execute(
+            "DELETE FROM content_draft_validation_results WHERE draft_hash=?",
+            (authorization.content_hash,),
+        )
+        self.publisher.db.conn.execute(
+            "INSERT OR IGNORE INTO validation_sequence_ledger(sequence) VALUES (2)"
+        )
+        self.publisher.db.conn.executemany(
+            "INSERT INTO content_draft_validation_results "
+            "(validation_id,draft_hash,status,reasons_json,validation_version,created_at,validation_sequence) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [
+                ("f" * 64, authorization.content_hash, "PASS", "[]", "text-v1", tied_time, 1),
+                ("a" * 64, authorization.content_hash, "NEEDS_REVISION", '["later revision"]', "text-v2", tied_time, 2),
+            ],
+        )
+        self.publisher.db.conn.commit()
+        with patch("main._open_binance_publish_no_redirect") as urlopen:
+            result = self.publisher.publish(
+                coin, "equal timestamp revision content",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("persisted text validation is not PASS", result.error)
+        urlopen.assert_not_called()
+
+    def test_final_publisher_gate_rejects_later_visual_reject_at_equal_timestamp(self):
+        image_hash = "c" * 64
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "equal timestamp visual rejection content",
+            image_hashes=[image_hash],
+        )
+        tied_time = self.publisher.db.conn.execute(
+            "SELECT created_at FROM visual_validation_results WHERE draft_hash=? AND image_hash=?",
+            (authorization.content_hash, image_hash),
+        ).fetchone()[0]
+        self.publisher.db.conn.execute(
+            "DELETE FROM visual_validation_results WHERE draft_hash=? AND image_hash=?",
+            (authorization.content_hash, image_hash),
+        )
+        self.publisher.db.conn.executemany(
+            "INSERT INTO visual_validation_results "
+            "(validation_id,draft_hash,image_hash,status,reasons_json,validation_version,created_at,validation_sequence) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [
+                ("f" * 64, authorization.content_hash, image_hash, "PASS", "[]", "visual-quality-v3", tied_time, 1),
+                ("a" * 64, authorization.content_hash, image_hash, "REJECT", '["later visual rejection"]', "visual-quality-v3", tied_time, 2),
+            ],
+        )
+        self.publisher.db.conn.commit()
+        with patch("main._open_binance_publish_no_redirect") as urlopen:
+            result = self.publisher.publish(
+                coin, "equal timestamp visual rejection content",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("persisted visual validation is not PASS", result.error)
+        urlopen.assert_not_called()
+
+    def test_final_publisher_gate_rejects_later_visual_needs_revision_at_equal_timestamp(self):
+        image_hash = "c" * 64
+        coin, authorization, hashes = self._authorization(
+            {"symbol": "BTC"}, "equal timestamp visual revision content",
+            image_hashes=[image_hash],
+        )
+        tied_time = self.publisher.db.conn.execute(
+            "SELECT created_at FROM visual_validation_results WHERE draft_hash=? AND image_hash=?",
+            (authorization.content_hash, image_hash),
+        ).fetchone()[0]
+        self.publisher.db.conn.execute(
+            "DELETE FROM visual_validation_results WHERE draft_hash=? AND image_hash=?",
+            (authorization.content_hash, image_hash),
+        )
+        self.publisher.db.conn.executemany(
+            "INSERT INTO visual_validation_results "
+            "(validation_id,draft_hash,image_hash,status,reasons_json,validation_version,created_at,validation_sequence) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [
+                ("f" * 64, authorization.content_hash, image_hash, "PASS", "[]", "visual-quality-v3", tied_time, 1),
+                ("a" * 64, authorization.content_hash, image_hash, "NEEDS_REVISION", '["later visual revision"]', "visual-quality-v3", tied_time, 2),
+            ],
+        )
+        self.publisher.db.conn.commit()
+        with patch("main._open_binance_publish_no_redirect") as urlopen:
+            result = self.publisher.publish(
+                coin, "equal timestamp visual revision content",
+                authorization=authorization, image_hashes=hashes,
+            )
+        self.assertEqual(result.status, "FAILED_CONFIRMED")
+        self.assertIn("persisted visual validation is not PASS", result.error)
         urlopen.assert_not_called()
 
     def test_lifecycle_change_after_authorization_blocks_before_network_post(self):
@@ -769,24 +921,12 @@ class PublisherSafetyTests(unittest.TestCase):
         reservation = quota.reserve_daily_quota(symbol="ATOM", daily_limit=6)
         draft_hash = main.hashlib.sha256(b"pending content").hexdigest()
         research_id = "research:test:coingecko:atom"
-        brief_id = "brief:test:" + draft_hash
+        brief_id = self._save_test_editorial_brief(research_id, "no-event:" + research_id)
         DraftStore(self.publisher.db.conn).save_draft(
             "pending content", asset_id="coingecko:atom",
             research_package_id=research_id,
             editorial_brief_id=brief_id,
             approved_claim_ids=("a" * 64,),
-        )
-        self.publisher.db.conn.execute("""
-            CREATE TABLE IF NOT EXISTS editorial_brief_versions (
-                event_id TEXT NOT NULL, angle_id TEXT NOT NULL, version INTEGER NOT NULL,
-                brief_id TEXT NOT NULL UNIQUE, research_package_id TEXT NOT NULL,
-                brief_hash TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
-            )
-        """)
-        self.publisher.db.conn.execute(
-            "INSERT INTO editorial_brief_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("no-event:" + research_id, "angle:test", 1, brief_id, research_id,
-             "b" * 64, "{}", main.utc_now()),
         )
         self.publisher.db.conn.execute("""
             CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
@@ -797,7 +937,8 @@ class PublisherSafetyTests(unittest.TestCase):
         self.publisher.db.conn.commit()
         DraftStore(self.publisher.db.conn).save_text_validation(
             draft_hash=draft_hash,
-            status="PASS", reasons=(), validation_version="content-verification-v1",
+            status="PASS", reasons=(), validation_version="content-verification-v2-claim-attribution",
+            verification_result=__import__("tests.evidence_fixtures", fromlist=["verifier_issued_content_result"]).verifier_issued_content_result("pending content", asset_id="coingecko:atom", symbol="ATOM"),
         )
         auth = quota.authorize(
             symbol="ATOM", asset_id="coingecko:atom", content="pending content",

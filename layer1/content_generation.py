@@ -27,6 +27,39 @@ class DraftRecord:
     created_at: str
 
 
+def load_latest_validation_record(
+    connection: sqlite3.Connection, *, draft_hash: str, image_hash: str | None = None,
+):
+    """Return the latest persisted validation; tied legacy chronology fails closed."""
+    if image_hash is None:
+        table = "content_draft_validation_results"
+        where = "draft_hash=?"
+        params = (draft_hash,)
+    else:
+        table = "visual_validation_results"
+        where = "draft_hash=? AND image_hash=?"
+        params = (draft_hash, image_hash)
+    latest = connection.execute(
+        f"SELECT MAX(created_at) FROM {table} WHERE {where}", params,
+    ).fetchone()[0]
+    if latest is None:
+        return None
+    count, missing_sequences = connection.execute(
+        f"SELECT COUNT(*), SUM(CASE WHEN validation_sequence IS NULL THEN 1 ELSE 0 END) "
+        f"FROM {table} WHERE {where} AND created_at=?",
+        (*params, latest),
+    ).fetchone()
+    if count > 1 and missing_sequences:
+        raise ValueError("latest validation chronology is ambiguous for legacy records")
+    row = connection.execute(
+        f"SELECT status,validation_version,validation_sequence "
+        f"FROM {table} WHERE {where} AND created_at=? "
+        "ORDER BY validation_sequence DESC LIMIT 1",
+        (*params, latest),
+    ).fetchone()
+    return row
+
+
 class DraftStore:
     """Persist exact draft versions and validation decisions in the publisher's existing DB."""
 
@@ -49,13 +82,17 @@ class DraftStore:
             PRIMARY KEY(draft_key, version),
             UNIQUE(draft_key, content_hash)
         );
+        CREATE TABLE IF NOT EXISTS validation_sequence_ledger (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT
+        );
         CREATE TABLE IF NOT EXISTS content_draft_validation_results (
             validation_id TEXT PRIMARY KEY,
             draft_hash TEXT NOT NULL,
             status TEXT NOT NULL,
             reasons_json TEXT NOT NULL,
             validation_version TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            validation_sequence INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_draft_validation_latest
             ON content_draft_validation_results(draft_hash, created_at);
@@ -67,6 +104,7 @@ class DraftStore:
             reasons_json TEXT NOT NULL,
             validation_version TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            validation_sequence INTEGER,
             UNIQUE(draft_hash, image_hash, validation_id)
         );
         CREATE INDEX IF NOT EXISTS idx_visual_validation_pair
@@ -90,6 +128,42 @@ class DraftStore:
             UNIQUE(draft_hash, image_hash)
         );
         """)
+        for table in ("content_draft_validation_results", "visual_validation_results"):
+            columns = {row[1] for row in self.connection.execute(f"PRAGMA table_info({table})")}
+            if "validation_sequence" not in columns:
+                # Historical insertion order is not reconstructed from rowid. Legacy rows stay NULL.
+                self.connection.execute(f"ALTER TABLE {table} ADD COLUMN validation_sequence INTEGER")
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_text_validation_sequence "
+            "ON content_draft_validation_results(validation_sequence) WHERE validation_sequence IS NOT NULL"
+        )
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_visual_validation_sequence "
+            "ON visual_validation_results(validation_sequence) WHERE validation_sequence IS NOT NULL"
+        )
+        existing_sequence_max = max(
+            self.connection.execute(
+                f"SELECT COALESCE(MAX(validation_sequence),0) FROM {table}"
+            ).fetchone()[0]
+            for table in ("content_draft_validation_results", "visual_validation_results")
+        )
+        ledger_sequence_max = self.connection.execute(
+            "SELECT COALESCE(MAX(sequence),0) FROM validation_sequence_ledger"
+        ).fetchone()[0]
+        if existing_sequence_max > ledger_sequence_max:
+            # Preserve already-assigned sequence space without inferring any legacy NULL rows.
+            self.connection.execute(
+                "INSERT INTO validation_sequence_ledger(sequence) VALUES (?)",
+                (existing_sequence_max,),
+            )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_text_validation_chronology "
+            "ON content_draft_validation_results(draft_hash,created_at,validation_sequence)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_visual_validation_chronology "
+            "ON visual_validation_results(draft_hash,image_hash,created_at,validation_sequence)"
+        )
         self.connection.commit()
 
     def save_draft(
@@ -117,6 +191,20 @@ class DraftStore:
         draft_key = _hash(asset_id + "|" + editorial_brief_id)
         created_at = datetime.now(timezone.utc).isoformat()
         with self.connection:
+            brief_row = self.connection.execute(
+                "SELECT research_package_id, payload_json FROM editorial_brief_versions WHERE brief_id=?",
+                (editorial_brief_id,),
+            ).fetchone()
+            if brief_row is None or brief_row[0] != research_package_id:
+                raise ValueError("draft research package does not match a persisted editorial brief")
+            try:
+                brief_payload = json.loads(brief_row[1])
+                from layer1.editorial_strategy import editorial_brief_approved_claim_ids
+                brief_claim_ids = editorial_brief_approved_claim_ids(brief_payload)
+            except (TypeError, json.JSONDecodeError, AttributeError, ValueError):
+                raise ValueError("persisted editorial brief approved-claim allowlist is invalid") from None
+            if not set(claim_ids).issubset(set(brief_claim_ids)):
+                raise ValueError("draft claim IDs are not approved by the editorial brief")
             existing = self.connection.execute(
                 "SELECT version, draft_id, created_at, research_package_id, "
                 "editorial_brief_id, approved_claim_ids_json FROM content_draft_versions "
@@ -162,6 +250,7 @@ class DraftStore:
     def save_text_validation(
         self, *, draft_hash: str, status: str, reasons: Sequence[str],
         validation_version: str,
+        verification_result=None,
     ) -> str:
         if (
             not isinstance(draft_hash, str) or len(draft_hash) != 64
@@ -175,17 +264,31 @@ class DraftStore:
             raise ValueError("validation reasons must be a sequence of strings")
         if any(not isinstance(reason, str) or not reason.strip() for reason in reasons):
             raise ValueError("validation reasons must be non-empty strings")
+        if status == "PASS":
+            from layer1.content_verification import ContentVerificationResult
+            if type(verification_result) is not ContentVerificationResult:
+                raise ValueError("PASS text validation requires a verifier-issued content result")
+            verification_result.assert_verifier_issued_and_unchanged()
+            if (verification_result.status != "PASS" or verification_result.draft_hash != draft_hash
+                    or verification_result.validation_version != validation_version
+                    or tuple(verification_result.reasons) != tuple(reasons)):
+                raise ValueError("verifier-issued content result does not match persisted validation")
         payload = {
             "draft_hash": draft_hash, "status": status,
             "reasons": sorted(set(reasons)), "version": validation_version,
         }
         validation_id = _hash(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         with self.connection:
+            sequence = self.connection.execute(
+                "INSERT INTO validation_sequence_ledger DEFAULT VALUES"
+            ).lastrowid
             self.connection.execute(
-                "INSERT OR IGNORE INTO content_draft_validation_results VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO content_draft_validation_results "
+                "(validation_id,draft_hash,status,reasons_json,validation_version,created_at,validation_sequence) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (validation_id, draft_hash, status,
                  json.dumps(payload["reasons"], separators=(",", ":")),
-                 validation_version, datetime.now(timezone.utc).isoformat()),
+                 validation_version, datetime.now(timezone.utc).isoformat(), sequence),
             )
         return validation_id
 
@@ -213,11 +316,16 @@ class DraftStore:
         }
         validation_id = _hash(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         with self.connection:
+            sequence = self.connection.execute(
+                "INSERT INTO validation_sequence_ledger DEFAULT VALUES"
+            ).lastrowid
             self.connection.execute(
-                "INSERT OR IGNORE INTO visual_validation_results VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO visual_validation_results "
+                "(validation_id,draft_hash,image_hash,status,reasons_json,validation_version,created_at,validation_sequence) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (validation_id, draft_hash, image_hash, status,
                  json.dumps(payload["reasons"], separators=(",", ":")),
-                 validation_version, datetime.now(timezone.utc).isoformat()),
+                 validation_version, datetime.now(timezone.utc).isoformat(), sequence),
             )
         return validation_id
 
@@ -325,20 +433,15 @@ class DraftStore:
         }
 
     def latest_text_validation(self, draft_hash: str) -> str | None:
-        row = self.connection.execute(
-            "SELECT status FROM content_draft_validation_results WHERE draft_hash=? "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (draft_hash,),
-        ).fetchone()
+        row = load_latest_validation_record(self.connection, draft_hash=draft_hash)
         return row[0] if row else None
 
     def visual_validation(self, draft_hash: str, image_hash: str) -> str | None:
-        row = self.connection.execute(
-            "SELECT status FROM visual_validation_results WHERE draft_hash=? AND image_hash=? "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (draft_hash, image_hash),
-        ).fetchone()
+        row = load_latest_validation_record(
+            self.connection, draft_hash=draft_hash, image_hash=image_hash,
+        )
         return row[0] if row else None
+
 
     def load_latest(self, draft_key: str) -> dict | None:
         row = self.connection.execute(

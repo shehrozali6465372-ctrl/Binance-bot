@@ -10,9 +10,13 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from .onchain import OnChainAssetMapping, OnChainStore
-from .onchain_ingestion import OnChainIngestionStore, normalize_bitcoin_transaction_outputs
+from .onchain import OnChainAssetMapping
+from .onchain_ingestion import normalize_bitcoin_transaction_outputs
 from .onchain_providers import BitcoinAddressTransaction, ProviderTransportError, retry_provider_operation
+from .onchain_protocols import (
+    OnChainIngestionStoreProtocol, OnChainMappingStoreProtocol,
+    require_ingestion_store, require_mapping_store,
+)
 
 
 _RETRYABLE = {"TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"}
@@ -20,8 +24,8 @@ _RETRYABLE = {"TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"}
 
 class BitcoinAddressIngestionWorker:
     def __init__(
-        self, provider, mapping_store: OnChainStore,
-        ingestion_store: OnChainIngestionStore, *,
+        self, provider, mapping_store: OnChainMappingStoreProtocol,
+        ingestion_store: OnChainIngestionStoreProtocol, *,
         monitored_addresses: dict[str, tuple[str, ...]],
         start_blocks: dict[str, int],
         minimum_confirmations: int,
@@ -32,8 +36,8 @@ class BitcoinAddressIngestionWorker:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
-        if not isinstance(mapping_store, OnChainStore) or not isinstance(ingestion_store, OnChainIngestionStore):
-            raise ValueError("worker requires the existing mapping and ingestion stores")
+        require_mapping_store(mapping_store)
+        require_ingestion_store(ingestion_store)
         if not isinstance(monitored_addresses, dict) or not monitored_addresses:
             raise ValueError("explicit monitored address seeds are required")
         if not isinstance(start_blocks, dict) or not start_blocks:

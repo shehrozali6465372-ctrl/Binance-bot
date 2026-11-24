@@ -105,7 +105,9 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
         path = os.path.join(self.tmp.name, "onchain.sqlite3")
         self.mapping_store = OnChainStore(path, OnChainIntelligenceEngine(
             {"bitcoin-mainnet": 86400, "ethereum-mainnet": 86400, "solana-mainnet": 86400, "xrpl-mainnet": 86400},
-            minimum_confirmations_by_network={"bitcoin-mainnet": 6}))
+            minimum_confirmations_by_network={"bitcoin-mainnet": 6},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1"))
         self.ingestion_store = OnChainIngestionStore(path)
         self.btc = mapping("bitcoin-mainnet", "btc-native-v1", 8)
         self.wbtc = mapping("ethereum-mainnet", "wbtc-ethereum-v1", 18, "WRAPPED")

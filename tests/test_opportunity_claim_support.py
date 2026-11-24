@@ -8,12 +8,13 @@ from dataclasses import asdict
 from layer1.evidence_verification import (
     Claim, EvidenceRecord, EvidenceVerificationEngine,
 )
+from tests.evidence_fixtures import trusted_evidence_record
 
 
 class FactorClaimSupportTests(unittest.TestCase):
     def setUp(self):
         self.asset = "coingecko:bitcoin"
-        self.evidence = EvidenceRecord(
+        self.evidence = trusted_evidence_record(
             source_id="official-listing:001", source_family="exchange-official",
             source_kind="PRIMARY", publisher="Example Exchange", subject=self.asset,
             claim_key="announcement.listing", value="listed",

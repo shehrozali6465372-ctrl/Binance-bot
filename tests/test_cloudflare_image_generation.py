@@ -15,7 +15,8 @@ import main
 
 from image_engine import (
     CloudflareImageArtifact, CloudflareWorkersAIImageGenerator, ImageComposer,
-    ImageIntelligenceEngine, ImageUploader, should_upload_image, upload_authorized_image,
+    ImageIntelligenceEngine, ImageUploader, should_generate_image,
+    should_upload_image, upload_authorized_image,
 )
 from layer1.visual_quality import VisualQualityEngine
 
@@ -158,31 +159,31 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
                 )
             self.assertEqual(upload_calls, [])
 
-    def test_legacy_github_image_upload_uses_no_redirect_transport_for_bearer_token(self):
-        from types import SimpleNamespace
-
+    def test_legacy_github_repository_upload_paths_are_disabled_without_side_effects(self):
         with tempfile.TemporaryDirectory() as directory:
             previous_cwd = os.getcwd()
             try:
                 os.chdir(directory)
                 image_path = Path(directory) / "image.png"
                 image_path.write_bytes(png_bytes())
-                responses = [
-                    FakeResponse(b'{"sha":"existing-sha"}'),
-                    FakeResponse(b'{"content":{"path":"images/image.png"}}'),
-                ]
+                uploader = ImageUploader()
                 with patch.dict(os.environ, {
                     "GH_TOKEN": "test-github-token",
+                    "GITHUB_TOKEN": "",
                     "GITHUB_REPOSITORY": "owner/repo",
-                }), patch("subprocess.run", return_value=SimpleNamespace(stdout="feature/test\n")), patch(
-                    "image_engine._open_without_redirect", side_effect=responses,
-                ) as safe_open, patch(
-                    "image_engine.urllib.request.urlopen",
-                    side_effect=AssertionError("redirect-following transport used for GitHub bearer token"),
-                ), patch.object(ImageUploader, "_verify_url", return_value=False):
-                    result = ImageUploader()._github_api_upload(image_path)
-                self.assertEqual(result, "https://raw.githubusercontent.com/owner/repo/feature/test/images/image.png")
-                self.assertEqual(safe_open.call_count, 2)
+                    "GITHUB_ACTIONS": "true",
+                    "GITHUB_REF": "refs/heads/main",
+                }, clear=False), patch("subprocess.run") as git_run, patch(
+                    "image_engine._open_without_redirect"
+                ) as api_open, patch("image_engine.urllib.request.urlopen") as unsafe_open:
+                    self.assertIsNone(uploader.binance_square_upload(image_path))
+                    self.assertEqual(uploader.upload(image_path), (None, False))
+                    self.assertIsNone(uploader._github_api_upload(image_path))
+                    self.assertIsNone(uploader._git_push_image(image_path))
+                    git_run.assert_not_called()
+                    api_open.assert_not_called()
+                    unsafe_open.assert_not_called()
+                self.assertFalse((Path(directory) / "images" / "image.png").exists())
             finally:
                 os.chdir(previous_cwd)
 
@@ -336,6 +337,10 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
         self.assertFalse(should_upload_image(dry_run=False, image_path=None))
         self.assertFalse(should_upload_image(dry_run=False, image_path=""))
         self.assertTrue(should_upload_image(dry_run=False, image_path="/tmp/image.png"))
+
+    def test_image_generation_is_skipped_in_dry_run(self):
+        self.assertFalse(should_generate_image(dry_run=True))
+        self.assertTrue(should_generate_image(dry_run=False))
 
     def test_dry_run_pipeline_does_not_instantiate_image_composer(self):
         config = SimpleNamespace(dry_run=True)
@@ -517,7 +522,7 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
                 draft = "$ABC market update. #ABC #Write2Earn"
                 path = composer.generate_post_image({
                     "symbol": "ABC", "asset_id": "coingecko:abc",
-                    "price": 999999, "change_24h": 88, "volume_ratio": 12,
+                    "price": 999999, "change_24h": 88, "turnover_ratio_pct": 12,
                     "entry": 100, "target1": 200, "stop": 50,
                 }, draft_content=draft)
                 self.assertIsNotNone(path)
@@ -546,7 +551,7 @@ class CloudflareWorkersAIImageGeneratorTests(unittest.TestCase):
         engine = ImageIntelligenceEngine()
         with patch.object(engine, "_draw_candlestick_chart") as draw_chart:
             image = engine._render_image(
-                symbol="ABC", price=1.0, change=2.0, volume_ratio=1.2,
+                symbol="ABC", price=1.0, change=2.0, turnover_ratio_pct=1.2,
                 market_cap=0, headline="MARKET UPDATE", reasons=["Evidence-backed update"],
                 setup={"entry": "1", "target1": "2", "target2": "3", "stop": "0.5"},
                 is_bullish=True, primary_color=(20, 180, 120), dim_color=(20, 40, 60),

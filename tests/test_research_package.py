@@ -6,6 +6,7 @@ from layer1.evidence_verification import Claim, EvidenceRecord, EvidenceVerifica
 from layer1.research_package import DeepResearchEngine, ResearchPackageStore
 
 
+from tests.evidence_fixtures import trusted_evidence_record
 def iso(delta=0):
     return (datetime.now(timezone.utc) + timedelta(seconds=delta)).isoformat()
 
@@ -14,14 +15,14 @@ class DeepResearchEngineTests(unittest.TestCase):
     def setUp(self):
         self.asset_id = "coingecko:abc"
         self.timestamp = iso(-5)
-        self.market = EvidenceRecord(
+        self.market = trusted_evidence_record(
             source_id="market:abc:1", source_family="coingecko",
             source_kind="MARKET", publisher="CoinGecko", subject=self.asset_id,
             claim_key="market.price", value=1.25, unit="USD",
             published_at=self.timestamp, observed_at=self.timestamp,
             asset_id=self.asset_id, is_primary=True, source_status="ACCEPTED",
         )
-        self.primary = EvidenceRecord(
+        self.primary = trusted_evidence_record(
             source_id="announcement:abc:1", source_family="binance",
             source_kind="PRIMARY", publisher="Binance", subject=self.asset_id,
             claim_key="announcement.event_type", value="listing",
@@ -70,7 +71,7 @@ class DeepResearchEngineTests(unittest.TestCase):
 
     def test_unbound_claims_and_evidence_for_other_asset_do_not_enter_package(self):
         foreign_asset = "coingecko:xyz"
-        foreign_evidence = EvidenceRecord(
+        foreign_evidence = trusted_evidence_record(
             source_id="unbound-foreign-market", source_family="coingecko",
             source_kind="MARKET", publisher="CoinGecko", subject=foreign_asset,
             claim_key="market.price", value=9.99, unit="USD",
@@ -83,7 +84,7 @@ class DeepResearchEngineTests(unittest.TestCase):
             observed_at=self.timestamp, evidence_ids=(foreign_evidence.evidence_id,),
             asset_id=None,
         )
-        mismapped_evidence = EvidenceRecord(
+        mismapped_evidence = trusted_evidence_record(
             source_id="mismapped-asset-market", source_family="coingecko",
             source_kind="MARKET", publisher="CoinGecko", subject=foreign_asset,
             claim_key="market.price", value=8.88, unit="USD",
@@ -183,7 +184,7 @@ class DeepResearchEngineTests(unittest.TestCase):
         self.assertIn("UNRESOLVED_FACTUAL_CLAIMS:1", package.gaps)
 
     def test_contradicted_claim_is_retained_with_cutoff_eligible_conflicting_evidence(self):
-        conflict = EvidenceRecord(
+        conflict = trusted_evidence_record(
             source_id="market:abc:conflict", source_family="independent-market-source",
             source_kind="MARKET", publisher="Independent Market Source", subject=self.asset_id,
             claim_key="market.price", value=9.99, unit="USD",
@@ -217,7 +218,7 @@ class DeepResearchEngineTests(unittest.TestCase):
         self.assertEqual(withdrawn.completeness, "REJECT")
 
     def test_evidence_after_cutoff_is_not_counted(self):
-        future = EvidenceRecord(
+        future = trusted_evidence_record(
             source_id="future-market", source_family="coingecko",
             source_kind="MARKET", publisher="CoinGecko", subject=self.asset_id,
             claim_key="market.future", value=2.0, published_at=iso(300),
@@ -233,7 +234,7 @@ class DeepResearchEngineTests(unittest.TestCase):
 
     def test_future_claim_and_its_future_evidence_are_excluded_from_cutoff(self):
         future_time = iso(600)
-        future_evidence = EvidenceRecord(
+        future_evidence = trusted_evidence_record(
             source_id="future-primary-claim", source_family="binance",
             source_kind="PRIMARY", publisher="Binance", subject=self.asset_id,
             claim_key="announcement.status", value="postponed",
@@ -262,7 +263,7 @@ class DeepResearchEngineTests(unittest.TestCase):
 
     def test_verified_claim_with_no_cutoff_eligible_support_is_not_a_fact(self):
         future_time = iso(600)
-        future_evidence = EvidenceRecord(
+        future_evidence = trusted_evidence_record(
             source_id="future-only-market", source_family="coingecko",
             source_kind="MARKET", publisher="CoinGecko", subject=self.asset_id,
             claim_key="market.price", value=9.99, unit="USD",
@@ -304,6 +305,149 @@ class DeepResearchEngineTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_store_rejects_package_hash_that_does_not_commit_to_package_payload(self):
+        from dataclasses import replace
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            store = ResearchPackageStore(conn)
+            forged = replace(self.build(), package_hash="f" * 64)
+            with self.assertRaisesRegex(ValueError, "package hash"):
+                store.save(forged)
+        finally:
+            conn.close()
+
+    def test_store_rejects_tampered_research_payload_on_read(self):
+        import json
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            store = ResearchPackageStore(conn)
+            saved = store.save(self.build())
+            row = conn.execute(
+                "SELECT payload_json FROM layer1_research_package_versions WHERE research_key=?",
+                (saved.research_key,),
+            ).fetchone()
+            payload = json.loads(row[0])
+            payload["verified_facts"][0]["text"] = "tampered fact"
+            conn.execute(
+                "UPDATE layer1_research_package_versions SET payload_json=? WHERE research_key=?",
+                (json.dumps(payload, sort_keys=True, separators=(",", ":")), saved.research_key),
+            )
+            with self.assertRaisesRegex(ValueError, "package hash"):
+                store.load_latest(saved.research_key)
+        finally:
+            conn.close()
+
+    def test_sqlite_legacy_generic_research_payload_is_hash_checked_on_read(self):
+        import hashlib
+        import json
+        import sqlite3
+        from datetime import datetime, timezone
+        from layer1.research_package import ResearchPackageStore
+
+        connection = sqlite3.connect(":memory:")
+        try:
+            store = ResearchPackageStore(connection)
+            original = {"asset_id": "coingecko:bitcoin", "facts": ["verified"]}
+            package_hash = hashlib.sha256(
+                json.dumps(original, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            connection.execute(
+                "INSERT INTO layer1_research_package_versions "
+                "(research_key,version,package_id,package_hash,cutoff_at,payload_json,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("research:legacy", 1, "research:legacy:1", package_hash,
+                 "2026-11-24T00:00:00+00:00", json.dumps(original),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            self.assertEqual(store.load_latest("research:legacy"), original)
+            tampered = {"asset_id": "coingecko:bitcoin", "facts": ["tampered"]}
+            connection.execute(
+                "UPDATE layer1_research_package_versions SET payload_json=? WHERE research_key=?",
+                (json.dumps(tampered), "research:legacy"),
+            )
+            with self.assertRaisesRegex(ValueError, "package hash"):
+                store.load_latest("research:legacy")
+        finally:
+            connection.close()
+
+    def test_postgres_research_package_validator_recomputes_full_package_hash(self):
+        from dataclasses import asdict
+        from layer1.publication_postgres import validate_research_package_input
+
+        package = self.build()
+        payload = asdict(package)
+        payload.pop("version")
+        payload.pop("package_id")
+        validate_research_package_input(
+            package.research_key, package.package_hash, package.cutoff_at, payload,
+        )
+        payload["verified_facts"][0]["text"] = "tampered fact"
+        with self.assertRaisesRegex(ValueError, "package hash"):
+            validate_research_package_input(
+                package.research_key, package.package_hash, package.cutoff_at, payload,
+            )
+
+    def test_postgres_research_package_validator_rejects_generic_payload_hash_mismatch(self):
+        import hashlib
+        import json
+        from layer1.publication_postgres import validate_research_package_input
+
+        payload = {"asset_id": "coingecko:bitcoin", "facts": ["verified"]}
+        valid_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        validate_research_package_input(
+            "research:generic", valid_hash, "2026-11-24T00:00:00Z", payload,
+        )
+        with self.assertRaisesRegex(ValueError, "package hash"):
+            validate_research_package_input(
+                "research:generic", "f" * 64, "2026-11-24T00:00:00Z", payload,
+            )
+
+    def test_generic_research_package_hash_preserves_legacy_ascii_escaped_json_contract(self):
+        import hashlib
+        import json
+        from layer1.research_package import research_package_payload_hash
+
+        payload = {"facts": ["verified 🚀"]}
+        expected = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(research_package_payload_hash(payload), expected)
+
+    def test_postgres_research_package_loader_rejects_tampered_generic_payload(self):
+        import hashlib
+        import json
+        from datetime import datetime, timezone
+        from layer1.publication_postgres import _load_latest_research_package
+
+        original = {"asset_id": "coingecko:bitcoin", "facts": ["verified"]}
+        package_hash = hashlib.sha256(
+            json.dumps(original, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        tampered = {"asset_id": "coingecko:bitcoin", "facts": ["tampered"]}
+
+        class Cursor:
+            def fetchone(self):
+                return {
+                    "research_key": "research:generic", "version": 1,
+                    "package_id": "research:generic:1", "package_hash": package_hash,
+                    "cutoff_at": datetime(2026, 11, 24, tzinfo=timezone.utc),
+                    "payload_json": tampered,
+                }
+
+        class Connection:
+            def execute(self, *args, **kwargs):
+                return Cursor()
+
+        class Store:
+            conn = Connection()
+
+        with self.assertRaisesRegex(ValueError, "package hash"):
+            _load_latest_research_package(Store(), "research:generic")
+
     def test_unknown_event_state_and_source_kind_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "event lifecycle states"):
             self.build(event_states=("MAYBE_CONFIRMED",))
@@ -311,7 +455,7 @@ class DeepResearchEngineTests(unittest.TestCase):
             self.build(required_source_kinds=("UNKNOWN_PROVIDER_CLASS",))
 
     def test_evidence_updated_after_cutoff_is_not_eligible(self):
-        future_update = EvidenceRecord(
+        future_update = trusted_evidence_record(
             source_id="future-update-market", source_family="coingecko",
             source_kind="MARKET", publisher="CoinGecko", subject=self.asset_id,
             claim_key="market.price", value=1.50, unit="USD",
@@ -337,6 +481,77 @@ class DeepResearchEngineTests(unittest.TestCase):
             self.build(research_question=" ")
         with self.assertRaisesRegex(ValueError, "canonical"):
             self.build(asset_id="ABC")
+
+
+    def test_builder_rejects_manually_constructed_registry_with_fabricated_verified_result(self):
+        from layer1.evidence_verification import ClaimRegistry, ClaimVerificationResult
+
+        fabricated = ClaimVerificationResult(
+            claim_id=self.claims[0].claim_id,
+            state="VERIFIED",
+            evidence_ids=(self.market.evidence_id,),
+            supporting_evidence_ids=(self.market.evidence_id,),
+            contradicting_evidence_ids=(),
+            independent_source_count=1,
+            source_lineage={self.market.evidence_id: self.market.source_family},
+            issues=(),
+        )
+        forged_registry = ClaimRegistry(
+            claims=(self.claims[0],),
+            evidence_records=(self.market,),
+            results=(fabricated,),
+            unresolved_issues=(),
+        )
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
+            self.build(registry=forged_registry)
+
+
+    def test_builder_rejects_registry_mutated_after_verification(self):
+        source_lineage = self.registry.results[0].source_lineage
+        self.assertIsInstance(source_lineage, dict)
+        source_lineage["tampered-source"] = "untrusted"
+        with self.assertRaisesRegex(ValueError, "changed after verification"):
+            self.build()
+
+    def test_builder_rejects_manual_duplicate_mismatched_and_missing_evidence_registries(self):
+        from dataclasses import replace
+        from layer1.evidence_verification import ClaimRegistry, ClaimVerificationResult
+
+        fabricated = ClaimVerificationResult(
+            claim_id=self.claims[0].claim_id,
+            state="VERIFIED",
+            evidence_ids=(self.market.evidence_id,),
+            supporting_evidence_ids=(self.market.evidence_id,),
+            contradicting_evidence_ids=(),
+            independent_source_count=1,
+            source_lineage={self.market.evidence_id: self.market.source_family},
+            issues=(),
+        )
+        cases = {
+            "duplicate_claim_ids": ClaimRegistry(
+                claims=(self.claims[0], self.claims[0]),
+                evidence_records=(self.market,), results=(fabricated,), unresolved_issues=(),
+            ),
+            "mismatched_result_id": ClaimRegistry(
+                claims=(self.claims[0],), evidence_records=(self.market,),
+                results=(replace(fabricated, claim_id="f" * 64),), unresolved_issues=(),
+            ),
+            "missing_evidence_record": ClaimRegistry(
+                claims=(self.claims[0],), evidence_records=(),
+                results=(fabricated,), unresolved_issues=(),
+            ),
+        }
+        for case_name, registry in cases.items():
+            with self.subTest(case=case_name):
+                with self.assertRaisesRegex(ValueError, "verifier-issued"):
+                    self.build(registry=registry)
+
+    def test_asset_scoped_registry_remains_verified_for_research_builder(self):
+        scoped = EvidenceVerificationEngine.scope_registry_to_asset(
+            self.registry, self.asset_id,
+        )
+        package = self.build(registry=scoped)
+        self.assertEqual(package.completeness, "READY")
 
 
 if __name__ == "__main__":

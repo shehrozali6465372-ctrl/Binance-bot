@@ -37,7 +37,9 @@ class OnChainIntelligenceTests(unittest.TestCase):
             "solana-mainnet": 86400,
             "bnb-smart-chain-mainnet": 86400,
             "xrpl-mainnet": 86400,
-        }, minimum_confirmations_by_network={"bitcoin-mainnet": 6})
+        }, minimum_confirmations_by_network={"bitcoin-mainnet": 6},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1")
         self.eligibility = eligible_decision("coingecko:bitcoin", "BTC")
         self.mapping = OnChainAssetMapping(
             mapping_id="btc-mainnet-native-v1",

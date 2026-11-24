@@ -66,7 +66,7 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         path = os.path.join(self.tmp.name, "onchain.sqlite3")
-        self.mapping_store = OnChainStore(path, OnChainIntelligenceEngine({"xrpl-mainnet": 86400}))
+        self.mapping_store = OnChainStore(path, OnChainIntelligenceEngine({"xrpl-mainnet": 86400}, receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum", receipt_key_id="test-key-v1"))
         self.ingestion_store = OnChainIngestionStore(path)
         stamp = NOW.isoformat()
         self.mapping = OnChainAssetMapping(

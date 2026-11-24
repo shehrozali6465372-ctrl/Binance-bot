@@ -448,7 +448,7 @@ class PostgresPublicationStore:
                 "FROM content_draft_versions WHERE draft_id=%s FOR SHARE", (payload["draft_id"],),
             ).fetchone()
             brief = self.conn.execute(
-                "SELECT event_id,research_package_id FROM editorial_brief_versions WHERE brief_id=%s FOR SHARE",
+                "SELECT event_id,research_package_id,payload_json FROM editorial_brief_versions WHERE brief_id=%s FOR SHARE",
                 (payload["editorial_brief_id"],),
             ).fetchone()
             if (draft is None or brief is None or draft["asset_id"] != payload["asset_id"]
@@ -458,10 +458,17 @@ class PostgresPublicationStore:
                     or brief["event_id"] != payload["event_id"]
                     or brief["research_package_id"] != payload["research_package_id"]):
                 raise ValueError("draft/editorial provenance changed after authorization")
+            brief_payload = brief["payload_json"]
+            if isinstance(brief_payload, str):
+                brief_payload = json.loads(brief_payload)
+            from layer1.editorial_strategy import editorial_brief_approved_claim_ids
+            allowed_claim_ids = set(editorial_brief_approved_claim_ids(brief_payload))
             claims = draft["approved_claim_ids_json"]
             if isinstance(claims, str): claims = json.loads(claims)
             if sorted(claims) != sorted(payload["approved_claim_ids"]):
                 raise ValueError("approved claim provenance changed after authorization")
+            if not set(claims).issubset(allowed_claim_ids):
+                raise ValueError("draft approved claims exceed the persisted editorial brief allowlist")
             self.conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 ("event-lifecycle:" + payload["event_id"],),
@@ -486,10 +493,7 @@ class PostgresPublicationStore:
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                     (validation_advisory_lock_key(content_hash, image_hash),),
                 )
-            text = self.conn.execute(
-                "SELECT status FROM content_draft_validation_results WHERE draft_hash=%s "
-                "ORDER BY created_at DESC,validation_id DESC LIMIT 1", (content_hash,),
-            ).fetchone()
+            text = _load_latest_validation(self, draft_hash=content_hash, image_hash=None)
             if text is None or text["status"] != "PASS":
                 raise ValueError("latest persisted text validation is no longer PASS")
             for image_hash in payload["image_hashes"]:
@@ -497,13 +501,11 @@ class PostgresPublicationStore:
                     "SELECT 1 FROM image_generation_artifacts WHERE draft_hash=%s AND image_hash=%s",
                     (content_hash, image_hash),
                 ).fetchone()
-                visual = self.conn.execute(
-                    "SELECT status,validation_version FROM visual_validation_results WHERE draft_hash=%s "
-                    "AND image_hash=%s ORDER BY created_at DESC,validation_id DESC LIMIT 1",
-                    (content_hash, image_hash),
-                ).fetchone()
+                visual = _load_latest_validation(
+                    self, draft_hash=content_hash, image_hash=image_hash,
+                )
                 if (artifact is None or visual is None or visual["status"] != "PASS"
-                        or visual["validation_version"] != "visual-quality-v2"):
+                        or visual["validation_version"] != "visual-quality-v3"):
                     raise ValueError("latest persisted image artifact/visual validation is not publishable")
             quota = self.conn.execute(
                 "SELECT status,authorization_id,attempt_id FROM publication_quota_reservations "
@@ -831,7 +833,7 @@ class PostgresPublicationStore:
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
         with self.conn.transaction():
             brief = self.conn.execute(
-                "SELECT event_id,research_package_id FROM editorial_brief_versions WHERE brief_id=%s FOR SHARE",
+                "SELECT event_id,research_package_id,payload_json FROM editorial_brief_versions WHERE brief_id=%s FOR SHARE",
                 (authorization.editorial_brief_id,),
             ).fetchone()
             draft = self.conn.execute(
@@ -852,6 +854,13 @@ class PostgresPublicationStore:
             if isinstance(stored_claims, str): stored_claims = json.loads(stored_claims)
             if tuple(sorted(stored_claims)) != tuple(sorted(authorization.approved_claim_ids)):
                 raise ValueError("publication authorization approved-claim binding is mismatched")
+            brief_payload = brief["payload_json"] if brief is not None else None
+            if isinstance(brief_payload, str):
+                brief_payload = json.loads(brief_payload)
+            from layer1.editorial_strategy import editorial_brief_approved_claim_ids
+            allowed_claim_ids = set(editorial_brief_approved_claim_ids(brief_payload))
+            if not set(stored_claims).issubset(allowed_claim_ids):
+                raise ValueError("draft approved claims exceed the persisted editorial brief allowlist")
             event = self.conn.execute(
                 "SELECT asset_id,state FROM layer1_event_lifecycle WHERE event_id=%s FOR SHARE",
                 (authorization.event_id,),
@@ -872,16 +881,17 @@ class PostgresPublicationStore:
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                     (validation_advisory_lock_key(authorization.content_hash, image_hash),),
                 )
-            text_validation = self.conn.execute(
-                "SELECT status FROM content_draft_validation_results WHERE draft_hash=%s ORDER BY created_at DESC,validation_id DESC LIMIT 1",
-                (authorization.content_hash,),
-            ).fetchone()
+            text_validation = _load_latest_validation(
+                self, draft_hash=authorization.content_hash, image_hash=None,
+            )
             if text_validation is None or text_validation["status"] != "PASS" or authorization.text_validation_status != "PASS":
                 raise ValueError("publication authorization exact draft text validation is not PASS")
             for image_hash in authorization.image_hashes:
                 artifact = self.conn.execute("SELECT 1 FROM image_generation_artifacts WHERE draft_hash=%s AND image_hash=%s", (authorization.content_hash,image_hash)).fetchone()
-                visual = self.conn.execute("SELECT status,validation_version FROM visual_validation_results WHERE draft_hash=%s AND image_hash=%s ORDER BY created_at DESC,validation_id DESC LIMIT 1", (authorization.content_hash,image_hash)).fetchone()
-                if artifact is None or visual is None or visual["status"] != "PASS" or visual["validation_version"] != "visual-quality-v2":
+                visual = _load_latest_validation(
+                    self, draft_hash=authorization.content_hash, image_hash=image_hash,
+                )
+                if artifact is None or visual is None or visual["status"] != "PASS" or visual["validation_version"] != "visual-quality-v3":
                     raise ValueError("publication authorization image artifact or current visual validation is missing")
             quota = self.conn.execute(
                 "SELECT symbol,day_utc,status FROM publication_quota_reservations WHERE reservation_id=%s FOR UPDATE",
@@ -947,7 +957,7 @@ class PostgresPublicationStore:
                 validate_opportunity_input_snapshot(
                     snapshot, expected_asset_id=package_payload.get("asset_id"),
                 )
-            elif schema_version == 3:
+            elif schema_version in (3, 4):
                 validate_opportunity_input_snapshot(
                     snapshot, expected_asset_id=package_payload.get("asset_id"),
                 )
@@ -955,7 +965,7 @@ class PostgresPublicationStore:
                     snapshot["inputs"]["registry_verification_id"],
                 )
                 if registry is None:
-                    raise ValueError("v3 opportunity decision references a missing claim registry snapshot")
+                    raise ValueError("registry-bound opportunity decision references a missing claim registry snapshot")
                 validate_registry_bound_opportunity_input_snapshot(
                     snapshot, registry, expected_asset_id=package_payload.get("asset_id"),
                 )
@@ -997,13 +1007,13 @@ class PostgresPublicationStore:
             reasons=reasons, policy_version=row["policy_version"], input_snapshot=snapshot,
         )
         inputs = snapshot.get("inputs")
-        if isinstance(inputs, dict) and inputs.get("schema_version") == 3:
+        if isinstance(inputs, dict) and inputs.get("schema_version") in (3, 4):
             from layer1.opportunity import validate_registry_bound_opportunity_input_snapshot
             registry = self.load_claim_registry_by_verification_id(
                 inputs["registry_verification_id"],
             )
             if registry is None:
-                raise ValueError("v3 opportunity decision references a missing claim registry snapshot")
+                raise ValueError("registry-bound opportunity decision references a missing claim registry snapshot")
             validate_registry_bound_opportunity_input_snapshot(snapshot, registry)
         return {"decision_id":row["decision_id"],"research_package_id":row["research_package_id"],
                 "state":row["state"],"score":row["score"],"reasons":reasons,"policy_version":row["policy_version"],
@@ -1068,7 +1078,17 @@ class PostgresPublicationStore:
     def load_latest_draft(self, draft_key: str) -> Optional[dict]:
         return _load_latest_draft(self, draft_key)
 
-    def save_text_validation(self, *, draft_hash: str, status: str, reasons, validation_version: str) -> str:
+    def save_text_validation(self, *, draft_hash: str, status: str, reasons, validation_version: str,
+                             verification_result=None) -> str:
+        if status == "PASS":
+            from layer1.content_verification import ContentVerificationResult
+            if type(verification_result) is not ContentVerificationResult:
+                raise ValueError("PASS text validation requires a verifier-issued content result")
+            verification_result.assert_verifier_issued_and_unchanged()
+            if (verification_result.status != "PASS" or verification_result.draft_hash != draft_hash
+                    or verification_result.validation_version != validation_version
+                    or tuple(verification_result.reasons) != tuple(reasons)):
+                raise ValueError("verifier-issued content result does not match persisted validation")
         return _save_validation(self, draft_hash=draft_hash, image_hash=None, status=status,
                                 reasons=reasons, validation_version=validation_version)
 
@@ -1349,11 +1369,20 @@ def validate_research_package_input(
     except (TypeError, ValueError):
         raise ValueError("research package payload must be finite JSON data") from None
     try:
-        return _utc(cutoff_at)
+        cutoff = _utc(cutoff_at)
     except ValueError as exc:
         if "timezone" in str(exc):
             raise ValueError("cutoff_at must include timezone") from None
         raise ValueError("cutoff_at must be ISO-8601 with timezone") from None
+    from layer1.research_package import is_research_package_payload, research_package_payload_hash
+    if is_research_package_payload(payload):
+        if payload.get("research_key") != research_key or payload.get("package_hash") != package_hash:
+            raise ValueError("research package metadata does not match persistence identity")
+        if _utc(payload.get("cutoff_at")) != cutoff:
+            raise ValueError("research package cutoff does not match payload")
+    if research_package_payload_hash(payload) != package_hash:
+        raise ValueError("research package hash does not match canonical package payload")
+    return cutoff
 
 
 def _save_research_package(
@@ -1415,6 +1444,14 @@ def _load_latest_research_package(store: PostgresPublicationStore, research_key:
     payload = row["payload_json"]
     if isinstance(payload, str):
         payload = json.loads(payload)
+    from layer1.research_package import is_research_package_payload, research_package_payload_hash
+    if is_research_package_payload(payload):
+        if (payload.get("research_key") != row["research_key"]
+                or payload.get("package_hash") != row["package_hash"]
+                or _utc(payload.get("cutoff_at")) != _utc(row["cutoff_at"])):
+            raise ValueError("stored research package metadata does not match row identity")
+    if research_package_payload_hash(payload) != row["package_hash"]:
+        raise ValueError("stored research package hash does not match canonical package payload")
     return {
         "research_key": row["research_key"], "version": row["version"],
         "package_id": row["package_id"], "package_hash": row["package_hash"],
@@ -1433,9 +1470,18 @@ def _validate_editorial_brief_input(event_id, angle_id, research_package_id, bri
     if not isinstance(payload, dict):
         raise ValueError("editorial brief payload must be a JSON object")
     try:
-        return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError):
         raise ValueError("editorial brief payload must be finite JSON data") from None
+    from layer1.editorial_strategy import is_editorial_brief_payload, editorial_brief_payload_hash
+    if is_editorial_brief_payload(payload):
+        if (payload.get("event_id") != event_id or payload.get("angle_id") != angle_id
+                or payload.get("research_package_id") != research_package_id
+                or payload.get("brief_hash") != brief_hash):
+            raise ValueError("editorial brief metadata does not match persistence identity")
+    if editorial_brief_payload_hash(payload) != brief_hash:
+        raise ValueError("editorial brief hash does not match canonical brief payload")
+    return encoded
 
 
 def _save_editorial_brief(
@@ -1490,6 +1536,15 @@ def _load_latest_editorial_brief(store, event_id, angle_id):
     payload = row["payload_json"]
     if isinstance(payload, str):
         payload = json.loads(payload)
+    from layer1.editorial_strategy import is_editorial_brief_payload, editorial_brief_payload_hash
+    if is_editorial_brief_payload(payload):
+        if (payload.get("event_id") != row["event_id"]
+                or payload.get("angle_id") != row["angle_id"]
+                or payload.get("research_package_id") != row["research_package_id"]
+                or payload.get("brief_hash") != row["brief_hash"]):
+            raise ValueError("stored editorial brief metadata does not match row identity")
+    if editorial_brief_payload_hash(payload) != row["brief_hash"]:
+        raise ValueError("stored editorial brief hash does not match canonical brief payload")
     return {"event_id": row["event_id"], "angle_id": row["angle_id"],
             "version": row["version"], "brief_id": row["brief_id"],
             "research_package_id": row["research_package_id"],
@@ -1754,22 +1809,36 @@ def _load_latest_validation(store, *, draft_hash, image_hash):
     if image_hash is not None and (not isinstance(image_hash, str) or len(image_hash) != 64 or any(c not in "0123456789abcdef" for c in image_hash)):
         raise ValueError("validation record has invalid image_hash")
     if image_hash is None:
-        row = store.conn.execute(
-            "SELECT validation_id,draft_hash,status,reasons_json,validation_version,created_at FROM content_draft_validation_results WHERE draft_hash=%s ORDER BY created_at DESC,validation_id DESC LIMIT 1",
-            (draft_hash,),
-        ).fetchone()
+        table = "content_draft_validation_results"
+        where = "draft_hash=%s"
+        params = (draft_hash,)
+        selected = "validation_id,draft_hash,status,reasons_json,validation_version,created_at,validation_sequence"
     else:
-        row = store.conn.execute(
-            "SELECT validation_id,draft_hash,image_hash,status,reasons_json,validation_version,created_at FROM visual_validation_results WHERE draft_hash=%s AND image_hash=%s ORDER BY created_at DESC,validation_id DESC LIMIT 1",
-            (draft_hash, image_hash),
-        ).fetchone()
+        table = "visual_validation_results"
+        where = "draft_hash=%s AND image_hash=%s"
+        params = (draft_hash, image_hash)
+        selected = "validation_id,draft_hash,image_hash,status,reasons_json,validation_version,created_at,validation_sequence"
+    stats = store.conn.execute(
+        f"SELECT COUNT(*) AS row_count, "
+        f"COUNT(*) FILTER (WHERE validation_sequence IS NULL) AS missing_sequence_count "
+        f"FROM {table} WHERE {where} AND created_at=(SELECT MAX(created_at) FROM {table} WHERE {where})",
+        (*params, *params),
+    ).fetchone()
+    if stats["row_count"] > 1 and stats["missing_sequence_count"]:
+        raise ValueError("latest validation chronology is ambiguous for legacy records")
+    row = store.conn.execute(
+        f"SELECT {selected} FROM {table} WHERE {where} "
+        "ORDER BY created_at DESC,validation_sequence DESC NULLS LAST LIMIT 1",
+        params,
+    ).fetchone()
     if row is None:
         return None
     reasons = row["reasons_json"] if isinstance(row["reasons_json"], list) else json.loads(row["reasons_json"])
     return {"validation_id": row["validation_id"], "draft_hash": row["draft_hash"],
             "image_hash": row["image_hash"] if image_hash is not None else None,
             "status": row["status"], "reasons": reasons, "validation_version": row["validation_version"],
-            "created_at": row["created_at"].isoformat()}
+            "created_at": row["created_at"].isoformat(),
+            "validation_sequence": row["validation_sequence"]}
 
 
 def _is_sha256(value) -> bool:

@@ -206,7 +206,10 @@ class PostgresOnChainIngestionTests(unittest.TestCase):
             "assert (info.get('dbname') or info.get('database')) == 'binance_onchain_test'",
             "assert info.get('host') == os.environ['TEST_POSTGRES_ALLOWED_HOST']",
             "assert info.get('host') in {'localhost', '127.0.0.1', '::1'} or info.get('sslmode') in {'require', 'verify-ca', 'verify-full'}",
-            "store = PostgresOnChainStore(dsn)",
+            "from layer1.onchain import OnChainIntelligenceEngine",
+            "receipt_key = b'test-only-onchain-receipt-key-32-bytes-minimum'",
+            "engine = OnChainIntelligenceEngine(receipt_signing_key=receipt_key, receipt_key_id='test-key-v1')",
+            "store = PostgresOnChainStore(dsn, engine=engine)",
             "try:",
             "    recovered = store.get_observation(sys.argv[1])",
             "    assert recovered is not None, 'verified on-chain observation missing after reconnect'",
@@ -364,6 +367,317 @@ class PostgresOnChainIngestionTests(unittest.TestCase):
                 expected_cursor=None, scope_identity=self.identity,
                 canonical_slots=(slot,),
             )
+
+    def test_bitcoin_worker_and_aggregator_run_against_real_postgres_adapters(self):
+        from datetime import datetime, timezone
+        from layer1.onchain_aggregation import OnChainTransferAggregator
+        from layer1.onchain_bitcoin_worker import BitcoinAddressIngestionWorker
+        from layer1.onchain import OnChainIntelligenceEngine
+        from layer1.onchain_postgres import PostgresOnChainStore
+        from tests.test_onchain_acceptance_receipts import OnChainAcceptanceReceiptTests
+        from tests.test_onchain_bitcoin_worker import (
+            ADDRESS, FakeBitcoinProvider, history, transaction,
+        )
+
+        fixture = OnChainAcceptanceReceiptTests()
+        fixture.setUp()
+        mapping_store = PostgresOnChainStore(TEST_DSN, engine=fixture.engine)
+        try:
+            self.assertEqual(
+                mapping_store.save_verified(
+                    fixture.eligibility, fixture.mapping, fixture.observation,
+                ),
+                "INSERTED",
+            )
+            provider = FakeBitcoinProvider()
+            record = history()
+            provider.pages = {1: ((record,), 1)}
+            provider.details = {record.txid: transaction(record)}
+            worker = BitcoinAddressIngestionWorker(
+                provider, mapping_store, self.store,
+                monitored_addresses={fixture.mapping.mapping_id: (ADDRESS,)},
+                start_blocks={fixture.mapping.mapping_id: 99},
+                minimum_confirmations=6, max_blocks_per_run=5, page_size=1,
+                reorg_lookback_blocks=2, retry_attempts=1, sleep=lambda _: None,
+                clock=lambda: datetime.now(timezone.utc).replace(microsecond=0),
+            )
+            worker_result = worker.run_once()
+            event = self.store.get_event(
+                record.txid + ":0", "bitcoin-mainnet", "alchemy", "address:" + ADDRESS,
+            )
+            self.assertEqual(worker_result["events_inserted"], 1)
+            self.assertIsNotNone(event)
+            self.assertEqual(event.canonical_status, "CANONICAL")
+            self.assertEqual(
+                self.store.get_checkpoint("alchemy:bitcoin-mainnet:address:" + ADDRESS)["next_block"],
+                104,
+            )
+
+            aggregator = OnChainTransferAggregator(
+                mapping_store, minimum_amount_by_mapping={fixture.mapping.mapping_id: "0.0001"},
+            )
+            aggregator.bind_ingestion_store(self.store)
+            aggregate = aggregator.aggregate(
+                [event], {fixture.mapping.asset_id: fixture.eligibility},
+                now=datetime.now(timezone.utc),
+            )
+            self.assertEqual(aggregate.deduplicated_events, 0)
+            self.assertEqual(aggregate.rejected_events, 0)
+            self.assertEqual(len(aggregate.network_summaries), 1)
+            self.assertEqual(len(aggregate.qualifying_network_summaries), 1)
+            self.assertTrue(aggregate.qualifying_network_summaries[0].threshold_met)
+        finally:
+            mapping_store.close()
+            self.store.conn.execute("""
+                TRUNCATE TABLE
+                    layer1_onchain_observations,
+                    layer1_onchain_asset_mappings,
+                    layer1_onchain_transfer_events,
+                    layer1_onchain_ingestion_blocks,
+                    layer1_onchain_solana_slot_journal,
+                    layer1_onchain_ingestion_checkpoints
+                RESTART IDENTITY CASCADE
+            """)
+
+    def test_evm_worker_and_aggregator_run_against_real_postgres_adapters(self):
+        from datetime import datetime, timezone
+        from layer1.foundation import EligibilityDecision
+        from layer1.onchain import OnChainIntelligenceEngine, OnChainObservation
+        from layer1.onchain_aggregation import OnChainTransferAggregator
+        from layer1.onchain_evm_worker import EvmTransferIngestionWorker
+        from layer1.onchain_postgres import PostgresOnChainStore
+        from tests.test_onchain_evm_worker import (
+            BLOCK_HASH, CONTRACT, TX_HASH, FakeProvider, mapping,
+        )
+        from layer1.onchain_providers import EvmTokenTransferLog
+
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        stamp = now.isoformat()
+        verified_mapping = mapping()
+        eligibility = EligibilityDecision(
+            status="ELIGIBLE", asset_id="coingecko:example", symbol="EXAMPLE",
+            eligible_pairs=("EXAMPLEUSDT",), verified_at=stamp,
+            identity_proof_status="VERIFIED", identity_proof_source="coingecko_coin_tickers",
+            identity_proof_verified_at=stamp, identity_proof_source_timestamp=stamp,
+            identity_proof_data_hash="a" * 64,
+        )
+        observation = OnChainObservation(
+            observation_id="bnb-map-proof-pg", mapping_id=verified_mapping.mapping_id,
+            asset_id=verified_mapping.asset_id, network_id=verified_mapping.network_id,
+            chain_id="56", provider="alchemy", endpoint_id="bnb-mainnet-rpc",
+            observation_type="TRANSFER", block_height=100, block_hash=BLOCK_HASH,
+            transaction_hash=TX_HASH, block_time=stamp, observed_at=stamp,
+            finality="FINALIZED", finality_reference="eth_getFinalizedHeader",
+        )
+        engine = OnChainIntelligenceEngine(
+            freshness_limits_seconds={"bnb-smart-chain-mainnet": 30 * 86400},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1",
+        )
+        mapping_store = PostgresOnChainStore(TEST_DSN, engine=engine)
+        try:
+            self.assertEqual(mapping_store.save_verified(eligibility, verified_mapping, observation), "INSERTED")
+            provider = FakeProvider()
+            provider.logs = [EvmTokenTransferLog(
+                network_id="bnb-smart-chain-mainnet", contract_address=CONTRACT,
+                from_address="0x" + "2" * 40, to_address="0x" + "3" * 40,
+                amount_raw="12345678901234567890", block_number=109,
+                block_hash=BLOCK_HASH, transaction_hash=TX_HASH, log_index=4, removed=False,
+            )]
+            worker = EvmTransferIngestionWorker(
+                provider, mapping_store, self.store,
+                start_blocks={verified_mapping.mapping_id: 100},
+                max_blocks_per_run=10, reorg_lookback_blocks=2,
+                retry_attempts=1, sleep=lambda _: None, clock=lambda: now,
+            )
+            result = worker.run_once()
+            event = self.store.get_event(
+                TX_HASH + ":4", verified_mapping.network_id, "alchemy",
+                "contract:" + CONTRACT.lower(),
+            )
+            self.assertEqual(result["events_inserted"], 1)
+            self.assertIsNotNone(event)
+            self.assertEqual(event.canonical_status, "CANONICAL")
+            self.assertEqual(
+                self.store.get_checkpoint("alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT.lower())["next_block"],
+                110,
+            )
+            aggregator = OnChainTransferAggregator(
+                mapping_store, minimum_amount_by_mapping={verified_mapping.mapping_id: "0.1"},
+            )
+            aggregator.bind_ingestion_store(self.store)
+            aggregate = aggregator.aggregate([event], {verified_mapping.asset_id: eligibility}, now=now)
+            self.assertEqual(aggregate.rejected_events, 0)
+            self.assertEqual(len(aggregate.qualifying_network_summaries), 1)
+            self.assertTrue(aggregate.qualifying_network_summaries[0].threshold_met)
+        finally:
+            mapping_store.close()
+            self.store.conn.execute("""
+                TRUNCATE TABLE
+                    layer1_onchain_observations,
+                    layer1_onchain_asset_mappings,
+                    layer1_onchain_transfer_events,
+                    layer1_onchain_ingestion_blocks,
+                    layer1_onchain_solana_slot_journal,
+                    layer1_onchain_ingestion_checkpoints
+                RESTART IDENTITY CASCADE
+            """)
+
+    def test_solana_worker_and_aggregator_run_against_real_postgres_adapters(self):
+        from datetime import datetime, timedelta, timezone
+        from layer1.foundation import EligibilityDecision
+        from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine, OnChainObservation
+        from layer1.onchain_aggregation import OnChainTransferAggregator
+        from layer1.onchain_postgres import PostgresOnChainStore
+        from layer1.onchain_solana_worker import SolanaAddressIngestionWorker
+        from tests.test_onchain_solana_worker import FakeSolanaProvider, history
+        from tests.test_solana_normalization import MINT, WALLET, BLOCKHASH, SIGNATURE
+
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        stamp = now.isoformat()
+        mapping = OnChainAssetMapping(
+            "pg-solana-usdc-v1", "coingecko:usd-coin", "USDC", "solana-mainnet",
+            "SOLANA", "mainnet-beta", "TOKEN", MINT, "SPL_TOKEN", 6,
+            "VERIFIED", "OFFICIAL_PROJECT", "https://solana.com",
+            (now - timedelta(hours=2)).isoformat(),
+        )
+        eligibility = EligibilityDecision(
+            status="ELIGIBLE", asset_id="coingecko:usd-coin", symbol="USDC",
+            eligible_pairs=("USDCUSDT",), verified_at=stamp,
+            identity_proof_status="VERIFIED", identity_proof_source="coingecko_coin_tickers",
+            identity_proof_verified_at=stamp, identity_proof_source_timestamp=stamp,
+            identity_proof_data_hash="a" * 64,
+        )
+        observation = OnChainObservation(
+            "pg-solana-map-proof", mapping.mapping_id, mapping.asset_id, mapping.network_id,
+            "mainnet-beta", "alchemy", "solana-mainnet", "TRANSFER", 290,
+            BLOCKHASH, SIGNATURE, stamp, stamp, "FINALIZED", "commitment=finalized",
+        )
+        engine = OnChainIntelligenceEngine(
+            freshness_limits_seconds={"solana-mainnet": 30 * 86400},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1",
+        )
+        mapping_store = PostgresOnChainStore(TEST_DSN, engine=engine)
+        try:
+            self.assertEqual(mapping_store.save_verified(eligibility, mapping, observation), "INSERTED")
+            provider = FakeSolanaProvider()
+            provider.pages = {None: ((history(),), None)}
+            worker = SolanaAddressIngestionWorker(
+                provider, mapping_store, self.store,
+                monitored_addresses={mapping.mapping_id: (WALLET,)},
+                start_slots={mapping.mapping_id: 300}, max_slots_per_run=5,
+                page_size=100, reorg_lookback_slots=5, retry_attempts=1,
+                sleep=lambda _: None, clock=lambda: now,
+            )
+            result = worker.run_once()
+            scope = f"address:{WALLET}:mapping:{mapping.mapping_id}"
+            event = self.store.get_event(
+                SIGNATURE + ":outer:0", "solana-mainnet", "alchemy", scope,
+            )
+            self.assertEqual(result["events_inserted"], 1)
+            self.assertIsNotNone(event)
+            self.assertEqual(event.canonical_status, "CANONICAL")
+            journal = self.store.get_solana_slot_journal(
+                "solana-mainnet", "alchemy", scope, 300, 304,
+            )
+            self.assertEqual(set(journal), set(range(300, 305)))
+            self.assertTrue(all(item["produced"] for item in journal.values()))
+            aggregator = OnChainTransferAggregator(
+                mapping_store, minimum_amount_by_mapping={mapping.mapping_id: "1"},
+            )
+            aggregator.bind_ingestion_store(self.store)
+            aggregate = aggregator.aggregate([event], {mapping.asset_id: eligibility}, now=now)
+            self.assertEqual(aggregate.rejected_events, 0)
+            self.assertEqual(len(aggregate.qualifying_network_summaries), 1)
+            self.assertTrue(aggregate.qualifying_network_summaries[0].threshold_met)
+        finally:
+            mapping_store.close()
+            self.store.conn.execute("""
+                TRUNCATE TABLE
+                    layer1_onchain_observations,
+                    layer1_onchain_asset_mappings,
+                    layer1_onchain_transfer_events,
+                    layer1_onchain_ingestion_blocks,
+                    layer1_onchain_solana_slot_journal,
+                    layer1_onchain_ingestion_checkpoints
+                RESTART IDENTITY CASCADE
+            """)
+
+    def test_xrpl_worker_and_aggregator_run_against_real_postgres_adapters(self):
+        from datetime import datetime, timedelta, timezone
+        from layer1.foundation import EligibilityDecision
+        from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine, OnChainObservation
+        from layer1.onchain_aggregation import OnChainTransferAggregator
+        from layer1.onchain_postgres import PostgresOnChainStore
+        from layer1.onchain_xrpl_worker import XrplIssuedCurrencyIngestionWorker
+        from tests.test_onchain_xrpl_worker import (
+            ACCOUNT, ISSUER, TX_HASH, BLOCK_HASH, FakeXrplProvider, record,
+        )
+
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        stamp = now.isoformat()
+        mapping = OnChainAssetMapping(
+            "pg-xrpl-usdc-v1", "coingecko:usd-coin", "USDC", "xrpl-mainnet",
+            "XRPL", "xrpl-mainnet", "TOKEN", None, "XRPL_ISSUED_CURRENCY", 6,
+            "VERIFIED", "OFFICIAL_PROJECT", "https://xrpl.org",
+            (now - timedelta(hours=2)).isoformat(), issuer_address=ISSUER, issued_currency="USD",
+        )
+        eligibility = EligibilityDecision(
+            status="ELIGIBLE", asset_id="coingecko:usd-coin", symbol="USDC",
+            eligible_pairs=("USDCUSDT",), verified_at=stamp,
+            identity_proof_status="VERIFIED", identity_proof_source="coingecko_coin_tickers",
+            identity_proof_verified_at=stamp, identity_proof_source_timestamp=stamp,
+            identity_proof_data_hash="a" * 64,
+        )
+        observation = OnChainObservation(
+            "pg-xrpl-map-proof", mapping.mapping_id, mapping.asset_id, mapping.network_id,
+            "xrpl-mainnet", "chainstack", "xrpl-mainnet", "TRANSFER", 499,
+            BLOCK_HASH, TX_HASH, stamp, stamp, "FINALIZED", "validated_ledger=true",
+        )
+        engine = OnChainIntelligenceEngine(
+            freshness_limits_seconds={"xrpl-mainnet": 30 * 86400},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1",
+        )
+        mapping_store = PostgresOnChainStore(TEST_DSN, engine=engine)
+        try:
+            self.assertEqual(mapping_store.save_verified(eligibility, mapping, observation), "INSERTED")
+            provider = FakeXrplProvider()
+            provider.pages = {None: ((record(),), None)}
+            worker = XrplIssuedCurrencyIngestionWorker(
+                provider, mapping_store, self.store,
+                monitored_accounts={mapping.mapping_id: (ACCOUNT,)},
+                start_ledgers={mapping.mapping_id: 500}, max_ledgers_per_run=3,
+                page_size=10, max_pages_per_run=1, reorg_lookback_ledgers=3,
+                retry_attempts=1, sleep=lambda _: None, clock=lambda: now,
+            )
+            result = worker.run_once()
+            scope = f"account:{ACCOUNT}:mapping:{mapping.mapping_id}"
+            event = self.store.get_event(TX_HASH.lower(), "xrpl-mainnet", "chainstack", scope)
+            self.assertEqual(result["events_inserted"], 1)
+            self.assertIsNotNone(event)
+            self.assertEqual(event.canonical_status, "CANONICAL")
+            aggregator = OnChainTransferAggregator(
+                mapping_store, minimum_amount_by_mapping={mapping.mapping_id: "1"},
+            )
+            aggregator.bind_ingestion_store(self.store)
+            aggregate = aggregator.aggregate([event], {mapping.asset_id: eligibility}, now=now)
+            self.assertEqual(aggregate.rejected_events, 0)
+            self.assertEqual(len(aggregate.qualifying_network_summaries), 1)
+            self.assertTrue(aggregate.qualifying_network_summaries[0].threshold_met)
+        finally:
+            mapping_store.close()
+            self.store.conn.execute("""
+                TRUNCATE TABLE
+                    layer1_onchain_observations,
+                    layer1_onchain_asset_mappings,
+                    layer1_onchain_transfer_events,
+                    layer1_onchain_ingestion_blocks,
+                    layer1_onchain_solana_slot_journal,
+                    layer1_onchain_ingestion_checkpoints
+                RESTART IDENTITY CASCADE
+            """)
 
     def test_solana_slot_journal_persists_produced_state_consistently(self):
         slot = {

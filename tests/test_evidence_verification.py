@@ -17,6 +17,7 @@ from layer1.foundation import AnnouncementEvidence, Layer1Store, MarketObservati
 from layer1.onchain import OnChainObservation, OnChainValidationResult
 
 
+from tests.evidence_fixtures import trusted_evidence_record
 def iso(delta_seconds=0):
     return (datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)).isoformat()
 
@@ -28,7 +29,7 @@ def record(value=100.0, source_id="source-1", source_family="exchange-a", is_pri
            status_value=None, lineage_id=None):
     observed_at = observed_at or iso()
     published_at = published_at or iso(-120)
-    return EvidenceRecord(
+    return trusted_evidence_record(
         source_id=source_id, source_family=source_family, source_kind="PRIMARY" if is_primary else "SECONDARY",
         publisher=source_family, subject=subject, claim_key=claim_key, value=value,
         published_at=published_at, observed_at=observed_at, asset_id=asset_id, unit=unit,
@@ -56,7 +57,12 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.engine = EvidenceVerificationEngine()
 
     def test_evidence_record_rejects_malformed_nonempty_content_hash(self):
-        malformed = record(content_hash="sha256:not-a-hex-digest")
+        malformed = EvidenceRecord(
+            source_id="malformed-hash", source_family="exchange-a", source_kind="PRIMARY",
+            publisher="exchange-a", subject="coingecko:abc", claim_key="market.price",
+            value=100.0, published_at=iso(-120), observed_at=iso(),
+            content_hash="sha256:not-a-hex-digest",
+        )
         with self.assertRaisesRegex(ValueError, "content_hash must be a lowercase SHA-256"):
             malformed.validate()
 
@@ -388,6 +394,17 @@ class EvidenceVerificationTests(unittest.TestCase):
         self.assertTrue(all(result.state == "UNVERIFIED" for result in registry.results))
         self.assertTrue(all("CLAIM_TYPE_UNCLASSIFIED" in result.issues for result in registry.results))
 
+    def test_rendered_source_assertion_names_the_actual_supporting_publishers(self):
+        evidence = record(source_id="binance-market", source_family="binance",
+                          is_primary=True)
+        registry = self.engine.verify(
+            self.engine._source_assertion_claims((evidence,)), (evidence,),
+        )
+        rendered = render_claim_registry(registry, asset_id="coingecko:abc")
+        self.assertIn("source publishers: binance", rendered)
+        self.assertIn("A SOURCE_ASSERTION records only what its named publisher asserted", rendered)
+        self.assertIn("not independently confirmed truth", rendered)
+
     def test_rendered_registry_separates_verified_and_unresolved_claims(self):
         evidence = record()
         verified_claim = claim(evidence)
@@ -436,7 +453,7 @@ class EvidenceVerificationTests(unittest.TestCase):
     def test_research_package_maps_exact_market_facts_and_labels_analysis(self):
         observed = iso()
         event = iso(-30)
-        price_evidence = EvidenceRecord(
+        price_evidence = trusted_evidence_record(
             source_id="market-price-1", source_family="binance_spot",
             source_kind="MARKET", publisher="binance_spot", subject="coingecko:abc",
             claim_key="market.price", value=100.0000004, published_at=iso(-60),
@@ -444,7 +461,7 @@ class EvidenceVerificationTests(unittest.TestCase):
             unit="USDT", timeframe="spot", event_at=event,
             content_hash="a" * 64, lineage_id="price-lineage", is_primary=True,
         )
-        change_evidence = EvidenceRecord(
+        change_evidence = trusted_evidence_record(
             source_id="market-change-1", source_family="binance_spot",
             source_kind="MARKET", publisher="binance_spot", subject="coingecko:abc",
             claim_key="market.change_24h", value=2.54, published_at=iso(-60),
@@ -502,7 +519,7 @@ class EvidenceVerificationTests(unittest.TestCase):
     def test_market_claim_uses_exact_candidate_payload_and_does_not_cross_quote_currencies(self):
         observed = iso()
         event = iso(-30)
-        coingecko = EvidenceRecord(
+        coingecko = trusted_evidence_record(
             source_id="coingecko-market", source_family="coingecko_markets",
             source_kind="SECONDARY", publisher="CoinGecko", subject="coingecko:abc",
             claim_key="market.price", value=100.0, published_at=iso(-60),
@@ -510,7 +527,7 @@ class EvidenceVerificationTests(unittest.TestCase):
             unit="USD", timeframe="spot", event_at=event,
             content_hash="a" * 64, lineage_id="coingecko-lineage", is_primary=False,
         )
-        binance = EvidenceRecord(
+        binance = trusted_evidence_record(
             source_id="binance-market", source_family="binance_spot",
             source_kind="MARKET", publisher="Binance", subject="coingecko:abc",
             claim_key="market.price", value=101.0, published_at=iso(-60),
@@ -644,16 +661,18 @@ class EvidenceVerificationTests(unittest.TestCase):
             },
         ]
         evidence = self.engine.evidence_from_binance_spot_pairs(
-            "coingecko:abc", pairs, observed_at=iso(), allowed_quote_assets=("USDT", "USDC"),
+            "coingecko:abc", pairs, observed_at=iso(), allowed_quote_assets=("USDT", "USDC"), expected_base_asset="ABC",
         )
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0].claim_key, "binance_spot.eligible")
         self.assertEqual(evidence[0].value, True)
         self.assertEqual(evidence[0].status_value, "TRADING")
-        self.assertEqual(evidence[0].source_family, "binance_spot_exchange_info")
+        self.assertEqual(evidence[0].source_family, "binance_spot_exchange_info_unreceipted")
+        self.assertEqual(evidence[0].source_status, "UNVERIFIED")
+        self.assertFalse(evidence[0].is_primary)
         with self.assertRaisesRegex(ValueError, "no active"):
             self.engine.evidence_from_binance_spot_pairs(
-                "coingecko:abc", pairs[1:], observed_at=iso(), allowed_quote_assets=("USDT", "USDC", "BTC"),
+                "coingecko:abc", pairs[1:], observed_at=iso(), allowed_quote_assets=("USDT", "USDC", "BTC"), expected_base_asset="ABC",
             )
 
     def test_publication_history_evidence_scopes_no_record_to_latest_200(self):
@@ -678,7 +697,7 @@ class EvidenceVerificationTests(unittest.TestCase):
                 "status": "TRADING", "isSpotTradingAllowed": True,
                 "permissionSets": [["SPOT"]],
             }],
-            observed_at=observed,
+            observed_at=observed, expected_base_asset="ABC",
         )
         publication = self.engine.evidence_from_publication_history(
             "coingecko:abc", "ABC", None, observed_at=observed,
@@ -689,8 +708,9 @@ class EvidenceVerificationTests(unittest.TestCase):
             asset_id="coingecko:abc", observed_at=observed,
         )
         registry = self.engine.verify(claims, spot + (publication,))
-        self.assertEqual([result.state for result in registry.results], ["VERIFIED", "VERIFIED"])
-        self.assertTrue(all(result.supporting_evidence_ids for result in registry.results))
+        self.assertEqual([result.state for result in registry.results], ["UNVERIFIED", "VERIFIED"])
+        self.assertEqual(registry.results[0].supporting_evidence_ids, ())
+        self.assertTrue(registry.results[1].supporting_evidence_ids)
 
     def test_atomic_claim_splitter_separates_independent_conjunction_clauses(self):
         self.assertEqual(
@@ -815,9 +835,10 @@ class EvidenceVerificationTests(unittest.TestCase):
             source_id="binance-article-1", source_url="https://www.binance.com/en/support/announcement/article-1",
             publisher="Binance", event_type="listing", title="ABC listing", published_at=iso(-60),
             observed_at=iso(), asset_ids=("coingecko:abc",), content_hash="d" * 64,
+            body="Binance will list ABC.",
         )
         market = MarketObservation(
-            asset_id="coingecko:abc", provider="binance_spot", endpoint="/ticker",
+            asset_id="coingecko:abc", provider="binance_spot", endpoint="https://data-api.binance.vision/api/v3/ticker/24hr",
             observed_at=iso(), published_at=iso(-10), source_timestamp=iso(-10),
             price=100.0, currency="USDT", data_hash="e" * 64,
             field_availability={"price": "AVAILABLE"}, field_provenance={"price": "binance_spot"},
@@ -831,11 +852,31 @@ class EvidenceVerificationTests(unittest.TestCase):
         announcement_records = engine.evidence_from_announcement(announcement)
         market_records = engine.evidence_from_market_observation(market)
         trend_records = engine.evidence_from_trend_signal(trend_signal)
-        self.assertTrue(announcement_records[0].is_primary)
+        self.assertFalse(announcement_records[0].is_primary)
+        self.assertEqual(announcement_records[0].source_status, "UNVERIFIED")
         self.assertEqual(announcement_records[0].lineage_id, "d" * 64)
+        by_claim_key = {item.claim_key: item for item in announcement_records}
+        self.assertFalse(by_claim_key["announcement.title"].is_primary)
+        self.assertFalse(by_claim_key["announcement.body"].is_primary)
+        self.assertFalse(by_claim_key["announcement.event_type"].is_primary)
+        self.assertEqual(by_claim_key["announcement.title"].source_status, "UNVERIFIED")
+        self.assertFalse(by_claim_key["announcement.freshness"].is_primary)
+        self.assertFalse(by_claim_key["announcement.asset_id"].is_primary)
         self.assertTrue(market_records)
-        self.assertEqual(market_records[0].source_family, "binance_spot")
+        self.assertEqual(market_records[0].source_family, "binance_spot_market")
         self.assertFalse(trend_records[0].is_primary)
+
+    def test_announcement_import_hash_does_not_claim_unverified_canonical_hash_semantics(self):
+        announcement = AnnouncementEvidence(
+            source_id="announcement-hash-semantics",
+            source_url="https://www.binance.com/en/support/announcement/hash-semantics",
+            publisher="Binance", event_type="listing", title="ABC listing",
+            published_at=iso(-60), observed_at=iso(), asset_ids=("coingecko:abc",),
+            content_hash="9" * 64, body="Binance will list ABC.",
+        )
+        evidence = self.engine.evidence_from_announcement(announcement)
+        self.assertTrue(evidence[0].content_hash)
+        self.assertEqual(evidence[0].content_hash_kind, "UNSPECIFIED")
 
     def test_announcement_body_detail_requires_exact_source_text_match(self):
         engine = EvidenceVerificationEngine()
@@ -853,7 +894,7 @@ class EvidenceVerificationTests(unittest.TestCase):
         )[0]
         self.assertEqual(exact.claim_key, "announcement.body")
         self.assertEqual(exact.evidence_ids, tuple(item.evidence_id for item in evidence if item.claim_key == "announcement.body"))
-        self.assertEqual(engine.verify([exact], evidence).results[0].state, "VERIFIED")
+        self.assertEqual(engine.verify([exact], evidence).results[0].state, "UNVERIFIED")
 
         paraphrase = engine.claims_from_research_package(
             "Detail: Binance will list ABC next month at 08:00 UTC.", evidence,
@@ -880,8 +921,8 @@ class EvidenceVerificationTests(unittest.TestCase):
         )
         fresh_age_claim = next(item for item in fresh_claims if item.claim_key == "announcement.freshness")
         fresh_result = engine.verify([fresh_age_claim], fresh_records).results[0]
-        self.assertEqual(fresh_result.state, "VERIFIED")
-        self.assertEqual(fresh_result.supporting_evidence_ids, fresh_age_claim.evidence_ids)
+        self.assertEqual(fresh_result.state, "UNVERIFIED")
+        self.assertEqual(fresh_result.supporting_evidence_ids, ())
 
         stale_announcement = AnnouncementEvidence(
             source_id="binance-article-stale",
@@ -898,17 +939,19 @@ class EvidenceVerificationTests(unittest.TestCase):
         )
         stale_age_claim = next(item for item in stale_claims if item.claim_key == "announcement.freshness")
         stale_result = engine.verify([stale_age_claim], stale_records).results[0]
-        self.assertEqual(stale_result.state, "STALE")
+        self.assertEqual(stale_result.state, "UNVERIFIED")
 
     def test_distinct_trend_topics_and_market_snapshots_within_one_minute_are_not_contradictions(self):
         engine = EvidenceVerificationEngine()
         first_topic = TrendSignal(
-            topic="BTC", source="trend-a", observed_at=iso(), rank=1,
+            topic="BTC", source="coingecko_trending", observed_at=iso(), rank=1,
             asset_ids=("coingecko:abc",), source_item_id="topic-1", content_hash="1" * 64,
+            source_endpoint="https://api.coingecko.com/api/v3/search/trending",
         )
         second_topic = TrendSignal(
-            topic="btc", source="trend-b", observed_at=iso(), rank=2,
+            topic="btc", source="coingecko_trending", observed_at=iso(), rank=2,
             asset_ids=("coingecko:abc",), source_item_id="topic-2", content_hash="2" * 64,
+            source_endpoint="https://api.coingecko.com/api/v3/search/trending",
         )
         topic_evidence = (
             engine.evidence_from_trend_signal(first_topic)
@@ -916,19 +959,20 @@ class EvidenceVerificationTests(unittest.TestCase):
         )
         topic_registry = engine.verify(engine._source_assertion_claims(topic_evidence), topic_evidence)
         self.assertEqual(len(topic_registry.results), 1)
-        self.assertEqual(topic_registry.results[0].state, "CORROBORATED")
+        self.assertEqual(topic_registry.results[0].state, "VERIFIED")
+        self.assertEqual(topic_registry.results[0].independent_source_count, 1)
 
         minute = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=1)
         first_time = (minute + timedelta(seconds=10)).isoformat()
         second_time = (minute + timedelta(seconds=40)).isoformat()
         first_market = MarketObservation(
-            asset_id="coingecko:abc", provider="binance_spot", endpoint="/ticker",
+            asset_id="coingecko:abc", provider="binance_spot", endpoint="https://data-api.binance.vision/api/v3/ticker/24hr",
             observed_at=iso(), published_at=first_time, source_timestamp=first_time,
             price=100.0, currency="USDT", data_hash="3" * 64,
             field_availability={"price": "AVAILABLE"}, freshness_by_field={"price": "FRESH"},
         )
         second_market = MarketObservation(
-            asset_id="coingecko:abc", provider="binance_spot", endpoint="/ticker",
+            asset_id="coingecko:abc", provider="binance_spot", endpoint="https://data-api.binance.vision/api/v3/ticker/24hr",
             observed_at=iso(), published_at=second_time, source_timestamp=second_time,
             price=101.0, currency="USDT", data_hash="4" * 64,
             field_availability={"price": "AVAILABLE"}, freshness_by_field={"price": "FRESH"},
@@ -955,8 +999,8 @@ class EvidenceVerificationTests(unittest.TestCase):
         )
         engine = EvidenceVerificationEngine()
         verified = engine.evidence_from_onchain_observation(observation, accepted)
-        self.assertEqual(verified.source_status, "ACCEPTED")
-        self.assertTrue(verified.is_primary)
+        self.assertEqual(verified.source_status, "UNVERIFIED")
+        self.assertFalse(verified.is_primary)
         mismatched = OnChainValidationResult(
             "ACCEPTED", "ONCHAIN_OBSERVATION_VERIFIED", "mismatched", observation.observation_id,
             observation.asset_id, observation.mapping_id, "polygon-mainnet", observation.provider,
@@ -974,6 +1018,8 @@ class EvidenceVerificationTests(unittest.TestCase):
         }
         summary_evidence = engine.evidence_from_onchain_summary(summary)
         self.assertEqual(summary_evidence.mapping_id, "mapping-abc-1")
+        self.assertFalse(summary_evidence.is_primary)
+        self.assertEqual(summary_evidence.source_family, "module9_canonical_store")
         with self.assertRaisesRegex(ValueError, "threshold-qualified"):
             engine.evidence_from_onchain_summary({**summary, "threshold_met": False})
 
@@ -982,6 +1028,7 @@ class EvidenceVerificationTests(unittest.TestCase):
             topic="ABC", source="coingecko_trending", observed_at=iso(), rank=1,
             asset_ids=("coingecko:abc",), source_item_id="abc-trend-1",
             content_hash="a" * 64,
+            source_endpoint="https://api.coingecko.com/api/v3/search/trending",
         )
         trend_evidence = self.engine.evidence_from_trend_signal(trend)
         summary = {
@@ -998,7 +1045,7 @@ class EvidenceVerificationTests(unittest.TestCase):
             subject="coingecko:abc", asset_id="coingecko:abc",
         )
         self.assertIn("Trend topic: abc", package)
-        self.assertIn(f"On-chain transfer summary ID: {summary['summary_id']}", package)
+        self.assertNotIn("On-chain transfer summary ID:", package)
 
         claims = self.engine.claims_from_research_package(
             package, evidence, subject="coingecko:abc", asset_id="coingecko:abc",
@@ -1009,7 +1056,7 @@ class EvidenceVerificationTests(unittest.TestCase):
         states = {item.claim_id: item.state for item in registry.results}
 
         self.assertIn("trend.topic:" + hashlib.sha256(b"abc").hexdigest()[:16], by_key)
-        self.assertIn("onchain.transfer_summary", by_key)
+        self.assertNotIn("onchain.transfer_summary", by_key)
         self.assertTrue(all(item.evidence_ids for item in claims))
         self.assertTrue(all(states[item.claim_id] in {"VERIFIED", "CORROBORATED"} for item in claims))
 
@@ -1018,6 +1065,7 @@ class EvidenceVerificationTests(unittest.TestCase):
             topic="ABC", source="coingecko_trending", observed_at=iso(), rank=1,
             asset_ids=("coingecko:abc",), source_item_id="abc-trend-1",
             content_hash="a" * 64,
+            source_endpoint="https://api.coingecko.com/api/v3/search/trending",
         )
         evidence = self.engine.evidence_from_trend_signal(trend)
         original = "COIN: XYZ"
@@ -1056,7 +1104,7 @@ class EvidenceVerificationTests(unittest.TestCase):
             store = Layer1Store(os.path.join(directory, "layer1.db"))
             try:
                 market = MarketObservation(
-                    asset_id="coingecko:abc", provider="binance_spot", endpoint="/ticker",
+                    asset_id="coingecko:abc", provider="binance_spot", endpoint="https://data-api.binance.vision/api/v3/ticker/24hr",
                     observed_at=iso(), published_at=iso(-10), source_timestamp=iso(-10),
                     price=100.0, currency="USDT", data_hash="1" * 64,
                     field_availability={"price": "AVAILABLE"}, field_provenance={"price": "binance_spot"},
@@ -1152,6 +1200,56 @@ class EvidenceVerificationTests(unittest.TestCase):
 
 
 class ClaimRegistrySnapshotIntegrityTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = EvidenceVerificationEngine()
+
+    def test_registry_v2_binds_hash_semantics_without_changing_evidence_identity(self):
+        from dataclasses import replace
+        from layer1.evidence_verification import Claim, ClaimRegistry, EvidenceRecord
+        record = trusted_evidence_record(
+            source_id="cms:source-1", source_family="binance", source_kind="PRIMARY",
+            publisher="Binance", subject="coingecko:bitcoin", claim_key="announcement.title",
+            value="BTC listing", published_at="2026-11-21T11:58:00Z",
+            observed_at="2026-11-21T11:59:00Z", asset_id="coingecko:bitcoin",
+            content_hash="a" * 64, lineage_id="cms:source-1",
+        )
+        original_id = record.evidence_id
+        typed = replace(record, content_hash_kind="CANONICAL_NORMALIZED_PAYLOAD_SHA256")
+        self.assertEqual(typed.evidence_id, original_id)
+        payload = ClaimRegistry((), (typed,), (), ()).to_dict()
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(
+            payload["evidence_records"][0]["content_hash_kind"],
+            "CANONICAL_NORMALIZED_PAYLOAD_SHA256",
+        )
+
+    def test_evidence_record_rejects_unknown_content_hash_kind(self):
+        from dataclasses import replace
+        from layer1.evidence_verification import EvidenceRecord
+        record = trusted_evidence_record(
+            source_id="source-1", source_family="provider", source_kind="MARKET",
+            publisher="Provider", subject="coingecko:bitcoin", claim_key="market.price",
+            value=1.0, published_at="2026-11-21T11:58:00Z",
+            observed_at="2026-11-21T11:59:00Z", content_hash="b" * 64,
+        )
+        with self.assertRaisesRegex(ValueError, "content_hash_kind"):
+            replace(record, content_hash_kind="RAW_BYTES_BUT_UNVERIFIED").validate()
+
+    def test_evidence_record_rejects_hash_semantics_without_a_content_hash(self):
+        from dataclasses import replace
+        from layer1.evidence_verification import EvidenceRecord
+        record = trusted_evidence_record(
+            source_id="source-no-hash", source_family="provider", source_kind="ONCHAIN",
+            publisher="Provider", subject="coingecko:bitcoin", claim_key="onchain.transaction_hash",
+            value="0x" + "1" * 64, published_at="2026-11-21T11:58:00Z",
+            observed_at="2026-11-21T11:59:00Z",
+        )
+        typed_without_digest = replace(
+            record, content_hash_kind="CANONICAL_PARSED_PROVIDER_JSON_SHA256",
+        )
+        with self.assertRaisesRegex(ValueError, "requires content_hash"):
+            typed_without_digest.validate()
+
     def test_sqlite_claim_registry_loader_rejects_tampered_snapshot(self):
         import sqlite3
         from layer1.evidence_verification import ClaimRegistry, ClaimRegistryStore
@@ -1234,5 +1332,267 @@ class ClaimRegistrySnapshotIntegrityTests(unittest.TestCase):
             store.load_claim_registry_by_verification_id("not-a-digest")
 
 
+    def test_unissued_caller_record_cannot_manufacture_primary_acceptance(self):
+        forged = EvidenceRecord(
+            source_id="forged-primary", source_family="invented-primary-family",
+            source_kind="SECONDARY", publisher="Unapproved Publisher",
+            subject="coingecko:abc", claim_key="market.price", value=100.0,
+            published_at=iso(-120), observed_at=iso(), asset_id="coingecko:abc",
+            source_url="https://attacker.example/price", is_primary=True,
+            source_status="ACCEPTED",
+        )
+        candidate = claim(forged, unit=None, timeframe=None)
+        registry = self.engine.verify((candidate,), (forged,))
+        result = registry.results[0]
+        self.assertEqual(result.state, "UNVERIFIED")
+        self.assertEqual(result.supporting_evidence_ids, ())
+        self.assertEqual(result.independent_source_count, 0)
+        self.assertIn("EVIDENCE_PROVENANCE_UNTRUSTED", result.issues)
+
+    def test_caller_supplied_authority_metadata_does_not_replace_adapter_proof(self):
+        forged = EvidenceRecord(
+            source_id="forged-coingecko-record", source_family="coingecko_market",
+            source_kind="MARKET", publisher="CoinGecko market data",
+            subject="coingecko:abc", claim_key="market.price", value=100.0,
+            published_at=iso(-30), observed_at=iso(), asset_id="coingecko:abc",
+            unit="USD", timeframe="spot",
+            source_url="https://api.coingecko.com/api/v3/coins/markets",
+            is_primary=False, source_status="ACCEPTED",
+            source_authority_id="coingecko_market",
+            independence_group="coingecko_market",
+        )
+        registry = self.engine.verify(
+            (claim(forged),), (forged,),
+        )
+        self.assertEqual(registry.results[0].state, "UNVERIFIED")
+        self.assertEqual(registry.results[0].supporting_evidence_ids, ())
+
+    def test_source_family_aliases_cannot_make_same_publisher_independent(self):
+        observed = iso()
+        first = trusted_evidence_record(
+            source_id="publisher-copy-a", source_family="provider-alias-a",
+            source_kind="SECONDARY", publisher="Same Publisher",
+            subject="coingecko:abc", claim_key="market.price", value=100.0,
+            published_at=iso(-120), observed_at=observed, asset_id="coingecko:abc",
+            source_url="https://same-publisher.example/a", is_primary=False,
+            source_status="ACCEPTED",
+        )
+        second = trusted_evidence_record(
+            source_id="publisher-copy-b", source_family="provider-alias-b",
+            source_kind="SECONDARY", publisher="Same Publisher",
+            subject="coingecko:abc", claim_key="market.price", value=100.0,
+            published_at=iso(-120), observed_at=observed, asset_id="coingecko:abc",
+            source_url="https://same-publisher.example/b", is_primary=False,
+            source_status="ACCEPTED",
+        )
+        candidate = claim(
+            first, unit=None, timeframe=None,
+            evidence_ids=(first.evidence_id, second.evidence_id),
+        )
+        registry = self.engine.verify((candidate,), (first, second))
+        self.assertNotEqual(registry.results[0].state, "CORROBORATED")
+        self.assertEqual(registry.results[0].independent_source_count, 1)
+
+    def test_market_adapter_rejects_unknown_provider_endpoint_as_authority(self):
+        unknown = MarketObservation(
+            asset_id="coingecko:abc", provider="binance_spot",
+            endpoint="https://attacker.example/api/v3/ticker/24hr",
+            observed_at=iso(), price=100.0, currency="USD",
+            freshness_by_field={"price": "FRESH"},
+        )
+        evidence = self.engine.evidence_from_market_observation(unknown)
+        self.assertEqual(evidence[0].source_status, "UNVERIFIED")
+        self.assertFalse(evidence[0].is_primary)
+
+    def test_unknown_trend_source_cannot_claim_social_authority(self):
+        signal = TrendSignal(
+            topic="ABC", source="caller_invented_social",
+            observed_at=iso(), asset_ids=("coingecko:abc",),
+            source_item_id="fake-item",
+        )
+        evidence = self.engine.evidence_from_trend_signal(signal)
+        self.assertTrue(all(item.source_status == "UNVERIFIED" for item in evidence))
+        self.assertTrue(all(not item.is_primary for item in evidence))
+
+    def test_approved_market_provider_endpoints_bind_canonical_authority_groups(self):
+        observed = iso()
+        published = iso(-30)
+        binance = MarketObservation(
+            asset_id="coingecko:abc", provider="binance_spot",
+            endpoint="https://data-api.binance.vision/api/v3/ticker/24hr",
+            observed_at=observed, published_at=published, source_timestamp=published,
+            price=100.0, currency="USDT", data_hash="1" * 64,
+            field_availability={"price": "AVAILABLE"},
+            freshness_by_field={"price": "FRESH"},
+        )
+        coingecko = MarketObservation(
+            asset_id="coingecko:abc", provider="coingecko_markets",
+            endpoint="https://api.coingecko.com/api/v3/coins/markets",
+            observed_at=observed, published_at=published, source_timestamp=published,
+            price=100.0, currency="USDT", data_hash="2" * 64,
+            field_availability={"price": "AVAILABLE"},
+            freshness_by_field={"price": "FRESH"},
+        )
+        records = (
+            self.engine.evidence_from_market_observation(binance)
+            + self.engine.evidence_from_market_observation(coingecko)
+        )
+        self.assertEqual({item.source_family for item in records}, {
+            "binance_spot_market", "coingecko_market",
+        })
+        self.assertTrue(all(item.source_status == "ACCEPTED" for item in records))
+        self.assertTrue(all(not item.is_primary for item in records))
+        claims = self.engine._source_assertion_claims(records)
+        registry = self.engine.verify(claims, records)
+        self.assertEqual(registry.results[0].state, "CORROBORATED")
+        self.assertEqual(registry.results[0].independent_source_count, 2)
+
+    def test_mutating_an_issued_evidence_record_invalidates_its_provenance_proof(self):
+        evidence = trusted_evidence_record(
+            source_id="tamper-proof", source_family="trusted-fixture",
+            source_kind="PRIMARY", publisher="Trusted Fixture",
+            subject="coingecko:abc", claim_key="market.price", value=100.0,
+            published_at=iso(-30), observed_at=iso(), asset_id="coingecko:abc",
+            unit="USD", timeframe="spot", is_primary=True, source_status="ACCEPTED",
+        )
+        object.__setattr__(evidence, "publisher", "Attacker")
+        candidate = claim(evidence)
+        registry = self.engine.verify((candidate,), (evidence,))
+        self.assertEqual(registry.results[0].state, "UNVERIFIED")
+        self.assertIn("EVIDENCE_PROVENANCE_UNTRUSTED", registry.results[0].issues)
+
+
+    def test_binance_spot_evidence_accepts_only_endpoint_bound_approved_ingestion_receipt(self):
+        from unittest.mock import patch
+        from layer1.source_receipts import create_source_ingestion_receipt
+
+        observed = iso()
+        pair = {
+            "symbol": "ABCUSDT", "baseAsset": "ABC", "quoteAsset": "USDT",
+            "status": "TRADING", "isSpotTradingAllowed": True,
+            "permissionSets": [["SPOT"]],
+        }
+        endpoint = "https://api.binance.com/api/v3/exchangeInfo?permissions=SPOT"
+        canonical_pair = {
+            "symbol": "ABCUSDT", "baseAsset": "ABC", "quoteAsset": "USDT",
+            "status": "TRADING", "isSpotTradingAllowed": True,
+            "permissionSets": [["SPOT"]],
+        }
+        pair_hash = hashlib.sha256(json.dumps(
+            canonical_pair, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        payload = {
+            "authority_id": "binance_spot_exchange_info",
+            "endpoint": endpoint,
+            "server_time": int(datetime.fromisoformat(observed).timestamp() * 1000),
+            "observed_at": observed,
+            "pair": canonical_pair,
+            "pair_sha256": pair_hash,
+        }
+        key = b"approved-spot-ingestion-key-material-32bytes"
+        receipt = create_source_ingestion_receipt(
+            payload, authority_id="binance_spot_exchange_info",
+            key_id="spot-key-v1", signing_key=key,
+        ).to_dict()
+        receipt_bundle = {"ABCUSDT": {"payload": payload, "receipt": receipt}}
+        env = {
+            "BINANCE_SPOT_INGESTION_HMAC_KEY_HEX": key.hex(),
+            "BINANCE_SPOT_INGESTION_KEY_ID": "spot-key-v1",
+            "BINANCE_SOURCE_RECEIPT_TRUSTED_KEY_IDS": "spot-key-v1",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            evidence = self.engine.evidence_from_binance_spot_pairs(
+                "coingecko:abc", [pair], observed_at=observed,
+                allowed_quote_assets=("USDT",), expected_base_asset="ABC",
+                source_receipts=receipt_bundle,
+            )
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0].source_status, "ACCEPTED")
+        self.assertEqual(evidence[0].source_authority_id, "binance_spot_exchange_info")
+        self.assertEqual(evidence[0].source_receipt_key_id, "spot-key-v1")
+        self.assertFalse(evidence[0].is_primary)
+
+    def test_binance_spot_receipt_rejects_tampered_pair_and_unapproved_key(self):
+        from unittest.mock import patch
+        from layer1.source_receipts import create_source_ingestion_receipt
+
+        observed = iso()
+        pair = {
+            "symbol": "ABCUSDT", "baseAsset": "ABC", "quoteAsset": "USDT",
+            "status": "TRADING", "isSpotTradingAllowed": True,
+            "permissionSets": [["SPOT"]],
+        }
+        endpoint = "https://api.binance.com/api/v3/exchangeInfo?permissions=SPOT"
+        payload = {
+            "authority_id": "binance_spot_exchange_info", "endpoint": endpoint,
+            "server_time": int(datetime.fromisoformat(observed).timestamp() * 1000),
+            "observed_at": observed, "pair": pair,
+            "pair_sha256": hashlib.sha256(json.dumps(
+                pair, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest(),
+        }
+        key = b"approved-spot-ingestion-key-material-32bytes"
+        receipt = create_source_ingestion_receipt(
+            payload, authority_id="binance_spot_exchange_info",
+            key_id="spot-key-v1", signing_key=key,
+        ).to_dict()
+        env = {
+            "BINANCE_SPOT_INGESTION_HMAC_KEY_HEX": key.hex(),
+            "BINANCE_SPOT_INGESTION_KEY_ID": "spot-key-v1",
+            "BINANCE_SOURCE_RECEIPT_TRUSTED_KEY_IDS": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            unapproved = self.engine.evidence_from_binance_spot_pairs(
+                "coingecko:abc", [pair], observed_at=observed,
+                expected_base_asset="ABC",
+                source_receipts={"ABCUSDT": {"payload": payload, "receipt": receipt}},
+            )
+        self.assertEqual(unapproved[0].source_status, "UNVERIFIED")
+        self.assertIsNone(unapproved[0].source_authority_id)
+        changed_pair = {**pair, "permissionSets": [["SPOT", "MARGIN"]]}
+        with patch.dict(os.environ, {**env, "BINANCE_SOURCE_RECEIPT_TRUSTED_KEY_IDS": "spot-key-v1"}, clear=False):
+            tampered = self.engine.evidence_from_binance_spot_pairs(
+                "coingecko:abc", [changed_pair], observed_at=observed,
+                expected_base_asset="ABC",
+                source_receipts={"ABCUSDT": {"payload": payload, "receipt": receipt}},
+            )
+        self.assertEqual(tampered[0].source_status, "UNVERIFIED")
+        self.assertIsNone(tampered[0].source_authority_id)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class OnChainPersistedReceiptRestorationTests(unittest.TestCase):
+    def test_persisted_onchain_evidence_without_signed_receipt_is_not_retrusted(self):
+        from unittest.mock import patch
+        import layer1.evidence_verification as evidence_module
+
+        forged = EvidenceRecord(
+            source_id="obs-forged-restore",
+            source_family="alchemy",
+            source_kind="ONCHAIN",
+            publisher="alchemy",
+            subject="coingecko:ethereum",
+            claim_key="onchain.transaction_hash",
+            value="0x" + "b" * 64,
+            published_at=iso(-30),
+            observed_at=iso(),
+            asset_id="coingecko:ethereum",
+            mapping_id="eth-mainnet-native-v1",
+            timeframe="ethereum-mainnet",
+            is_primary=True,
+            source_status="ACCEPTED",
+            status_value="FINALIZED",
+            source_authority_id="onchain_receipt",
+            independence_group="onchain:ethereum-mainnet:alchemy",
+            source_receipt_key_id="test-key-v1",
+        )
+        with patch.object(
+            evidence_module, "_TRUSTED_ONCHAIN_RECEIPT_KEY_IDS", frozenset({"test-key-v1"}),
+        ):
+            evidence_module._restore_evidence_record_proof(forged)
+            self.assertIsNone(evidence_module._evidence_proof(forged))
+            self.assertEqual(evidence_module._effective_evidence_status(forged), "UNVERIFIED")
+            self.assertFalse(evidence_module._effective_evidence_primary(forged))

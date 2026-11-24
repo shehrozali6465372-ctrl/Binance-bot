@@ -55,7 +55,7 @@ class DeepSeekGeneratorTests(unittest.TestCase):
         self.config = replace(main.CONFIG, deepseek_api_key="unit-test-key")
         self.generator = main.DeepSeekGenerator(self.config)
 
-    def test_complete_research_package_maps_to_evidence_without_unresolved_facts(self):
+    def test_unreceipted_binance_spot_eligibility_remains_unresolved(self):
         asset_id = "coingecko:abc"
         market_hash = "a" * 64
         observed_at = main.utc_now()
@@ -69,7 +69,7 @@ class DeepSeekGeneratorTests(unittest.TestCase):
         coin.market_data_hash = market_hash
         package = main.ResearchEngine().build_research_package(coin.as_dict(), [], None)
         market = MarketObservation(
-            asset_id=asset_id, provider="coingecko_markets", endpoint="/coins/markets",
+            asset_id=asset_id, provider="coingecko_markets", endpoint="https://api.coingecko.com/api/v3/coins/markets",
             observed_at=observed_at, published_at=source_time, source_timestamp=source_time,
             price=1.2345678, currency="USD", change_24h=6.25,
             volume_24h=2_000_000.4, market_cap=50_000_000.4,
@@ -92,7 +92,7 @@ class DeepSeekGeneratorTests(unittest.TestCase):
                 "status": "TRADING", "isSpotTradingAllowed": True,
                 "permissionSets": [["SPOT"]],
             }],
-            observed_at=observed_at,
+            observed_at=observed_at, expected_base_asset="ABC",
         )
         publication_evidence = verifier.evidence_from_publication_history(
             asset_id, "ABC", None, observed_at=observed_at,
@@ -105,10 +105,10 @@ class DeepSeekGeneratorTests(unittest.TestCase):
         )
         registry = verifier.verify(claims, evidence)
         rendered = render_claim_registry(registry, asset_id=asset_id)
-        self.assertIn("VERIFIED_COUNT: 6", rendered)
-        self.assertIn("UNRESOLVED_COUNT: 0", rendered)
+        self.assertIn("VERIFIED_COUNT: 5", rendered)
+        self.assertIn("UNRESOLVED_COUNT: 1", rendered)
         self.assertNotIn("[UNCLASSIFIED]", rendered)
-        self.assertIn("- None.", rendered)
+        self.assertIn("[UNVERIFIED/SOURCE_ASSERTION] Binance Spot: YES", rendered)
 
     def test_writing_prompt_requires_exact_sentence_claim_ids(self):
         prompt = self.generator._build_writing_prompt(
@@ -143,12 +143,12 @@ class DeepSeekGeneratorTests(unittest.TestCase):
         package = main.ResearchEngine().build_research_package({
             "symbol": "ABC", "name": "Alpha Coin", "asset_id": "coingecko:abc",
             "price": 1.25, "change_24h": 6.0, "volume_24h": 2_000_000,
-            "volume_ratio": 3.1, "market_cap": 50_000_000, "history": [],
+            "turnover_ratio_pct": 3.1, "market_cap": 50_000_000, "history": [],
             "skills_score": 90, "skills_search": 1000,
             "skills_sources": ["AI"], "skills_smart_money": 12.5,
         }, [], posted_hours_ago=None)
 
-        self.assertIn("Volume Signal Index: 3.1 (source-dependent heuristic)", package)
+        self.assertIn("Turnover / market cap: 3.10% (derived heuristic, not provider fact)", package)
         self.assertNotIn("Volume vs Normal", package)
         self.assertNotIn("normal volume", package.lower())
         self.assertNotIn("smart money participation", package.lower())
@@ -175,10 +175,36 @@ class DeepSeekGeneratorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "IMAGE_REQUIRED"):
             replace(default_config, image_required="false").validate()
 
+    def test_config_requires_explicit_response_byte_limit_when_deepseek_key_is_configured(self):
+        with patch.dict(os.environ, {
+            "DEEPSEEK_API_KEY": "env-test-key", "DRY_RUN": "1",
+        }, clear=True):
+            config = main.Config.from_env()
+        with self.assertRaisesRegex(ValueError, "DEEPSEEK_MAX_RESPONSE_BYTES"):
+            config.validate()
+
+        with patch.dict(os.environ, {
+            "DEEPSEEK_API_KEY": "env-test-key", "DEEPSEEK_MAX_RESPONSE_BYTES": "65536",
+            "DRY_RUN": "1",
+        }, clear=True):
+            configured = main.Config.from_env()
+        configured.validate()
+        self.assertEqual(configured.deepseek_max_response_bytes, 65536)
+
+    def test_config_rejects_malformed_deepseek_response_byte_limit(self):
+        for value in ("0", "-1", "1.5", "1e6", "  "):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {
+                    "DEEPSEEK_MAX_RESPONSE_BYTES": value, "DRY_RUN": "1",
+                }, clear=True):
+                    with self.assertRaisesRegex(ValueError, "DEEPSEEK_MAX_RESPONSE_BYTES"):
+                        main.Config.from_env()
+
     def test_config_reads_direct_deepseek_environment_without_gemini_aliases(self):
         with patch.dict(os.environ, {
             "DEEPSEEK_API_KEY": "env-test-key",
             "DEEPSEEK_MODEL": "deepseek-flash",
+            "DEEPSEEK_MAX_RESPONSE_BYTES": "65536",
             "DRY_RUN": "1",
         }, clear=True):
             config = main.Config.from_env()

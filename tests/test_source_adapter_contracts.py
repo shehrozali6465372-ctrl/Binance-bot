@@ -48,7 +48,7 @@ class SourceAdapterHashContractTests(unittest.TestCase):
             asset_ids=("coingecko:abc",), source_item_id="coingecko:abc",
         )
         volume = TrendSignal(
-            topic="ABC_VOLUME", source="market_volume", observed_at=self.now,
+            topic="ABC_TURNOVER", source="market_turnover", observed_at=self.now,
             asset_ids=("coingecko:abc",), source_item_id="coingecko:abc",
         )
         records = (
@@ -56,19 +56,19 @@ class SourceAdapterHashContractTests(unittest.TestCase):
             + engine.evidence_from_trend_signal(volume)
         )
         self.assertEqual(
-            EvidenceVerificationEngine._independent_source_count(records), 1,
+            EvidenceVerificationEngine._independent_source_count(records), 0,
         )
+        self.assertTrue(all(record.source_status == "UNVERIFIED" for record in records))
         self.assertTrue(all(item.source_kind == "MARKET" for item in records))
         context = engine.append_asset_evidence_context(
             "", records, subject="coingecko:abc", asset_id="coingecko:abc",
         )
-        self.assertIn("Trend topic: abc_surge", context)
+        self.assertNotIn("Trend topic:", context)
         claims = engine.claims_from_research_package(
             context, records, subject="coingecko:abc", asset_id="coingecko:abc",
             observed_at=self.now,
         )
-        self.assertEqual(len(claims), 2)
-        self.assertTrue(all(claim.evidence_ids for claim in claims))
+        self.assertEqual(claims, ())
 
     def test_onchain_observation_adapter_does_not_claim_raw_payload_hash(self):
         observation = OnChainObservation(
@@ -97,7 +97,7 @@ class SourceAdapterHashContractTests(unittest.TestCase):
             "permissionSets": [["SPOT"]], "ignored_provider_field": "not-in-projection",
         }
         record = EvidenceVerificationEngine.evidence_from_binance_spot_pairs(
-            "coingecko:abc", [pair], observed_at=self.now,
+            "coingecko:abc", [pair], observed_at=self.now, expected_base_asset="ABC",
         )[0]
         canonical = {
             "symbol": "ABCUSDT", "baseAsset": "ABC", "quoteAsset": "USDT",
@@ -111,6 +111,120 @@ class SourceAdapterHashContractTests(unittest.TestCase):
         self.assertNotEqual(record.content_hash, hashlib.sha256(json.dumps(
             pair, sort_keys=True, separators=(",", ":"),
         ).encode()).hexdigest())
+
+    def test_exchange_info_adapter_rejects_pair_for_different_canonical_base_asset(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+        wrong_pair = {
+            "symbol": "DEFUSDT", "baseAsset": "DEF", "quoteAsset": "USDT",
+            "status": "TRADING", "isSpotTradingAllowed": True,
+            "permissionSets": [["SPOT"]],
+        }
+        with self.assertRaisesRegex(ValueError, "no active.*expected base asset"):
+            EvidenceVerificationEngine.evidence_from_binance_spot_pairs(
+                "coingecko:abc", [wrong_pair], observed_at=self.now,
+                expected_base_asset="ABC",
+            )
+
+    def test_market_provider_name_does_not_grant_primary_source_authority(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+        engine = EvidenceVerificationEngine()
+        for provider in ("binance_spot", "binance_untrusted"):
+            with self.subTest(provider=provider):
+                observation = MarketObservation(
+                    asset_id="coingecko:abc", provider=provider, endpoint="/market",
+                    observed_at=self.now, price=10.0,
+                )
+                records = engine.evidence_from_market_observation(observation)
+                self.assertTrue(records)
+                self.assertTrue(all(item.source_kind == "MARKET" for item in records))
+                self.assertTrue(all(not item.is_primary for item in records))
+
+    def test_market_adapter_does_not_infer_hash_kind_from_caller_supplied_digest(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+        observation = MarketObservation(
+            asset_id="coingecko:abc", provider="untrusted_adapter", endpoint="/market",
+            observed_at=self.now, price=10.0, data_hash="a" * 64,
+        )
+        evidence = EvidenceVerificationEngine.evidence_from_market_observation(observation)
+        self.assertTrue(evidence)
+        self.assertEqual(evidence[0].content_hash_kind, "UNSPECIFIED")
+
+    def test_trend_adapter_does_not_infer_hash_kind_from_source_label(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+        signal = TrendSignal(
+            topic="ABC_TREND", source="coingecko_trending", observed_at=self.now,
+            asset_ids=("coingecko:abc",), source_item_id="abc", content_hash="b" * 64,
+        )
+        evidence = EvidenceVerificationEngine.evidence_from_trend_signal(signal)
+        self.assertTrue(evidence)
+        self.assertEqual(evidence[0].content_hash_kind, "UNSPECIFIED")
+
+    def test_explicit_market_hash_kind_is_preserved_by_evidence_adapter(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+        observation = MarketObservation(
+            asset_id="coingecko:abc", provider="provider-a", endpoint="/market",
+            observed_at=self.now, price=10.0, data_hash="c" * 64,
+            data_hash_kind="CANONICAL_PARSED_PROVIDER_JSON_SHA256",
+        )
+        evidence = EvidenceVerificationEngine.evidence_from_market_observation(observation)
+        self.assertEqual(evidence[0].content_hash_kind, "CANONICAL_PARSED_PROVIDER_JSON_SHA256")
+
+    def test_explicit_trend_hash_kind_is_preserved_by_evidence_adapter(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
+        signal = TrendSignal(
+            topic="ABC_TREND", source="provider-a", observed_at=self.now,
+            asset_ids=("coingecko:abc",), source_item_id="abc", content_hash="d" * 64,
+            content_hash_kind="CANONICAL_PARSED_PROVIDER_JSON_SHA256",
+        )
+        evidence = EvidenceVerificationEngine.evidence_from_trend_signal(signal)
+        self.assertEqual(evidence[0].content_hash_kind, "CANONICAL_PARSED_PROVIDER_JSON_SHA256")
+
+    def test_market_hash_kind_requires_a_hash_and_known_contract(self):
+        with self.assertRaisesRegex(ValueError, "requires data_hash"):
+            MarketObservation(
+                asset_id="coingecko:abc", provider="provider-a", endpoint="/market",
+                observed_at=self.now, data_hash_kind="CANONICAL_PARSED_PROVIDER_JSON_SHA256",
+            ).validate()
+        with self.assertRaisesRegex(ValueError, "data_hash_kind"):
+            MarketObservation(
+                asset_id="coingecko:abc", provider="provider-a", endpoint="/market",
+                observed_at=self.now, data_hash="e" * 64, data_hash_kind="RAW_BYTES",
+            ).validate()
+
+    def test_trend_hash_kind_requires_a_hash_and_known_contract(self):
+        with self.assertRaisesRegex(ValueError, "requires content_hash"):
+            TrendSignal(
+                topic="ABC", source="provider-a", observed_at=self.now,
+                asset_ids=("coingecko:abc",), source_item_id="abc",
+                content_hash_kind="CANONICAL_PARSED_PROVIDER_JSON_SHA256",
+            ).validate()
+        with self.assertRaisesRegex(ValueError, "content_hash_kind"):
+            TrendSignal(
+                topic="ABC", source="provider-a", observed_at=self.now,
+                asset_ids=("coingecko:abc",), source_item_id="abc", content_hash="f" * 64,
+                content_hash_kind="RAW_BYTES",
+            ).validate()
+
+    def test_market_data_engine_producers_declare_their_parsed_json_hash_contract(self):
+        from layer1.foundation import AssetIdentity, MarketDataIntelligenceEngine
+        identity = AssetIdentity("coingecko:abc", "ABC", "ABC", "USDT")
+        source_time = self.now
+        close_ms = int(__import__("datetime").datetime.fromisoformat(source_time).timestamp() * 1000)
+        binance_payload = {
+            "symbol": "ABCUSDT", "lastPrice": "10", "priceChangePercent": "1",
+            "quoteVolume": "1000", "closeTime": close_ms,
+        }
+        engine = MarketDataIntelligenceEngine(lambda *_: binance_payload, clock=lambda: self.now)
+        binance = engine.fetch_binance_24h(identity, "ABCUSDT")
+        coingecko_item = {
+            "id": "abc", "symbol": "abc", "current_price": 10,
+            "price_change_percentage_24h": 1, "total_volume": 1000,
+            "market_cap": 1000000, "last_updated": self.now,
+            "sparkline_in_7d": {"price": [9, 10]},
+        }
+        coingecko = engine.normalize_coingecko_market(identity, coingecko_item, observed_at=self.now)
+        self.assertEqual(binance.data_hash_kind, "CANONICAL_PARSED_PROVIDER_JSON_SHA256")
+        self.assertEqual(coingecko.data_hash_kind, "CANONICAL_PARSED_PROVIDER_JSON_SHA256")
 
     def test_market_observation_allows_absent_hash_when_source_does_not_supply_it(self):
         observation = MarketObservation(

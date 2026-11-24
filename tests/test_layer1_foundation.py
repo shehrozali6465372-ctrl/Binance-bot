@@ -256,6 +256,28 @@ class Layer1FoundationTests(unittest.TestCase):
              patch("main.market_data_http_get", return_value=ProviderResponse(payload)):
             self.assertEqual(scanner._coingecko_universe(), [])
 
+
+    def test_module2_coingecko_turnover_is_typed_as_percentage_not_volume_multiple(self):
+        payload = [{
+            "id": "bitcoin", "symbol": "btc", "name": "Bitcoin",
+            "current_price": 65000, "price_change_percentage_24h": 1.5,
+            "total_volume": 2_500_000_000, "market_cap": 10_000_000_000,
+            "last_updated": iso(), "sparkline_in_7d": {"price": [64000, 65000]},
+        }]
+        scanner = main.MarketScanner(AgentConfigShim())
+        with patch("main._get_binance_listed", return_value={"BTC"}), \
+             patch("main.market_data_http_get", return_value=ProviderResponse(payload)):
+            coins = scanner._coingecko_universe()
+        self.assertEqual(len(coins), 1)
+        self.assertAlmostEqual(coins[0].turnover_ratio_pct, 25.0)
+        serialized = coins[0].as_dict()
+        self.assertEqual(serialized["turnover_ratio_pct"], 25.0)
+        self.assertEqual(serialized["turnover_metric_unit"], "PCT_MARKET_CAP_24H")
+        self.assertEqual(serialized["turnover_metric_source"], "coingecko_markets")
+        self.assertNotIn("volume_ratio", serialized)
+        with patch.object(scanner, "_universe", return_value=coins):
+            self.assertEqual(scanner.high_turnover_assets(min_turnover_pct=20.0)[0]["symbol"], "BTC")
+
     def test_module2_scanner_cache_uses_configured_ttl_without_refreshing_observation_time(self):
         scanner = main.MarketScanner(replace(main.CONFIG, live_market_data=True,
                                              market_data_cache_ttl_seconds=60))
@@ -1041,7 +1063,7 @@ class Layer1FoundationTests(unittest.TestCase):
     def test_legacy_candidate_filter_requires_canonical_asset_identity(self):
         with patch("main._get_binance_listed", return_value={"BTC"}):
             accepted = main._passes_objective_filters(
-                symbol="BTC", price=65000, change_24h=8, volume_ratio=2,
+                symbol="BTC", price=65000, change_24h=8, turnover_ratio_pct=2,
                 market_cap=1_000_000_000, announcements=[], posted_hours_data={},
                 asset_id="",
             )
@@ -1661,12 +1683,19 @@ class Layer1FoundationTests(unittest.TestCase):
         try:
             main._binance_listed_cache = {"OLD"}
             main._binance_listed_cache_time = time.time()
-            with patch.dict(os.environ, {"BINANCE_ALLOWED_QUOTE_ASSETS": "USDT"}), \
+            spot_receipt_key = b"approved-binance-spot-key-material-32bytes"
+            receipt_env = {
+                "BINANCE_ALLOWED_QUOTE_ASSETS": "USDT",
+                "BINANCE_SPOT_INGESTION_HMAC_KEY_HEX": spot_receipt_key.hex(),
+                "BINANCE_SPOT_INGESTION_KEY_ID": "spot-key-v1",
+                "BINANCE_SOURCE_RECEIPT_TRUSTED_KEY_IDS": "spot-key-v1",
+            }
+            with patch.dict(os.environ, receipt_env), \
                  patch("main.market_data_http_get", side_effect=[ProviderResponse(payload), ProviderResponse(ticker_payload)]) as fetch:
                 self.assertTrue(main._revalidate_binance_spot_asset("BTC", "coingecko:bitcoin"))
                 self.assertEqual(fetch.call_count, 2)
             stale_ticker_payload = {"tickers": [{**ticker_payload["tickers"][0], "last_fetch_at": iso(-3600)}]}
-            with patch.dict(os.environ, {"BINANCE_ALLOWED_QUOTE_ASSETS": "USDT"}), \
+            with patch.dict(os.environ, receipt_env), \
                  patch("main.market_data_http_get", side_effect=[ProviderResponse(payload), ProviderResponse(stale_ticker_payload)]):
                 self.assertFalse(main._revalidate_binance_spot_asset("BTC", "coingecko:bitcoin"))
             with patch("main.market_data_http_get") as fetch:

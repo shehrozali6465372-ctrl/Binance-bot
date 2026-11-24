@@ -37,20 +37,30 @@ class OpportunityEvaluationEngineTests(unittest.TestCase):
         args.update(overrides)
         return self.engine.evaluate(**args)
 
-    def test_deterministic_high_quality_research_proceeds(self):
+    def test_raw_high_quality_factor_mapping_defers_without_registry_provenance(self):
         first = self.evaluate()
         second = self.evaluate()
-        self.assertEqual(first.state, "PROCEED")
-        self.assertEqual(first.score, 90)
+        self.assertEqual(first.state, "DEFER")
+        self.assertIsNone(first.score)
+        self.assertIn("REGISTRY_BOUND_FACTOR_PROVENANCE_REQUIRED", first.reasons)
         self.assertEqual(first.decision_id, second.decision_id)
 
     def test_identical_opportunity_inputs_for_different_assets_have_distinct_decision_ids(self):
         first = self.evaluate(asset_id="coingecko:asset-one")
         second = self.evaluate(asset_id="coingecko:asset-two")
 
-        self.assertEqual(first.state, "PROCEED")
-        self.assertEqual(second.state, "PROCEED")
+        self.assertEqual(first.state, "DEFER")
+        self.assertEqual(second.state, "DEFER")
         self.assertNotEqual(first.decision_id, second.decision_id)
+
+
+    def test_raw_numeric_factor_mapping_cannot_produce_proceed(self):
+        result = self.evaluate()
+        self.assertEqual(result.state, "DEFER")
+        self.assertIsNone(result.score)
+        self.assertIn("REGISTRY_BOUND_FACTOR_PROVENANCE_REQUIRED", result.reasons)
+        snapshot = __import__("json").loads(result.input_snapshot_json)
+        self.assertEqual(snapshot["inputs"]["factor_input_trust"], "UNVERIFIED_RAW_MAPPING")
 
     def test_unlisted_asset_is_rejected_even_with_maximum_score(self):
         result = self.evaluate(eligibility_status="NOT_ELIGIBLE")
@@ -68,7 +78,7 @@ class OpportunityEvaluationEngineTests(unittest.TestCase):
 
     def test_duplicate_angle_requires_material_update(self):
         self.assertEqual(self.evaluate(duplicate_angle=True).state, "REJECT")
-        self.assertEqual(self.evaluate(duplicate_angle=True, materially_new=True).state, "PROCEED")
+        self.assertEqual(self.evaluate(duplicate_angle=True, materially_new=True).state, "DEFER")
 
     def test_unconfigured_policy_defers_instead_of_guessing_weights(self):
         result = self.evaluate(policy=None)
@@ -168,7 +178,7 @@ class OpportunityEvaluationEngineTests(unittest.TestCase):
             snapshot = json.loads(stored[0])
             self.assertEqual(snapshot["inputs"]["factors"]["evidence_strength"], 90.0)
             self.assertEqual(snapshot["policy"]["policy_version"], "test-policy-v1")
-            tampered = replace(decision, score=decision.score - 1)
+            tampered = replace(decision, score=1.0)
             with self.assertRaisesRegex(ValueError, "decision ID"):
                 store.save("research:package:1", tampered)
             with self.assertRaisesRegex(ValueError, "different research package"):

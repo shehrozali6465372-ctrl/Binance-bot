@@ -173,22 +173,29 @@ class PostgresPublicationAuthorizationEngine:
         if draft is None or draft["content"] != content:
             raise ValueError("exact draft must be persisted in PostgreSQL with provenance")
         brief = self.store.conn.execute(
-            "SELECT event_id,research_package_id FROM editorial_brief_versions WHERE brief_id=%s",
+            "SELECT event_id,research_package_id,payload_json FROM editorial_brief_versions WHERE brief_id=%s",
             (draft["editorial_brief_id"],),
         ).fetchone()
         if brief is None or brief["research_package_id"] != draft["research_package_id"]:
             raise ValueError("persisted editorial brief does not match the draft research package")
+        brief_payload = brief["payload_json"]
+        if isinstance(brief_payload, str):
+            brief_payload = json.loads(brief_payload)
+        from layer1.editorial_strategy import editorial_brief_approved_claim_ids
+        allowed_claim_ids = set(editorial_brief_approved_claim_ids(brief_payload))
         claims = draft["approved_claim_ids_json"]
         if isinstance(claims, str):
             claims = json.loads(claims)
         if not isinstance(claims, list) or not claims or any(not isinstance(v, str) or not v for v in claims):
             raise ValueError("persisted draft requires approved claim references")
+        if not set(claims).issubset(allowed_claim_ids):
+            raise ValueError("draft approved claims exceed the persisted editorial brief allowlist")
         text = self.store.load_latest_text_validation(draft_hash)
         if text is None or text["status"] != "PASS":
             raise ValueError("persisted text validation is not PASS for this exact draft")
         for image_hash in hashes:
             visual = self.store.load_latest_visual_validation(draft_hash, image_hash)
-            if visual is None or visual["status"] != "PASS" or visual["validation_version"] != "visual-quality-v2":
+            if visual is None or visual["status"] != "PASS" or visual["validation_version"] != "visual-quality-v3":
                 raise ValueError("persisted visual validation is not current PASS for this exact image")
         authorized_claims = tuple(sorted(claims))
         provenance = _draft_provenance_digest(
@@ -248,7 +255,7 @@ class PostgresPublicationAuthorizationEngine:
 
     def validate_persisted_event_binding(self, authorization):
         brief = self.store.conn.execute(
-            "SELECT event_id,research_package_id FROM editorial_brief_versions WHERE brief_id=%s",
+            "SELECT event_id,research_package_id,payload_json FROM editorial_brief_versions WHERE brief_id=%s",
             (authorization.editorial_brief_id,),
         ).fetchone()
         if brief is None:
@@ -258,6 +265,16 @@ class PostgresPublicationAuthorizationEngine:
             reasons.append("EDITORIAL_EVENT_IDENTITY_CHANGED")
         if brief["research_package_id"] != authorization.research_package_id:
             reasons.append("EDITORIAL_RESEARCH_PACKAGE_CHANGED")
+        try:
+            brief_payload = brief["payload_json"]
+            if isinstance(brief_payload, str):
+                brief_payload = json.loads(brief_payload)
+            from layer1.editorial_strategy import editorial_brief_approved_claim_ids
+            allowed_claim_ids = set(editorial_brief_approved_claim_ids(brief_payload))
+            if not set(authorization.approved_claim_ids).issubset(allowed_claim_ids):
+                reasons.append("EDITORIAL_CLAIM_ALLOWLIST_CHANGED")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            reasons.append("EDITORIAL_CLAIM_ALLOWLIST_INVALID")
         event = self.store.load_event_lifecycle(authorization.event_id)
         if authorization.event_state == "NO_EVENT":
             if event is not None:

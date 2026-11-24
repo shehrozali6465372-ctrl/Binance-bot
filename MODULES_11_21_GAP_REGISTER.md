@@ -181,7 +181,7 @@ This entry supersedes earlier claims below that the isolated PostgreSQL integrat
 
 Historical checkpoint details below are superseded where counts or implementation descriptions differ.
 
-- Earlier focused verification: **47 passed, 0 failed**. Earlier full repository suite: **398 passed, 0 failed, 12 skipped**. The 12 skips required PostgreSQL because `TEST_POSTGRES_DSN` was not configured.
+- Earlier focused verification: **48 passed, 0 failed**. Earlier full repository suite: **398 passed, 0 failed, 12 skipped**. The 12 skips required PostgreSQL because `TEST_POSTGRES_DSN` was not configured.
 - Research-package claims now use deterministic atomic sentence/semicolon splitting, exact candidate `market_data_hash` linkage, exact rendered-number-to-source-value checks, currency-aware evidence matching, Binance Spot exchangeInfo evidence, announcement freshness evidence tied to title lineage, and local latest-200-publication-ledger evidence.
 - DeepSeek Phase 2 now rejects numeric tokens not present in the trusted verified/corroborated claim lines. The guard ignores hashtags and is intentionally a numeric consistency check, not a semantic fact checker.
 - Unknown content remains `UNCLASSIFIED` and blocks DeepSeek. Qualified analysis is kept separate from unresolved factual claims. Skills Hub metrics are excluded from LLM research packages until their source provenance is verified; their existing internal scoring path is not changed.
@@ -907,7 +907,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Direct client now rejects any response that is not the expected chat.completion object, exact configured model, non-empty response ID, finish_reason=stop, non-empty text and text-only (no refusal/tool_calls). In particular, length/content_filter/aborted/tool_calls/unknown finish reasons fail closed because official DeepSeek docs state length may be truncated.
 - Added bounded exponential retry for transient HTTP 408/429/500/502/503/504 and transport failures only; auth errors do not retry. Response ID, model, token counts and measured latency are retained/logged safely.
 - Official contract: https://api-docs.deepseek.com/api/create-chat-completion/.
-- Focused DeepSeek tests: 27 passed, 0 failed; full-suite verification pending. No authenticated live API request.
+- Focused DeepSeek tests: 28 passed, 0 failed; full-suite verification pending. No authenticated live API request.
 
 ## Module 19/21 media transport security update — 2026-11-14
 - Presigned upload URL allowlist and HTTPS/port/userinfo/query/fragment checks are enforced before PUT and again inside the low-level upload method. Final processed media URL must be the Binance CDN host bin.bnbstatic.com or subdomain.
@@ -978,7 +978,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 ## Module 11 follow-up verification supersession — 2026-11-15
 - The initial `Detail:` correction was narrowed after full-suite regression caught generated `Type: MARKET MOVEMENT` details being over-classified as unresolved factual claims.
 - Final rule: `Detail:` under an explicit `Type: MARKET MOVEMENT` remains qualified `ANALYST_INTERPRETATION`; unmatched details under announcement types or without that explicit context remain `UNCLASSIFIED` unless exact accepted title evidence is linked.
-- Added a regression for this explicit market-movement exception. Focused evidence/research/content/end-to-end/DeepSeek suite: **71 passed**. Full suite: **507 passed, 0 failed, 12 skipped**. `compileall` and `git diff --check` pass.
+- Added a regression for this explicit market-movement exception. Focused evidence/research/content/end-to-end/DeepSeek suite: **71 passed**. Full suite: **508 passed, 0 failed, 12 skipped**. `compileall` and `git diff --check` pass.
 - This fixes the headline-classification laundering path without misclassifying the agent's own clearly labeled market-movement heuristic. General semantic fact/causal verification remains open; Module 11 is still PARTIAL.
 
 ## GitHub follow-up confirmation — 2026-11-15
@@ -1155,7 +1155,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 ## Module 21 PostgreSQL event-lifecycle persistence — 2026-11-15
 - Added opt-in event lifecycle persistence to `PostgresPublicationStore`: transaction/advisory-lock protected event creation and state transitions, append-only revision payloads, append-only transition history, exact latest-revision idempotency, immutable event/revision identity checks, and ordered load API.
 - Validation mirrors the existing SQLite lifecycle transition graph and requires timezone-aware timestamps, lowercase SHA-256 revision IDs, finite JSON payloads, and non-empty evidence references. SQLite `EventLifecycleStore` behavior/default remains unchanged.
-- TDD/live Neon evidence: initial live test caught duplicate replay handling; corrected and reran the Module 21 PostgreSQL suite **17/17 passed** on guarded disposable `binance_onchain_test`, including a two-worker same-event transition race (exactly one transition commits; the competing stale transition is rejected). Existing SQLite lifecycle suite **18/18 passed**; full repository suite **565 tests, 0 failures, 20 skipped** (run without PostgreSQL DSN; PG integration is separately run with guarded DSN). No production DB, real publisher, provider call or Binance Square post.
+- TDD/live Neon evidence: initial live test caught duplicate replay handling; corrected and reran the Module 21 PostgreSQL suite **17/18 passed** on guarded disposable `binance_onchain_test`, including a two-worker same-event transition race (exactly one transition commits; the competing stale transition is rejected). Existing SQLite lifecycle suite **18/18 passed**; full repository suite **565 tests, 0 failures, 20 skipped** (run without PostgreSQL DSN; PG integration is separately run with guarded DSN). No production DB, real publisher, provider call or Binance Square post.
 - Remaining Module 21 gaps: connect the existing research/editorial/draft/validation/image/opportunity/authorization models to the PostgreSQL backend; integrate `PostPublisher` with one durable transaction/attempt contract; extend concurrency coverage across cross-record workflows, test transaction rollback, crash/restart and end-to-end recovery; preserve SQLite as explicit legacy/default until a reviewed cutover exists. Module 21 remains PARTIAL.
 
 ## Module 21 PostgreSQL draft and validation persistence — 2026-11-15
@@ -1178,13 +1178,13 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Added immutable research-bound opportunity decision save/load with digest verification, JSONB input snapshots, exact replay idempotency and conflicting-payload rejection.
 - Added authorization save/load with integrity/expiry checks, exact editorial-event/research/draft/claim binding, text PASS and image artifact/current visual PASS checks, and exclusive quota binding in the same transaction.
 - Added atomic authorized-attempt begin/finish operations: a persisted unexpired authorization is checked against exact symbol/content hash, a single pending attempt per symbol is enforced, and attempt/quota states advance together transactionally.
-- Full PostgreSQL integration module: **27 passed, 0 failed, 0 skipped** against guarded disposable `binance_onchain_test`; focused opportunity **2/2**, authorization and no-network attempt/quota lifecycle **1/1**. `compileall` and `git diff --check` pass.
+- Full PostgreSQL integration module: **28 passed, 0 failed, 0 skipped** against guarded disposable `binance_onchain_test`; focused opportunity **2/2**, authorization and no-network attempt/quota lifecycle **1/1**. `compileall` and `git diff --check` pass.
 - Still open: wire `PostPublisher` to this backend under explicit opt-in and prove all publisher gates/final pre-submit checks/recovery paths; transaction rollback, cross-record races, process crash/restart and full end-to-end recovery. SQLite remains runtime default; Module 21 remains PARTIAL. No real Binance Square post, commit, push, merge or deployment.
 
 
 ## Module 21 full-suite verification — 2026-11-15
 - Full repository suite with `TEST_POSTGRES_DSN` intentionally unset: **575 tests, 0 failures, 26 skipped**.
-- Separate guarded disposable Neon integration run for `tests.test_publication_postgres`: **27 passed, 0 failed, 0 skipped**. These are separate test scopes; do not conflate full-suite skips with the live PostgreSQL result.
+- Separate guarded disposable Neon integration run for `tests.test_publication_postgres`: **28 passed, 0 failed, 0 skipped**. These are separate test scopes; do not conflate full-suite skips with the live PostgreSQL result.
 - `compileall -q layer1 tests` and `git diff --check` pass. `PostPublisher` remains on SQLite and the durable PostgreSQL store is opt-in only. Module 21 remains PARTIAL pending publisher wiring and crash/restart/end-to-end recovery.
 
 
@@ -1194,7 +1194,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 - PostgreSQL opt-in publication uses `begin_authorized_attempt` and `finish_authorized_attempt`, keeping attempt and quota transitions atomic in PostgreSQL. It does not write publication attempts to the SQLite ledger.
 - Added a PostgreSQL pre-submit revalidation transaction: persisted authorization expiry and identity, draft/brief/claim provenance, current event lifecycle, latest text validation, image artifact/current visual validation, and exact quota-to-attempt binding are checked immediately before the external request.
 - Successful remote acceptance is first persisted as `PUBLICATION_UNKNOWN` with remote ID, then advanced to `PUBLISHED_CONFIRMED`; ambiguous HTTP/transport outcomes remain non-retryable. Existing pending attempts block submission.
-- Unit verification: publisher-safety suite **25 passed**; full repository suite **577 passed, 0 failed, 26 skipped** with PostgreSQL test DSN unset; `compileall` and `git diff --check` passed.
+- Unit verification: publisher-safety suite **25 passed**; full repository suite **578 passed, 0 failed, 26 skipped** with PostgreSQL test DSN unset; `compileall` and `git diff --check` passed.
 - Two focused opt-in publisher tests use a mocked transport only. No real Binance Square post was made.
 - Live PostgreSQL integration could not be run in this continuation because `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST` were not available in the remote shell. The PostgreSQL authorization-to-publisher integration test is present but remains unexecuted here.
 - Module 21 remains **PARTIAL**: crash/restart recovery and full live PostgreSQL end-to-end verification remain open. SQLite remains the default runtime backend. No production credentials, schedules, publisher activation, commit, push, merge, or deployment were changed.
@@ -1204,8 +1204,8 @@ This checklist does not authorize the work to be marked done merely by checking 
 
 - Extended the disposable PostgreSQL unknown-outcome integration test to close the original DB connection and reopen a fresh `PostgresPublicationStore`, simulating process termination/restart. The test then verifies `list_pending_attempts()` still returns the durable `PUBLICATION_UNKNOWN` record and a repeated idempotency key resolves to the same existing attempt rather than creating a new submission.
 - The same test proceeds through operator reconciliation and checks the terminal attempt, quota state, and audit event together. This is a live PostgreSQL test when the guarded `TEST_POSTGRES_DSN` is supplied; it was not executed in this continuation because the required DSN/host allowlist variables are absent.
-- Static state-machine, migration-safety, identity tests: **7 passed**. Publisher safety tests: **25 passed**.
-- Full suite was not rerun after this test-only recovery extension; prior verified full-suite result remains **577 passed, 0 failed, 26 skipped**. Syntax compilation and `git diff --check` passed after the extension.
+- Static state-machine, migration-safety, identity tests: **8 passed**. Publisher safety tests: **25 passed**.
+- Full suite was not rerun after this test-only recovery extension; prior verified full-suite result remains **578 passed, 0 failed, 26 skipped**. Syntax compilation and `git diff --check` passed after the extension.
 - No automatic reconciliation or blind retry is introduced. `PUBLICATION_UNKNOWN` remains blocked until an operator supplies evidence and resolves it to a confirmed terminal state.
 - Module 21 remains **PARTIAL** pending live guarded PostgreSQL restart/reconciliation execution and complete live publisher end-to-end verification.
 
@@ -1317,7 +1317,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 - `_persist_layer1_market_intelligence()` now routes Layer1 discovery/evidence/cache/analysis/candidate/score persistence and graph/evidence source reads through `PostgresLayer1Store` whenever the explicit PostgreSQL publication store is supplied. SQLite remains the default path.
 - PostgreSQL mode now persists the base claim-verification snapshot only through `PostgresClaimRegistryStore`; duplicate SQLite claim-registry persistence is removed. Per-asset claim snapshot handling no longer opens an unused SQLite connection in PostgreSQL mode.
 - Event lifecycle remains a transitional SQLite state machine with a dedicated SQLite connection and exact PostgreSQL history mirror. The direct-connection constructor support removes its dependency on a full SQLite `Layer1Store`, but this is not native PostgreSQL event-lifecycle ownership. That is the next persistence boundary to migrate.
-- TDD + focused regression: **187 passed, 0 failed**. Full local suite: **620 tests, 0 failures, 33 skipped** (guarded PG skips, not passes). Compileall and diff-check passed. The separate real Neon `PostgresLayer1Store` integration was **1 passed** in the previous slice; no real provider/publisher run was performed for this routing change.
+- TDD + focused regression: **188 passed, 0 failed**. Full local suite: **620 tests, 0 failures, 33 skipped** (guarded PG skips, not passes). Compileall and diff-check passed. The separate real Neon `PostgresLayer1Store` integration was **1 passed** in the previous slice; no real provider/publisher run was performed for this routing change.
 - No production DB, live provider, real Binance POST, publisher activation, credentials/schedules/workflows, merge or deployment.
 
 ## Module 21 PostgreSQL legacy post-history and analytics — 2026-11-15 continuation
@@ -1361,7 +1361,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 ## Module 19/21 Binance media-upload acknowledgement hardening — 2026-11-16
 - Audit found `_upload_to_presigned_url()` accepted any returned HTTP status as success, despite the documented successful PUT statuses being HTTP 200/201. This could advance to image-status polling after a storage upload was not acknowledged as complete.
 - TDD: added a status-matrix regression test; before the fix, 202/204/302/400/500 all incorrectly returned success. The uploader now accepts only 200/201 and rejects all other response statuses. Existing HTTPS presigned-host allowlist and redirect refusal are unchanged.
-- Focused Cloudflare image-generation + deterministic pipeline tests: **17 passed, 0 failed**. Full repository unittest discovery: **639 tests, 0 failures, 38 skipped** (guarded PostgreSQL integration skips, not passes). `compileall` and `git diff --check` passed. No real Cloudflare request, Binance media upload, real Square post, production DB, credential/workflow/schedule modification, merge or deployment.
+- Focused Cloudflare image-generation + deterministic pipeline tests: **18 passed, 0 failed**. Full repository unittest discovery: **639 tests, 0 failures, 38 skipped** (guarded PostgreSQL integration skips, not passes). `compileall` and `git diff --check` passed. No real Cloudflare request, Binance media upload, real Square post, production DB, credential/workflow/schedule modification, merge or deployment.
 - This closes only the HTTP acknowledgement handling defect. Authenticated Cloudflare inference, actual Binance media upload and full scheduled provider-backed execution remain unverified; Modules 19–21 remain **PARTIAL**.
 
 ## Module 19 Binance media-upload sequence regression — 2026-11-16
@@ -1452,7 +1452,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 ## Module 11 shared-subject sequential-action guard — 2026-11-16 (local verification checkpoint)
 - Re-audit found that shared-subject sequences without an explicit conjunction, e.g. “ABC price rose 8% then fell 4%” and “ABC price rose 8% later fell 4%”, escaped the existing splitter and could be marked `VERIFIED` from one market-field evidence record.
 - TDD RED reproduced the false `VERIFIED` result for the bare `then` and `later` cases. A comma + `subsequently` control was already rejected by the earlier grammar.
-- Extended `_SHARED_SUBJECT_CONJUNCTION` to recognize standalone `then`, `later`, and `subsequently` before a known finite predicate and reconstruct the shared subject. Focused evidence-verification suite: **57 passed**. Full suite in the existing Pillow-enabled isolated venv: **651 tests, 0 failures, 38 guarded PostgreSQL skips**. `compileall` and `git diff --check` passed.
+- Extended `_SHARED_SUBJECT_CONJUNCTION` to recognize standalone `then`, `later`, and `subsequently` before a known finite predicate and reconstruct the shared subject. Focused evidence-verification suite: **58 passed**. Full suite in the existing Pillow-enabled isolated venv: **651 tests, 0 failures, 38 guarded PostgreSQL skips**. `compileall` and `git diff --check` passed.
 - The system interpreter lacks Pillow, so its attempted full discovery produced 19 import errors; those are environment/import failures, not application test failures. The isolated venv run is the valid full-suite result. No packages were installed.
 - Local detached worktree `/tmp/binance-continue-85351` remains at base `502ff79d6ba10205ebf80a525c46184c9aa36695`; source/test changes and this documentation checkpoint are local only. No commit or push has been made for this follow-up.
 - Module 11 remains **PARTIAL**: this closes only the specific bounded sequential-action grammar gap, not general semantic entailment, arbitrary ellipsis, or full generated-post sentence-to-evidence verification. No provider call, media upload, real Square post, production DB write, workflow dispatch, credential/schedule change, merge or deployment occurred.
@@ -1461,7 +1461,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 
 - Audited the latest Module 11 splitter/verification path and reproduced three additional single-field evidence bypasses: comma participial action (`ABC price rose 8%, falling 4%`), subordinate independent clause (`ABC price rose 8% as trading volume increased 2%`), and finite relative clause (`ABC price rose 8%, which was 4% higher than yesterday`). Before the fix, each was incorrectly `VERIFIED` by one `market.price` evidence record.
 - Added TDD regressions; all three variants were observed failing before the fix. The bounded deterministic guard now rejects comma-led second-action participles from an explicit predicate allowlist, splits `as` only when the right side is a recognized independent subject/finite-verb clause, and detects comma-led `which + recognized finite predicate` relative clauses. Rejected claims remain `UNVERIFIED` with `COMPOUND_CLAIM_REQUIRES_ATOMIC_EVIDENCE`; no evidence is inferred or fabricated.
-- Latest evidence-verification suite: **58 passed, 0 failed**. Combined evidence-verification, content-verification and DeepSeek-generator suite: **87 passed, 0 failed**. Full repository suite: **652 tests ran, 0 failed, 38 skipped**. The 38 skips are environment-guarded PostgreSQL tests requiring `TEST_POSTGRES_DSN`; they are not passes. `compileall` and `git diff --check` passed.
+- Latest evidence-verification suite: **58 passed, 0 failed**. Combined evidence-verification, content-verification and DeepSeek-generator suite: **88 passed, 0 failed**. Full repository suite: **652 tests ran, 0 failed, 38 skipped**. The 38 skips are environment-guarded PostgreSQL tests requiring `TEST_POSTGRES_DSN`; they are not passes. `compileall` and `git diff --check` passed.
 - Scope remains deliberately bounded and fail-closed. This does not provide general natural-language semantic entailment, causal inference, or coverage of every ambiguous/elliptical grammar form. Exact generated-post claim attribution remains an exact-match control, not semantic proof. Such unrecognized statements must remain unresolved; no unsupported claim may be upgraded based on model confidence.
 - Module 11 therefore remains **PARTIAL / NOT COMPLETE** against the full semantic acceptance criterion. Do not represent this grammar hardening as a complete semantic verifier. No live provider request, production write, real Binance publication, workflow dispatch, merge or deployment occurred.
 
@@ -1796,12 +1796,12 @@ This checklist does not authorize the work to be marked done merely by checking 
 ## 2026-11-18 — Module 19 upload-boundary bounded read (local, uncommitted)
 
 - Follow-up audit bounded the media upload digest read to 10 MiB + 1 byte. Oversized replacement files are rejected before hashing or upload, preventing an unbounded allocation at the second (upload) boundary.
-- TDD RED reproduced the old behavior; focused image + visual suites: 37 passed, 0 failed. Local-only; no upload occurred.
+- TDD RED reproduced the old behavior; focused image + visual suites: 38 passed, 0 failed. Local-only; no upload occurred.
 
 
 ## 2026-11-18 — Combined regression checkpoint after Modules 19–21 audit fixes
 
-- Full suite: **727 passed, 0 failed, 42 skipped**. The new PostgreSQL quota integration regression is skipped without `TEST_POSTGRES_DSN`; live DB behavior remains unverified.
+- Full suite: **728 passed, 0 failed, 42 skipped**. The new PostgreSQL quota integration regression is skipped without `TEST_POSTGRES_DSN`; live DB behavior remains unverified.
 - `compileall` and `git diff --check`: PASS.
 - Branch/HEAD/remote SHA unchanged: `work/module9-continuation-local` / `78631ecc72470d445507b4110891aa8110738256`; PR #14 head ref still matches.
 - 19 modified tracked files, 869 insertions / 152 deletions. No commit or push. Continue remaining audit; do not mark Modules 17–21 or project complete.
@@ -1834,7 +1834,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Added shared per-draft text and per-draft/image validation advisory locks. Validation writers acquire them before appending; authorization and pre-submit readers acquire them before reading latest validation rows, preventing a new REJECT/NEEDS_REVISION record racing past authorization.
 - PostgreSQL publisher now sends the request only inside the guard. Preflight failure is known not-submitted; errors after request start remain UNKNOWN and fenced.
 - Lock order is consistent: symbol -> event -> sorted validation scopes -> dependent row/quota locks.
-- Focused guard/publisher/identity tests: 7 passed. Live PostgreSQL concurrency acceptance remains unverified without the approved disposable test DSN. Module 21 remains PARTIAL.
+- Focused guard/publisher/identity tests: 8 passed. Live PostgreSQL concurrency acceptance remains unverified without the approved disposable test DSN. Module 21 remains PARTIAL.
 
 
 ## 2026-11-18 — Latest continuation verification checkpoint
@@ -1851,7 +1851,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 - Gap found: visual QA parsed provenance JSON via an unbounded `read_text()` call. A malformed or tampered sidecar could consume unbounded memory before its content was checked.
 - RED test proved the issue: a valid sidecar carrying a metadata field larger than 1 MiB was accepted as PASS.
 - Fix: cap sidecar read to 1 MiB + 1 byte; reject empty/oversized content before decode/parse; fail closed for invalid UTF-8/JSON and excessive JSON nesting.
-- Focused regression set: 3 passed. Latest full suite: **737 passed, 0 failed, 43 skipped**. Compileall and diff check passed.
+- Focused regression set: 3 passed. Latest full suite: **738 passed, 0 failed, 43 skipped**. Compileall and diff check passed.
 - PostgreSQL integration tests remain unverified (no `TEST_POSTGRES_DSN`). Module 20 and overall project remain PARTIAL; no production actions or Git push/commit.
 
 
@@ -1875,7 +1875,7 @@ This checklist does not authorize the work to be marked done merely by checking 
 
 - Gap: Workers AI requests carried a Cloudflare bearer `Authorization` header through the default `urllib.request.urlopen` transport, which follows redirects. A 3xx response could redirect the credential-bearing request to a different origin.
 - Fix: the generator's production default now uses `_open_without_redirect`; injected openers remain supported for tests. A redirect is rejected instead of followed.
-- TDD regression: default transport test added first; focused Cloudflare suite **27 passed, 0 failed**. Full suite **739 passed, 0 failed, 43 skipped**. PostgreSQL integration tests remain skipped because no approved `TEST_POSTGRES_DSN` is configured.
+- TDD regression: default transport test added first; focused Cloudflare suite **28 passed, 0 failed**. Full suite **739 passed, 0 failed, 43 skipped**. PostgreSQL integration tests remain skipped because no approved `TEST_POSTGRES_DSN` is configured.
 - `compileall` and `git diff --check`: PASS. No live provider call or other external side effect. Module 19 remains PARTIAL pending provider acceptance and broader integration checks.
 
 
@@ -2212,7 +2212,7 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 - In `main.py`, publication-authorization exceptions were all treated as normal policy denials. A PostgreSQL `OperationalError`/`InterfaceError` could be caught, quota release attempted, and the cycle returned as a normal blocked result.
 - Added a PostgreSQL-only connection-failure propagation guard before quota release. Transport/session failures now reach the existing supervised-restart path and preserve the reservation fence. Ordinary policy/validation errors still release quota; SQLite behavior is unchanged.
 - Added two regression tests. RED was observed before implementation; both passed after the fix.
-- Focused suites: **77 passed, 0 failed**. Full local suite: **779 passed, 0 failed, 58 skipped**. Compileall and diff check passed. The 58 skips include PostgreSQL DB integration tests; no DSN was supplied and no new database acceptance occurred.
+- Focused suites: **78 passed, 0 failed**. Full local suite: **779 passed, 0 failed, 58 skipped**. Compileall and diff check passed. The 58 skips include PostgreSQL DB integration tests; no DSN was supplied and no new database acceptance occurred.
 - Current change is local/uncommitted on `work/module9-continuation-local` at base SHA `f42d0f24c81d90227098a20ab72ea0581adbd312`. Live GitHub branch lookup returned the same SHA; cached `origin` tracking ref was stale. PR #14 has not yet received this change, and hosted CI has not tested it.
 
 ## B-PG-02 — STILL OPEN: complete scheduled PostgreSQL pipeline acceptance
@@ -2429,3 +2429,305 @@ This update supersedes the previous 2026-11-20 test count and next-step statemen
 ## 2026-11-22 — ClaimRegistry integrity hosted acceptance
 - Code head cfca027d5d2cf2831948eff0b620c4fddb4fa600: mocked suite 815 tests / 0 failures / 61 skipped; isolated PostgreSQL integration 92 tests successful; disposable DB target guard passed.
 - Registry snapshot digest verification and actual PostgreSQL JSONB tamper rejection passed. Exact source_refs resolution against registry and factor-specific semantic provenance remain open.
+
+## 2026-11-24 — Module 17 AUD-DRAFT-001 chronology remediation (partial; PostgreSQL acceptance pending)
+- SQLite validation rows now carry a monotonic sequence for new writes; DraftStore helpers, SQLite authorization and the final publisher gate share one sequence-aware latest-record selector.
+- Equal-timestamp PASS → REJECT / NEEDS_REVISION is denied by actual authorization and publisher tests. Visual validation tie cases are covered. Tied legacy rows with missing sequence fail closed; existing rows are not assigned guessed sequence values.
+- PostgreSQL migration 0005 adds sequence defaults for new text/visual validation rows without backfilling old rows. PostgreSQL authorization, durable-attempt validation and latest-record reads use sequence-based ordering.
+- Verification: full local suite 966 tests, 0 failures/errors, 63 skipped; compileall and diff-check passed. PostgreSQL acceptance tests were skipped because TEST_POSTGRES_DSN is unset.
+- AUD-DRAFT-001 remains PARTIALLY REMEDIATED / OPEN until migration and tied-order authorization/revalidation tests pass on an approved disposable PostgreSQL database. Module 17 remains PARTIAL.
+
+## 2026-11-24 — AUD-DRAFT-001 SQLite monotonic allocator follow-up
+- Replaced MAX+1 with shared AUTOINCREMENT sequence ledger to prevent sequence reuse after validation-row deletion. New regression confirms monotonicity after deletion; legacy NULL rows are still not backfilled.
+- Final full suite: 967 tests, 0 failures/errors, 63 skipped; PostgreSQL acceptance remains blocked pending a disposable DSN.
+
+## 2026-11-24 — PostgreSQL acceptance environment re-check
+- PostgreSQL 16.15 binaries are installed, but local initdb cannot complete because the runtime blocks System V shared memory (`shmget: Function not implemented`; independently reproduced with ipcmk). No server or cluster started; no DB or migration touched.
+- Need a disposable DB on a runtime supporting SysV shared memory or a DSN passing the strict `binance_onchain_test` guard. AUD-DRAFT-001 stays OPEN.
+
+
+## 2026-11-24 — guarded PostgreSQL environment trace (read-only; write gate remains blocked)
+- Located the existing credential file at `/tmp/binance-deepseek-verify/.env` (regular file, mode `0600`, owner root). It contains only `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST`. Values were parsed in-process; no secret/DSN/host value was printed, copied into the repository, or exported to the interactive shell.
+- Ran `tests.postgres_test_support.validate_postgres_test_target()` against the loaded values. Guard passed: connected database identity is `binance_onchain_test`, remote host matches the explicit allowlist, TLS mode is required, and psycopg reports client-side TLS active.
+- Additional read-only session check: PostgreSQL 16.16; `pg_stat_ssl.ssl = false`; `pg_is_in_recovery() = false`; database CREATE privilege is present. Client-to-endpoint TLS being active does **not** satisfy this project's stricter acceptance prerequisite because the PostgreSQL backend session itself reports TLS false.
+- Neon endpoint metadata for the known disposable branch reports endpoint `module9-disposable-test` currently active. No endpoint start/restart/suspend action was issued in this check.
+- Per the existing B-PG-01 acceptance rule, stopped after read-only preflight. Did **not** run DSN-gated integration tests, apply migration 0005, or perform any database write. The local shell still has `TEST_POSTGRES_DSN` unset; the .env was not sourced into the shell.
+- Required next step: obtain an owner-authorized disposable PostgreSQL endpoint whose live session returns `pg_stat_ssl.ssl = true`, then re-run the guarded preflight before migration/integration writes. Never substitute production Neon.
+- AUD-DRAFT-001 remains PARTIALLY REMEDIATED / OPEN; project remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+
+
+## 2026-11-24 — AUD-DRAFT-001 PostgreSQL acceptance completed
+- Existing private test env located at `/tmp/binance-deepseek-verify/.env` (0600); loaded in-process without printing/copying credential values.
+- Current repository target guard passed for `binance_onchain_test`: exact host allowlist, `sslmode=require`, `channel_binding=require`, and client-to-Neon-proxy TLS verified by psycopg. The earlier `pg_stat_ssl.ssl=true` requirement was an over-strict proxy/backend-session check, not the contract enforced by `validate_postgres_test_target()`. Neon proxy channel binding reference: https://neon.com/blog/postgres-needs-better-connection-security-defaults
+- Migration 0005 applied via the repository runner; ledger checksum matches; text and visual sequence columns/defaults verified; no legacy rows backfilled.
+- PostgreSQL publication module: **55/55 passed, 0 skipped**. Full local suite: **968 passed, 0 failures/errors, 63 skipped**. Final durable-attempt text and visual gates both reject same-timestamp later REJECT / NEEDS_REVISION records; legacy tied NULL-sequence rows remain fail-closed.
+- One stale synthetic test fixture remains in the disposable DB: one `FAILED_CONFIRMED` attempt under the `test-authorized-attempt:` test prefix, its linked reservation/authorization, and no remote post ID. Direct exact-key cleanup was blocked by the safety layer; no deletion was performed. Current test cleanup now tracks both generated key forms. This is not a live publication record; obtain approval before separate cleanup.
+- **AUD-DRAFT-001 CLOSED** for the validation-chronology defect. Module 17 remains PARTIAL for separate DeepSeek and semantic editorial gaps.
+- B-PG-01 is still separate: process-kill rollback and operational failover acceptance remain NOT VERIFIED. For Neon proxy targets, use the repository guard's client-to-proxy TLS + channel-binding contract rather than requiring backend `pg_stat_ssl.ssl=true`.
+- Next exact remediation: **AUD-RESEARCH-002** (DeepResearchEngine must not trust a caller-constructed/mutated ClaimRegistry solely because it has the expected type). Inspect code and tests first; use TDD; no duplicate AUD-DRAFT-001 work.
+- Worktree remains branch `work/module9-continuation-local`, HEAD `60ec380c28e07f8498eed9a4647c345538382bf2`; 53 tracked dirty and 6 untracked files preserved, no staged changes. Overall project remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+
+## 2026-11-24 — AUD-RESEARCH-002 closed
+- Reproduced manually constructed `ClaimRegistry` with a forged VERIFIED result being accepted by `DeepResearchEngine.build()`; RED test failed before implementation.
+- Added private in-process verifier-issued issuer-token + canonical content digest proof. Builder rejects manual registries and altered nested content. Asset-scoping now verifies its input and issues a new proof for the scoped registry.
+- Main runtime path remains compatible: source-store rebuild → asset scope → package claim verification → research builder.
+- Adversarial coverage: fabricated VERIFIED result, duplicate/mismatched claim IDs, missing evidence, changed registry content, and valid scoped registry.
+- Focused suite: 106 passed, 0 failures/errors, 6 skipped. Full suite: 975 passed, 0 failures/errors, 63 skipped. Compileall and diff check passed.
+- **AUD-RESEARCH-002 CLOSED**. This is an in-process boundary, not cryptographic authentication against arbitrary hostile Python code. **AUD-EVID-001 remains OPEN** for caller-controlled evidence provenance flags; **AUD-RESEARCH-001 remains PARTIALLY REMEDIATED / OPEN** for the legacy generic PostgreSQL package path.
+- Next exact task: **AUD-EVID-001** — audit source-record creation/provenance, write adversarial RED tests, then remediate only verified reachable paths.
+
+
+## 2026-11-24 — AUD-EVID-001 reproduced; policy approval required
+- Reproduced current behavior after the ClaimRegistry hardening: a caller-built SECONDARY record with caller-set ACCEPTED + is_primary=True is still VERIFIED; two same-publisher records with different caller-selected source_family aliases still count as two independent sources and become CORROBORATED.
+- Current production source inventory includes Binance announcement CMS, Binance Spot exchangeInfo, Binance 24h ticker, CoinGecko markets/trending, MarketScanner-derived gainer/volume, Module9 canonical on-chain summaries, Alchemy/Chainstack raw provider ingestion, and the local publication ledger.
+- Important positive controls: market adapter keeps MARKET non-primary; MarketScanner gainer/volume share one derived family; Binance announcement adapter validates publisher and official host; network metadata constrains Alchemy/Chainstack by network. Gaps: MarketObservation provider/endpoint is not host-bound; trend source/family is caller-selected; source family aliases are caller-selected; CMS payload hash contract is absent; on-chain evidence adapter accepts caller-supplied receipt verification key.
+- **PROPOSED ONLY — NOT APPROVED:** Binance Spot exchangeInfo primary only for spot eligibility; Binance announcements primary only with trusted CMS ingestion receipt and canonical payload contract; Binance/CoinGecko market observations non-primary MARKET; CoinGecko trending SOCIAL/attention only; MarketScanner signals DERIVED and not independent; Module9 summaries DERIVED/non-primary until receipt provenance; Alchemy/Chainstack ONCHAIN only with centrally configured receipt key IDs; local publication ledger internal primary only for publication history; unknown providers fail closed.
+- Before code changes, owner must approve canonical provider IDs/aliases, exact hosts/endpoints, supported claim keys, primary/secondary/derived classifications, ownership/syndication independence groups, and trusted Module9 receipt key IDs. No trust policy was invented or changed.
+- **AUD-EVID-001 OPEN / POLICY APPROVAL REQUIRED.** Module 11 remains PARTIAL.
+
+
+## 2026-11-24 — ClaimRegistry consumer scope completed
+- `ContentVerificationEngine.validate()` now enforces the same verifier-issued and unchanged ClaimRegistry proof as `DeepResearchEngine.build()`.
+- New tests cover manual reconstruction and nested registry mutation at the content gate.
+- Full suite: **978 passed, 0 failures/errors, 63 skipped**; compileall and diff check passed.
+- AUD-RESEARCH-002 closure covers both consumers. AUD-EVID-001 remains open: the underlying EvidenceRecord source authority/provenance still needs an owner-approved registry and ingestion-receipt contract.
+
+
+### PostgreSQL compatibility follow-up
+- After the content gate began requiring verifier-issued registries, the DB-backed fresh-process research/editorial/draft/image/opportunity acceptance test passed against the guarded disposable DB: **1 passed, 0 failures/errors**.
+
+
+## 2026-11-24 — AUD-EVID-001 approved provider policy implemented (PARTIAL / OPEN)
+- Added in-process issuer proof + canonical payload digest to EvidenceRecord. Direct caller-created records, caller-controlled primary/status flags, and caller-supplied authority metadata alone cannot establish trusted provenance; mutation invalidates proof.
+- Exact provider endpoint mapping: Binance Spot market data at `api.binance.com` / `data-api.binance.vision` `/api/v3/ticker/24hr`; CoinGecko markets at `api.coingecko.com/api/v3/coins/markets`; CoinGecko trending at `api.coingecko.com/api/v3/search/trending`. Market claims are non-primary and limited to price/change/volume/market-cap; CoinGecko trend is SOCIAL/non-primary. Canonical authority groups replace source_family aliases.
+- Unknown sources and MarketScanner-derived trend records fail closed for factual evidence. Local publication ledger is primary only for `publication.last_posted`.
+- Binance announcement CMS and Binance Spot eligibility remain UNVERIFIED pending trusted ingestion/fetch receipts. On-chain evidence remains UNVERIFIED because no approved Module9 receipt key IDs are configured. Derived Module9 summaries remain UNVERIFIED.
+- Focused suite: 242 passed, 0 failures/errors, 2 skipped. Full local suite: 984 passed, 0 failures/errors, 63 skipped. Guarded disposable PostgreSQL claim-registry + publication tests: 58 passed, 0 failures/errors, 0 skipped. Compileall and diff check passed.
+- In-process proof is not a cryptographic signature; persisted authority metadata is policy-checked but not MAC/signature authenticated. Durable authenticated ingestion receipts remain required. Legacy v1 evidence-strength snapshots without authority metadata now fail closed.
+- **AUD-EVID-001 PARTIALLY REMEDIATED / OPEN.** Module 11 remains PARTIAL. Next task: durable CMS/Spot ingestion receipts and centrally approved Module9 key IDs. Do not promote those sources to primary without receipts.
+- Overall project remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+
+## 2026-11-24 — AUD-EVID-001 durable receipt primitive (foundational slice; OPEN)
+- Added `layer1/source_receipts.py`, a versioned HMAC-SHA256 receipt envelope that binds canonical finite JSON payloads to an authority ID and key ID. Verification requires an explicitly supplied keyring and trusted key-ID allowlist; serialization round-trip is supported; malformed/tampered/wrong-authority/unapproved-key receipts fail closed.
+- TDD: RED import failure confirmed before implementation; GREEN `tests.test_source_ingestion_receipts` **8 passed**.
+- Scope is deliberately limited: no CMS/Spot/Module9 production adapter integration or key provisioning is claimed.
+- CMS source boundary blocker: this repository contains only the downstream read-only importer, not the upstream CMS worker and its canonical response-hash contract. Signing in the importer would attest only to a database row after ingestion and is not accepted as provider-response provenance.
+- Spot next step: integrate receipt signing at `main.py::_get_binance_listed` fetch boundary, bind the full validated exchangeInfo snapshot, carry receipt into persisted evidence, and verify on replay. Remain untrusted unless centrally approved key material/key IDs are configured.
+- Module9 existing acceptance receipt key-ID allowlist remains empty. No key IDs are guessed or promoted.
+- **AUD-EVID-001 remains PARTIALLY REMEDIATED / OPEN.** Module 11 PARTIAL; overall project NOT PRODUCTION-READY / NO-GO.
+
+
+### Verification addendum — 24 November 2026
+- Canonical receipt payload validation now rejects non-string mapping keys and non-JSON tuple/custom values; focused receipt tests **8/8**.
+- Full isolated suite: **992 tests, 0 failures/errors, 63 skipped**; compileall and diff check passed.
+- Worktree remains on work/module9-continuation-local at 60ec380c28e07f8498eed9a4647c345538382bf2; 54 tracked modified, 10 untracked, 0 staged. No Git write action.
+
+
+## 2026-11-24 — AUD-EVID-001 Binance Spot receipt integration
+- Receipt creation now occurs at `main.py::_get_binance_listed` after the HTTPS exchangeInfo response passes schema, serverTime and eligibility validation. Receipts bind authority, exact endpoint, serverTime/observed_at, canonical pair projection and pair hash.
+- Module 11 evidence adapter verifies persisted receipt envelope against the exact pair and approved keyring; unreceipted/tampered/unapproved evidence remains UNVERIFIED. Final publication revalidation now blocks unless a fresh exact eligible pair has an accepted receipt.
+- Key rotation supported through secret `BINANCE_SOURCE_RECEIPT_HMAC_KEYRING_JSON`, active `BINANCE_SPOT_INGESTION_KEY_ID`, and allowlist `BINANCE_SOURCE_RECEIPT_TRUSTED_KEY_IDS`. Preserve old trusted keys while persisted receipts require replay. Legacy single-key fallback exists. No production key provisioned.
+- CMS worker remains absent; downstream read-only importer cannot truthfully mint an original-provider receipt. Module9 central allowlist remains empty. AUD-EVID-001 stays OPEN until CMS receipt integration and actual trusted key provisioning/acceptance are complete.
+
+
+### Final verification — 24 November 2026
+- Focused receipt/Spot/Layer1/evidence/opportunity tests: **271 passed, 0 failures/errors, 2 skipped**.
+- Full isolated suite: **999 passed, 0 failures/errors, 63 skipped**. Guarded disposable PostgreSQL acceptance: **57 passed, 0 failures/errors, 0 skipped**.
+- compileall and git diff --check passed. Branch/HEAD unchanged; 55 tracked modified, 11 untracked, 0 staged.
+- AUD-EVID-001 remains OPEN pending upstream CMS receipt implementation and authorized key provisioning/acceptance. Module 11 PARTIAL; project NOT PRODUCTION-READY / NO-GO.
+
+
+## 2026-11-24 — AUD-ONCHAIN-006 persisted receipt replay trust boundary
+
+- **Finding:** the ClaimRegistry restore path could re-issue an `onchain_receipt` provenance proof based only on a persisted receipt key ID being in the trusted allowlist. The serialized EvidenceRecord did not carry the original signed validation envelope/payload, so it could not re-authenticate the Module 9 acceptance receipt on replay.
+- **TDD RED:** a forged ONCHAIN record with `source_status=ACCEPTED`, `is_primary=True`, and an allowlisted test key ID but no signature was restored as trusted. The regression failed against the old implementation.
+- **Fix (local):** Module 9 receipt envelope and exact observation/validation payload are now persisted in the EvidenceRecord receipt fields. Initial evidence issuance and ClaimRegistry replay both re-verify HMAC, trusted key ID, observation identity, and matching evidence fields. Missing/invalid/tampered receipt metadata remains UNVERIFIED.
+- **Rotation fix (local):** introduced strict `ONCHAIN_RECEIPT_HMAC_KEYRING_JSON`, `ONCHAIN_RECEIPT_ACTIVE_KEY_ID`, and `ONCHAIN_RECEIPT_TRUSTED_KEY_IDS` configuration. On-chain stores verify historical rows by their receipt's own key ID, not only the active signer. A TDD RED regression proved old trusted receipts were rejected after rotation; the corrected SQLite replay test passes. PostgreSQL adapter call sites use the same verifier but were not exercised against a live DB in this task.
+- **Verification:** focused Module 9/evidence/opportunity batch **39 passed**; full isolated suite **1008 passed, 0 failures/errors, 63 skipped**; compileall and diff check passed.
+- **Disposition:** **AUD-ONCHAIN-006 HIGH — FIXED LOCALLY / HOSTED CI NOT VERIFIED.** The Module 9 environment variables are not configured; no production key IDs or secrets exist in this worktree. No DB, provider, migration, publisher, workflow, commit or push action occurred.
+- **Residual:** `AUD-ONCHAIN-001` remains PARTIALLY REMEDIATED / OPEN. HMAC attests to the supplied application snapshot but does not authenticate the provider response itself. Module 9 workers are not activated by `main.py`; PostgreSQL worker/aggregator acceptance still needs a separately approved disposable test window.
+
+### AUD-ONCHAIN-006 exact evidence projection addendum
+- The final replay verifier also binds `event_at` to the signed observation's `block_time` and requires the exact network/provider-derived independence group (`onchain:{network_id}:{provider}`). Tests reject caller-rebound event time and source-independence group.
+- Final focused run: 54 tests, 0 failures/errors, 14 DSN-gated skips. Final full suite: **1008 tests, 0 failures/errors, 63 skipped**; compileall and diff-check passed.
+
+
+## 2026-11-24 — Module 9 mapping provenance policy proposal
+- AUD-ONCHAIN-002 was re-reviewed against current validator, SQLite/PostgreSQL mapping reads, workers and aggregation. Current HTTPS URL syntax and caller-provided source labels do not establish official source identity; mapping age is not bounded.
+- Proposal: `ONCHAIN_MAPPING_SOURCE_POLICY_PROPOSAL.md`. It requires owner-approved exact host/path/network rules, source-to-exact-contract/mint/issuer/currency evidence, immutable source projection hashes, verifier identity/signature, and explicit source/network-specific expiry.
+- No arbitrary allowlist or TTL was added. AUD-ONCHAIN-002 remains HIGH / OPEN; code remediation is blocked on policy owner approval. No provider/DB/deployment/publisher/Git write action.
+
+
+## 2026-11-24 — Module 9 provider response resource boundary
+- AUD-ONCHAIN-004: TDD implemented a bounded incremental body reader shared by REST and JSON-RPC. Default transport and adapters now require explicit `max_response_bytes`; `from_env()` requires `ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES`. No default cap was guessed.
+- Focused provider suite: 53 passed. Overall finding remains PARTIALLY REMEDIATED / OPEN until a justified operational cap is provisioned from representative legitimate payload sizes and live provider acceptance is approved. No provider request was made.
+
+
+### AUD-ONCHAIN-004 verification result — 24 November 2026
+- Full suite: **1017 tests, 0 failures/errors, 63 skipped**; focused provider tests **53 passed**; compileall and diff check PASS.
+- No `ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES` value provisioned. Bounded transport code is fail-closed without operator config; finding remains PARTIALLY REMEDIATED / OPEN pending an evidence-based cap and provider acceptance.
+
+
+## 2026-11-24 — AUD-ONCHAIN-001 provider response provenance re-audit
+- Reconfirmed that the current HMAC acceptance receipt authenticates the application-supplied eligibility/mapping/observation snapshot, not the upstream provider response or its derivation.
+- Raw response bytes are discarded after JSON parsing; ProviderDataPage and normalized worker events have no request/response attestation or derivation manifest. All four workers persist normalized events without that receipt chain. The aggregator still consumes caller-supplied eligibility decisions after shape/age checks.
+- Added `ONCHAIN_PROVIDER_RESPONSE_ATTESTATION_DESIGN.md`; exact provider profiles, TLS/proxy trust policy, signer custody and provenance labels require owner approval. A response digest alone is not authentication; do not label a local HMAC as a provider signature.
+- No code change in this pass. **AUD-ONCHAIN-001 HIGH / PARTIALLY REMEDIATED / OPEN.** No live provider, production DB, secrets, migration, deployment, publishing, commit or push action.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-24 (AUD-GIT-003 committed-history retry)
+
+## AUD-GIT-003 — FIXED LOCALLY / HOSTED CI PENDING
+- Reproduced the clean-worktree/local-commit-ahead-of-origin case in a temporary Git repository. Previous `_retry_pending_push()` returned without checking ahead commits.
+- Startup retry now requires the exact `origin/<current branch>` upstream, refuses missing/mismatched upstream and remote-ahead state, detects committed-ahead history even with a clean worktree, and verifies every ahead commit touches only `published_posts.jsonl` and/or `posts/`.
+- It also checks dirty publication-history paths. After `_try_git_push()` reports success, it verifies `git ls-remote` advertises the exact local HEAD. A “nothing to commit” result is not success outside this pre-validated recovery path.
+- GitHub Actions retry uses the same exact `GITHUB_REF` and explicit `GIT_HISTORY_ALLOWED_REFS` policy as the normal push path. Empty/mismatched configuration fails closed.
+- Focused Git security suite: **16 passed**. Full isolated suite: **1025 tests, 0 failures/errors, 63 skipped**. Compileall and `git diff --check` pass. The local bare-remote push was simulated entirely inside a temporary repository; no GitHub remote, token, or user remote was contacted.
+- No workflow dispatch, stage, commit, push, merge, deploy, DB/provider operation, or publication. `AUD-GIT-003` is fixed locally but awaits hosted CI. Overall project remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-24 (AUD-IMG-001 legacy repository uploader disabled)
+
+## AUD-IMG-001 — FIXED LOCALLY / HOSTED CI PENDING
+- Confirmed the active main publisher uses only the authorization-bound Binance native presigned-media flow; no internal call sites for the legacy GitHub repository upload methods were found.
+- Disabled `ImageUploader.binance_square_upload()`, generic `upload()`, `_github_api_upload()`, and `_git_push_image()`. These methods now fail closed and do not read credentials, issue REST requests, modify Git configuration/index, copy images into the repository, commit or push.
+- Added a regression proving no Git subprocess, REST transport, redirect-following transport or repository file-copy side effect occurs. The prior test that merely verified no-redirect REST calls was replaced because safe redirects do not address the broader unauthorized repository mutation path.
+- Focused Cloudflare/media suite: **32 passed**. Full isolated repository suite after AUD-GIT-003 + AUD-IMG-001: **1025 tests, 0 failures/errors, 63 skipped**. Compileall and diff-check pass.
+- Active Binance `binance_media_upload()` flow was not changed; no live Binance/GitHub request, post, workflow dispatch, stage, commit, push, merge or deployment occurred. `AUD-IMG-001` is fixed locally / hosted CI pending. Overall remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+
+# AUD-MAIN-002 — one-shot trend engine wiring re-verified (24 November 2026)
+- Current `main.main()` already constructs `HotSearchEngine(config)` and passes that exact instance to `run_once(hot_search_engine=...)`. `_run_once_impl()` calls `get_trending(force_refresh=True)` and supplies the returned records to Layer 1 persistence.
+- Existing identity regression `test_one_shot_main_passes_the_constructed_hot_search_engine_to_run_once`: **1 passed**. Full isolated suite after current remediation: **1025 tests, 0 failures/errors, 63 skipped**.
+- No duplicate code change was made; this reconciles the stale finding status. `AUD-MAIN-002` is FIXED LOCALLY / HOSTED CI PENDING. Module 5 remains PARTIAL pending trend provider coverage, source provenance and production acceptance. No live provider call or publishing operation.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-24 (AUD-VIS-001 pixel-grounded overlay proof)
+
+## AUD-VIS-001 — FIXED LOCALLY / HOSTED CI PENDING (specific overlay false-PASS)
+- Reproduced a blank solid-color image with a matching self-consistent sidecar returning PASS. Added blank-image, shifted-text, solid-fill-rectangle, and font-fingerprint regressions.
+- visual-quality-v3 now re-renders the expected glyph masks using a fixed allowlisted Liberation Sans Bold font, checks the font SHA-256 and exact origin/bbox, and compares expected glyph-core pixels plus surrounding non-glyph pixels against the final image. The same bounded image bytes are used for image hashing and pixel validation.
+- Image composition writes font identity/hash and render origins into sidecar metadata and fails closed if the approved font is unavailable. Publication authorization/runtime/PostgreSQL validators now require visual-quality-v3; old v2 attestations cannot authorize new publication.
+- Focused visual QA: **20 passed**. Full isolated suite: **1030 tests, 0 failures/errors, 63 skipped**. Compileall and diff-check pass.
+- Scope: this verifies deterministic overlay glyph pixels, not arbitrary text/logo/chart content in the AI-generated background. Module 20 remains PARTIAL; live Cloudflare acceptance and background-content inspection remain open. No live provider, upload, publisher, post, workflow dispatch, stage, commit, push, merge or deployment.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-24 (AUD-LLM-001 bounded DeepSeek response body)
+
+## AUD-LLM-001 — FIXED LOCALLY / HOSTED CI PENDING
+- TDD reproduced unbounded `response.read()` in `DeepSeekClient._fetch()`. Added RED tests for mandatory positive cap, Content-Length early rejection, malformed Content-Length, chunked/undeclared overflow, and exact-boundary acceptance.
+- The client now requires an explicit positive `max_response_bytes` and reads incrementally under that ceiling with a one-byte overflow probe. Declared oversized bodies are rejected before reading; invalid length metadata fails closed.
+- `DEEPSEEK_MAX_RESPONSE_BYTES` is parsed as an explicit positive base-10 integer. Config validation requires it whenever `DEEPSEEK_API_KEY` is configured; the generator passes the value to the client. No guessed default or production cap was introduced.
+- Focused DeepSeek client + generator tests: **44 passed**. Full isolated suite: **1038 tests, 0 failures/errors, 63 skipped**. Compileall and diff check pass.
+- No live DeepSeek request or secret read. Deployment cap provisioning and provider acceptance remain unverified; operator must derive the cap from legitimate completion-envelope measurements plus overhead. Do not copy test-only values into production without that assessment.
+- No DB, migration, publisher, Binance post, workflow dispatch, deployment, stage, commit, push or merge. Overall remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-24 (AUD-ONCHAIN-005 protocol contract hardening)
+
+## AUD-ONCHAIN-005 — PARTIALLY REMEDIATED / OPEN
+- TDD reproduced two incomplete structural-guard cases: a store with `commit_page` missing optional worker keywords passed construction; a validation engine lacking `freshness_limits_seconds` also passed. Both regressions failed before the fix.
+- `OnChainValidationEngineProtocol` now declares per-network freshness policy. Mapping-store guard requires a non-empty mapping of network IDs to positive integer seconds.
+- Ingestion-store guard binds the exact signatures used by workers/aggregator, including all commit-page kwargs, reorg provider/scope, event lookup and journal operations. Actual PostgreSQL adapter classes are checked without a DB connection.
+- Focused Module 9 batch: 87 tests, 0 failures/errors, 14 skipped. Full suite: 1041 tests, 0 failures/errors, 63 skipped. Compileall and diff-check pass.
+- Disposable PostgreSQL startup attempted locally but blocked before startup by sandbox `shmget` (`Function not implemented`). No DB, migration, or SQL acceptance occurred. Hosted isolated PostgreSQL acceptance remains required.
+- No live provider, production DB/Neon, migration, publisher, Binance post, workflow dispatch, deployment, stage, commit, push or merge.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-24 (AUD-LIFE-001 verifier-issued lifecycle confirmation)
+
+## AUD-LIFE-001 — PARTIALLY REMEDIATED / OPEN
+- TDD reproduced direct `observe(verification_state="VERIFIED")` creating lifecycle confirmation without a ClaimRegistry, and `sync_announcements()` accepting manually reconstructed or mutated registries. Four regressions failed before the fix.
+- SQLite and PostgreSQL `observe()` now require an exact verifier-issued unchanged ClaimRegistry for VERIFIED/CORROBORATED. Both sync paths validate exact registry proof, claim/result identity, unique IDs, evidence membership, supported states and exact per-asset announcement evidence linkage.
+- Direct caller-supplied resolved/withdrawn flags remain disabled. A typed verifier-issued resolution/withdrawal evidence contract remains open.
+- Focused lifecycle suite: 39 tests, 33 passed, 6 skipped, 0 failures/errors. Full suite: **1045 tests, 0 failures/errors, 63 skipped**. Compileall and diff check pass.
+- PostgreSQL DSN-gated acceptance remains skipped; no DB/migration, provider, publisher, post, deployment or Git write action occurred.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-24 (AUD-RESEARCH-001 / AUD-EDITORIAL-001 generic payload hashes)
+
+## AUD-RESEARCH-001 — FIXED LOCALLY / HOSTED CI PENDING
+- TDD reproduced generic PostgreSQL research payloads accepted with mismatched hashes and tampered generic payloads returned on read.
+- Typed research payloads keep their identity-excluding canonical hash. Generic legacy JSON payloads now hash the complete canonical object using the existing ASCII-escaped JSON byte convention. SQLite and PostgreSQL read paths recompute and compare both typed and generic hashes; PostgreSQL write validation also recomputes both.
+- Added generic payload save/read tamper regressions and a SQLite legacy generic read-tamper regression.
+
+## AUD-EDITORIAL-001 — FIXED LOCALLY / HOSTED CI PENDING
+- TDD reproduced generic PostgreSQL editorial payloads accepted with mismatched hashes and tampered generic payloads returned on read.
+- Typed editorial briefs keep their existing identity-excluding canonical hash. Generic legacy JSON payloads now hash the complete canonical object using the existing ASCII-escaped JSON byte convention. PostgreSQL write validation and read validation now recompute both typed and generic payload hashes.
+- Combined research/editorial focused suite: **62 passed, 0 failures/errors**. Full suite: **1055 tests, 0 failures/errors, 63 skipped**. Compileall and diff check pass.
+- PostgreSQL integration acceptance remains skipped without `TEST_POSTGRES_DSN`; no live DB/Neon, migration, publisher, post, workflow dispatch, deployment or Git write action occurred. Overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-24 (disposable PostgreSQL integration acceptance)
+
+## Dedicated database acceptance boundary
+- Mode-0600 `/tmp/binance-deepseek-verify/.env` parsed in-process only; exact target guard passed for dedicated `binance_onchain_test` database and allowed host. No DSN/credential values printed or copied. No production DB/Neon access.
+- Module 9 PostgreSQL integration: **19/19 passed**, including Bitcoin, EVM/BNB, Solana and XRPL workers with real PostgreSQL stores and aggregator, plus checkpoint, reorg, journal, rollback, concurrency and fresh-process persistence tests.
+- Module 12 PostgreSQL lifecycle: **10/10 passed**.
+- Module 21 PostgreSQL publication: **55/55 passed**.
+- Additional PostgreSQL atomicity/scheduled/claim-registry/Layer1/legacy suites: **15/15 passed**. Total dedicated PostgreSQL acceptance: **99 passed, 0 failed/errors/skipped**.
+- Scheduled acceptance correctly expects `RESEARCH_MORE` when PRIMARY evidence is absent, and confirms no draft/authorization/publish side effect; no source requirement was relaxed.
+
+## Updated gap dispositions
+- `AUD-ONCHAIN-005`: **FIXED LOCALLY / HOSTED CI PENDING** for all four worker families + aggregator on disposable PostgreSQL. Module 9 still FAIL/PARTIAL due `AUD-ONCHAIN-001/002/004`, policy approval and runtime activation.
+- `AUD-LIFE-001`: PARTIALLY REMEDIATED / OPEN; PostgreSQL lifecycle 10/10, but typed resolution/withdrawal proof remains open.
+- `AUD-RESEARCH-001` and `AUD-EDITORIAL-001`: FIXED LOCALLY / HOSTED CI PENDING; PostgreSQL generic tamper-on-read coverage passed in the 55-test publication suite.
+- M21 PARTIAL, not certified; crash/recovery operational evidence and hosted CI remain outstanding.
+- Full non-DSN suite after changes: **1059 tests, 0 failures/errors, 67 skipped**. No live provider, production DB, Binance post, deployment, workflow dispatch, stage, commit, push or merge.
+
+
+# STATUS RECONCILIATION — 2026-11-24 (disposable PostgreSQL results supersede earlier DSN-gated status text)
+- `AUD-M21-001` remains PARTIAL / OPEN, but the reason is now production crash/recovery/operator drills and hosted CI, not absence of a disposable DB run. Dedicated PostgreSQL publication suite 55/55 and additional atomicity/scheduled/claim-registry/Layer1/legacy suites 15/15 passed.
+- `AUD-RESEARCH-001` and `AUD-EDITORIAL-001` remain FIXED LOCALLY / HOSTED CI PENDING; actual disposable PostgreSQL generic-payload tamper-on-read acceptance passed within the 55/55 publication suite.
+- `AUD-LIFE-001` remains PARTIALLY REMEDIATED / OPEN; PostgreSQL lifecycle suite 10/10 passed, but typed resolution/withdrawal proof remains open.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-24 (AUD-CONTENT-003 caller-asserted PASS blocked)
+
+## AUD-CONTENT-003 — PARTIALLY REMEDIATED / OPEN; HOSTED CI PENDING
+- TDD reproduced SQLite `DraftStore.save_text_validation()` accepting arbitrary caller-supplied PASS status and arbitrary validation metadata. Added a PostgreSQL adapter regression requiring the same fail-closed behavior before DB access.
+- `ContentVerificationEngine.validate()` now issues an in-process proof bound to the immutable result payload (status, exact draft hash, asset identity, approved claim IDs, reasons, clean text and validation version). SQLite and PostgreSQL text-validation stores require the exact unchanged result for every PASS write and compare the persisted fields against it. `main.py` passes the actual engine result.
+- Raw PASS calls, caller-constructed result objects and mutated result copies are rejected. Non-PASS records remain persistable for audit/revision history.
+- Focused application/content/authorization/publisher/PG tests: **184 passed, 0 failures/errors, 28 skipped**. Dedicated disposable PostgreSQL publication suite: **56/56 passed**. Full isolated suite: **1062 tests, 0 failures/errors, 67 skipped**. Compileall and diff-check pass.
+- Limitation: the proof is process-local. The persisted validation row is not protected by a durable keyed signature; a principal with direct database write access can still forge a PASS row. Durable receipt signing, key custody and read-time verification require a separate approved design. Keep finding OPEN; Module 18 remains PARTIAL.
+- No production DB/Neon, live provider, publication, workflow, deployment, stage, commit, push or merge action.
+
+
+# LATEST AUTHORITATIVE GAP REGISTER UPDATE — 2026-11-24 (source receipt keyring policy validation)
+
+## AUD-EVID-001 — PARTIALLY REMEDIATED / OPEN
+- TDD found that load_source_receipt_config_from_env() accepted duplicate trusted IDs, trusted IDs absent from the keyring, and active signer IDs that were not provisioned and explicitly trusted. Four regression cases failed before remediation.
+- Source receipt key configuration now rejects malformed/duplicate trusted IDs, trusted IDs without key material, and configured active signing keys that are absent or not trusted. Verification-only keyrings remain supported. Legacy single-key migration configuration remains supported only when explicitly trusted.
+- Source receipt + Binance Spot receipt integration + evidence verification: 104 passed. Full isolated repository suite: 1065 passed, 0 failed, 67 skipped. compileall and diff-check passed.
+- Scope is configuration consistency only. CMS announcement importer still persists CMS records without a durable signed CMS receipt and evidence remains UNVERIFIED/under verification; CMS provider authentication, replay coverage and hosted CI are still open. This change does not close AUD-EVID-001 or authorize production source trust.
+- No live provider, production DB, migration, publication, deployment, workflow, stage, commit, push or merge.
+
+
+## 2026-11-24 — AUD-EVID-001 CMS producer contract trace (read-only)
+- Inspected upstream worker implementation on `integration/binance-cms-worker-main`: `normalize.js` hashes a normalized projection (`catalogId`, `catalogName`, `publishDate`, title, body, disclaimer), while `sourceId` is a local fingerprint of `catalogId + publishDate + title`. `rawPayload` is that normalized projection, not original WebSocket bytes.
+- `store.js` persists normalized fields and `raw_payload`; current `binance_announcement_events` schema contains no receipt/signature/key-ID field or receipt table. `worker.js` has no receipt issuance step.
+- Therefore importer-side HMAC would authenticate only a post-ingestion DB row, not the upstream CMS message/worker boundary. Do not mint a receipt downstream or promote CMS evidence.
+- Required next implementation is upstream producer-side receipt issuance + atomic persistence, followed by importer-side verification against operator-provisioned trusted keys. Receipt semantics must explicitly mean trusted-worker attestation, not Binance-origin signature. Bind authority/key/topic/catalog/source ID/content hash/timestamps/schema version. Missing or mismatched receipt fails closed.
+- Existing source identity limitation remains: no stable Binance article ID/permalink; revision correlation remains unresolved. Hosted worker CI, cross-component acceptance, key custody/provisioning, and deployment health remain unverified.
+- AUD-EVID-001 remains OPEN / PARTIAL; CMS evidence UNVERIFIED. No source code changed in this trace.
+
+
+## 2026-11-24 — AUD-EVID-001 CMS durable receipt integration slice
+- Created separate CMS worker worktree `/tmp/binance-cms-worker-receipts` on `work/cms-worker-receipts`, based on PR #2 head `55ff3e6a409a6f2b7b944c43772140b788556223`; preserved Layer 1 worktree and did not edit `/root/Binance-bot`.
+- Worker now has dedicated HMAC-SHA256 source receipt creation using a CMS-only keyring and authority. Receipt binds topic/catalog/local source fingerprint/content hash/catalog name/event type/title/body/disclaimer/publisher/source URL/published and observed timestamps. Receipt is persisted atomically with the event in nullable `ingestion_receipt JSONB`.
+- Added additive migration 002; 001 checksum remains unchanged. Worker runtime retains INSERT-only event/receipt access and does not SELECT the receipt column. Scheduled worker workflow scopes credentials to validation and execution and refuses to start without valid signing configuration.
+- Layer 1 importer now verifies CMS receipts against a separate CMS verification keyring/allowlist before saving evidence. Missing, invalid, tampered or untrusted receipts count as `untrusted_rows` and are not saved. Main runtime exposes an explicit unverified status. Spot receipt keyring is not reused.
+- Cross-language Node receipt vector verified by Python. Node tests **62 passed, 0 failed, 1 skipped**; Python full suite **1076 passed, 0 failed/errors, 67 skipped**; compile/syntax/diff checks passed.
+- PostgreSQL role/TLS integration remained skipped locally; Docker daemon/test DB unavailable. No live provider, database, migration, secret provisioning, hosted CI, workflow dispatch or deployment.
+- HMAC is trusted-worker attestation, not a Binance-origin signature. Stable provider article ID/permalink remains absent. Keep CMS evidence UNVERIFIED until key provisioning, disposable/staging PostgreSQL cross-component acceptance, hosted CI and deployed-worker coverage are verified.
+- **AUD-EVID-001 PARTIALLY REMEDIATED / OPEN; Module 11 PARTIAL; overall project NOT PRODUCTION-READY / NO-GO.**
+
+
+## 2026-11-24 — CMS importer PostgreSQL acceptance coverage added
+- Added `tests/test_module4_announcement_importer_postgres.py` to the guarded `binance_onchain_test` PostgreSQL CI job. It creates a unique schema only after `validate_postgres_test_target()` succeeds; tests JSONB receipt round-trip, legacy NULL rejection, and row-tamper rejection; cleanup is registered.
+- Added `layer-1/**` pull-request base branch trigger to `phase1-safety-tests.yml` so the importer acceptance job can run on the Layer 1 PR stack.
+- Local PostgreSQL cases skipped: no `TEST_POSTGRES_DSN` and Docker daemon unavailable. Do not count as executed DB acceptance until hosted CI reports green.
+- Latest Python full suite: **1078 passed, 0 failed/errors, 69 skipped**. CMS worker Node suite: **62 passed, 0 failed, 1 skipped**.
+- AUD-EVID-001 remains PARTIAL/OPEN pending actual guarded PostgreSQL CI, key provisioning, hosted CI and staging/worker verification.

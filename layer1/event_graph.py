@@ -34,6 +34,7 @@ RELATIONSHIP_TYPES = {
     "RELATED_TO",
 }
 CAUSAL_RELATIONSHIP_TYPES = {"CAUSES", "CAUSED_BY", "CAUSAL", "LEADS_TO", "DRIVES"}
+RELATIONSHIP_STATUS_PRIORITY = {"UNKNOWN": 0, "POSSIBLE": 1, "CONFIRMED": 2}
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -232,7 +233,8 @@ class EventIntelligenceGraphEngine:
             if previous is None or _parse_timestamp(relationship.observed_at) > _parse_timestamp(previous.observed_at):
                 relationships[relationship.relationship_id] = relationship
             elif (_parse_timestamp(relationship.observed_at) == _parse_timestamp(previous.observed_at)
-                  and (relationship.status, relationship.confidence) > (previous.status, previous.confidence)):
+                  and (RELATIONSHIP_STATUS_PRIORITY[relationship.status], relationship.confidence)
+                  > (RELATIONSHIP_STATUS_PRIORITY[previous.status], previous.confidence)):
                 relationships[relationship.relationship_id] = relationship
 
         def add_source(source_key: str, observed_at: str, kind: str) -> GraphEntity:

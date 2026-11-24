@@ -359,7 +359,7 @@ class ImageIntelligenceEngine:
             symbol=symbol,
             price=float(coin.get("price", 0) or 0),
             change=change,
-            volume_ratio=float(coin.get("volume_ratio", 1) or 1),
+            turnover_ratio_pct=float(coin.get("turnover_ratio_pct", 0.0) or 0.0),
             market_cap=float(coin.get("market_cap", 0) or 0),
             headline=headline,
             reasons=reasons,
@@ -391,7 +391,7 @@ class ImageIntelligenceEngine:
             coin.get("symbol", ""),
             str(coin.get("price", 0)),
             str(coin.get("change_24h", 0)),
-            str(coin.get("volume_ratio", 1)),
+            str(coin.get("turnover_ratio_pct", 0.0) or 0.0),
             str(setup.get("entry", "")),
             str(setup.get("target1", "")),
             str(setup.get("stop", "")),
@@ -402,7 +402,7 @@ class ImageIntelligenceEngine:
     def _select_headline(self, coin: Dict[str, Any], analysis: Dict[str, Any], is_bullish: bool) -> str:
         """Select the best headline based on coin data and context."""
         change = abs(float(coin.get("change_24h", 0) or 0))
-        vol_ratio = float(coin.get("volume_ratio", 1) or 1)
+        turnover_pct = float(coin.get("turnover_ratio_pct", 0.0) or 0.0)
         announcement = coin.get("announcement_type", "") if isinstance(analysis, dict) else ""
         narrative = analysis.get("category", "") if isinstance(analysis, dict) else ""
         
@@ -418,10 +418,10 @@ class ImageIntelligenceEngine:
             headlines = ["STRONG MOMENTUM", "TRENDING NOW", "BREAKOUT WATCH", "BULLISH SIGNAL"]
         elif change >= 3:
             headlines = ["GAINING TRACTION", "MOVING UP", "WATCH LIST"]
-        elif vol_ratio >= 3:
-            headlines = ["VOLUME SPIKE", "WHALE ALERT", "SOMETHING BIG"]
-        elif vol_ratio >= 2:
-            headlines = ["VOLUME SURGE", "SMART MONEY", "INSTITUTIONAL FLOW"]
+        elif turnover_pct >= 3:
+            headlines = ["HIGH TURNOVER", "ACTIVE MARKET", "MARKET ACTIVITY"]
+        elif turnover_pct >= 2:
+            headlines = ["ELEVATED TURNOVER", "ACTIVE MARKET", "MARKET ACTIVITY"]
         elif narrative == "AI":
             headlines = ["AI NARRATIVE", "AI SEASON", "SMART MONEY AI"]
         elif narrative == "MEME":
@@ -437,7 +437,7 @@ class ImageIntelligenceEngine:
         """Generate 3-5 data-driven reasons for the trade."""
         reasons = []
         change = float(coin.get("change_24h", 0) or 0)
-        vol_ratio = float(coin.get("volume_ratio", 1) or 1)
+        turnover_pct = float(coin.get("turnover_ratio_pct", 0.0) or 0.0)
         abs_change = abs(change)
         announcement = coin.get("announcement_type", "")
         narrative = analysis.get("category", "") if isinstance(analysis, dict) else ""
@@ -450,15 +450,15 @@ class ImageIntelligenceEngine:
         elif abs_change >= 3:
             reasons.append(f"Trending with {change:+.1f}% positive price action")
         else:
-            reasons.append(f"Notable price action with volume confirmation")
+            reasons.append("Price action is modest; reported turnover-to-market-cap percentage is separate context, not confirmation.")
         
-        # Reason 2: Volume
-        if vol_ratio >= 3:
-            reasons.append(f"Volume spike {vol_ratio:.1f}x above average - major participation")
-        elif vol_ratio >= 2:
-            reasons.append(f"Volume at {vol_ratio:.1f}x - above average interest")
-        elif vol_ratio >= 1.5:
-            reasons.append(f"Healthy volume at {vol_ratio:.1f}x confirming the move")
+        # Reason 2: 24h turnover ratio (not relative-volume surge)
+        if turnover_pct >= 3:
+            reasons.append(f"Reported 24h turnover is {turnover_pct:.2f}% of market capitalization; historical-volume baseline unavailable.")
+        elif turnover_pct >= 2:
+            reasons.append(f"Reported 24h turnover is {turnover_pct:.2f}% of market capitalization; this is not an average-volume multiple.")
+        elif turnover_pct >= 1.5:
+            reasons.append(f"Reported 24h turnover-to-market-cap ratio is {turnover_pct:.2f}%; order-book depth is not measured.")
         
         # Reason 3: Narrative
         if narrative:
@@ -505,7 +505,7 @@ class ImageIntelligenceEngine:
         symbol: str,
         price: float,
         change: float,
-        volume_ratio: float,
+        turnover_ratio_pct: float,
         market_cap: float,
         headline: str,
         reasons: List[str],
@@ -595,10 +595,10 @@ class ImageIntelligenceEngine:
         data_y = sym_y + 95
         draw.rounded_rectangle([20, data_y, WIDTH - 20, data_y + 60], radius=6, fill=bg_card, outline=border)
         
-        # Volume
-        draw.text((40, data_y + 8), "VOLUME", fill=text_dim, font=self.font_tiny)
-        vol_text = f"{volume_ratio:.1f}x"
-        draw.text((40, data_y + 28), vol_text, fill=white, font=self.font_bold_small)
+        # 24h turnover-to-market-cap percentage (not relative volume)
+        draw.text((40, data_y + 8), "24H TURNOVER / MC", fill=text_dim, font=self.font_tiny)
+        turnover_text = f"{turnover_ratio_pct:.2f}%"
+        draw.text((40, data_y + 28), turnover_text, fill=white, font=self.font_bold_small)
         
         # Market Cap (center)
         if market_cap > 0:
@@ -774,9 +774,7 @@ class ImageComposer:
             return "defi"
         if "rwa" in narrative.lower():
             return "narrative"
-        vol = float(coin.get("volume_ratio", 0) or 0)
-        if vol > 3:
-            return "breakout"
+        # Turnover-to-market-cap percentage is not a breakout or relative-volume signal.
         return "default"
     
     def generate_post_image(
@@ -821,12 +819,12 @@ class ImageComposer:
             overlay_draw.rectangle((0, 960, 1080, 1350), fill=(5, 12, 24, 190))
             canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
             draw = ImageDraw.Draw(canvas)
-            try:
-                title_font = ImageFont.truetype(self.engine.fonts_dir + "LiberationSans-Bold.ttf", 42)
-                symbol_font = ImageFont.truetype(self.engine.fonts_dir + "LiberationSans-Bold.ttf", 82)
-            except OSError:
-                title_font = ImageFont.load_default()
-                symbol_font = ImageFont.load_default()
+            font_path = Path(self.engine.fonts_dir) / "LiberationSans-Bold.ttf"
+            if not font_path.is_file():
+                raise ValueError("approved deterministic overlay font is unavailable")
+            font_sha256 = hashlib.sha256(font_path.read_bytes()).hexdigest()
+            title_font = ImageFont.truetype(str(font_path), 42)
+            symbol_font = ImageFont.truetype(str(font_path), 82)
             title = "MARKET UPDATE"
             ticker = "$" + symbol
             overlay_items = []
@@ -843,6 +841,9 @@ class ImageComposer:
                 overlay_items.append({
                     "text": text_value,
                     "bbox": list(actual_bounds),
+                    "origin_xy": [x, y],
+                    "font_id": "LIBERATION_SANS_BOLD",
+                    "font_sha256": font_sha256,
                     "font_size_px": getattr(font, "size", 0),
                     "fill_rgb": list(fill),
                 })
@@ -898,15 +899,11 @@ class ImageComposer:
 
 
 class ImageUploader:
-    """Upload generated images and return public URLs - guaranteed.
-    Binance Square OpenAPI has NO dedicated media upload endpoint.
-    Images are attached via imageUrl field in content/add.
-    
-    Provider 1: GitHub REST API (create file via API - most reliable in GHA)
-    Provider 2: Git push with token auth
-    Provider 3: GHA environment URL construction
-    
-    Every post will have an image when possible - text-only fallback always preserved.
+    """Upload authorized media through Binance's native presigned-media flow.
+
+    Legacy GitHub REST/Git repository-write methods are intentionally disabled:
+    they are not part of the active publication path and must not mutate the
+    application repository or persist credentials.
     """
     
     def __init__(self, config=None):
@@ -948,271 +945,35 @@ class ImageUploader:
         return url
 
     def binance_square_upload(self, image_path: Path) -> Optional[str]:
-        """Upload image for Binance Square post.
-        
-        Flow:
-        1. Upload image to GitHub repo via REST API (requires GH_TOKEN)
-        2. Return public raw.githubusercontent.com URL
-        3. This URL is then passed as imageUrl to content/add
-        
-        In GitHub Actions, GITHUB_TOKEN is automatically available.
-        Falls back gracefully if upload fails — text-only publish proceeds.
+        """Deprecated GitHub-repository upload path; disabled for safety.
+
+        The active publisher must use ``binance_media_upload`` and the
+        authorization-bound Binance presigned-media flow. This legacy method
+        previously wrote repository contents through GitHub REST/Git and could
+        target an unapproved branch.
         """
-        if not image_path or not image_path.exists():
-            LOGGER.warning("binance_square_upload: image path missing: %s", image_path)
-            return None
-        
-        # Log image info before upload
-        import mimetypes
-        mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
-        file_size = image_path.stat().st_size
-        LOGGER.info("Upload step 1: image ready — %s (%s, %d bytes, %s)",
-                    image_path.name, mime, file_size, image_path)
-        
-        # Attempt 1: GitHub REST API (most reliable in GHA)
-        gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
-        gh_repo = os.getenv("GITHUB_REPOSITORY", "")
-        
-        LOGGER.info("Upload step 2: checking GitHub credentials — token=%s repo=%s",
-                    "SET (%d chars)" % len(gh_token) if gh_token else "NOT SET",
-                    gh_repo if gh_repo else "NOT SET")
-        
-        if gh_token and gh_repo:
-            url = self._github_api_upload(image_path)
-            if url:
-                LOGGER.info("Upload step 3: GitHub API upload SUCCESS — %s", url)
-                return url
-            LOGGER.warning("Upload step 3: GitHub API upload returned None")
-        else:
-            LOGGER.warning("Upload step 3: GitHub API upload skipped (missing token or repo)")
-        
-        # Attempt 2: Git push upload
-        LOGGER.info("Upload step 4: trying git push upload")
-        url = self._git_push_image(image_path)
-        if url:
-            LOGGER.info("Upload step 4: git push upload SUCCESS — %s", url)
-            return url
-        
-        # Attempt 3: GHA env URL (last resort, unverified)
-        LOGGER.info("Upload step 5: trying GHA env URL")
-        url = self._gha_env_url(image_path)
-        if url:
-            LOGGER.warning("Upload step 5: GHA env URL (unverified) — %s", url)
-            return url
-        
-        LOGGER.warning("Upload step 6: ALL upload methods FAILED — proceeding text-only")
+        LOGGER.warning(
+            "Legacy GitHub repository image upload is disabled; use the authorized Binance media upload flow"
+        )
         return None
-    
+
     def upload(self, image_path: Path) -> tuple:
-        """Upload image and return (url, verified).
-        
-        Returns (url, True) if a reliable upload method succeeded.
-        Returns (url, False) if URL is constructed but not verified.
-        Returns (None, False) if all methods fail.
-        
-        verified=True means the image definitely exists at the URL.
-        verified=False means the URL might work (e.g., from a previous push).
-        """
-        if not image_path or not image_path.exists():
-            return (None, False)
-        
-        # Provider 1: GitHub REST API (most reliable in GHA)
-        url = self._github_api_upload(image_path)
-        if url:
-            LOGGER.info("Image uploaded via GitHub API: %s", url)
-            return (url, True)
-        
-        # Provider 2: Git push
-        url = self._git_push_image(image_path)
-        if url:
-            LOGGER.info("Image uploaded via git push: %s", url)
-            return (url, True)
-        
-        # Provider 3: GHA env URL construction (last resort)
-        url = self._gha_env_url(image_path)
-        if url:
-            LOGGER.info("Image URL from GHA env (unverified): %s", url)
-            return (url, False)
-        
-        LOGGER.warning("All image upload methods failed")
+        """Deprecated generic uploader; fail closed instead of mutating GitHub."""
+        LOGGER.warning(
+            "Legacy generic image uploader is disabled; use the authorized Binance media upload flow"
+        )
         return (None, False)
-    
+
     def _github_api_upload(self, image_path: Path) -> Optional[str]:
-        """Upload image to GitHub repo via REST API.
-        
-        Uses: PUT /repos/{owner}/{repo}/contents/{path}
-        This is more reliable than git push in GHA.
-        """
-        try:
-            gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
-            if not gh_token:
-                LOGGER.warning("GitHub API upload: no GH_TOKEN available")
-                return None
-            
-            gh_repo = os.getenv("GITHUB_REPOSITORY", "")
-            LOGGER.info("GitHub API upload: token=%s repo=%s",
-                        "SET" if gh_token else "NOT_SET",
-                        gh_repo if gh_repo else "NOT_SET")
-            if not gh_repo:
-                # Try git remote
-                import subprocess
-                result = subprocess.run(
-                    ["git", "remote", "get-url", "origin"],
-                    capture_output=True, text=True, timeout=5
-                )
-                remote = result.stdout.strip()
-                if "github.com" in remote:
-                    if remote.startswith("git@"):
-                        gh_repo = remote.split("github.com:")[-1].replace(".git", "")
-                    else:
-                        gh_repo = remote.split("github.com/")[-1].replace(".git", "")
-            
-            if not gh_repo:
-                return None
-            
-            # Read image as base64
-            import base64
-            with open(image_path, "rb") as f:
-                img_b64 = base64.b64encode(f.read()).decode("utf-8")
-            
-            # Get current branch
-            import subprocess
-            branch = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=3
-            ).stdout.strip() or "main"
-            
-            # Copy image to repo images/ directory  
-            repo_images = Path("images")
-            repo_images.mkdir(parents=True, exist_ok=True)
-            dest = repo_images / image_path.name
-            
-            import shutil
-            if Path(image_path).resolve() != dest.resolve():
-                shutil.copy2(str(image_path), str(dest))
-            
-            # API endpoint (URL-encode filename for special chars)
-            safe_filename = self._url_encode_filename(image_path.name)
-            api_url = f"https://api.github.com/repos/{gh_repo}/contents/images/{safe_filename}"
-            
-            # First check if file exists (get SHA if it does)
-            sha = None
-            req = urllib.request.Request(api_url, headers={
-                "Authorization": f"Bearer {gh_token}",
-                "Accept": "application/vnd.github.v3+json",
-                "User-Agent": "codex-agent/1.0"
-            }, method="GET")
-            try:
-                with _open_without_redirect(req, timeout=10) as resp:
-                    existing = json.loads(resp.read().decode())
-                    sha = existing.get("sha")
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    LOGGER.info("File does not exist on GitHub, will create new")
-                else:
-                    err_detail = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
-                    LOGGER.warning("GitHub API check failed (HTTP %d): %s", e.code, err_detail)
-            
-            # Create or update file
-            payload = {
-                "message": f"Add post image {image_path.name}",
-                "content": img_b64,
-                "branch": branch,
-            }
-            if sha:
-                payload["sha"] = sha
-            
-            data_bytes = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(api_url, data=data_bytes, headers={
-                "Authorization": f"Bearer {gh_token}",
-                "Accept": "application/vnd.github.v3+json",
-                "Content-Type": "application/json",
-                "User-Agent": "codex-agent/1.0"
-            }, method="PUT")
-            
-            with _open_without_redirect(req, timeout=15) as resp:
-                response_data = json.loads(resp.read().decode())
-            
-            # Success! Get the raw URL (URL-encoded for safety)
-            safe_name = self._url_encode_filename(image_path.name)
-            raw_url = f"https://raw.githubusercontent.com/{gh_repo}/{branch}/images/{safe_name}"
-            LOGGER.info("GitHub API upload SUCCESS: %s", raw_url)
-            if self._verify_url(raw_url):
-                LOGGER.info("GitHub raw URL verified accessible: %s", raw_url)
-            else:
-                LOGGER.warning("GitHub raw URL not verifiable (may still work): %s", raw_url)
-            return raw_url
-            
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
-            LOGGER.warning("GitHub API upload FAILED (HTTP %d): %s", e.code, err_body)
-        except Exception as e:
-            LOGGER.warning("GitHub API upload FAILED: %s", e)
-        
+        """Disabled legacy GitHub Contents API write path."""
+        LOGGER.warning("Legacy GitHub Contents API image upload is disabled")
         return None
-    
+
     def _git_push_image(self, image_path: Path) -> Optional[str]:
-        """Push image to GitHub repo using git with token auth."""
-        try:
-            import subprocess
-            
-            gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
-            if not gh_token:
-                return None
-            
-            gh_repo = os.getenv("GITHUB_REPOSITORY", "")
-            if not gh_repo:
-                result = subprocess.run(
-                    ["git", "remote", "get-url", "origin"],
-                    capture_output=True, text=True, timeout=5
-                )
-                remote = result.stdout.strip()
-                if "github.com" in remote:
-                    if remote.startswith("git@"):
-                        gh_repo = remote.split("github.com:")[-1].replace(".git", "")
-                    else:
-                        gh_repo = remote.split("github.com/")[-1].replace(".git", "")
-            
-            if not gh_repo:
-                return None
-            
-            subprocess.run(["git", "config", "user.name", "bot"], capture_output=True, timeout=3)
-            subprocess.run(["git", "config", "user.email", "bot@bot.com"], capture_output=True, timeout=3)
-            
-            branch = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=3
-            ).stdout.strip() or "main"
-            
-            # Copy to repo
-            repo_images = Path("images")
-            repo_images.mkdir(parents=True, exist_ok=True)
-            dest = repo_images / image_path.name
-            if Path(image_path).resolve() != dest.resolve():
-                import shutil
-                shutil.copy2(str(image_path), str(dest))
-            
-            # Set auth URL
-            auth_url = f"https://x-access-token:{gh_token}@github.com/{gh_repo}.git"
-            subprocess.run(["git", "remote", "set-url", "origin", auth_url], capture_output=True, timeout=5)
-            
-            subprocess.run(["git", "add", str(dest)], capture_output=True, text=True, timeout=5)
-            subprocess.run(["git", "commit", "-m", f"Add image {image_path.name}"], capture_output=True, text=True, timeout=5)
-            subprocess.run(["git", "pull", "--rebase", "origin", branch], capture_output=True, text=True, timeout=15)
-            
-            result = subprocess.run(["git", "push", "origin", branch], capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                url = f"https://raw.githubusercontent.com/{gh_repo}/{branch}/images/{image_path.name}"
-                LOGGER.info("Git push success: %s", url)
-                return url
-            
-            LOGGER.warning("Git push failed: %s", result.stderr[:200])
-        except Exception as e:
-            LOGGER.warning("Git push error: %s", e)
-        
+        """Disabled legacy Git mutation path; never persist credentials or commit files."""
+        LOGGER.warning("Legacy Git image upload is disabled")
         return None
-    
+
     def _gha_env_url(self, image_path: Path) -> Optional[str]:
         """Construct GitHub raw URL from GHA env (file must already be in repo)."""
         gh_repo = os.getenv("GITHUB_REPOSITORY", "")

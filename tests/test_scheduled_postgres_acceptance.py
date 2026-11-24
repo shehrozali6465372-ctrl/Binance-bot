@@ -133,7 +133,7 @@ class ScheduledPostgresFailClosedAcceptanceTests(unittest.TestCase):
                 store.close()
 
 
-    def test_real_run_once_persists_research_and_defer_decisions_without_editorial_or_publish_side_effects(self):
+    def test_real_run_once_persists_research_more_without_editorial_or_publish_side_effects(self):
         import hashlib
         import json
         from datetime import datetime, timezone
@@ -318,7 +318,11 @@ class ScheduledPostgresFailClosedAcceptanceTests(unittest.TestCase):
                     (list(asset_ids),),
                 ).fetchall()
                 self.assertEqual(len(package_rows), 2, f"research failures: {research_failures!r}")
-                self.assertTrue(all(row["payload_json"]["completeness"] == "READY" for row in package_rows))
+                self.assertTrue(all(
+                    row["payload_json"]["completeness"] == "RESEARCH_MORE"
+                    and "MISSING_REQUIRED_SOURCE_KINDS:PRIMARY" in row["payload_json"]["gaps"]
+                    for row in package_rows
+                ), repr([(row["payload_json"].get("completeness"), row["payload_json"].get("gaps")) for row in package_rows]))
 
                 decisions = store.conn.execute(
                     "SELECT d.state,d.reasons_json,p.payload_json->>'asset_id' AS asset_id "
@@ -329,11 +333,8 @@ class ScheduledPostgresFailClosedAcceptanceTests(unittest.TestCase):
                 ).fetchall()
                 self.assertEqual(len(decisions), 2)
                 for decision in decisions:
-                    self.assertEqual(decision["state"], "DEFER")
-                    self.assertIn(
-                        "APPROVED_OPPORTUNITY_SCORING_POLICY_NOT_CONFIGURED",
-                        decision["reasons_json"],
-                    )
+                    self.assertEqual(decision["state"], "RESEARCH_MORE")
+                    self.assertIn("RESEARCH_PACKAGE_NOT_COMPLETE", decision["reasons_json"])
 
                 after = {
                     "research": store.conn.execute("SELECT COUNT(*) AS count FROM layer1_research_package_versions").fetchone()["count"],
@@ -404,7 +405,7 @@ store.close()
                 )
                 child_result = json.loads(child.stdout)
                 self.assertEqual(len(child_result["decisions"]), 2)
-                self.assertTrue(all(item["state"] == "DEFER" for item in child_result["decisions"]))
+                self.assertTrue(all(item["state"] == "RESEARCH_MORE" for item in child_result["decisions"]))
                 self.assertEqual(child_result["run_status"], "NO_CANDIDATE_OR_BLOCKED")
                 self.assertEqual(child_result["cycle_result"], "NO_CANDIDATE_OR_BLOCKED")
                 self.assertEqual(child_result["lease_count"], 0)

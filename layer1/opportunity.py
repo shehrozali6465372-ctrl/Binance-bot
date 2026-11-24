@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from typing import Mapping, Optional, Sequence
 
@@ -104,9 +104,12 @@ def _validate_v2_subfeature(
         "baseline_id", "baseline_version", "source_dependency_group",
         "quality_flags", "missing_reason",
     }
-    if schema_version == 3:
+    if schema_version in (3, 4):
         required.add("source_provenance")
-    optional = {"claim_refs"} if schema_version == 3 else set()
+    if schema_version == 4:
+        required.discard("source_payload_hashes")
+        required.add("source_hashes")
+    optional = {"claim_refs"} if schema_version in (3, 4) else set()
     if not isinstance(subfeature, dict) or not required.issubset(subfeature) or set(subfeature) - required - optional:
         raise ValueError("factor subfeature provenance fields are incomplete or unknown")
     _required_text(subfeature["feature_key"], "subfeature feature_key")
@@ -123,7 +126,7 @@ def _validate_v2_subfeature(
         raise ValueError("factor subfeature source references are invalid")
     if availability == "AVAILABLE" and not refs:
         raise ValueError("available factor subfeature requires at least one source reference")
-    if schema_version == 3:
+    if schema_version in (3, 4):
         if "claim_refs" in subfeature:
             claim_refs = subfeature["claim_refs"]
             if (not isinstance(claim_refs, list) or any(not isinstance(value, str) or not value.strip() for value in claim_refs)
@@ -138,13 +141,29 @@ def _validate_v2_subfeature(
                 or len(provenance_ids) != len(set(provenance_ids))
                 or set(provenance_ids) != set(refs)):
             raise ValueError("v3 factor source provenance IDs must match source references")
-    hashes = subfeature["source_payload_hashes"]
-    if (not isinstance(hashes, list)
-            or any(not isinstance(value, str) or len(value) != _SHA256_LENGTH
-                   or any(char not in "0123456789abcdef" for char in value)
-                   for value in hashes)
-            or len(hashes) != len(set(hashes))):
-        raise ValueError("factor subfeature source payload hashes must be lowercase SHA-256")
+    if schema_version == 4:
+        hashes = subfeature["source_hashes"]
+        if (not isinstance(hashes, list)
+                or any(not isinstance(item, dict)
+                       or set(item) != {"evidence_id", "sha256", "kind"}
+                       or not isinstance(item.get("evidence_id"), str)
+                       or not item["evidence_id"].strip()
+                       or not isinstance(item.get("sha256"), str)
+                       or len(item["sha256"]) != _SHA256_LENGTH
+                       or any(char not in "0123456789abcdef" for char in item["sha256"])
+                       or not isinstance(item.get("kind"), str)
+                       or item["kind"] in {"", "UNSPECIFIED"}
+                       for item in hashes)
+                or len({item["evidence_id"] for item in hashes}) != len(hashes)):
+            raise ValueError("factor subfeature source hash metadata is invalid")
+    else:
+        hashes = subfeature["source_payload_hashes"]
+        if (not isinstance(hashes, list)
+                or any(not isinstance(value, str) or len(value) != _SHA256_LENGTH
+                       or any(char not in "0123456789abcdef" for char in value)
+                       for value in hashes)
+                or len(hashes) != len(set(hashes))):
+            raise ValueError("factor subfeature source payload hashes must be lowercase SHA-256")
     flags = subfeature["quality_flags"]
     if (not isinstance(flags, list)
             or any(not isinstance(flag, str) or not flag.strip() for flag in flags)
@@ -259,7 +278,10 @@ def validate_factor_claim_support(
     may use direct measurements, but any supplied claim_refs are still checked.
     This validates linkage/state, not semantic truth beyond the claim verifier.
     """
-    from layer1.evidence_verification import Claim, EvidenceRecord
+    from layer1.evidence_verification import (
+        Claim, EvidenceRecord, EvidenceVerificationEngine,
+        _restore_evidence_record_proof,
+    )
 
     if factor_name not in FACTOR_NAMES:
         raise ValueError("factor name is not recognized for claim support")
@@ -287,14 +309,40 @@ def validate_factor_claim_support(
 
     evidence_by_id = {}
     from dataclasses import fields as dataclass_fields
-    evidence_fields = {item.name for item in dataclass_fields(EvidenceRecord)}
+    evidence_fields = {
+        item.name for item in dataclass_fields(EvidenceRecord)
+        if item.name != "_provenance_proof"
+    }
+    _new_provenance_fields = {
+        "source_authority_id", "independence_group", "source_receipt_key_id",
+        "source_receipt", "source_receipt_payload",
+    }
+    legacy_evidence_fields = evidence_fields - {"content_hash_kind"} - _new_provenance_fields
+    previous_v2_evidence_fields = evidence_fields - _new_provenance_fields
+    current_without_hash_kind_fields = evidence_fields - {"content_hash_kind"}
+    registry_schema_version = registry_payload.get("schema_version", 1)
+    if (isinstance(registry_schema_version, bool)
+            or not isinstance(registry_schema_version, int)
+            or registry_schema_version not in (1, 2)):
+        raise ValueError("claim registry schema version is unsupported")
     for raw in raw_evidence:
-        if not isinstance(raw, Mapping) or set(raw) != evidence_fields | {"evidence_id"}:
+        allowed_fields = legacy_evidence_fields if registry_schema_version == 1 else evidence_fields
+        accepted_shapes = (
+            allowed_fields | {"evidence_id"},
+            previous_v2_evidence_fields | {"evidence_id"},
+            current_without_hash_kind_fields | {"evidence_id"},
+            evidence_fields | {"evidence_id"},
+            evidence_fields | {"_provenance_proof", "evidence_id"},
+        )
+        if not isinstance(raw, Mapping) or set(raw) not in accepted_shapes:
             raise ValueError("claim registry contains invalid evidence provenance")
-        values = {key: raw[key] for key in evidence_fields}
+        if raw.get("_provenance_proof") is not None:
+            raise ValueError("serialized evidence must not carry an in-process provenance proof")
+        values = {key: raw[key] for key in allowed_fields if key in raw}
         try:
             record = EvidenceRecord(**values)
             record.validate()
+            _restore_evidence_record_proof(record)
         except (TypeError, ValueError):
             raise ValueError("claim registry contains invalid evidence provenance") from None
         if raw.get("evidence_id") != record.evidence_id or record.evidence_id in evidence_by_id:
@@ -318,13 +366,89 @@ def validate_factor_claim_support(
         claims_by_id[claim.claim_id] = claim
 
     results_by_id = {}
+    result_fields = {
+        "claim_id", "state", "evidence_ids", "supporting_evidence_ids",
+        "contradicting_evidence_ids", "independent_source_count", "source_lineage", "issues",
+    }
     for raw in raw_results:
-        if not isinstance(raw, Mapping):
-            raise ValueError("claim registry contains an invalid verification result")
+        if not isinstance(raw, Mapping) or set(raw) != result_fields:
+            raise ValueError("claim registry contains an invalid verification result shape")
         claim_id = raw.get("claim_id")
-        if not isinstance(claim_id, str) or claim_id in results_by_id:
+        if (not isinstance(claim_id, str) or len(claim_id) != _SHA256_LENGTH
+                or any(char not in "0123456789abcdef" for char in claim_id)
+                or claim_id in results_by_id):
             raise ValueError("claim registry verification result identity is invalid or ambiguous")
+        if raw.get("state") not in {"VERIFIED", "CORROBORATED", "UNVERIFIED", "CONTRADICTED", "STALE"}:
+            raise ValueError("claim registry verification result state is invalid")
+        def valid_result_ids(values):
+            return (isinstance(values, (list, tuple)) and all(
+                isinstance(value, str) and len(value) == _SHA256_LENGTH
+                and all(char in "0123456789abcdef" for char in value)
+                for value in values
+            ) and len(values) == len(set(values)))
+        if any(not valid_result_ids(raw.get(name)) for name in (
+            "evidence_ids", "supporting_evidence_ids", "contradicting_evidence_ids",
+        )):
+            raise ValueError("claim registry verification result evidence linkage is invalid or duplicated")
+        count = raw.get("independent_source_count")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("claim registry verification result independent-source count is invalid")
+        lineage = raw.get("source_lineage")
+        issues = raw.get("issues")
+        if (not isinstance(lineage, Mapping)
+                or any(not isinstance(key, str) or not isinstance(value, str) or not value
+                       for key, value in lineage.items())
+                or not isinstance(issues, (list, tuple))
+                or any(not isinstance(issue, str) or not issue for issue in issues)
+                or len(issues) != len(set(issues))):
+            raise ValueError("claim registry verification result lineage or issues are invalid")
         results_by_id[claim_id] = raw
+    if set(results_by_id) != set(claims_by_id):
+        raise ValueError("claim registry claim and verification result references do not match")
+    # Preserve actionable factor-level diagnostics before replay consistency checks.
+    # The replay below remains the final canonical integrity gate for every result.
+    for claim_id in claim_refs:
+        claim = claims_by_id.get(claim_id)
+        result = results_by_id.get(claim_id)
+        if claim is None or result is None:
+            raise ValueError("factor claim reference does not resolve in selected registry")
+        if claim.asset_id != expected_asset_id and claim.subject != expected_asset_id:
+            raise ValueError("factor claim asset identity does not match decision asset")
+        if result.get("state") not in {"VERIFIED", "CORROBORATED"}:
+            raise ValueError("factor claim is not VERIFIED or CORROBORATED")
+    for claim_id, result in results_by_id.items():
+        claim = claims_by_id[claim_id]
+        supporting = result["supporting_evidence_ids"]
+        contradicting = result["contradicting_evidence_ids"]
+        expected_ids = set(claim.evidence_ids) | set(supporting) | set(contradicting)
+        if set(result["evidence_ids"]) != expected_ids:
+            raise ValueError("claim registry verification result evidence linkage is inconsistent")
+        linked_ids = set(supporting) | set(contradicting)
+        if not linked_ids.issubset(evidence_by_id):
+            raise ValueError("claim registry verification result evidence linkage is unresolved")
+        expected_lineage = {
+            evidence_id: EvidenceVerificationEngine._lineage_key(evidence_by_id[evidence_id])
+            for evidence_id in linked_ids
+        }
+        if dict(result["source_lineage"]) != expected_lineage:
+            raise ValueError("claim registry verification result source lineage is inconsistent")
+        if result["independent_source_count"] != EvidenceVerificationEngine._independent_source_count(
+            tuple(evidence_by_id[value] for value in supporting)
+        ):
+            raise ValueError("claim registry independent-source count does not match recomputed evidence grouping")
+
+    # A digest proves payload integrity, not that a result was derived from its
+    # claims/evidence. Replay the deterministic verifier and compare full results.
+    from dataclasses import asdict
+    replayed = EvidenceVerificationEngine().verify(
+        tuple(claims_by_id.values()), tuple(evidence_by_id.values()),
+    )
+    replayed_by_id = {item.claim_id: item for item in replayed.results}
+    for claim_id, result in results_by_id.items():
+        canonical_result = json.loads(json.dumps(asdict(replayed_by_id[claim_id]), allow_nan=False))
+        normalized_result = json.loads(json.dumps(dict(result), allow_nan=False))
+        if normalized_result != canonical_result:
+            raise ValueError("claim registry verification result does not match deterministic evidence replay")
 
     validated = []
     covered_evidence = set()
@@ -347,18 +471,21 @@ def validate_factor_claim_support(
                 isinstance(value, str) and len(value) == _SHA256_LENGTH
                 and all(char in "0123456789abcdef" for char in value)
                 for value in values
-            )
+            ) and len(values) == len(set(values))
         )
         if (not valid_evidence_ids(supporting) or not supporting
-                or not valid_evidence_ids(contradicting) or contradicting
-                or not isinstance(issues, (list, tuple))
+                or not valid_evidence_ids(contradicting)):
+            raise ValueError("factor claim verification contains invalid or duplicate evidence IDs")
+        if contradicting:
+            raise ValueError("factor claim verification contains contradicting evidence")
+        if (not isinstance(issues, (list, tuple))
                 or any(not isinstance(issue, str) or not issue for issue in issues)
                 or issues):
-            raise ValueError("factor claim verification contains contradiction or unresolved issues")
+            raise ValueError("factor claim verification contains unresolved issues")
         evidence_ids = result.get("evidence_ids")
         if (not valid_evidence_ids(evidence_ids)
                 or not set(supporting).issubset(set(evidence_ids))):
-            raise ValueError("factor claim supporting evidence linkage is invalid")
+            raise ValueError("factor claim supporting evidence linkage is invalid or duplicated")
         if not set(supporting).intersection(source_refs):
             raise ValueError("verified claim does not support referenced factor evidence")
         if not set(supporting).issubset(set(claim.evidence_ids)):
@@ -387,9 +514,9 @@ def validate_factor_claim_support(
 
 def resolve_factor_source_provenance(
     subfeature, registry_snapshot, *, expected_registry_verification_id: str,
-    expected_asset_id: str, decision_cutoff_at: str,
+    expected_asset_id: str, decision_cutoff_at: str, hash_contract_version: int = 3,
 ):
-    """Resolve exact v3-style evidence references against one immutable registry.
+    """Resolve exact v3/v4 factor evidence references against one immutable registry.
 
     This is deliberately additive to v1/v2 snapshot validation. It verifies the
     persisted registry digest, reconstructs EvidenceRecord identities, compares
@@ -399,6 +526,7 @@ def resolve_factor_source_provenance(
     from dataclasses import asdict, fields
     from layer1.evidence_verification import (
         EvidenceRecord, verify_claim_registry_payload,
+        _restore_evidence_record_proof,
     )
 
     if not isinstance(registry_snapshot, Mapping):
@@ -434,16 +562,48 @@ def resolve_factor_source_provenance(
 
     cutoff = _utc_timestamp(decision_cutoff_at, "decision_cutoff_at")
     _required_text(expected_asset_id, "expected asset identity")
-    record_fields = {item.name for item in fields(EvidenceRecord)}
+    record_fields = {
+        item.name for item in fields(EvidenceRecord)
+        if item.name != "_provenance_proof"
+    }
+    _new_provenance_fields = {
+        "source_authority_id", "independence_group", "source_receipt_key_id",
+        "source_receipt", "source_receipt_payload",
+    }
+    legacy_record_fields = record_fields - {"content_hash_kind"} - _new_provenance_fields
+    previous_v2_record_fields = record_fields - _new_provenance_fields
+    current_without_hash_kind_record_fields = record_fields - {"content_hash_kind"}
+    registry_schema_version = payload.get("schema_version", 1)
+    if (isinstance(registry_schema_version, bool)
+            or not isinstance(registry_schema_version, int)
+            or registry_schema_version not in (1, 2)):
+        raise ValueError("claim registry schema version is unsupported")
+    if (isinstance(hash_contract_version, bool)
+            or not isinstance(hash_contract_version, int)
+            or hash_contract_version not in (3, 4)):
+        raise ValueError("factor source hash contract version is unsupported")
     by_id = {}
     for raw in payload["evidence_records"]:
-        if not isinstance(raw, Mapping) or set(raw) != record_fields | {"evidence_id"}:
+        allowed_record_fields = record_fields if registry_schema_version == 2 else legacy_record_fields
+        # Early in-development v2 fixtures may omit the top-level marker while
+        # serializing current dataclasses; accept either complete representation.
+        accepted_shapes = (
+            allowed_record_fields | {"evidence_id"},
+            previous_v2_record_fields | {"evidence_id"},
+            current_without_hash_kind_record_fields | {"evidence_id"},
+            record_fields | {"evidence_id"},
+            record_fields | {"_provenance_proof", "evidence_id"},
+        )
+        if not isinstance(raw, Mapping) or set(raw) not in accepted_shapes:
             raise ValueError("claim registry evidence record fields are invalid")
+        if raw.get("_provenance_proof") is not None:
+            raise ValueError("serialized evidence must not carry an in-process provenance proof")
         evidence_id = raw.get("evidence_id")
-        values = {key: raw[key] for key in record_fields}
+        values = {key: raw[key] for key in record_fields if key in raw}
         try:
             record = EvidenceRecord(**values)
             record.validate()
+            _restore_evidence_record_proof(record)
         except (TypeError, ValueError):
             raise ValueError("claim registry evidence record is invalid") from None
         if record.evidence_id != evidence_id:
@@ -464,6 +624,7 @@ def resolve_factor_source_provenance(
 
     resolved = []
     payload_hashes = set()
+    typed_hashes = []
     for evidence_id in refs:
         record = by_id.get(evidence_id)
         if record is None:
@@ -474,22 +635,48 @@ def resolve_factor_source_provenance(
             value = getattr(record, field)
             if value is not None and _utc_timestamp(value, "evidence " + field) > cutoff:
                 raise ValueError("factor evidence timestamp is after decision cutoff")
-        expected_copy = asdict(record) | {"evidence_id": record.evidence_id}
-        if dict(copied_by_id[evidence_id]) != expected_copy:
+        expected_copy = {
+            item.name: getattr(record, item.name)
+            for item in fields(record)
+            if item.name != "_provenance_proof"
+        } | {"evidence_id": record.evidence_id}
+        actual_copy = dict(copied_by_id[evidence_id])
+        if actual_copy.get("_provenance_proof") is not None:
+            raise ValueError("factor copied provenance must not contain an in-process proof")
+        actual_copy.pop("_provenance_proof", None)
+        for optional_field in _new_provenance_fields:
+            actual_copy.setdefault(optional_field, getattr(record, optional_field))
+        if registry_schema_version == 1 and "content_hash_kind" not in actual_copy:
+            expected_copy.pop("content_hash_kind")
+        if actual_copy != expected_copy:
             raise ValueError("factor copied source provenance does not match registry record")
         if record.content_hash:
             if (len(record.content_hash) != 64
                     or any(char not in "0123456789abcdef" for char in record.content_hash)):
                 raise ValueError("registry source content hash is not lowercase SHA-256")
             payload_hashes.add(record.content_hash)
+            if hash_contract_version == 4:
+                if record.content_hash_kind == "UNSPECIFIED":
+                    raise ValueError("registry source hash metadata is unclassified")
+                typed_hashes.append({
+                    "evidence_id": record.evidence_id,
+                    "sha256": record.content_hash,
+                    "kind": record.content_hash_kind,
+                })
         resolved.append(record)
 
-    supplied_hashes = subfeature.get("source_payload_hashes")
-    if (not isinstance(supplied_hashes, list)
-            or any(not isinstance(value, str) for value in supplied_hashes)
-            or len(supplied_hashes) != len(set(supplied_hashes))
-            or set(supplied_hashes) != payload_hashes):
-        raise ValueError("factor source payload hashes do not match registry source records")
+    if hash_contract_version == 4:
+        supplied_hashes = subfeature.get("source_hashes")
+        expected_hashes = sorted(typed_hashes, key=lambda item: item["evidence_id"])
+        if supplied_hashes != expected_hashes:
+            raise ValueError("factor source hash metadata does not match immutable registry records")
+    else:
+        supplied_hashes = subfeature.get("source_payload_hashes")
+        if (not isinstance(supplied_hashes, list)
+                or any(not isinstance(value, str) for value in supplied_hashes)
+                or len(supplied_hashes) != len(set(supplied_hashes))
+                or set(supplied_hashes) != payload_hashes):
+            raise ValueError("factor source payload hashes do not match registry source records")
     return tuple(resolved)
 
 
@@ -516,13 +703,13 @@ def validate_opportunity_input_snapshot(snapshot, *, expected_asset_id=None) -> 
         if "factor_assessments" in inputs:
             raise ValueError("versioned factor assessments require schema_version")
         return 1
-    if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2, 3):
+    if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2, 3, 4):
         raise ValueError("opportunity decision snapshot schema version is unsupported")
     if version == 1:
         if "factor_assessments" in inputs:
             raise ValueError("legacy schema cannot contain versioned factor assessments")
         return 1
-    if version == 3:
+    if version in (3, 4):
         registry_id = inputs.get("registry_verification_id")
         if (not isinstance(registry_id, str) or len(registry_id) != _SHA256_LENGTH
                 or any(char not in "0123456789abcdef" for char in registry_id)):
@@ -600,8 +787,8 @@ def validate_registry_bound_opportunity_input_snapshot(
     version = validate_opportunity_input_snapshot(
         snapshot, expected_asset_id=expected_asset_id,
     )
-    if version != 3:
-        raise ValueError("registry-bound source resolution requires opportunity schema version 3")
+    if version not in (3, 4):
+        raise ValueError("registry-bound source resolution requires opportunity schema version 3 or 4")
     inputs = snapshot["inputs"]
     registry_id = inputs["registry_verification_id"]
     if (not isinstance(registry_snapshot, Mapping)
@@ -615,6 +802,7 @@ def validate_registry_bound_opportunity_input_snapshot(
                 expected_registry_verification_id=registry_id,
                 expected_asset_id=inputs["asset_id"],
                 decision_cutoff_at=cutoff,
+                hash_contract_version=version,
             )
             validate_factor_claim_support(
                 factor_name=factor["factor_name"],
@@ -623,7 +811,7 @@ def validate_registry_bound_opportunity_input_snapshot(
                 registry_payload=registry_snapshot["payload"],
                 expected_asset_id=inputs["asset_id"],
             )
-    return 3
+    return version
 
 
 def _decision_digest(
@@ -795,16 +983,13 @@ class OpportunityEvaluationEngine:
                     reasons.append("OPPORTUNITY_FACTOR_OUT_OF_RANGE:" + ",".join(sorted(invalid)))
                     state = "DEFER"
                 else:
-                    score = round(sum(float(policy.weights[name]) * float(factors[name]) for name in FACTOR_NAMES), 6)
-                    if score >= policy.proceed_threshold:
-                        state = "PROCEED"
-                        reasons.append("OPPORTUNITY_SCORE_ABOVE_PROCEED_THRESHOLD")
-                    elif score >= policy.defer_threshold:
-                        state = "DEFER"
-                        reasons.append("OPPORTUNITY_SCORE_IN_DEFER_RANGE")
-                    else:
-                        state = "REJECT"
-                        reasons.append("OPPORTUNITY_SCORE_BELOW_DEFER_THRESHOLD")
+                    # A plain numeric mapping is caller-controlled input, not a
+                    # registry-bound factor assessment. It may be recorded for
+                    # diagnostics, but it must never authorize PROCEED. Until an
+                    # approved evaluator consumes a validated immutable v3/v4
+                    # assessment plus its exact ClaimRegistry, this API defers.
+                    reasons.append("REGISTRY_BOUND_FACTOR_PROVENANCE_REQUIRED")
+                    state = "DEFER"
         policy_version = policy.policy_version if policy else "UNCONFIGURED"
         factor_snapshot = {}
         factor_keys = []
@@ -848,6 +1033,9 @@ class OpportunityEvaluationEngine:
                     "duplicate_angle": duplicate_angle,
                     "materially_new": materially_new,
                     "factor_keys": factor_keys,
+                    "factor_input_trust": (
+                        "UNVERIFIED_RAW_MAPPING" if isinstance(factors, Mapping) else "MISSING"
+                    ),
                     "factors": factor_snapshot,
                 },
             },
@@ -942,12 +1130,12 @@ class OpportunityDecisionStore:
         reasons_json = json.dumps(decision.reasons, separators=(",", ":"))
         with self.connection:
             inputs = snapshot.get("inputs")
-            if isinstance(inputs, dict) and inputs.get("schema_version") == 3:
+            if isinstance(inputs, dict) and inputs.get("schema_version") in (3, 4):
                 registry = self.registry_store.load_by_verification_id(
                     inputs["registry_verification_id"],
                 )
                 if registry is None:
-                    raise ValueError("v3 opportunity decision references a missing claim registry snapshot")
+                    raise ValueError("registry-bound opportunity decision references a missing claim registry snapshot")
                 validate_registry_bound_opportunity_input_snapshot(snapshot, registry)
             existing = self.connection.execute(
                 "SELECT research_package_id, state, score, reasons_json, policy_version, input_snapshot_json "
@@ -995,12 +1183,12 @@ class OpportunityDecisionStore:
             policy_version=row[5], input_snapshot=snapshot,
         )
         inputs = snapshot.get("inputs")
-        if isinstance(inputs, dict) and inputs.get("schema_version") == 3:
+        if isinstance(inputs, dict) and inputs.get("schema_version") in (3, 4):
             registry = self.registry_store.load_by_verification_id(
                 inputs["registry_verification_id"],
             )
             if registry is None:
-                raise ValueError("v3 opportunity decision references a missing claim registry snapshot")
+                raise ValueError("registry-bound opportunity decision references a missing claim registry snapshot")
             validate_registry_bound_opportunity_input_snapshot(snapshot, registry)
         return {
             "decision_id": row[0], "research_package_id": row[1], "state": row[2],

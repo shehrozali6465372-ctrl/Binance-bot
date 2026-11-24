@@ -32,6 +32,36 @@ def _open_without_redirect(request, *, timeout: int):
     return urllib.request.build_opener(_NoRedirectHandler).open(request, timeout=timeout)
 
 
+def _read_bounded_response(response, max_response_bytes: int) -> bytes:
+    """Read a provider body incrementally without allocating beyond its byte budget."""
+    headers = getattr(response, "headers", None)
+    raw_length = headers.get("Content-Length") if headers is not None else None
+    if raw_length is None:
+        getheader = getattr(response, "getheader", None)
+        if callable(getheader):
+            raw_length = getheader("Content-Length")
+    if raw_length is not None:
+        if not isinstance(raw_length, str) or not raw_length.strip().isdigit():
+            raise ValueError("DeepSeek response has an invalid Content-Length")
+        if int(raw_length.strip()) > max_response_bytes:
+            raise ValueError("DeepSeek response exceeds the configured byte limit")
+
+    chunks: list[bytes] = []
+    total = 0
+    while total <= max_response_bytes:
+        read_size = min(65536, max_response_bytes - total + 1)
+        chunk = response.read(read_size)
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise ValueError("DeepSeek response body is not bytes")
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > max_response_bytes:
+            raise ValueError("DeepSeek response exceeds the configured byte limit")
+        chunks.append(bytes(chunk))
+    raise ValueError("DeepSeek response exceeds the configured byte limit")
+
+
 @dataclass(frozen=True)
 class DeepSeekResponse:
     text: str
@@ -55,6 +85,7 @@ class DeepSeekClient:
         temperature: float = 0.7,
         top_p: float = 1.0,
         max_tokens: int = 2048,
+        max_response_bytes: Optional[int] = None,
         base_url: str = DEFAULT_BASE_URL,
         opener=None,
         max_retries: int = 2,
@@ -68,6 +99,9 @@ class DeepSeekClient:
             raise ValueError("timeout_seconds must be a positive integer")
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
             raise ValueError("max_tokens must be a positive integer")
+        if (isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int)
+                or max_response_bytes <= 0):
+            raise ValueError("max_response_bytes must be an explicit positive integer")
         if not isinstance(temperature, (int, float)) or isinstance(temperature, bool) or not 0 <= temperature <= 2:
             raise ValueError("temperature must be between 0 and 2")
         if not isinstance(top_p, (int, float)) or isinstance(top_p, bool) or not 0 < top_p <= 1:
@@ -101,6 +135,7 @@ class DeepSeekClient:
         self.temperature = float(temperature)
         self.top_p = float(top_p)
         self.max_tokens = max_tokens
+        self.max_response_bytes = max_response_bytes
         self.base_url = base_url.rstrip("/")
         # API keys are bearer credentials; the default transport must reject
         # redirects rather than forward Authorization to another origin.
@@ -111,7 +146,9 @@ class DeepSeekClient:
         for attempt in range(self.max_retries + 1):
             try:
                 with self._opener(request, timeout=self.timeout_seconds) as response:
-                    return getattr(response, "status", 200), response.read()
+                    return getattr(response, "status", 200), _read_bounded_response(
+                        response, self.max_response_bytes,
+                    )
             except urllib.error.HTTPError as exc:
                 if exc.code in transient_http and attempt < self.max_retries:
                     delay = self.retry_backoff_seconds * (2 ** attempt)

@@ -31,6 +31,81 @@ ALLOWED_TRANSITIONS = {
 }
 
 
+def _claim_registry_material_states(announcement: AnnouncementEvidence, asset_id: str, claim_registry: Any) -> list[str]:
+    """Return only verifier-issued claim states bound to this exact announcement asset."""
+    from layer1.evidence_verification import (
+        Claim, ClaimRegistry, ClaimVerificationResult, EvidenceRecord,
+        EvidenceVerificationEngine,
+    )
+
+    if type(claim_registry) is not ClaimRegistry:
+        raise ValueError("event lifecycle requires a verifier-issued ClaimRegistry")
+    try:
+        claim_registry.assert_verifier_issued_and_unchanged()
+    except ValueError:
+        raise ValueError("event lifecycle requires a verifier-issued unchanged ClaimRegistry") from None
+
+    claims = tuple(claim_registry.claims)
+    results = tuple(claim_registry.results)
+    records = tuple(claim_registry.evidence_records)
+    if len(claims) != len(results):
+        raise ValueError("claim registry claims/results are inconsistent")
+    if any(type(record) is not EvidenceRecord for record in records):
+        raise ValueError("claim registry contains an invalid evidence record")
+    evidence_ids = [record.evidence_id for record in records]
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise ValueError("claim registry contains duplicate evidence identities")
+    available_evidence = set(evidence_ids)
+
+    state_by_claim: dict[str, str] = {}
+    for claim, result in zip(claims, results):
+        if type(claim) is not Claim or type(result) is not ClaimVerificationResult:
+            raise ValueError("claim registry contains an invalid claim/result pair")
+        claim.validate()
+        if result.claim_id != claim.claim_id or claim.claim_id in state_by_claim:
+            raise ValueError("claim registry result identity does not match its claim")
+        claim_evidence = set(claim.evidence_ids)
+        result_evidence = set(result.evidence_ids)
+        if (not claim_evidence.issubset(available_evidence)
+                or not result_evidence.issubset(claim_evidence)
+                or not set(result.supporting_evidence_ids).issubset(result_evidence)
+                or not set(result.contradicting_evidence_ids).issubset(result_evidence)):
+            raise ValueError("claim registry evidence membership is inconsistent")
+        if result.state not in VERIFIED_STATES | {"UNVERIFIED", "CONTRADICTED", "STALE"}:
+            raise ValueError("claim registry contains an unsupported verification state")
+        state_by_claim[claim.claim_id] = result.state
+
+    source_evidence = EvidenceVerificationEngine().evidence_from_announcement(announcement)
+    material_states: list[str] = []
+    material_claim_keys = {
+        "announcement.title", "announcement.event_type",
+        "announcement.asset_id", "announcement.freshness",
+    }
+    for item in source_evidence:
+        if item.claim_key not in material_claim_keys:
+            continue
+        for claim in claims:
+            if (claim.asset_id == asset_id and item.evidence_id in claim.evidence_ids
+                    and claim.claim_id in state_by_claim):
+                material_states.append(state_by_claim[claim.claim_id])
+    return material_states
+
+
+def _require_lifecycle_verification(
+    announcement: AnnouncementEvidence, verification_state: str,
+    claim_registry: Any = None,
+) -> None:
+    if verification_state not in VERIFIED_STATES:
+        return
+    if claim_registry is None:
+        raise ValueError("VERIFIED lifecycle state requires verifier-issued evidence")
+    if len(announcement.asset_ids) != 1:
+        raise ValueError("verified lifecycle observation must be scoped to exactly one asset")
+    states = _claim_registry_material_states(announcement, announcement.asset_ids[0], claim_registry)
+    if not states or not all(state in VERIFIED_STATES for state in states):
+        raise ValueError("verifier-issued claim registry does not verify this event's material claims")
+
+
 def _time(value: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("lifecycle timestamp is required")
@@ -166,14 +241,21 @@ class EventLifecycleStore:
         resolved: bool = False,
         withdrawn: bool = False,
         resolution_evidence_id: Optional[str] = None,
+        claim_registry: Any = None,
     ) -> EventLifecycleRecord:
         evidence.validate()
+        _require_lifecycle_verification(evidence, verification_state, claim_registry)
         if verification_state not in VERIFIED_STATES | {"UNVERIFIED", "CONTRADICTED", "STALE"}:
             raise ValueError("unsupported event evidence verification state")
         if not isinstance(materially_new, bool) or not isinstance(resolved, bool) or not isinstance(withdrawn, bool):
             raise ValueError("event lifecycle flags must be booleans")
         if resolved and withdrawn:
             raise ValueError("event cannot be resolved and withdrawn in the same transition")
+        if resolved or withdrawn or resolution_evidence_id is not None:
+            raise ValueError(
+                "resolution evidence and withdrawal evidence require a verifier-issued proof; "
+                "direct lifecycle flags are disabled"
+            )
         if resolved and (verification_state not in VERIFIED_STATES or not resolution_evidence_id):
             raise ValueError("resolution evidence must be explicit and verified")
         if withdrawn and (verification_state not in VERIFIED_STATES or not resolution_evidence_id):
@@ -343,16 +425,16 @@ class EventLifecycleStore:
     ) -> list[EventLifecycleRecord]:
         """Persist lifecycle observations using only Module 11's attributable verification results."""
         from dataclasses import replace
-        from layer1.evidence_verification import EvidenceVerificationEngine
+        from layer1.evidence_verification import ClaimRegistry
 
         if not isinstance(announcements, (tuple, list)):
             raise TypeError("announcements must be a finite list or tuple")
-        claims = tuple(getattr(claim_registry, "claims", ()))
-        results = tuple(getattr(claim_registry, "results", ()))
-        if len(claims) != len(results):
-            raise ValueError("claim registry claims/results are inconsistent")
-        state_by_claim = {claim.claim_id: result.state for claim, result in zip(claims, results)}
-        verifier = EvidenceVerificationEngine()
+        if type(claim_registry) is not ClaimRegistry:
+            raise ValueError("event lifecycle requires a verifier-issued ClaimRegistry")
+        try:
+            claim_registry.assert_verifier_issued_and_unchanged()
+        except ValueError:
+            raise ValueError("event lifecycle requires a verifier-issued unchanged ClaimRegistry") from None
         output = []
         for announcement in announcements:
             announcement.validate()
@@ -360,20 +442,9 @@ class EventLifecycleStore:
                 continue
             for asset_id in announcement.asset_ids:
                 single_asset = replace(announcement, asset_ids=(asset_id,))
-                source_evidence = verifier.evidence_from_announcement(single_asset)
-                material_states = []
-                for item in source_evidence:
-                    if item.claim_key not in {
-                        "announcement.title", "announcement.event_type",
-                        "announcement.asset_id", "announcement.freshness",
-                    }:
-                        continue
-                    linked_states = [
-                        state_by_claim[claim.claim_id]
-                        for claim in claims
-                        if item.evidence_id in claim.evidence_ids and claim.claim_id in state_by_claim
-                    ]
-                    material_states.extend(linked_states)
+                material_states = _claim_registry_material_states(
+                    single_asset, asset_id, claim_registry,
+                )
                 if material_states and all(state in VERIFIED_STATES for state in material_states):
                     verification_state = "VERIFIED"
                 elif "CONTRADICTED" in material_states:
@@ -396,6 +467,7 @@ class EventLifecycleStore:
                 output.append(self.observe(
                     single_asset, verification_state=verification_state,
                     materially_new=materially_new,
+                    claim_registry=claim_registry,
                 ))
         return output
 

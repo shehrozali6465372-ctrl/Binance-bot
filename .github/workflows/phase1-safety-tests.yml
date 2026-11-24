@@ -2,7 +2,7 @@ name: Phase 1 Safety Tests
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, "layer-1/**"]
   push:
     branches: [main, "phase-1/**", "layer-1/**"]
 
@@ -83,3 +83,4 @@ jobs:
           tests.test_postgres_adapter_atomicity
           tests.test_publication_postgres
           tests.test_scheduled_postgres_acceptance
+          tests.test_module4_announcement_importer_postgres

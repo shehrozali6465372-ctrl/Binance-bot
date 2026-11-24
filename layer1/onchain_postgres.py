@@ -621,22 +621,38 @@ class PostgresOnChainStore:
         return "INSERTED"
 
     def get_latest_accepted_observation(self, mapping_id: str):
-        from .onchain import OnChainObservation
-        row = self.conn.execute(
-            """SELECT payload_json FROM layer1_onchain_observations
+        from .onchain import OnChainObservation, OnChainValidationResult
+        rows = self.conn.execute(
+            """SELECT payload_json, validation_json FROM layer1_onchain_observations
                WHERE mapping_id=%s AND validation_json->>'status'='ACCEPTED'
-               ORDER BY observed_at DESC LIMIT 1""",
+               ORDER BY observed_at DESC""",
             (mapping_id,),
-        ).fetchone()
-        return OnChainObservation(**row[0]) if row else None
+        ).fetchall()
+        for payload, validation_payload in rows:
+            observation = OnChainObservation(**payload)
+            validation = OnChainValidationResult(**validation_payload)
+            if self.engine.verify_persisted_acceptance_receipt(
+                observation, validation,
+            ):
+                return observation
+        return None
 
     def get_observation(self, observation_id: str):
+        from dataclasses import replace
         from .onchain import OnChainObservation, OnChainValidationResult
         row = self.conn.execute(
             "SELECT payload_json, validation_json FROM layer1_onchain_observations WHERE observation_id=%s",
             (observation_id,),
         ).fetchone()
-        return (OnChainObservation(**row[0]), OnChainValidationResult(**row[1])) if row else None
+        if row is None:
+            return None
+        observation = OnChainObservation(**row[0])
+        validation = OnChainValidationResult(**row[1])
+        if validation.status == "ACCEPTED" and not self.engine.verify_persisted_acceptance_receipt(
+            observation, validation,
+        ):
+            validation = replace(validation, status="UNVERIFIED", reason_code="ONCHAIN_RECEIPT_INVALID", reason="persisted acceptance receipt failed authentication")
+        return observation, validation
 
     def list_verified_mappings(self, network_id: Optional[str] = None):
         from .onchain import OnChainAssetMapping

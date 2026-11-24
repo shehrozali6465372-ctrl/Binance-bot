@@ -18,6 +18,56 @@ def _digest(payload: Any) -> str:
     ).hexdigest()
 
 
+_EDITORIAL_BRIEF_CONTENT_FIELDS = frozenset({
+    "event_id", "angle_id", "research_package_id", "research_question",
+    "format", "angle", "audience", "tone", "min_words", "max_words",
+    "outline", "approved_claim_ids", "prohibited_claims", "uncertainty_notes",
+    "status", "policy_version",
+})
+_EDITORIAL_BRIEF_IDENTITY_FIELDS = frozenset({"brief_id", "version", "brief_hash"})
+
+
+def is_editorial_brief_payload(payload: Any) -> bool:
+    return isinstance(payload, dict) and _EDITORIAL_BRIEF_CONTENT_FIELDS.issubset(payload)
+
+
+def editorial_brief_payload_hash(payload: dict[str, Any]) -> str:
+    """Hash typed brief content or the complete canonical legacy JSON object."""
+    if not isinstance(payload, dict):
+        raise ValueError("editorial brief payload must be an object")
+    if is_editorial_brief_payload(payload):
+        canonical = {
+            key: value for key, value in payload.items()
+            if key not in _EDITORIAL_BRIEF_IDENTITY_FIELDS
+        }
+        return _digest(canonical)
+    try:
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError("editorial brief payload must be finite JSON data") from None
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def editorial_brief_approved_claim_ids(payload: dict[str, Any]) -> tuple[str, ...]:
+    """Validate a persisted READY brief and return its exact claim allowlist."""
+    if not is_editorial_brief_payload(payload):
+        raise ValueError("editorial brief payload schema is incomplete")
+    if (payload.get("status") != "READY"
+            or payload.get("brief_hash") != editorial_brief_payload_hash(payload)):
+        raise ValueError("editorial brief payload hash or READY status is invalid")
+    values = payload.get("approved_claim_ids")
+    if (not isinstance(values, (list, tuple)) or not values
+            or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                   for value in values)):
+        raise ValueError("editorial brief approved-claim allowlist is invalid")
+    if len(set(values)) != len(values):
+        raise ValueError("editorial brief approved-claim allowlist contains duplicates")
+    return tuple(sorted(values))
+
+
 def _render_untrusted_field(value: Any) -> str:
     """Keep source/config text on one line and neutralize brief delimiters."""
     text = str(value)
@@ -109,13 +159,20 @@ class EditorialBriefStore:
     def save(self, brief: EditorialBrief) -> EditorialBrief:
         if brief.status != "READY":
             raise ValueError("only a READY editorial brief may be persisted")
+        payload = asdict(brief)
+        if editorial_brief_payload_hash(payload) != brief.brief_hash:
+            raise ValueError("editorial brief hash does not match canonical brief payload")
         with self.connection:
             existing = self.connection.execute(
-                "SELECT version, brief_id FROM editorial_brief_versions "
+                "SELECT version, brief_id, payload_json FROM editorial_brief_versions "
                 "WHERE event_id=? AND angle_id=? AND brief_hash=?",
                 (brief.event_id, brief.angle_id, brief.brief_hash),
             ).fetchone()
             if existing:
+                stored_payload = json.loads(existing[2])
+                if (editorial_brief_payload_hash(stored_payload) != brief.brief_hash
+                        or stored_payload.get("brief_hash") != brief.brief_hash):
+                    raise ValueError("stored editorial brief hash does not match canonical brief payload")
                 return replace(brief, version=existing[0], brief_id=existing[1])
             current = self.connection.execute(
                 "SELECT COALESCE(MAX(version),0) FROM editorial_brief_versions "

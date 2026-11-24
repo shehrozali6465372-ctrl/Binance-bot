@@ -6,9 +6,9 @@ import warnings
 from unittest import mock
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
-from layer1.visual_quality import VisualQualityEngine
+from layer1.visual_quality import FONT_REGISTRY, VisualQualityEngine
 
 
 class VisualQualityEngineTests(unittest.TestCase):
@@ -16,14 +16,42 @@ class VisualQualityEngineTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.image_path = Path(self.tmp.name) / "asset.png"
         self.sidecar = Path(str(self.image_path) + ".json")
-        Image.new("RGB", (1080, 1350), "navy").save(self.image_path, format="PNG")
         self.draft = "$ABC has an update. #ABC #Write2Earn"
         self.symbol = "ABC"
         self.asset_id = "coingecko:abc"
+        self.font_path = FONT_REGISTRY["LIBERATION_SANS_BOLD"]
+        self.font_sha256 = hashlib.sha256(self.font_path.read_bytes()).hexdigest()
+        self.overlay_items = []
+        self._render_valid_image()
         self._write_sidecar()
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def _render_valid_image(self, *, shift=0):
+        canvas = Image.new("RGB", (1080, 1350), (15, 20, 30))
+        draw = ImageDraw.Draw(canvas)
+        draw.rectangle((0, 960, 1080, 1350), fill=(5, 12, 24))
+        items = []
+        for text_value, size, y, fill in (
+            ("MARKET UPDATE", 42, 1020, (170, 195, 225)),
+            ("$ABC", 82, 1080, (255, 255, 255)),
+        ):
+            font = ImageFont.truetype(str(self.font_path), size)
+            bounds = draw.textbbox((0, 0), text_value, font=font)
+            x = (1080 - (bounds[2] - bounds[0])) // 2 + shift
+            draw.text((x, y), text_value, font=font, fill=fill)
+            items.append({
+                "text": text_value,
+                "bbox": list(draw.textbbox((x, y), text_value, font=font)),
+                "origin_xy": [x, y],
+                "font_id": "LIBERATION_SANS_BOLD",
+                "font_sha256": self.font_sha256,
+                "font_size_px": size,
+                "fill_rgb": list(fill),
+            })
+        canvas.save(self.image_path, format="PNG")
+        self.overlay_items = items
 
     def _write_sidecar(self, **overrides):
         image_bytes = self.image_path.read_bytes()
@@ -46,12 +74,7 @@ class VisualQualityEngineTests(unittest.TestCase):
                     "bbox": [0, 960, 1080, 1350],
                     "fill_rgba": [5, 12, 24, 190],
                 },
-                "items": [
-                    {"text": "MARKET UPDATE", "bbox": [350, 1020, 730, 1060],
-                     "font_size_px": 42, "fill_rgb": [170, 195, 225]},
-                    {"text": "$ABC", "bbox": [400, 1080, 680, 1170],
-                     "font_size_px": 82, "fill_rgb": [255, 255, 255]},
-                ],
+                "items": self.overlay_items,
             },
             "chart_data_refs": [],
             "numeric_overlays": [],
@@ -68,6 +91,60 @@ class VisualQualityEngineTests(unittest.TestCase):
         self.assertEqual(result.reasons, ())
         self.assertEqual((result.width, result.height), (1080, 1350))
 
+
+
+    def test_blank_image_with_matching_sidecar_hash_is_rejected(self):
+        # The sidecar is regenerated after blanking, so the image/hash pair is
+        # internally consistent. QA must still prove the claimed text pixels exist.
+        Image.new("RGB", (1080, 1350), "navy").save(self.image_path, format="PNG")
+        self._write_sidecar()
+        result = VisualQualityEngine().validate(
+            self.image_path, draft_content=self.draft,
+            symbol=self.symbol, asset_id=self.asset_id,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("TEXT_PIXELS_MISSING_OR_TAMPERED", result.reasons)
+
+
+    def test_shifted_text_pixels_are_rejected_even_when_sidecar_hash_matches(self):
+        original_items = self.overlay_items
+        self._render_valid_image(shift=40)
+        self.overlay_items = original_items
+        self._write_sidecar()
+        result = VisualQualityEngine().validate(
+            self.image_path, draft_content=self.draft,
+            symbol=self.symbol, asset_id=self.asset_id,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("TEXT_PIXELS_MISSING_OR_TAMPERED", result.reasons)
+
+
+    def test_solid_fill_rectangles_do_not_substitute_for_rendered_glyph_shapes(self):
+        from PIL import ImageDraw
+        image = Image.open(self.image_path).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        for item in self.overlay_items:
+            draw.rectangle(tuple(item["bbox"]), fill=tuple(item["fill_rgb"]))
+        image.save(self.image_path, format="PNG")
+        self._write_sidecar()
+        result = VisualQualityEngine().validate(
+            self.image_path, draft_content=self.draft,
+            symbol=self.symbol, asset_id=self.asset_id,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("TEXT_PIXEL_SHAPE_NOT_REPRODUCED", result.reasons)
+
+    def test_unapproved_or_changed_font_fingerprint_fails_closed(self):
+        changed_items = [dict(item) for item in self.overlay_items]
+        changed_items[0]["font_sha256"] = "0" * 64
+        self.overlay_items = changed_items
+        self._write_sidecar()
+        result = VisualQualityEngine().validate(
+            self.image_path, draft_content=self.draft,
+            symbol=self.symbol, asset_id=self.asset_id,
+        )
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("TEXT_FONT_HASH_MISMATCH", result.reasons)
 
     def test_png_bytes_with_non_png_filename_are_rejected(self):
         mismatched_path = Path(self.tmp.name) / "asset.jpg"

@@ -45,9 +45,24 @@ class FakeConnection:
 
 class EventBindingConnection:
     def execute(self, query, params):
+        from layer1.editorial_strategy import editorial_brief_payload_hash
+        payload = {
+            "event_id": "event-1", "angle_id": "angle-1",
+            "research_package_id": "research-1", "research_question": "Explain ABC",
+            "format": "MARKET_MOVEMENT_EXPLAINER", "angle": "Verified facts only",
+            "audience": "readers", "tone": "cautious", "min_words": 20,
+            "max_words": 120, "outline": ["State facts"],
+            "approved_claim_ids": ["a" * 64], "prohibited_claims": [],
+            "uncertainty_notes": [], "status": "READY", "policy_version": "test-v1",
+            "brief_id": "pending", "version": 1, "brief_hash": "0" * 64,
+        }
+        payload["brief_hash"] = editorial_brief_payload_hash(payload)
         class Cursor:
             def fetchone(self):
-                return {"event_id": "event-1", "research_package_id": "research-1"}
+                return {
+                    "event_id": "event-1", "research_package_id": "research-1",
+                    "payload_json": payload,
+                }
         return Cursor()
 
 
@@ -151,7 +166,7 @@ class PostgresRuntimeAdapterTests(unittest.TestCase):
         authorization = type("Authorization", (), {
             "editorial_brief_id": "brief-1", "event_id": "event-1",
             "research_package_id": "research-1", "event_state": "NO_EVENT",
-            "asset_id": "coingecko:abc",
+            "asset_id": "coingecko:abc", "approved_claim_ids": ("a" * 64,),
         })()
         engine = PostgresPublicationAuthorizationEngine(EventBindingStore({
             "asset_id": "coingecko:abc", "state": "WITHDRAWN",

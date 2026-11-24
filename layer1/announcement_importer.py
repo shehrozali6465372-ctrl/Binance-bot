@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from layer1.foundation import AnnouncementEvidence
+from layer1.source_receipts import load_cms_source_receipt_config_from_env, verify_source_ingestion_receipt
 
 # Ticker matching is deliberately conservative: only uppercase symbols in
 # parentheses are accepted. Free-standing words are too ambiguous for identity.
@@ -19,11 +20,13 @@ _CANONICAL_ASSET_ID = re.compile(r"^coingecko:[a-z0-9-]+$")
 
 RECENT_ANNOUNCEMENTS_SQL = """
 SELECT source_id, content_hash, event_type, title, body, publisher,
-       source_url, published_at, observed_at
+       source_url, published_at, observed_at, catalog_id, catalog_name,
+       disclaimer, ingestion_receipt
 FROM (
     SELECT DISTINCT ON (source_id)
            source_id, content_hash, event_type, title, body, publisher,
-           source_url, published_at, observed_at, inserted_at
+           source_url, published_at, observed_at, catalog_id, catalog_name,
+           disclaimer, ingestion_receipt, inserted_at
     FROM binance_announcement_events
     WHERE published_at >= %s
       AND published_at <= %s
@@ -48,7 +51,7 @@ def _iso_utc(value: Any, field: str) -> str:
         raise ValueError(f"{field} is not a timestamp")
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field} must include a timezone")
-    return parsed.astimezone(timezone.utc).isoformat()
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _candidate_symbol_index(candidates: Sequence[Any]) -> tuple[dict[str, str], set[str]]:
@@ -88,6 +91,8 @@ def import_recent_binance_announcements(
     now: datetime | None = None,
     lookback_days: int = 7,
     max_rows: int = 250,
+    receipt_verification_keys: Mapping[str, bytes] | None = None,
+    trusted_receipt_key_ids: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Read recent CMS rows and persist only unambiguous candidate-linked evidence.
 
@@ -113,12 +118,17 @@ def import_recent_binance_announcements(
             raise RuntimeError("psycopg is required when ANNOUNCEMENT_DATABASE_URL is configured") from exc
         connect_factory = psycopg.connect
 
+    if receipt_verification_keys is None and trusted_receipt_key_ids is None:
+        receipt_verification_keys, trusted_receipt_key_ids = load_cms_source_receipt_config_from_env()
+    elif receipt_verification_keys is None or trusted_receipt_key_ids is None:
+        raise ValueError("CMS receipt verification keys and trusted key IDs must be supplied together")
     symbol_index, ambiguous_symbols = _candidate_symbol_index(candidates)
     result = {
         "rows_read": 0,
         "evidence_saved": 0,
         "unmatched_rows": 0,
         "invalid_rows": 0,
+        "untrusted_rows": 0,
         "ambiguous_symbols": sorted(ambiguous_symbols),
         "by_asset_id": defaultdict(list),
     }
@@ -143,7 +153,8 @@ def import_recent_binance_announcements(
             try:
                 (
                     source_id, content_hash, event_type, title, body, publisher,
-                    source_url, published_at, observed_at,
+                    source_url, published_at, observed_at, catalog_id, catalog_name,
+                    disclaimer, ingestion_receipt,
                 ) = row
                 if not all(isinstance(value, str) and value.strip() for value in (
                     source_id, content_hash, event_type, title, publisher, source_url
@@ -159,6 +170,37 @@ def import_recent_binance_announcements(
                 title = title.strip()
                 publisher = publisher.strip()
                 source_url = source_url.strip()
+                catalog_id = catalog_id.strip() if isinstance(catalog_id, str) else str(catalog_id)
+                if not isinstance(catalog_name, str) or not isinstance(disclaimer, str):
+                    raise ValueError("announcement catalog name or disclaimer is invalid")
+                catalog_name = catalog_name.strip()
+                published_at_utc = _iso_utc(published_at, "published_at")
+                observed_at_utc = _iso_utc(observed_at, "observed_at")
+                receipt_payload = {
+                    "authority_id": "binance_announcement_cms",
+                    "schema_version": "cms-announcement-normalized-v1",
+                    "topic": "com_announcement_en",
+                    "catalog_id": catalog_id,
+                    "source_id": source_id,
+                    "content_hash": content_hash,
+                    "catalog_name": catalog_name,
+                    "event_type": event_type,
+                    "title": title,
+                    "body": body,
+                    "disclaimer": disclaimer,
+                    "publisher": publisher,
+                    "source_url": source_url,
+                    "published_at": published_at_utc,
+                    "observed_at": observed_at_utc,
+                }
+                if not verify_source_ingestion_receipt(
+                    ingestion_receipt, receipt_payload,
+                    verification_keys=receipt_verification_keys,
+                    expected_authority_id="binance_announcement_cms",
+                    trusted_key_ids=trusted_receipt_key_ids,
+                ):
+                    result["untrusted_rows"] += 1
+                    continue
                 asset_ids = _matched_asset_ids(title, body, symbol_index, ambiguous_symbols)
                 if not asset_ids:
                     result["unmatched_rows"] += 1
@@ -169,8 +211,8 @@ def import_recent_binance_announcements(
                     publisher=publisher,
                     event_type=event_type,
                     title=title,
-                    published_at=_iso_utc(published_at, "published_at"),
-                    observed_at=_iso_utc(observed_at, "observed_at"),
+                    published_at=published_at_utc,
+                    observed_at=observed_at_utc,
                     asset_ids=asset_ids,
                     content_hash=content_hash,
                     body=body,

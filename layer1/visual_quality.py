@@ -8,12 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_DECODED_IMAGE_PIXELS = 2_000_000
+FONT_REGISTRY = {
+    "LIBERATION_SANS_BOLD": Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+}
 
 
 def _valid_int_vector(value: Any, length: int, low: int = 0, high: int = 255) -> bool:
@@ -47,9 +50,70 @@ def _contrast_ratio(foreground: tuple[int, int, int] | list[int],
     return (first + 0.05) / (second + 0.05)
 
 
-def _validate_visual_overlay(
-    overlay: Any, expected_labels: tuple[str, str], width: int, height: int,
+def _validate_rendered_text_pixels(
+    image: Image.Image, item: dict[str, Any], expected_text: str,
 ) -> tuple[str, ...]:
+    """Re-render the declared glyphs and prove their pixels exist in the final PNG."""
+    reasons: list[str] = []
+    font_id = item.get("font_id")
+    font_path = FONT_REGISTRY.get(font_id) if isinstance(font_id, str) else None
+    if font_path is None or not font_path.is_file():
+        return ("TEXT_FONT_UNAVAILABLE_OR_UNAPPROVED",)
+    try:
+        font_bytes = font_path.read_bytes()
+    except OSError:
+        return ("TEXT_FONT_UNAVAILABLE_OR_UNAPPROVED",)
+    expected_font_hash = hashlib.sha256(font_bytes).hexdigest()
+    if item.get("font_sha256") != expected_font_hash:
+        reasons.append("TEXT_FONT_HASH_MISMATCH")
+
+    font_size = item.get("font_size_px")
+    origin = item.get("origin_xy")
+    fill = item.get("fill_rgb")
+    box = item.get("bbox")
+    if (
+        isinstance(font_size, bool) or not isinstance(font_size, int) or font_size < 28
+        or not _valid_int_vector(origin, 2, 0, max(image.size))
+        or not _valid_int_vector(fill, 3)
+        or not _valid_int_vector(box, 4, 0, max(image.size))
+    ):
+        return tuple(sorted(set(reasons + ["TEXT_OVERLAY_PIXEL_PROOF_METADATA_INVALID"])))
+    try:
+        font = ImageFont.truetype(str(font_path), font_size)
+        mask = Image.new("L", image.size, 0)
+        mask_draw = ImageDraw.Draw(mask)
+        expected_box = mask_draw.textbbox(tuple(origin), expected_text, font=font)
+        if tuple(box) != tuple(expected_box):
+            reasons.append("TEXT_OVERLAY_GEOMETRY_MISMATCH")
+        mask_draw.text(tuple(origin), expected_text, font=font, fill=255)
+        glyph_mask = mask.crop(tuple(box))
+        image_crop = image.crop(tuple(box)).convert("RGB")
+        mask_values = list(glyph_mask.get_flattened_data())
+        actual_pixels = list(image_crop.get_flattened_data())
+    except (OSError, ValueError, TypeError):
+        return tuple(sorted(set(reasons + ["TEXT_OVERLAY_PIXEL_PROOF_UNAVAILABLE"])))
+
+    core_indexes = [index for index, coverage in enumerate(mask_values) if coverage >= 220]
+    outside_indexes = [index for index, coverage in enumerate(mask_values) if coverage == 0]
+    if len(core_indexes) < max(20, len(expected_text) * 2) or not outside_indexes:
+        return tuple(sorted(set(reasons + ["TEXT_OVERLAY_PIXEL_PROOF_UNAVAILABLE"])))
+
+    def matches_fill(pixel):
+        return max(abs(int(pixel[channel]) - fill[channel]) for channel in range(3)) <= 24
+
+    core_matches = sum(1 for index in core_indexes if matches_fill(actual_pixels[index]))
+    outside_matches = sum(1 for index in outside_indexes if matches_fill(actual_pixels[index]))
+    if core_matches / len(core_indexes) < 0.90:
+        reasons.append("TEXT_PIXELS_MISSING_OR_TAMPERED")
+    if outside_matches / len(outside_indexes) > 0.05:
+        reasons.append("TEXT_PIXEL_SHAPE_NOT_REPRODUCED")
+    return tuple(sorted(set(reasons)))
+
+
+def _validate_visual_overlay(
+    overlay: Any, expected_labels: tuple[str, str], image: Image.Image | None,
+) -> tuple[str, ...]:
+    width, height = image.size if image is not None else (0, 0)
     reasons: list[str] = []
     if not isinstance(overlay, dict):
         return ("TEXT_OVERLAY_GEOMETRY_MISSING_OR_INVALID",)
@@ -109,6 +173,11 @@ def _validate_visual_overlay(
         elif _contrast_ratio(text_fill, worst_case_background) < 4.5:
             reasons.append("TEXT_OVERLAY_CONTRAST_INSUFFICIENT")
 
+        if image is None:
+            reasons.append("IMAGE_PIXEL_DATA_UNAVAILABLE")
+        else:
+            reasons.extend(_validate_rendered_text_pixels(image, item, expected_labels[index]))
+
     if len(boxes) == 2:
         first, second = boxes
         horizontal_overlap = max(first[0], second[0]) < min(first[2], second[2])
@@ -127,7 +196,7 @@ class VisualValidationResult:
     width: int
     height: int
     byte_length: int
-    validation_version: str = "visual-quality-v2"
+    validation_version: str = "visual-quality-v3"
 
 
 class VisualQualityEngine:
@@ -159,6 +228,7 @@ class VisualQualityEngine:
         image_hash = ""
         width = height = byte_length = 0
         metadata: dict[str, Any] = {}
+        decoded_image: Image.Image | None = None
         try:
             # Read at most the configured limit plus one byte. Decode and hash
             # this same snapshot so a replaced path cannot change the validated
@@ -186,6 +256,7 @@ class VisualQualityEngine:
                                 reasons.append("FINAL_IMAGE_MUST_BE_PNG")
                             if path.suffix.lower() != ".png":
                                 reasons.append("FINAL_IMAGE_EXTENSION_MISMATCH")
+                            decoded_image = image.convert("RGB")
         except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
             reasons.append("IMAGE_MISSING_OR_UNDECODABLE")
         try:
@@ -228,7 +299,7 @@ class VisualQualityEngine:
             if tuple(metadata.get("rendered_labels") or ()) != expected_labels:
                 reasons.append("UNEXPECTED_OR_UNPROVEN_TEXT_OVERLAY")
             reasons.extend(_validate_visual_overlay(
-                metadata.get("visual_overlay"), expected_labels, width, height,
+                metadata.get("visual_overlay"), expected_labels, decoded_image,
             ))
             if metadata.get("chart_data_refs") not in ([], None):
                 reasons.append("UNSOURCED_CHART_DATA_REFERENCE")

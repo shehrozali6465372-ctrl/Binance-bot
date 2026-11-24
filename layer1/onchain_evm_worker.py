@@ -10,9 +10,13 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from .onchain import OnChainAssetMapping, OnChainStore
-from .onchain_ingestion import OnChainIngestionStore, normalize_evm_transfer_log
+from .onchain import OnChainAssetMapping
+from .onchain_ingestion import normalize_evm_transfer_log
 from .onchain_providers import EvmTokenTransferLog, ProviderTransportError, retry_provider_operation
+from .onchain_protocols import (
+    OnChainIngestionStoreProtocol, OnChainMappingStoreProtocol,
+    require_ingestion_store, require_mapping_store,
+)
 
 
 EVM_NETWORKS = {
@@ -29,8 +33,8 @@ class EvmTransferIngestionWorker:
     def __init__(
         self,
         provider,
-        mapping_store: OnChainStore,
-        ingestion_store: OnChainIngestionStore,
+        mapping_store: OnChainMappingStoreProtocol,
+        ingestion_store: OnChainIngestionStoreProtocol,
         *,
         start_blocks: dict[str, int],
         max_blocks_per_run: int,
@@ -39,8 +43,8 @@ class EvmTransferIngestionWorker:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
-        if not isinstance(mapping_store, OnChainStore) or not isinstance(ingestion_store, OnChainIngestionStore):
-            raise ValueError("worker requires the existing on-chain mapping and ingestion stores")
+        require_mapping_store(mapping_store)
+        require_ingestion_store(ingestion_store)
         if not isinstance(start_blocks, dict) or not start_blocks:
             raise ValueError("explicit start_blocks are required for each verified mapping")
         for mapping_id, height in start_blocks.items():

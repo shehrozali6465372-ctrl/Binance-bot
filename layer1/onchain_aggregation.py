@@ -16,8 +16,12 @@ from decimal import Decimal, InvalidOperation, localcontext
 from typing import Iterable, Mapping, Optional
 
 from .foundation import BinanceListingEligibilityEngine, EligibilityDecision
-from .onchain import NETWORK_PROVIDERS, OnChainAssetMapping, OnChainStore, _parse_timestamp
-from .onchain_ingestion import NormalizedTransferEvent, OnChainIngestionStore
+from .onchain import NETWORK_PROVIDERS, OnChainAssetMapping, _parse_timestamp
+from .onchain_ingestion import NormalizedTransferEvent
+from .onchain_protocols import (
+    OnChainIngestionStoreProtocol, OnChainMappingStoreProtocol,
+    require_ingestion_store, require_mapping_store,
+)
 
 
 @dataclass(frozen=True)
@@ -78,14 +82,13 @@ class OnChainTransferAggregator:
 
     def __init__(
         self,
-        mapping_store: OnChainStore,
+        mapping_store: OnChainMappingStoreProtocol,
         *,
         minimum_amount_by_mapping: Mapping[str, str | int | Decimal],
         eligibility_max_age_seconds: int = 300,
         identity_proof_max_age_seconds: int = 900,
     ):
-        if not isinstance(mapping_store, OnChainStore):
-            raise ValueError("mapping_store must be the verified OnChainStore")
+        require_mapping_store(mapping_store)
         if (isinstance(eligibility_max_age_seconds, bool)
                 or not isinstance(eligibility_max_age_seconds, int)
                 or eligibility_max_age_seconds <= 0
@@ -120,7 +123,7 @@ class OnChainTransferAggregator:
             raise ValueError("threshold configuration must exactly cover verified mappings: " + "; ".join(details))
         self.mapping_store = mapping_store
         self.minimum_amount_by_mapping = thresholds
-        self._ingestion_store: Optional[OnChainIngestionStore] = None
+        self._ingestion_store: Optional[OnChainIngestionStoreProtocol] = None
         self.eligibility_max_age_seconds = eligibility_max_age_seconds
         self.identity_proof_max_age_seconds = identity_proof_max_age_seconds
 
@@ -194,10 +197,9 @@ class OnChainTransferAggregator:
             event.canonical_status,
         )
 
-    def bind_ingestion_store(self, ingestion_store: OnChainIngestionStore) -> None:
+    def bind_ingestion_store(self, ingestion_store: OnChainIngestionStoreProtocol) -> None:
         """Bind the canonical block journal required to verify each event's hash."""
-        if not isinstance(ingestion_store, OnChainIngestionStore):
-            raise ValueError("ingestion_store must be the canonical OnChainIngestionStore")
+        require_ingestion_store(ingestion_store)
         self._ingestion_store = ingestion_store
 
     def aggregate(
@@ -208,7 +210,7 @@ class OnChainTransferAggregator:
         now: Optional[datetime] = None,
     ) -> TransferAggregationResult:
         current = self._now(now)
-        if not isinstance(self._ingestion_store, OnChainIngestionStore):
+        if self._ingestion_store is None:
             raise ValueError("canonical ingestion store must be bound before aggregation")
         if not isinstance(eligibility_by_asset, Mapping):
             raise ValueError("current Binance eligibility decisions must be supplied by canonical asset ID")
@@ -399,13 +401,12 @@ class OnChainTransferAggregator:
 
     def aggregate_store(
         self,
-        ingestion_store: OnChainIngestionStore,
+        ingestion_store: OnChainIngestionStoreProtocol,
         eligibility_by_asset: Mapping[str, EligibilityDecision],
         *,
         now: Optional[datetime] = None,
     ) -> TransferAggregationResult:
-        if not isinstance(ingestion_store, OnChainIngestionStore):
-            raise ValueError("ingestion_store must be the canonical OnChainIngestionStore")
+        require_ingestion_store(ingestion_store)
         self._ingestion_store = ingestion_store
         return self.aggregate(
             ingestion_store.list_all_events(canonical_only=True),

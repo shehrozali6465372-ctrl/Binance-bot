@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from layer1.event_lifecycle import EventLifecycleStore
 from layer1.foundation import AnnouncementEvidence, Layer1Store
+from tests.event_lifecycle_fixtures import test_receipted_announcement_registry
 
 
 def iso(delta=0):
@@ -37,6 +38,13 @@ class EventLifecycleStoreTests(unittest.TestCase):
         self.db.close()
         self.tmp.cleanup()
 
+    def observe_verified(self, announcement):
+        registry = test_receipted_announcement_registry(announcement)
+        records = self.store.sync_announcements([announcement], registry)
+        if len(records) != 1:
+            raise AssertionError("single-asset verified test observation must produce exactly one record")
+        return records[0]
+
     def test_event_lifecycle_store_can_own_a_separate_sqlite_connection(self):
         import sqlite3
         connection = sqlite3.connect(":memory:")
@@ -57,7 +65,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             title="Binance announces ABC Launchpool",
             event_type="launch",
         )
-        first = self.store.observe(first_evidence, verification_state="VERIFIED")
+        first = self.observe_verified(first_evidence)
         second = self.store.observe(second_evidence, verification_state="UNVERIFIED")
 
         self.assertEqual(first.asset_id, second.asset_id)
@@ -100,40 +108,43 @@ class EventLifecycleStoreTests(unittest.TestCase):
     def test_verified_evidence_confirms_and_duplicate_does_not_add_transition(self):
         item = evidence()
         first = self.store.observe(item, verification_state="UNVERIFIED")
-        confirmed = self.store.observe(item, verification_state="VERIFIED")
-        again = self.store.observe(item, verification_state="VERIFIED")
+        confirmed = self.observe_verified(item)
+        again = self.observe_verified(item)
         self.assertEqual(confirmed.event_id, first.event_id)
         self.assertEqual(again.state, "CONFIRMED")
         self.assertEqual([row["to_state"] for row in self.store.history(first.event_id)],
                          ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED"])
 
     def test_material_new_revision_moves_confirmed_event_to_developing(self):
-        self.store.observe(evidence("a"), verification_state="VERIFIED")
-        updated = evidence("b", published=-300, updated=-60)
-        record = self.store.observe(
-            updated, verification_state="CORROBORATED", materially_new=True,
+        self.observe_verified(evidence("a"))
+        from dataclasses import replace
+        updated = replace(
+            evidence("b", published=-300, updated=-60),
+            title="Binance updates ABC Spot listing schedule",
+            body="Trading will begin at 09:00 UTC instead of 08:00 UTC.",
         )
+        record = self.observe_verified(updated)
         self.assertEqual(record.state, "DEVELOPING")
         self.assertEqual(len(self.store.history(record.event_id)), 4)
 
     def test_non_material_revision_does_not_mark_event_developing(self):
-        first = self.store.observe(evidence("a"), verification_state="VERIFIED")
-        record = self.store.observe(
-            evidence("b", published=-300, updated=-60),
-            verification_state="VERIFIED", materially_new=False,
-        )
+        first = self.observe_verified(evidence("a"))
+        record = self.observe_verified(evidence("b", published=-300, updated=-60))
         self.assertEqual(record.event_id, first.event_id)
         self.assertEqual(record.state, "CONFIRMED")
 
     def test_contradicted_event_is_disputed_and_only_material_new_evidence_reopens(self):
         first = self.store.observe(evidence("a"), verification_state="CONTRADICTED")
         self.assertEqual(first.state, "DISPUTED")
-        duplicate = self.store.observe(evidence("a"), verification_state="VERIFIED")
+        duplicate = self.observe_verified(evidence("a"))
         self.assertEqual(duplicate.state, "DISPUTED")
-        reopened = self.store.observe(
+        from dataclasses import replace
+        materially_new = replace(
             evidence("b", published=-300, updated=-30),
-            verification_state="VERIFIED", materially_new=True,
+            title="Binance changes ABC listing schedule",
+            body="Trading starts at 10:00 UTC.",
         )
+        reopened = self.observe_verified(materially_new)
         self.assertEqual(reopened.state, "CONFIRMED")
         self.assertEqual(
             [row["to_state"] for row in self.store.history(first.event_id)],
@@ -141,45 +152,75 @@ class EventLifecycleStoreTests(unittest.TestCase):
              "UNDER_VERIFICATION", "CONFIRMED"],
         )
 
-    def test_resolution_requires_explicit_verified_evidence(self):
-        with self.assertRaisesRegex(ValueError, "resolution evidence"):
+    def test_direct_api_rejects_caller_asserted_verified_state(self):
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
+            self.store.observe(evidence(), verification_state="VERIFIED")
+
+    def test_sync_rejects_manually_reconstructed_claim_registry(self):
+        from layer1.evidence_verification import ClaimRegistry
+
+        item = evidence()
+        trusted = test_receipted_announcement_registry(item)
+        forged = ClaimRegistry(
+            claims=trusted.claims, evidence_records=trusted.evidence_records,
+            results=trusted.results, unresolved_issues=trusted.unresolved_issues,
+        )
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
+            self.store.sync_announcements([item], forged)
+
+    def test_sync_rejects_claim_registry_mutated_after_verification(self):
+        from dataclasses import replace
+
+        item = evidence()
+        registry = test_receipted_announcement_registry(item)
+        altered = (replace(registry.results[0], state="CONTRADICTED"),) + registry.results[1:]
+        object.__setattr__(registry, "results", altered)
+        with self.assertRaisesRegex(ValueError, "unchanged"):
+            self.store.sync_announcements([item], registry)
+
+    def test_direct_api_rejects_caller_asserted_resolution_and_withdrawal_evidence(self):
+        for transition in (
+            {"resolved": True, "resolution_evidence_id": "evidence:forged-resolution"},
+            {"withdrawn": True, "resolution_evidence_id": "evidence:forged-withdrawal"},
+        ):
+            with self.subTest(transition=transition):
+                with self.assertRaisesRegex(ValueError, "verifier-issued"):
+                    self.store.observe(evidence(), verification_state="VERIFIED", **transition)
+
+    def test_resolution_requires_verifier_issued_evidence_not_caller_string(self):
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
+            self.store.observe(evidence(), verification_state="VERIFIED", resolved=True)
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
             self.store.observe(
                 evidence(), verification_state="VERIFIED", resolved=True,
+                resolution_evidence_id="evidence:resolution-1",
             )
-        record = self.store.observe(
-            evidence(), verification_state="VERIFIED", resolved=True,
-            resolution_evidence_id="evidence:resolution-1",
-        )
-        self.assertEqual(record.state, "RESOLVED")
 
-    def test_disputed_event_can_only_resolve_with_explicit_verified_resolution_evidence(self):
+    def test_disputed_event_cannot_be_resolved_by_caller_asserted_evidence_id(self):
         disputed = self.store.observe(evidence("a"), verification_state="CONTRADICTED")
-        with self.assertRaisesRegex(ValueError, "resolution evidence"):
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
             self.store.observe(
-                evidence("b"), verification_state="VERIFIED", resolved=True,
+                evidence("c"), verification_state="VERIFIED", resolved=True,
+                resolution_evidence_id="evidence:independent-resolution",
             )
-        resolved = self.store.observe(
-            evidence("c"), verification_state="VERIFIED", resolved=True,
-            resolution_evidence_id="evidence:independent-resolution",
-        )
-        self.assertEqual(resolved.event_id, disputed.event_id)
-        self.assertEqual(resolved.state, "RESOLVED")
+        current = self.store.get(disputed.event_id)
+        self.assertEqual(current.state, "DISPUTED")
 
-    def test_withdrawal_requires_explicit_verified_evidence(self):
-        with self.assertRaisesRegex(ValueError, "withdrawal evidence"):
+    def test_withdrawal_requires_verifier_issued_evidence_not_caller_string(self):
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
             self.store.observe(evidence(), verification_state="VERIFIED", withdrawn=True)
-        record = self.store.observe(
-            evidence(), verification_state="VERIFIED", withdrawn=True,
-            resolution_evidence_id="evidence:withdrawal-1",
-        )
-        self.assertEqual(record.state, "WITHDRAWN")
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
+            self.store.observe(
+                evidence(), verification_state="VERIFIED", withdrawn=True,
+                resolution_evidence_id="evidence:withdrawal-1",
+            )
 
     def test_stale_event_is_explicitly_marked_and_cannot_be_reopened_by_old_source(self):
         old = evidence()
-        record = self.store.observe(old, verification_state="VERIFIED")
+        record = self.observe_verified(old)
         stale = self.store.mark_stale(record.event_id, now=iso(1000), max_age_seconds=100)
         self.assertEqual(stale.state, "STALE")
-        repeated = self.store.observe(old, verification_state="VERIFIED")
+        repeated = self.observe_verified(old)
         self.assertEqual(repeated.state, "STALE")
         self.assertEqual(len(self.store.history(record.event_id)), 4)
 
@@ -194,8 +235,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             content_hash="c" * 64, updated_at=iso(-60),
         )
         engine = EvidenceVerificationEngine()
-        source_evidence = engine.evidence_from_announcement(item)
-        registry = engine.verify(engine._source_assertion_claims(source_evidence), source_evidence)
+        registry = test_receipted_announcement_registry(item)
         records = self.store.sync_announcements([item], registry)
         self.assertEqual(len(records), 2)
         self.assertEqual({record.asset_id for record in records}, {"coingecko:abc", "coingecko:xyz"})
@@ -212,8 +252,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             content_hash="d" * 64, updated_at=iso(-172800),
         )
         engine = EvidenceVerificationEngine()
-        source_evidence = engine.evidence_from_announcement(item)
-        registry = engine.verify(engine._source_assertion_claims(source_evidence), source_evidence)
+        registry = test_receipted_announcement_registry(item)
         records = self.store.sync_announcements([item], registry)
         self.assertEqual(records[0].state, "STALE")
 
@@ -228,10 +267,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             content_hash="a" * 64, updated_at=iso(-200), event_at=iso(3600),
         )
         engine = EvidenceVerificationEngine()
-        first_evidence = engine.evidence_from_announcement(first)
-        first_registry = engine.verify(
-            engine._source_assertion_claims(first_evidence), first_evidence,
-        )
+        first_registry = test_receipted_announcement_registry(first)
         initial = self.store.sync_announcements([first], first_registry)[0]
         self.assertEqual(initial.state, "CONFIRMED")
 
@@ -242,10 +278,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             asset_ids=first.asset_ids, content_hash="b" * 64,
             updated_at=iso(-30), event_at=iso(7200),
         )
-        revised_evidence = engine.evidence_from_announcement(revised)
-        revised_registry = engine.verify(
-            engine._source_assertion_claims(revised_evidence), revised_evidence,
-        )
+        revised_registry = test_receipted_announcement_registry(revised)
         updated = self.store.sync_announcements([revised], revised_registry)[0]
         self.assertEqual(updated.state, "DEVELOPING")
         self.assertEqual(self.store.history(updated.event_id)[-1]["reason_code"],
@@ -261,8 +294,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             content_hash="e" * 64, updated_at=iso(-200), event_at=iso(3600),
         )
         engine = EvidenceVerificationEngine()
-        first_evidence = engine.evidence_from_announcement(first)
-        first_registry = engine.verify(engine._source_assertion_claims(first_evidence), first_evidence)
+        first_registry = test_receipted_announcement_registry(first)
         initial = self.store.sync_announcements([first], first_registry)[0]
         self.assertEqual(initial.state, "CONFIRMED")
 
@@ -272,8 +304,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             published_at=first.published_at, observed_at=iso(), asset_ids=first.asset_ids,
             content_hash="f" * 64, updated_at=iso(-100), event_at=first.event_at,
         )
-        cosmetic_evidence = engine.evidence_from_announcement(cosmetic)
-        cosmetic_registry = engine.verify(engine._source_assertion_claims(cosmetic_evidence), cosmetic_evidence)
+        cosmetic_registry = test_receipted_announcement_registry(cosmetic)
         unchanged = self.store.sync_announcements([cosmetic], cosmetic_registry)[0]
         self.assertEqual(unchanged.state, "CONFIRMED")
 
@@ -283,8 +314,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             published_at=first.published_at, observed_at=iso(), asset_ids=first.asset_ids,
             content_hash="1" * 64, updated_at=iso(-30), event_at=first.event_at,
         )
-        material_evidence = engine.evidence_from_announcement(material)
-        material_registry = engine.verify(engine._source_assertion_claims(material_evidence), material_evidence)
+        material_registry = test_receipted_announcement_registry(material)
         updated = self.store.sync_announcements([material], material_registry)[0]
         self.assertEqual(updated.state, "DEVELOPING")
         self.assertEqual(self.store.history(updated.event_id)[-1]["reason_code"], "MATERIAL_NEW_EVIDENCE")
@@ -301,8 +331,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             body="Binance will list ABC on 2026-12-01. Trading starts at 08:00 UTC.",
         )
         engine = EvidenceVerificationEngine()
-        first_evidence = engine.evidence_from_announcement(first)
-        first_registry = engine.verify(engine._source_assertion_claims(first_evidence), first_evidence)
+        first_registry = test_receipted_announcement_registry(first)
         initial = self.store.sync_announcements([first], first_registry)[0]
         self.assertEqual(initial.state, "CONFIRMED")
 
@@ -313,10 +342,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             updated_at=iso(-100), event_at=first.event_at,
             body="Binance is going to list ABC on 2026-12-01. Trading will begin at 08:00 UTC.",
         )
-        revised_evidence = engine.evidence_from_announcement(paraphrase)
-        revised_registry = engine.verify(
-            engine._source_assertion_claims(revised_evidence), revised_evidence,
-        )
+        revised_registry = test_receipted_announcement_registry(paraphrase)
         unchanged = self.store.sync_announcements([paraphrase], revised_registry)[0]
         self.assertEqual(unchanged.state, "CONFIRMED")
         self.assertEqual(self.store.history(unchanged.event_id)[-1]["reason_code"], "EVIDENCE_VERIFIED")
@@ -333,8 +359,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             body="Trading for ABC will start at 08:00 UTC on 2026-12-01.",
         )
         engine = EvidenceVerificationEngine()
-        first_evidence = engine.evidence_from_announcement(first)
-        first_registry = engine.verify(engine._source_assertion_claims(first_evidence), first_evidence)
+        first_registry = test_receipted_announcement_registry(first)
         self.assertEqual(self.store.sync_announcements([first], first_registry)[0].state, "CONFIRMED")
 
         changed = AnnouncementEvidence(
@@ -344,8 +369,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             updated_at=iso(-100), event_at=first.event_at,
             body="Trading for ABC has been suspended at 08:00 UTC on 2026-12-01.",
         )
-        changed_evidence = engine.evidence_from_announcement(changed)
-        changed_registry = engine.verify(engine._source_assertion_claims(changed_evidence), changed_evidence)
+        changed_registry = test_receipted_announcement_registry(changed)
         updated = self.store.sync_announcements([changed], changed_registry)[0]
         self.assertEqual(updated.state, "DEVELOPING")
         self.assertEqual(self.store.history(updated.event_id)[-1]["reason_code"], "MATERIAL_NEW_EVIDENCE")
@@ -361,8 +385,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             body="Binance will list ABC on 2026-12-01. Trading starts at 08:00 UTC.",
         )
         engine = EvidenceVerificationEngine()
-        first_evidence = engine.evidence_from_announcement(first)
-        first_registry = engine.verify(engine._source_assertion_claims(first_evidence), first_evidence)
+        first_registry = test_receipted_announcement_registry(first)
         self.assertEqual(self.store.sync_announcements([first], first_registry)[0].state, "CONFIRMED")
 
         cosmetic = AnnouncementEvidence(
@@ -372,8 +395,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             updated_at=iso(-100), event_at=first.event_at,
             body="  BINANCE will list ABC on 2026 12 01! Trading starts at 08:00 UTC.  ",
         )
-        cosmetic_evidence = engine.evidence_from_announcement(cosmetic)
-        cosmetic_registry = engine.verify(engine._source_assertion_claims(cosmetic_evidence), cosmetic_evidence)
+        cosmetic_registry = test_receipted_announcement_registry(cosmetic)
         self.assertEqual(self.store.sync_announcements([cosmetic], cosmetic_registry)[0].state, "CONFIRMED")
 
         material = AnnouncementEvidence(
@@ -383,8 +405,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             updated_at=iso(-30), event_at=first.event_at,
             body="Binance will list ABC on 2026-12-08. Trading starts at 08:00 UTC.",
         )
-        material_evidence = engine.evidence_from_announcement(material)
-        material_registry = engine.verify(engine._source_assertion_claims(material_evidence), material_evidence)
+        material_registry = test_receipted_announcement_registry(material)
         updated = self.store.sync_announcements([material], material_registry)[0]
         self.assertEqual(updated.state, "DEVELOPING")
         self.assertEqual(self.store.history(updated.event_id)[-1]["reason_code"], "MATERIAL_NEW_EVIDENCE")
@@ -400,10 +421,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             content_hash="c" * 64, updated_at=iso(-200), event_at=iso(3600),
         )
         engine = EvidenceVerificationEngine()
-        first_evidence = engine.evidence_from_announcement(first)
-        first_registry = engine.verify(
-            engine._source_assertion_claims(first_evidence), first_evidence,
-        )
+        first_registry = test_receipted_announcement_registry(first)
         self.store.sync_announcements([first], first_registry)
 
         revised = AnnouncementEvidence(
@@ -413,10 +431,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
             asset_ids=first.asset_ids, content_hash="d" * 64,
             updated_at=iso(-30), event_at=first.event_at,
         )
-        revised_evidence = engine.evidence_from_announcement(revised)
-        revised_registry = engine.verify(
-            engine._source_assertion_claims(revised_evidence), revised_evidence,
-        )
+        revised_registry = test_receipted_announcement_registry(revised)
         updated = self.store.sync_announcements([revised], revised_registry)[0]
         self.assertEqual(updated.state, "CONFIRMED")
 
@@ -430,7 +445,7 @@ class EventLifecycleStoreTests(unittest.TestCase):
         self.assertEqual(records[0].state, "UNDER_VERIFICATION")
 
     def test_restart_preserves_current_state_and_append_only_transition_history(self):
-        record = self.store.observe(evidence(), verification_state="VERIFIED")
+        record = self.observe_verified(evidence())
         self.db.close()
         self.db = Layer1Store(self.path)
         self.store = EventLifecycleStore(self.db)
@@ -453,20 +468,18 @@ class EventLifecycleStoreTests(unittest.TestCase):
             published_at=iso(-300), observed_at=iso(), asset_ids=("coingecko:abc",),
             content_hash="b" * 64,
         )
-        a = self.store.observe(first, verification_state="VERIFIED")
-        b = self.store.observe(second, verification_state="VERIFIED")
+        a = self.observe_verified(first)
+        b = self.observe_verified(second)
         self.assertNotEqual(a.event_id, b.event_id)
 
 
     def test_non_material_revision_does_not_reopen_stale_event(self):
         from dataclasses import replace
 
-        initial = self.store.observe(evidence("a"), verification_state="VERIFIED")
+        initial = self.observe_verified(evidence("a"))
         stale = self.store.mark_stale(initial.event_id, now=iso(10), max_age_seconds=1)
         revised = replace(evidence("b"), observed_at=iso(30))
-        result = self.store.observe(
-            revised, verification_state="VERIFIED", materially_new=False,
-        )
+        result = self.observe_verified(revised)
         self.assertEqual(stale.state, "STALE")
         self.assertEqual(result.state, "STALE")
         self.assertEqual(
@@ -474,23 +487,21 @@ class EventLifecycleStoreTests(unittest.TestCase):
             ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED", "STALE"],
         )
 
-    def test_non_material_revision_does_not_reopen_resolved_event(self):
+    def test_direct_api_cannot_create_resolved_terminal_event_from_caller_string(self):
         from dataclasses import replace
 
-        initial = self.store.observe(evidence("a"), verification_state="VERIFIED")
-        resolved = self.store.observe(
-            evidence("b"), verification_state="VERIFIED", resolved=True,
-            resolution_evidence_id="evidence:explicit-resolution",
-        )
+        initial = self.observe_verified(evidence("a"))
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
+            self.store.observe(
+                evidence("b"), verification_state="VERIFIED", resolved=True,
+                resolution_evidence_id="evidence:explicit-resolution",
+            )
         revised = replace(evidence("c"), observed_at=iso(30))
-        result = self.store.observe(
-            revised, verification_state="VERIFIED", materially_new=False,
-        )
-        self.assertEqual(resolved.state, "RESOLVED")
-        self.assertEqual(result.state, "RESOLVED")
+        result = self.observe_verified(revised)
+        self.assertEqual(result.state, "CONFIRMED")
         self.assertEqual(
             [row["to_state"] for row in self.store.history(initial.event_id)],
-            ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED", "RESOLVED"],
+            ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED"],
         )
 
 

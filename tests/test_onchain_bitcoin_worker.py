@@ -66,7 +66,9 @@ class BitcoinAddressIngestionWorkerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         path = os.path.join(self.tmp.name, "onchain.sqlite3")
         self.mapping_store = OnChainStore(path, OnChainIntelligenceEngine(
-            {"bitcoin-mainnet": 86400}, {"bitcoin-mainnet": 6}))
+            {"bitcoin-mainnet": 86400}, {"bitcoin-mainnet": 6},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1"))
         self.ingestion_store = OnChainIngestionStore(path)
         self.mapping = OnChainAssetMapping(
             "bitcoin-native-v1", "coingecko:bitcoin", "BTC", "bitcoin-mainnet",

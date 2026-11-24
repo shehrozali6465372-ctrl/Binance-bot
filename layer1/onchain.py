@@ -5,10 +5,12 @@ requests, infer token contracts, or treat provider reachability as data validity
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Optional
@@ -17,6 +19,7 @@ from urllib.parse import urlparse
 from .onchain_providers import is_valid_xrpl_classic_address
 
 from .foundation import BinanceListingEligibilityEngine, EligibilityDecision
+from .onchain_receipt_config import load_onchain_receipt_config_from_env
 
 
 NETWORK_METADATA = {
@@ -95,6 +98,11 @@ class OnChainValidationResult:
     mapping_id: str = ""
     network_id: str = ""
     provider: str = ""
+    receipt_version: int = 0
+    receipt_key_id: str = ""
+    observation_fingerprint: str = ""
+    evidence_fingerprint: str = ""
+    receipt_signature: str = ""
 
 
 class OnChainIntelligenceEngine:
@@ -105,7 +113,22 @@ class OnChainIntelligenceEngine:
     """
 
     def __init__(self, freshness_limits_seconds: Optional[Mapping[str, int]] = None,
-                 minimum_confirmations_by_network: Optional[Mapping[str, int]] = None):
+                 minimum_confirmations_by_network: Optional[Mapping[str, int]] = None,
+                 receipt_signing_key: Optional[bytes] = None, receipt_key_id: str = ""):
+        if receipt_signing_key is not None and (not isinstance(receipt_signing_key, bytes) or len(receipt_signing_key) < 32):
+            raise ValueError("on-chain receipt signing key must contain at least 32 bytes")
+        if receipt_signing_key is not None and (not isinstance(receipt_key_id, str) or not receipt_key_id.strip()):
+            raise ValueError("a non-empty receipt key ID is required when receipt signing is enabled")
+        if receipt_signing_key is not None and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", receipt_key_id.strip()) is None:
+            raise ValueError("receipt key ID must be 1-128 safe identifier characters")
+        self.receipt_signing_key = receipt_signing_key
+        self.receipt_key_id = receipt_key_id.strip() if receipt_signing_key is not None else ""
+        self.receipt_verification_keys = (
+            {self.receipt_key_id: receipt_signing_key} if receipt_signing_key is not None else {}
+        )
+        self.trusted_receipt_key_ids = (
+            frozenset({self.receipt_key_id}) if receipt_signing_key is not None else frozenset()
+        )
         limits = dict(freshness_limits_seconds or {})
         for network_id, seconds in limits.items():
             if network_id not in NETWORK_METADATA:
@@ -121,6 +144,40 @@ class OnChainIntelligenceEngine:
         self.freshness_limits_seconds = limits
         self.minimum_confirmations_by_network = confirmations
 
+    @classmethod
+    def from_env(
+        cls,
+        freshness_limits_seconds: Optional[Mapping[str, int]] = None,
+        minimum_confirmations_by_network: Optional[Mapping[str, int]] = None,
+    ) -> "OnChainIntelligenceEngine":
+        """Build an engine from explicitly provisioned Module 9 receipt keys.
+
+        An empty environment keeps signing disabled. Malformed or partially
+        trusted key configuration raises rather than silently selecting a key.
+        """
+        config = load_onchain_receipt_config_from_env()
+        engine = cls(
+            freshness_limits_seconds=freshness_limits_seconds,
+            minimum_confirmations_by_network=minimum_confirmations_by_network,
+            receipt_signing_key=config.active_signing_key,
+            receipt_key_id=config.active_key_id,
+        )
+        engine.receipt_verification_keys = dict(config.keyring)
+        engine.trusted_receipt_key_ids = config.trusted_key_ids
+        return engine
+
+    def verify_persisted_acceptance_receipt(
+        self, observation: OnChainObservation, validation: OnChainValidationResult,
+    ) -> bool:
+        """Verify a stored receipt using its key ID, including trusted retired keys."""
+        if (not isinstance(validation, OnChainValidationResult)
+                or validation.receipt_key_id not in self.trusted_receipt_key_ids):
+            return False
+        key = self.receipt_verification_keys.get(validation.receipt_key_id)
+        return self.verify_acceptance_receipt(
+            observation, validation, key, validation.receipt_key_id,
+        )
+
     @staticmethod
     def _result(status: str, code: str, reason: str,
                 mapping: Optional[OnChainAssetMapping] = None,
@@ -135,6 +192,95 @@ class OnChainIntelligenceEngine:
             network_id=mapping.network_id if mapping else (observation.network_id if observation else ""),
             provider=observation.provider if observation else "",
         )
+
+    @staticmethod
+    def _canonical_receipt_json(value) -> bytes:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+    @staticmethod
+    def _receipt_signature_payload(result: OnChainValidationResult) -> dict:
+        return {
+            "receipt_version": result.receipt_version,
+            "receipt_key_id": result.receipt_key_id,
+            "status": result.status,
+            "reason_code": result.reason_code,
+            "reason": result.reason,
+            "observation_id": result.observation_id,
+            "asset_id": result.asset_id,
+            "mapping_id": result.mapping_id,
+            "network_id": result.network_id,
+            "provider": result.provider,
+            "observation_fingerprint": result.observation_fingerprint,
+            "evidence_fingerprint": result.evidence_fingerprint,
+        }
+
+    @classmethod
+    def verify_acceptance_receipt(cls, observation: OnChainObservation,
+                                  validation: OnChainValidationResult,
+                                  verification_key: Optional[bytes],
+                                  expected_key_id: Optional[str]) -> bool:
+        if (not isinstance(verification_key, bytes) or len(verification_key) < 32
+                or not isinstance(observation, OnChainObservation)
+                or not isinstance(validation, OnChainValidationResult)
+                or validation.status != "ACCEPTED" or type(validation.receipt_version) is not int
+                or validation.receipt_version != 1
+                or not isinstance(validation.receipt_key_id, str)
+                or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", validation.receipt_key_id) is None
+                or not isinstance(expected_key_id, str)
+                or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", expected_key_id) is None
+                or validation.receipt_key_id != expected_key_id
+                or not re.fullmatch(r"[a-f0-9]{64}", validation.receipt_signature)
+                or not re.fullmatch(r"[a-f0-9]{64}", validation.observation_fingerprint)
+                or not re.fullmatch(r"[a-f0-9]{64}", validation.evidence_fingerprint)):
+            return False
+        if (validation.observation_id != observation.observation_id
+                or validation.asset_id != observation.asset_id
+                or validation.mapping_id != observation.mapping_id
+                or validation.network_id != observation.network_id
+                or validation.provider != observation.provider):
+            return False
+        observation_fingerprint = hashlib.sha256(
+            cls._canonical_receipt_json(asdict(observation))
+        ).hexdigest()
+        if not hmac.compare_digest(observation_fingerprint, validation.observation_fingerprint):
+            return False
+        expected = hmac.new(
+            verification_key,
+            cls._canonical_receipt_json(cls._receipt_signature_payload(validation)),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(expected, validation.receipt_signature)
+
+    def _signed_acceptance_result(self, eligibility: EligibilityDecision,
+                                  mapping: OnChainAssetMapping,
+                                  observation: OnChainObservation) -> OnChainValidationResult:
+        if self.receipt_signing_key is None:
+            return self._result(
+                "UNAVAILABLE", "ONCHAIN_RECEIPT_SIGNING_NOT_CONFIGURED",
+                "trusted acceptance receipt signing is not configured", mapping, observation,
+            )
+        observation_fingerprint = hashlib.sha256(
+            self._canonical_receipt_json(asdict(observation))
+        ).hexdigest()
+        evidence_fingerprint = hashlib.sha256(self._canonical_receipt_json({
+            "eligibility": asdict(eligibility),
+            "mapping": asdict(mapping),
+            "observation": asdict(observation),
+        })).hexdigest()
+        result = self._result("ACCEPTED", "ONCHAIN_OBSERVATION_VERIFIED",
+                              "eligible asset, exact network mapping, provider, provenance, finality and freshness validated",
+                              mapping, observation)
+        result = replace(
+            result, receipt_version=1, receipt_key_id=self.receipt_key_id,
+            observation_fingerprint=observation_fingerprint,
+            evidence_fingerprint=evidence_fingerprint,
+        )
+        signature = hmac.new(
+            self.receipt_signing_key,
+            self._canonical_receipt_json(self._receipt_signature_payload(result)),
+            hashlib.sha256,
+        ).hexdigest()
+        return replace(result, receipt_signature=signature)
 
     @staticmethod
     def _validate_mapping(mapping: OnChainAssetMapping) -> Optional[OnChainValidationResult]:
@@ -309,7 +455,7 @@ class OnChainIntelligenceEngine:
             return self._result("UNAVAILABLE", "FRESHNESS_POLICY_NOT_CONFIGURED", "network freshness threshold has not been calibrated and configured", mapping, observation)
         if (current_time - block_time).total_seconds() > max_age:
             return self._result("UNAVAILABLE", "ONCHAIN_OBSERVATION_STALE", "block observation exceeds the configured network freshness threshold", mapping, observation)
-        return self._result("ACCEPTED", "ONCHAIN_OBSERVATION_VERIFIED", "eligible asset, exact network mapping, provider, provenance, finality and freshness validated", mapping, observation)
+        return self._signed_acceptance_result(eligibility, mapping, observation)
 
 
 class OnChainStore:
@@ -400,6 +546,11 @@ class OnChainStore:
             if validation.get("status") != "ACCEPTED":
                 continue
             observation = OnChainObservation(**json.loads(payload_json))
+            validation_record = OnChainValidationResult(**validation)
+            if not self.engine.verify_persisted_acceptance_receipt(
+                observation, validation_record,
+            ):
+                continue
             try:
                 observed_at = _parse_timestamp(observation.observed_at)
             except ValueError:
@@ -414,7 +565,13 @@ class OnChainStore:
         ).fetchone()
         if row is None:
             return None
-        return OnChainObservation(**json.loads(row[0])), OnChainValidationResult(**json.loads(row[1]))
+        observation = OnChainObservation(**json.loads(row[0]))
+        validation = OnChainValidationResult(**json.loads(row[1]))
+        if validation.status == "ACCEPTED" and not self.engine.verify_persisted_acceptance_receipt(
+            observation, validation,
+        ):
+            validation = replace(validation, status="UNVERIFIED", reason_code="ONCHAIN_RECEIPT_INVALID", reason="persisted acceptance receipt failed authentication")
+        return observation, validation
 
     def list_verified_mappings(self, network_id: Optional[str] = None) -> list[OnChainAssetMapping]:
         """Return only previously accepted, verified asset mappings."""

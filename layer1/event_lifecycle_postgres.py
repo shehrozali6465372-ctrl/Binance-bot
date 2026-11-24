@@ -11,7 +11,8 @@ from typing import Any, Optional
 
 from layer1.event_lifecycle import (
     ALLOWED_TRANSITIONS, TERMINAL_STATES, VERIFIED_STATES,
-    EventLifecycleRecord, EventLifecycleStore, _time,
+    EventLifecycleRecord, EventLifecycleStore, _require_lifecycle_verification,
+    _claim_registry_material_states, _time,
 )
 from layer1.foundation import AnnouncementEvidence
 
@@ -61,14 +62,21 @@ class PostgresEventLifecycleStore(EventLifecycleStore):
         resolved: bool = False,
         withdrawn: bool = False,
         resolution_evidence_id: Optional[str] = None,
+        claim_registry: Any = None,
     ) -> EventLifecycleRecord:
         evidence.validate()
+        _require_lifecycle_verification(evidence, verification_state, claim_registry)
         if verification_state not in VERIFIED_STATES | {"UNVERIFIED","CONTRADICTED","STALE"}:
             raise ValueError("unsupported event evidence verification state")
         if not all(isinstance(value,bool) for value in (materially_new,resolved,withdrawn)):
             raise ValueError("event lifecycle flags must be booleans")
         if resolved and withdrawn:
             raise ValueError("event cannot be resolved and withdrawn in the same transition")
+        if resolved or withdrawn or resolution_evidence_id is not None:
+            raise ValueError(
+                "resolution evidence and withdrawal evidence require a verifier-issued proof; "
+                "direct lifecycle flags are disabled"
+            )
         if resolved and (verification_state not in VERIFIED_STATES or not resolution_evidence_id):
             raise ValueError("resolution evidence must be explicit and verified")
         if withdrawn and (verification_state not in VERIFIED_STATES or not resolution_evidence_id):
@@ -179,15 +187,15 @@ class PostgresEventLifecycleStore(EventLifecycleStore):
         claim_registry: Any,
     ) -> list[EventLifecycleRecord]:
         from dataclasses import replace
-        from layer1.evidence_verification import EvidenceVerificationEngine
+        from layer1.evidence_verification import ClaimRegistry
         if not isinstance(announcements,(tuple,list)):
             raise TypeError("announcements must be a finite list or tuple")
-        claims=tuple(getattr(claim_registry,"claims",()))
-        results=tuple(getattr(claim_registry,"results",()))
-        if len(claims)!=len(results):
-            raise ValueError("claim registry claims/results are inconsistent")
-        state_by_claim={claim.claim_id:result.state for claim,result in zip(claims,results)}
-        verifier=EvidenceVerificationEngine()
+        if type(claim_registry) is not ClaimRegistry:
+            raise ValueError("event lifecycle requires a verifier-issued ClaimRegistry")
+        try:
+            claim_registry.assert_verifier_issued_and_unchanged()
+        except ValueError:
+            raise ValueError("event lifecycle requires a verifier-issued unchanged ClaimRegistry") from None
         output=[]
         for announcement in announcements:
             announcement.validate()
@@ -195,17 +203,9 @@ class PostgresEventLifecycleStore(EventLifecycleStore):
                 continue
             for asset_id in announcement.asset_ids:
                 single_asset=replace(announcement,asset_ids=(asset_id,))
-                source_evidence=verifier.evidence_from_announcement(single_asset)
-                material_states=[]
-                for item in source_evidence:
-                    if item.claim_key not in {
-                        "announcement.title","announcement.event_type","announcement.asset_id","announcement.freshness",
-                    }:
-                        continue
-                    material_states.extend(
-                        state_by_claim[claim.claim_id] for claim in claims
-                        if item.evidence_id in claim.evidence_ids and claim.claim_id in state_by_claim
-                    )
+                material_states=_claim_registry_material_states(
+                    single_asset, asset_id, claim_registry,
+                )
                 if material_states and all(state in VERIFIED_STATES for state in material_states):
                     verification_state="VERIFIED"
                 elif "CONTRADICTED" in material_states:
@@ -228,7 +228,8 @@ class PostgresEventLifecycleStore(EventLifecycleStore):
                     previous_payload=_json(previous_payload)
                 materially_new=self._has_material_event_change(previous_payload,single_asset)
                 output.append(self.observe(single_asset,verification_state=verification_state,
-                                           materially_new=materially_new))
+                                           materially_new=materially_new,
+                                           claim_registry=claim_registry))
         return output
 
     def mark_stale(self,event_id: str,*,now: str,max_age_seconds: int) -> EventLifecycleRecord:

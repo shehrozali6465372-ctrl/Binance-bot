@@ -323,3 +323,40 @@ This proposal is ready for technical review, not runtime activation. The followi
 ## 11. Repository change boundary for this proposal
 
 This proposal is documentation only. It does not change `layer1/opportunity.py`, `main.py`, `SCORING_POLICY.md`, database schemas or data, provider credentials, GitHub workflows, Neon, publisher / gateway code, schedules, or publishing behaviour. No live provider inference, Binance media upload, or real Binance Square publication is part of this work.
+
+## 12. Current Binance Square W2E and Community Guidelines cross-check — 22 November 2026
+
+This is a fresh official-policy check for the current programme, not a source of numeric factor weights.
+
+### Official platform facts checked
+
+- Binance Square's official W2E Terms show **Last Updated: 16 October 2026**. Qualifying content must be published organically and contain an embedded coin cashtag or trading widget. Spam/low-quality content is excluded; similar or duplicate content pieces count as one post. The terms also describe an Engagement Bonus based on the quality and volume of genuine engagement, with engagement type and the standing/activity of engaging accounts considered at Binance's discretion. The terms state a 7-day trading-commission reward window and a 30-day genuine-engagement reward window.
+- The W2E Terms prohibit market manipulation, inducing readers to trade assets where the creator/related parties stand to benefit, failure to disclose material financial interests, representing content as financial/investment/trading advice, and manufactured/coordinated/automated engagement. These are not soft-score deductions: prohibited conduct must remain a hard block.
+- Binance's official W2E upgrade announcement says the Engagement Bonus began **19 October 2026** and applies to genuine, high-quality engagement. This is a programme-reward change; it does not define an internal Module 14 editorial score.
+- Binance Square Community Guidelines page reports **Updated: 6 November 2026**. It prohibits false or unverified claims, fraudulent/manipulative content, fake price charts, spam, bot/high-frequency abuse, plagiarism, misleading promotion and other conduct that may cause financial harm. It encourages DYOR, valid/reliable/current information, clear logic, substantive content, genuine interactions, and transparency.
+
+### Implications for the six Module 14 factors
+
+1. **Risk control:** platform-prohibited behaviour (market manipulation, undisclosed conflicts, fabricated charts/claims, fake engagement, prohibited trading advice, spam/plagiarism) must be a non-compensatory hard gate. A high score elsewhere cannot offset a policy violation. Residual risks may be scored only when they are evidenced, disclosed and responsibly bounded.
+2. **Evidence strength:** DYOR and valid/reliable/current information support exact claim-to-source verification. The guidelines do not define source-authority weights or a universal numeric credibility score.
+3. **Audience usefulness:** genuine engagement may be monitored as a secondary programme outcome, but it is not ground truth for factual correctness or editorial usefulness. Binance's engagement weighting also considers account standing/activity and is discretionary; those private mechanics cannot be reverse-engineered from the public terms.
+4. **Novelty:** the duplicate-content rule supports a duplicate eligibility control. It does not define a semantic novelty score; rewording or changing timestamps alone must not be treated as new editorial value.
+5. **Timeliness:** the 7-day and 30-day periods are W2E reward-attribution windows, not evidence-freshness limits. Do not reuse them as market/event/source TTLs. Freshness still requires source-, field-, event- and use-specific historical calibration.
+6. **Materiality:** the W2E terms do not define a market-materiality formula or numerical event weights. Materiality still requires exact event scope, affected parties, source-backed facts and independently labelled historical examples.
+
+### What this research does not justify
+
+- No public W2E document discloses the numerical engagement-type weights, account-standing weights, or full ranking algorithm. Do not invent or attempt to imitate them.
+- No official Binance policy supplies Module 14's six factor weights, PROCEED/DEFER thresholds, per-factor floors, or a minimum independent-source count.
+- W2E reward windows, commission amounts, engagement volume, trading conversions, trend rank, likes and follower counts are not valid substitutes for point-in-time evidence quality or independent editorial-worthiness labels.
+- The public platform rules can justify compliance gates and qualitative rubric boundaries; they cannot calibrate the scoring model.
+
+### Decision
+
+The existing proposal's hard-gate-first design is consistent with the current public Binance Square rules. Preserve all six factors and keep `policy=None` / `factors=None`. Module 14 remains **PROPOSAL ONLY — NOT APPROVED FOR RUNTIME**. Empirical weights/thresholds remain unavailable until the approved historical dataset, independent adjudication and out-of-time validation exist. No score or policy parameter is changed by this research.
+
+### Official sources
+
+- Binance Square Official, **Write to Earn (W2E) Terms**, last updated 2026-10-16: https://www.binance.com/en/square/post/377977188380155
+- Binance, **Binance Square is Upgrading Write to Earn – Create Engaging Content, Grow Your Community, and Earn More**, effective 2026-10-19: https://www.binance.com/en/support/announcement/detail/d9c84b68e9ab4ef29bee0cc53dfdabd2
+- Binance Square, **Community Guidelines**, updated 2026-11-06: https://www.binance.com/en/support/faq/detail/ecb50ef2012f40b2a2c4f72eaa5b569f

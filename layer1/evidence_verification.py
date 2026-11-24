@@ -7,16 +7,21 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
-from layer1.foundation import AnnouncementEvidence, MarketObservation, TrendSignal
-from layer1.onchain import OnChainObservation, OnChainValidationResult
+from layer1.foundation import AnnouncementEvidence, CONTENT_HASH_KINDS, MarketObservation, TrendSignal
+from layer1.onchain import OnChainIntelligenceEngine, OnChainObservation, OnChainValidationResult
+from layer1.onchain_receipt_config import load_onchain_receipt_config_from_env
+from layer1.source_receipts import (
+    load_source_receipt_config_from_env, verify_source_ingestion_receipt,
+)
 
 
 CLAIM_STATES = {"VERIFIED", "CORROBORATED", "UNVERIFIED", "CONTRADICTED", "STALE"}
@@ -27,6 +32,15 @@ CLAIM_TYPES = {
 IMPACT_LEVELS = {"LOW", "MEDIUM", "HIGH"}
 SOURCE_KINDS = {"PRIMARY", "SECONDARY", "MARKET", "ONCHAIN", "SOCIAL"}
 SOURCE_STATUSES = {"ACCEPTED", "UNVERIFIED", "REJECTED", "STALE"}
+_CLAIM_REGISTRY_ISSUER_TOKEN = object()
+
+
+@dataclass(frozen=True)
+class _ClaimRegistryVerificationProof:
+    issuer_token: object = field(repr=False, compare=False)
+    payload_digest: str
+
+
 _CAUSAL_RELATION_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
     r"\bbecause\b", r"\bdue\s+to\b", r"\bcaus(?:ed|es|ing)\b",
     r"\bdriven\s+by\b", r"\btriggered\s+by\b", r"\battributed\s+to\b",
@@ -116,6 +130,18 @@ def _same_optional_text(left: Optional[str], right: Optional[str]) -> bool:
     return left.strip().casefold() == right.strip().casefold()
 
 
+_EVIDENCE_AUTHORITY_ISSUER_TOKEN = object()
+_TRUSTED_ONCHAIN_RECEIPT_KEY_IDS: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class _EvidenceProvenanceProof:
+    issuer_token: object = field(repr=False, compare=False)
+    authority_id: str
+    independence_group: str
+    payload_digest: str
+
+
 @dataclass(frozen=True)
 class EvidenceRecord:
     source_id: str
@@ -135,10 +161,19 @@ class EvidenceRecord:
     updated_at: Optional[str] = None
     source_url: Optional[str] = None
     content_hash: str = ""
+    content_hash_kind: str = "UNSPECIFIED"
     lineage_id: str = ""
     is_primary: bool = False
     source_status: str = "ACCEPTED"
     status_value: Optional[str] = None
+    source_authority_id: Optional[str] = None
+    independence_group: Optional[str] = None
+    source_receipt_key_id: Optional[str] = None
+    source_receipt: Optional[str] = None
+    source_receipt_payload: Optional[str] = None
+    _provenance_proof: Optional[_EvidenceProvenanceProof] = field(
+        default=None, init=False, repr=False, compare=False,
+    )
 
     @property
     def evidence_id(self) -> str:
@@ -166,14 +201,32 @@ class EvidenceRecord:
             raise ValueError("evidence value must be a finite JSON scalar")
         if not isinstance(self.is_primary, bool):
             raise ValueError("evidence primary-source flag must be boolean")
-        for name in ("asset_id", "mapping_id", "unit", "timeframe", "status_value", "content_hash", "lineage_id"):
+        for name in (
+            "asset_id", "mapping_id", "unit", "timeframe", "status_value",
+            "content_hash", "content_hash_kind", "lineage_id",
+            "source_authority_id", "independence_group", "source_receipt_key_id",
+            "source_receipt", "source_receipt_payload",
+        ):
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"evidence {name} must be a string or unavailable")
         if self.source_url is not None and not isinstance(self.source_url, str):
             raise ValueError("evidence source URL must be a string or unavailable")
+        if (self.source_receipt is None) != (self.source_receipt_payload is None):
+            raise ValueError("source receipt and signed payload must be stored together")
+        if self.source_receipt is not None and (
+            not isinstance(self.source_receipt, str) or len(self.source_receipt) > 8192
+            or not isinstance(self.source_receipt_payload, str) or len(self.source_receipt_payload) > 16384
+            or not self.source_receipt_key_id
+        ):
+            raise ValueError("source receipt envelope fields are invalid")
         if self.content_hash and not re.fullmatch(r"[0-9a-f]{64}", self.content_hash):
             raise ValueError("evidence content_hash must be a lowercase SHA-256 digest")
+        if (not isinstance(self.content_hash_kind, str)
+                or self.content_hash_kind not in CONTENT_HASH_KINDS):
+            raise ValueError("evidence content_hash_kind is invalid")
+        if not self.content_hash and self.content_hash_kind != "UNSPECIFIED":
+            raise ValueError("evidence hash semantics requires content_hash")
         _timestamp(self.published_at)
         _timestamp(self.observed_at)
         if self.updated_at:
@@ -186,6 +239,333 @@ class EvidenceRecord:
             parsed = urlparse(self.source_url)
             if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError("evidence source URL must be attributable HTTPS")
+
+
+_EVIDENCE_AUTHORITY_POLICY = {
+    # Test fixtures are an internal test harness exception, never emitted by
+    # production source adapters.
+    "test_fixture": {"kind": None, "claim_prefix": None, "primary": None, "group": None},
+    "local_publication_ledger": {
+        "kind": "PRIMARY", "claim_prefix": "publication.last_posted",
+        "primary": True, "group": "local_publication_ledger",
+    },
+    "binance_spot_market": {
+        "kind": "MARKET", "claim_prefix": "market.",
+        "primary": False, "group": "binance_spot_market",
+    },
+    "coingecko_market": {
+        "kind": "MARKET", "claim_prefix": "market.",
+        "primary": False, "group": "coingecko_market",
+    },
+    "coingecko_trending": {
+        "kind": "SOCIAL", "claim_prefix": "trend.topic:",
+        "primary": False, "group": "coingecko_trending",
+    },
+    "onchain_receipt": {
+        "kind": "ONCHAIN", "claim_prefix": "onchain.transaction_hash",
+        "primary": True, "group": "onchain:",
+    },
+    "binance_spot_exchange_info": {
+        "kind": "PRIMARY", "claim_prefix": "binance_spot.eligible",
+        "primary": False, "group": "binance_spot_exchange_info",
+    },
+}
+
+
+def _https_endpoint_matches(value: Optional[str], hosts: set[str], path: str) -> bool:
+    try:
+        parsed = urlparse(value or "")
+        return bool(
+            parsed.scheme == "https"
+            and (parsed.hostname or "").casefold() in hosts
+            and parsed.port in (None, 443)
+            and parsed.path == path
+            and parsed.username is None and parsed.password is None
+        )
+    except ValueError:
+        return False
+
+
+def _authority_claim_key_allowed(authority_id: str, claim_key: str) -> bool:
+    if authority_id in {"binance_spot_market", "coingecko_market"}:
+        return claim_key in {
+            "market.price", "market.change_24h",
+            "market.volume_24h", "market.market_cap",
+        }
+    if authority_id == "coingecko_trending":
+        return claim_key.startswith("trend.topic:")
+    if authority_id == "local_publication_ledger":
+        return claim_key == "publication.last_posted"
+    if authority_id == "onchain_receipt":
+        return claim_key == "onchain.transaction_hash"
+    if authority_id == "binance_spot_exchange_info":
+        return claim_key == "binance_spot.eligible"
+    return authority_id == "test_fixture"
+
+
+def _evidence_payload_digest(record: EvidenceRecord) -> str:
+    payload = {
+        item.name: getattr(record, item.name)
+        for item in fields(record)
+        if item.name != "_provenance_proof"
+    }
+    return _digest(json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True, allow_nan=False,
+    ))
+
+
+def _verify_binance_spot_evidence_receipt(record: EvidenceRecord) -> bool:
+    """Verify the persisted pair-level receipt against centrally provisioned keys."""
+    if not record.source_receipt or not record.source_receipt_payload:
+        return False
+    try:
+        keyring, trusted_ids, _current_key_id = load_source_receipt_config_from_env()
+        payload = json.loads(record.source_receipt_payload)
+        receipt = json.loads(record.source_receipt)
+        if not isinstance(payload, dict) or not isinstance(receipt, dict):
+            return False
+        pair = payload.get("pair")
+        if not isinstance(pair, dict):
+            return False
+        endpoint = "https://api.binance.com/api/v3/exchangeInfo?permissions=SPOT"
+        pair_hash = _digest(json.dumps(pair, sort_keys=True, separators=(",", ":"), allow_nan=False))
+        symbol = pair.get("symbol")
+        if (
+            payload.get("authority_id") != "binance_spot_exchange_info"
+            or payload.get("endpoint") != endpoint
+            or payload.get("observed_at") != record.observed_at
+            or payload.get("pair_sha256") != pair_hash
+            or record.content_hash != pair_hash
+            or record.source_url != endpoint
+            or record.source_status != "ACCEPTED"
+            or record.source_kind != "PRIMARY"
+            or record.claim_key != "binance_spot.eligible"
+            or record.value is not True
+            or record.is_primary is not False
+            or record.status_value != pair.get("status")
+            or record.source_receipt_key_id != receipt.get("key_id")
+            or not isinstance(symbol, str)
+            or record.source_id != f"binance-exchange-info:{symbol}:{_digest(record.observed_at)[:16]}"
+            or pair.get("baseAsset") != symbol[:-len(str(pair.get("quoteAsset", "")))]
+            or pair.get("status") != "TRADING"
+            or pair.get("isSpotTradingAllowed") is not True
+            or not any("SPOT" in group for group in pair.get("permissionSets", []) if isinstance(group, list))
+        ):
+            return False
+        server_time = payload.get("server_time")
+        observed_ms = int(_timestamp(record.observed_at).timestamp() * 1000)
+        if isinstance(server_time, bool) or not isinstance(server_time, int) or abs(server_time - observed_ms) > 1000:
+            return False
+        return verify_source_ingestion_receipt(
+            receipt, payload, verification_keys=keyring,
+            expected_authority_id="binance_spot_exchange_info", trusted_key_ids=trusted_ids,
+        )
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError, OverflowError):
+        return False
+
+
+def _onchain_trusted_receipt_key_ids() -> frozenset[str]:
+    try:
+        config = load_onchain_receipt_config_from_env()
+    except ValueError:
+        return frozenset()
+    return frozenset(_TRUSTED_ONCHAIN_RECEIPT_KEY_IDS | config.trusted_key_ids)
+
+
+def _verify_onchain_evidence_receipt(
+    record: EvidenceRecord, *, expected_independence_group: Optional[str] = None,
+) -> bool:
+    """Reauthenticate a persisted Module 9 observation before restoring trust."""
+    if not record.source_receipt or not record.source_receipt_payload:
+        return False
+    try:
+        config = load_onchain_receipt_config_from_env()
+        payload = json.loads(record.source_receipt_payload)
+        envelope = json.loads(record.source_receipt)
+        if (not isinstance(payload, dict) or set(payload) != {"observation", "validation"}
+                or not isinstance(envelope, dict)
+                or set(envelope) != {"version", "key_id", "signature"}):
+            return False
+        observation_data = payload["observation"]
+        validation_data = payload["validation"]
+        if not isinstance(observation_data, dict) or not isinstance(validation_data, dict):
+            return False
+        observation = OnChainObservation(**observation_data)
+        validation = OnChainValidationResult(**validation_data)
+        key_id = validation.receipt_key_id
+        if (
+            key_id not in _onchain_trusted_receipt_key_ids()
+            or record.source_receipt_key_id != key_id
+            or envelope != {
+                "version": validation.receipt_version,
+                "key_id": key_id,
+                "signature": validation.receipt_signature,
+            }
+            or record.source_id != observation.observation_id
+            or record.source_family != observation.provider
+            or record.source_kind != "ONCHAIN"
+            or record.publisher != observation.provider
+            or record.subject != observation.asset_id
+            or record.claim_key != "onchain.transaction_hash"
+            or record.value != observation.transaction_hash
+            or record.published_at != observation.block_time
+            or record.observed_at != observation.observed_at
+            or record.asset_id != observation.asset_id
+            or record.mapping_id != observation.mapping_id
+            or record.timeframe != observation.network_id
+            or record.event_at != observation.block_time
+            or (expected_independence_group or record.independence_group) != (
+                "onchain:" + observation.network_id + ":" + observation.provider
+            )
+            or record.is_primary is not True
+            or record.source_status != "ACCEPTED"
+            or record.status_value != observation.finality
+        ):
+            return False
+        return OnChainIntelligenceEngine.verify_acceptance_receipt(
+            observation, validation, config.keyring.get(key_id), key_id,
+        )
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError, RecursionError):
+        return False
+
+
+def _issue_evidence_record(
+    record: EvidenceRecord, *, authority_id: str, independence_group: str,
+) -> EvidenceRecord:
+    """Attach an in-process provenance proof after a trusted adapter validates its source."""
+    if not isinstance(record, EvidenceRecord):
+        raise TypeError("evidence provenance can only be issued for EvidenceRecord")
+    policy = _EVIDENCE_AUTHORITY_POLICY.get(authority_id)
+    if policy is None:
+        raise ValueError("evidence authority is not in the approved source policy")
+    if not isinstance(independence_group, str) or not independence_group.strip():
+        raise ValueError("evidence independence group is required")
+    if authority_id != "test_fixture":
+        if (
+            record.source_kind != policy["kind"]
+            or not _authority_claim_key_allowed(authority_id, record.claim_key)
+            or record.is_primary is not policy["primary"]
+            or (
+                policy["group"] != "onchain:"
+                and independence_group != policy["group"]
+            )
+            or (
+                policy["group"] == "onchain:"
+                and not independence_group.startswith("onchain:")
+            )
+            or (
+                authority_id == "binance_spot_exchange_info"
+                and not _verify_binance_spot_evidence_receipt(record)
+            )
+            or (
+                authority_id == "onchain_receipt"
+                and not _verify_onchain_evidence_receipt(
+                    record, expected_independence_group=independence_group.strip().casefold(),
+                )
+            )
+        ):
+            raise ValueError("evidence fields exceed the approved source authority policy")
+    record.validate()
+    object.__setattr__(record, "source_authority_id", authority_id)
+    object.__setattr__(record, "independence_group", independence_group.strip().casefold())
+    object.__setattr__(
+        record, "_provenance_proof",
+        _EvidenceProvenanceProof(
+            issuer_token=_EVIDENCE_AUTHORITY_ISSUER_TOKEN,
+            authority_id=authority_id,
+            independence_group=independence_group.strip().casefold(),
+            payload_digest=_evidence_payload_digest(record),
+        ),
+    )
+    return record
+
+
+def _restore_evidence_record_proof(record: EvidenceRecord) -> EvidenceRecord:
+    """Revalidate serialized authority metadata before replaying a persisted registry."""
+    authority_id = record.source_authority_id
+    group = record.independence_group
+    policy = _EVIDENCE_AUTHORITY_POLICY.get(authority_id) if isinstance(authority_id, str) else None
+    if policy is None or not isinstance(group, str) or not group.strip():
+        return record
+    if authority_id != "test_fixture":
+        if (
+            record.source_kind != policy["kind"]
+            or not _authority_claim_key_allowed(authority_id, record.claim_key)
+            or record.is_primary is not policy["primary"]
+            or (
+                policy["group"] != "onchain:"
+                and group != policy["group"]
+            )
+            or (
+                policy["group"] == "onchain:"
+                and not group.startswith("onchain:")
+            )
+        ):
+            return record
+        if authority_id == "binance_spot_market":
+            if not _https_endpoint_matches(
+                record.source_url, {"api.binance.com", "data-api.binance.vision"},
+                "/api/v3/ticker/24hr",
+            ):
+                return record
+        elif authority_id == "coingecko_market":
+            if not _https_endpoint_matches(
+                record.source_url, {"api.coingecko.com"}, "/api/v3/coins/markets",
+            ):
+                return record
+        elif authority_id == "coingecko_trending":
+            if not _https_endpoint_matches(
+                record.source_url, {"api.coingecko.com"}, "/api/v3/search/trending",
+            ):
+                return record
+        elif authority_id == "local_publication_ledger":
+            if not record.source_id.startswith("local-publication-ledger:"):
+                return record
+        elif authority_id == "onchain_receipt":
+            if not _verify_onchain_evidence_receipt(record):
+                return record
+        elif authority_id == "binance_spot_exchange_info":
+            if (not _https_endpoint_matches(
+                    record.source_url, {"api.binance.com"}, "/api/v3/exchangeInfo",
+                ) or not _verify_binance_spot_evidence_receipt(record)):
+                return record
+    object.__setattr__(
+        record, "_provenance_proof",
+        _EvidenceProvenanceProof(
+            issuer_token=_EVIDENCE_AUTHORITY_ISSUER_TOKEN,
+            authority_id=authority_id,
+            independence_group=group.casefold(),
+            payload_digest=_evidence_payload_digest(record),
+        ),
+    )
+    return record
+
+
+def _evidence_proof(record: EvidenceRecord) -> Optional[_EvidenceProvenanceProof]:
+    proof = record._provenance_proof
+    if (
+        not isinstance(proof, _EvidenceProvenanceProof)
+        or proof.issuer_token is not _EVIDENCE_AUTHORITY_ISSUER_TOKEN
+        or proof.authority_id not in _EVIDENCE_AUTHORITY_POLICY
+        or record.source_authority_id != proof.authority_id
+        or record.independence_group != proof.independence_group
+    ):
+        return None
+    try:
+        if _evidence_payload_digest(record) != proof.payload_digest:
+            return None
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return proof
+
+
+def _effective_evidence_status(record: EvidenceRecord) -> str:
+    return record.source_status if _evidence_proof(record) is not None else "UNVERIFIED"
+
+
+def _effective_evidence_primary(record: EvidenceRecord) -> bool:
+    return bool(_evidence_proof(record) is not None and record.is_primary)
 
 
 @dataclass(frozen=True)
@@ -266,17 +646,73 @@ class ClaimRegistry:
     evidence_records: tuple[EvidenceRecord, ...]
     results: tuple[ClaimVerificationResult, ...]
     unresolved_issues: tuple[Mapping[str, Any], ...]
+    _verification_proof: Optional[_ClaimRegistryVerificationProof] = field(
+        default=None, init=False, repr=False, compare=False,
+    )
+
+    def assert_verifier_issued_and_unchanged(self) -> None:
+        if type(self) is not ClaimRegistry:
+            raise ValueError("deep research requires an exact verifier-issued ClaimRegistry")
+        proof = self._verification_proof
+        if (
+            not isinstance(proof, _ClaimRegistryVerificationProof)
+            or proof.issuer_token is not _CLAIM_REGISTRY_ISSUER_TOKEN
+        ):
+            raise ValueError("deep research requires a verifier-issued ClaimRegistry")
+        try:
+            canonical = json.dumps(
+                self.to_dict(), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True, allow_nan=False,
+            )
+        except (TypeError, ValueError, RecursionError):
+            raise ValueError("ClaimRegistry contents changed after verification") from None
+        if _digest(canonical) != proof.payload_digest:
+            raise ValueError("ClaimRegistry contents changed after verification")
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": 2,
             "claims": [asdict(claim) | {"claim_id": claim.claim_id} for claim in self.claims],
             "evidence_records": [
-                asdict(record) | {"evidence_id": record.evidence_id}
+                {
+                    **{
+                        item.name: getattr(record, item.name)
+                        for item in fields(record)
+                        if item.name != "_provenance_proof"
+                    },
+                    "evidence_id": record.evidence_id,
+                }
                 for record in self.evidence_records
             ],
             "results": [asdict(result) for result in self.results],
             "unresolved_issues": [dict(issue) for issue in self.unresolved_issues],
         }
+
+
+def _issue_verified_claim_registry(
+    *,
+    claims: tuple[Claim, ...],
+    evidence_records: tuple[EvidenceRecord, ...],
+    results: tuple[ClaimVerificationResult, ...],
+    unresolved_issues: tuple[Mapping[str, Any], ...],
+) -> ClaimRegistry:
+    """Internal factory used only after EvidenceVerificationEngine verification."""
+    registry = ClaimRegistry(
+        claims=claims, evidence_records=evidence_records,
+        results=results, unresolved_issues=unresolved_issues,
+    )
+    canonical = json.dumps(
+        registry.to_dict(), sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True, allow_nan=False,
+    )
+    object.__setattr__(
+        registry, "_verification_proof",
+        _ClaimRegistryVerificationProof(
+            issuer_token=_CLAIM_REGISTRY_ISSUER_TOKEN,
+            payload_digest=_digest(canonical),
+        ),
+    )
+    return registry
 
 
 class EvidenceVerificationEngine:
@@ -291,6 +727,7 @@ class EvidenceVerificationEngine:
         """
         if not isinstance(registry, ClaimRegistry):
             raise TypeError("asset scoping requires a ClaimRegistry")
+        registry.assert_verifier_issued_and_unchanged()
         if not isinstance(asset_id, str) or not re.fullmatch(r"coingecko:[a-z0-9][a-z0-9-]{1,99}", asset_id):
             raise ValueError("asset scoping requires a canonical CoinGecko asset ID")
         claims = tuple(
@@ -309,7 +746,7 @@ class EvidenceVerificationEngine:
             issue for issue in registry.unresolved_issues
             if issue.get("claim_id") in claim_ids
         )
-        return ClaimRegistry(
+        return _issue_verified_claim_registry(
             claims=claims, evidence_records=evidence,
             results=results, unresolved_issues=unresolved,
         )
@@ -343,7 +780,7 @@ class EvidenceVerificationEngine:
                     "issue": issue, "evidence_ids": list(result.evidence_ids),
                 })
 
-        return ClaimRegistry(
+        return _issue_verified_claim_registry(
             claims=tuple(claims),
             evidence_records=tuple(sorted(evidence_by_id.values(), key=lambda item: item.evidence_id)),
             results=tuple(results), unresolved_issues=tuple(unresolved),
@@ -558,7 +995,7 @@ class EvidenceVerificationEngine:
                 and evidence.subject == claim.subject
                 and evidence.asset_id == claim.asset_id
                 and evidence.value == claim.value
-                and evidence.source_status == "ACCEPTED"
+                and _effective_evidence_status(evidence) == "ACCEPTED"
                 for evidence in linked
             )
         )
@@ -604,7 +1041,7 @@ class EvidenceVerificationEngine:
             and _same_optional_text(evidence.unit, claim.unit)
             and _same_optional_text(evidence.timeframe, claim.timeframe)
             and evidence.event_at == event_scope
-            and evidence.source_status == "ACCEPTED"
+            and _effective_evidence_status(evidence) == "ACCEPTED"
             and self._temporal_state(claim, evidence) == (None, False)
         ]
         contradictions = [
@@ -638,11 +1075,11 @@ class EvidenceVerificationEngine:
                         and evidence.event_at == event_scope
                         and (not _value_equal(evidence.value, claim.value)
                              or (claim.expected_status is not None and evidence.status_value != claim.expected_status))
-                        and evidence.source_status == "ACCEPTED"):
+                        and _effective_evidence_status(evidence) == "ACCEPTED"):
                     contradictions.append(evidence)
                 continue
-            if evidence.source_status != "ACCEPTED":
-                issues.add("EVIDENCE_SOURCE_NOT_ACCEPTED:" + evidence.source_status)
+            if _effective_evidence_status(evidence) != "ACCEPTED":
+                issues.add("EVIDENCE_SOURCE_NOT_ACCEPTED:" + _effective_evidence_status(evidence))
                 continue
             supporting.append(evidence)
 
@@ -663,7 +1100,7 @@ class EvidenceVerificationEngine:
         if contradictions_by_id:
             issues.add("CONTRADICTORY_EVIDENCE")
         independent_count = self._independent_source_count(supporting)
-        primary_available = any(item.is_primary for item in supporting)
+        primary_available = any(_effective_evidence_primary(item) for item in supporting)
         source_lineage = {
             item.evidence_id: self._lineage_key(item)
             for item in supporting + list(contradictions_by_id.values())
@@ -737,13 +1174,15 @@ class EvidenceVerificationEngine:
 
     @staticmethod
     def _temporal_state(claim: Claim, evidence: EvidenceRecord) -> tuple[Optional[str], bool]:
+        if _evidence_proof(evidence) is None:
+            return "EVIDENCE_PROVENANCE_UNTRUSTED", False
         cutoff = _timestamp(claim.observed_at)
         published = _timestamp(evidence.published_at)
         observed = _timestamp(evidence.observed_at)
         updated = _timestamp(evidence.updated_at) if evidence.updated_at else published
         if published > observed or observed > cutoff or updated > cutoff:
             return "EVIDENCE_AFTER_CLAIM_CUTOFF", False
-        if evidence.source_status == "STALE":
+        if _effective_evidence_status(evidence) == "STALE":
             return "EVIDENCE_STALE", True
         if claim.max_age_seconds is not None:
             if (cutoff - updated).total_seconds() > claim.max_age_seconds:
@@ -752,16 +1191,24 @@ class EvidenceVerificationEngine:
 
     @staticmethod
     def _lineage_key(evidence: EvidenceRecord) -> str:
-        return evidence.lineage_id or (
-            "content:" + evidence.content_hash if evidence.content_hash
-            else "source-family:" + evidence.source_family
-        )
+        proof = _evidence_proof(evidence)
+        if proof is None:
+            return "untrusted:" + evidence.publisher.strip().casefold()
+        if evidence.content_hash:
+            return "content:" + evidence.content_hash
+        if evidence.lineage_id:
+            return "lineage:" + evidence.lineage_id
+        return "authority:" + proof.independence_group
 
     @classmethod
     def _independent_source_count(cls, evidence: Sequence[EvidenceRecord]) -> int:
-        if not evidence:
+        # Only records carrying a valid in-process adapter proof can contribute
+        # to independence. Caller-selected source_family aliases are ignored.
+        trusted = [(item, _evidence_proof(item)) for item in evidence]
+        trusted = [(item, proof) for item, proof in trusted if proof is not None]
+        if not trusted:
             return 0
-        parent = list(range(len(evidence)))
+        parent = list(range(len(trusted)))
 
         def find(index: int) -> int:
             while parent[index] != index:
@@ -775,21 +1222,21 @@ class EvidenceVerificationEngine:
                 parent[root_right] = root_left
 
         seen: dict[tuple[str, str], int] = {}
-        for index, item in enumerate(evidence):
-            tokens = []
+        for index, (item, proof) in enumerate(trusted):
+            tokens = [
+                ("authority-group", proof.independence_group),
+            ]
             if item.lineage_id:
                 tokens.append(("lineage", item.lineage_id))
             if item.content_hash:
                 tokens.append(("content", item.content_hash))
-            if item.source_family:
-                tokens.append(("family", item.source_family))
             for token in tokens:
                 previous = seen.get(token)
                 if previous is None:
                     seen[token] = index
                 else:
                     union(index, previous)
-        return len({find(index) for index in range(len(evidence))})
+        return len({find(index) for index in range(len(trusted))})
 
     @staticmethod
     def evidence_from_announcement(item: AnnouncementEvidence) -> tuple[EvidenceRecord, ...]:
@@ -797,15 +1244,20 @@ class EvidenceVerificationEngine:
         output = []
         for asset_id in item.asset_ids or (None,):
             common = {
-                "source_id": item.source_id, "source_family": item.publisher.casefold(),
-                "source_kind": "PRIMARY", "publisher": item.publisher,
+                "source_id": item.source_id, "source_family": "binance_announcement_cms_unverified",
+                "source_kind": "SECONDARY", "publisher": item.publisher,
                 "subject": item.publisher, "published_at": item.published_at,
                 "observed_at": item.observed_at, "asset_id": asset_id,
                 "timeframe": item.event_type, "event_at": item.event_at or item.published_at,
                 "updated_at": item.updated_at, "source_url": item.source_url,
                 "content_hash": item.content_hash,
+                # Announcement importer currently receives a CMS hash but the
+                # producing worker's canonicalization contract is not present in
+                # this repository. Preserve the digest for correlation only; do
+                # not assert canonical payload semantics without that contract.
+                "content_hash_kind": "UNSPECIFIED",
                 "lineage_id": item.content_hash or item.source_id,
-                "is_primary": True, "source_status": "ACCEPTED", "status_value": "PUBLISHED",
+                "is_primary": False, "source_status": "UNVERIFIED", "status_value": "PUBLISHED",
             }
             output.append(EvidenceRecord(**common, claim_key="announcement.title", value=item.title))
             if item.body.strip():
@@ -827,12 +1279,17 @@ class EvidenceVerificationEngine:
                     "subject": asset_id or item.publisher,
                     "source_status": freshness_status,
                     "status_value": freshness_value,
+                    # Freshness is calculated locally from timestamps; Binance
+                    # did not publish this derived classification.
+                    "is_primary": False,
                 },
                 claim_key="announcement.freshness", value=freshness_value,
             ))
             if asset_id:
                 output.append(EvidenceRecord(
-                    **{**common, "subject": asset_id},
+                    **{**common, "subject": asset_id, "is_primary": False},
+                    # The canonical CoinGecko ID is resolved by local ticker
+                    # matching; it is not an identity asserted by the CMS row.
                     claim_key="announcement.asset_id", value=asset_id,
                 ))
         return tuple(output)
@@ -843,12 +1300,17 @@ class EvidenceVerificationEngine:
         pairs: Sequence[Mapping[str, Any]],
         *,
         observed_at: str,
+        expected_base_asset: str,
         allowed_quote_assets: Sequence[str] = ("USDT",),
+        source_receipts: Optional[Mapping[str, Mapping[str, Any]]] = None,
     ) -> tuple[EvidenceRecord, ...]:
-        """Adapt exact active pairs from the official Binance exchangeInfo snapshot."""
+        """Adapt active pairs only for the caller's already-proven canonical base asset."""
         _timestamp(observed_at)
         if not isinstance(asset_id, str) or not asset_id.startswith("coingecko:"):
             raise ValueError("Binance Spot evidence requires a canonical CoinGecko asset ID")
+        if (not isinstance(expected_base_asset, str) or not expected_base_asset.isalnum()
+                or expected_base_asset != expected_base_asset.upper()):
+            raise ValueError("Binance Spot evidence requires an exact uppercase expected base asset")
         if isinstance(pairs, (str, bytes)) or not isinstance(pairs, Sequence):
             raise ValueError("Binance exchangeInfo pairs must be a sequence of objects")
         if isinstance(allowed_quote_assets, (str, bytes)) or not isinstance(allowed_quote_assets, Sequence):
@@ -872,7 +1334,8 @@ class EvidenceVerificationEngine:
                 )
                 and any("SPOT" in group for group in permissions)
             )
-            if (not isinstance(base, str) or not base.isalnum() or base != base.upper()
+            if (not isinstance(base, str) or base != expected_base_asset
+                    or not base.isalnum() or base != base.upper()
                     or not isinstance(quote, str) or not quote.isalnum() or quote not in allowed
                     or not isinstance(symbol, str) or symbol != base + quote
                     or pair.get("status") != "TRADING"
@@ -888,19 +1351,50 @@ class EvidenceVerificationEngine:
                 "permissionSets": permissions,
             }
             content_hash = _digest(json.dumps(canonical, sort_keys=True, separators=(",", ":")))
-            output.append(EvidenceRecord(
+            endpoint = "https://api.binance.com/api/v3/exchangeInfo?permissions=SPOT"
+            receipt_bundle = (source_receipts or {}).get(symbol)
+            receipt_payload = receipt_bundle.get("payload") if isinstance(receipt_bundle, Mapping) else None
+            receipt_value = receipt_bundle.get("receipt") if isinstance(receipt_bundle, Mapping) else None
+            receipt_key_id = receipt_value.get("key_id") if isinstance(receipt_value, Mapping) else None
+            payload_matches = (
+                isinstance(receipt_payload, Mapping)
+                and receipt_payload.get("authority_id") == "binance_spot_exchange_info"
+                and receipt_payload.get("endpoint") == endpoint
+                and receipt_payload.get("observed_at") == observed_at
+                and receipt_payload.get("pair") == canonical
+                and receipt_payload.get("pair_sha256") == content_hash
+            )
+            record = EvidenceRecord(
                 source_id=f"binance-exchange-info:{symbol}:{_digest(observed_at)[:16]}",
-                source_family="binance_spot_exchange_info", source_kind="PRIMARY",
-                publisher="Binance Spot exchangeInfo", subject=asset_id,
+                source_family=("binance_spot_exchange_info" if payload_matches else "binance_spot_exchange_info_unreceipted"),
+                source_kind="PRIMARY", publisher="Binance Spot exchangeInfo", subject=asset_id,
                 claim_key="binance_spot.eligible", value=True,
                 published_at=observed_at, updated_at=observed_at, observed_at=observed_at,
                 asset_id=asset_id, timeframe="spot", event_at=observed_at,
-                source_url="https://api.binance.com/api/v3/exchangeInfo?permissions=SPOT",
-                content_hash=content_hash, lineage_id=content_hash,
-                is_primary=True, source_status="ACCEPTED", status_value="TRADING",
-            ))
+                source_url=endpoint, content_hash=content_hash,
+                content_hash_kind="CANONICAL_SELECTED_PROJECTION_SHA256", lineage_id=content_hash,
+                is_primary=False, source_status="ACCEPTED" if payload_matches else "UNVERIFIED",
+                status_value="TRADING", source_receipt_key_id=receipt_key_id if payload_matches else None,
+                source_receipt=(json.dumps(receipt_value, sort_keys=True, separators=(",", ":")) if payload_matches else None),
+                source_receipt_payload=(json.dumps(dict(receipt_payload), sort_keys=True, separators=(",", ":")) if payload_matches else None),
+            )
+            if payload_matches and _verify_binance_spot_evidence_receipt(record):
+                record = _issue_evidence_record(
+                    record, authority_id="binance_spot_exchange_info",
+                    independence_group="binance_spot_exchange_info",
+                )
+            else:
+                # A caller-provided receipt-shaped object is never enough; without
+                # an approved key and a valid signature this remains untrusted.
+                object.__setattr__(record, "source_status", "UNVERIFIED")
+                object.__setattr__(record, "source_authority_id", None)
+                object.__setattr__(record, "independence_group", None)
+                object.__setattr__(record, "source_receipt_key_id", None)
+                object.__setattr__(record, "source_receipt", None)
+                object.__setattr__(record, "source_receipt_payload", None)
+            output.append(record)
         if not output:
-            raise ValueError("no active, permission-verified Binance Spot pair supports this asset")
+            raise ValueError("no active, permission-verified Binance Spot pair supports this asset and expected base asset")
         return tuple(output)
 
     @staticmethod
@@ -928,24 +1422,54 @@ class EvidenceVerificationEngine:
             unit = "hours"
             status_value = "RECENT_RECORD"
         payload = f"{symbol.strip().upper()}|{value}|{observed_at}"
-        return EvidenceRecord(
-            source_id="local-publication-ledger:" + _digest(payload),
-            source_family="local_publication_ledger", source_kind="PRIMARY",
-            publisher="local publication ledger", subject=asset_id,
-            claim_key="publication.last_posted", value=value,
-            published_at=observed_at, updated_at=observed_at, observed_at=observed_at,
-            asset_id=asset_id, unit=unit, timeframe="latest_200_posts",
-            content_hash=_digest(payload), lineage_id="local-ledger:" + _digest(payload),
-            is_primary=True, source_status="ACCEPTED", status_value=status_value,
+        return _issue_evidence_record(
+            EvidenceRecord(
+                source_id="local-publication-ledger:" + _digest(payload),
+                source_family="local_publication_ledger", source_kind="PRIMARY",
+                publisher="local publication ledger", subject=asset_id,
+                claim_key="publication.last_posted", value=value,
+                published_at=observed_at, updated_at=observed_at, observed_at=observed_at,
+                asset_id=asset_id, unit=unit, timeframe="latest_200_posts",
+                content_hash=_digest(payload), content_hash_kind="LOCAL_ASSERTION_FINGERPRINT_SHA256",
+                lineage_id="local-ledger:" + _digest(payload),
+                is_primary=True, source_status="ACCEPTED", status_value=status_value,
+            ),
+            authority_id="local_publication_ledger",
+            independence_group="local_publication_ledger",
         )
 
     @staticmethod
     def evidence_from_market_observation(item: MarketObservation) -> tuple[EvidenceRecord, ...]:
         item.validate()
+        endpoint_is_binance = (
+            item.provider == "binance_spot"
+            and _https_endpoint_matches(
+                item.endpoint, {"api.binance.com", "data-api.binance.vision"},
+                "/api/v3/ticker/24hr",
+            )
+        )
+        endpoint_is_coingecko = (
+            item.provider == "coingecko_markets"
+            and _https_endpoint_matches(
+                item.endpoint, {"api.coingecko.com"}, "/api/v3/coins/markets",
+            )
+        )
+        if endpoint_is_binance:
+            authority_id, source_family, publisher, independence_group = (
+                "binance_spot_market", "binance_spot_market", "Binance Spot market data",
+                "binance_spot_market",
+            )
+        elif endpoint_is_coingecko:
+            authority_id, source_family, publisher, independence_group = (
+                "coingecko_market", "coingecko_market", "CoinGecko market data",
+                "coingecko_market",
+            )
+        else:
+            authority_id = source_family = publisher = independence_group = None
+
         source_id = item.data_hash or _digest("|".join((item.provider, item.endpoint, item.observed_at)))
         published_at = item.source_timestamp or item.published_at or item.observed_at
         updated_at = item.source_timestamp or item.published_at
-        is_primary = item.provider.casefold().startswith("binance_")
         fields = (
             ("price", item.price, item.currency, "spot"),
             ("change_24h", item.change_24h, "percent", "24h"),
@@ -959,60 +1483,119 @@ class EvidenceVerificationEngine:
             freshness = item.freshness_by_field.get(name)
             source_status = (
                 "STALE" if freshness == "STALE"
-                else "UNVERIFIED" if freshness == "UNKNOWN"
+                else "UNVERIFIED" if freshness == "UNKNOWN" or authority_id is None
                 else "ACCEPTED"
             )
-            output.append(EvidenceRecord(
-                source_id=source_id, source_family=item.provider, source_kind="MARKET",
-                publisher=item.provider, subject=item.asset_id, claim_key="market." + name,
+            record = EvidenceRecord(
+                source_id=source_id,
+                source_family=source_family or ("untrusted_market:" + item.provider.casefold()),
+                source_kind="MARKET", publisher=publisher or item.provider,
+                subject=item.asset_id, claim_key="market." + name,
                 value=value, published_at=published_at, updated_at=updated_at,
                 observed_at=item.observed_at, asset_id=item.asset_id, unit=unit,
-                timeframe=timeframe,
-                event_at=_timestamp(published_at).isoformat(),
-                content_hash=item.data_hash, lineage_id=item.data_hash or source_id,
-                is_primary=is_primary,
+                timeframe=timeframe, event_at=_timestamp(published_at).isoformat(),
+                source_url=item.endpoint,
+                content_hash=item.data_hash, content_hash_kind=item.data_hash_kind,
+                lineage_id=item.data_hash or source_id, is_primary=False,
                 source_status=source_status, status_value=freshness or "OBSERVED",
-            ))
+            )
+            if authority_id is not None:
+                record = _issue_evidence_record(
+                    record, authority_id=authority_id,
+                    independence_group=independence_group,
+                )
+            output.append(record)
         return tuple(output)
 
     @staticmethod
     def evidence_from_trend_signal(item: TrendSignal) -> tuple[EvidenceRecord, ...]:
         item.validate()
-        # Gainer/volume topics are two derived views over the same MarketScanner
-        # universe, not two independent publishers. Keep one dependency family
-        # even when the upstream market observation omitted its content hash.
-        market_derived = item.source in {"market_gainer", "market_volume"}
-        source_family = "market_scanner_derived" if market_derived else item.source
-        source_kind = "MARKET" if market_derived else "SOCIAL"
-        return tuple(
-            EvidenceRecord(
-                source_id=item.source_item_id or item.content_hash,
-                source_family=source_family, source_kind=source_kind, publisher=item.source,
-                subject=asset_id,
-                claim_key="trend.topic:" + _digest(item.topic.casefold())[:16], value=item.topic.strip().casefold(),
-                published_at=item.observed_at, observed_at=item.observed_at,
-                asset_id=asset_id, timeframe="current", content_hash=item.content_hash,
-                lineage_id=item.content_hash, is_primary=False, source_status="ACCEPTED",
+        trusted_coingecko_trending = (
+            item.source == "coingecko_trending"
+            and _https_endpoint_matches(
+                item.source_endpoint, {"api.coingecko.com"},
+                "/api/v3/search/trending",
             )
-            for asset_id in item.asset_ids
         )
+        market_derived = item.source in {"market_gainer", "market_turnover"}
+        output = []
+        for asset_id in item.asset_ids:
+            record = EvidenceRecord(
+                source_id=item.source_item_id or item.content_hash,
+                source_family=(
+                    "coingecko_trending" if trusted_coingecko_trending
+                    else "market_scanner_derived" if market_derived
+                    else "untrusted_trend:" + item.source.casefold()
+                ),
+                source_kind="SOCIAL" if not market_derived else "MARKET",
+                publisher="CoinGecko trending" if trusted_coingecko_trending else item.source,
+                subject=asset_id,
+                claim_key="trend.topic:" + _digest(item.topic.casefold())[:16],
+                value=item.topic.strip().casefold(),
+                published_at=item.observed_at, observed_at=item.observed_at,
+                asset_id=asset_id, timeframe="current", source_url=item.source_endpoint or None,
+                content_hash=item.content_hash,
+                content_hash_kind=item.content_hash_kind,
+                lineage_id=item.content_hash or item.source_item_id,
+                is_primary=False,
+                source_status="ACCEPTED" if trusted_coingecko_trending else "UNVERIFIED",
+            )
+            if trusted_coingecko_trending:
+                record = _issue_evidence_record(
+                    record, authority_id="coingecko_trending",
+                    independence_group="coingecko_trending",
+                )
+            output.append(record)
+        return tuple(output)
 
     @staticmethod
     def evidence_from_onchain_observation(
         observation: OnChainObservation,
         validation: OnChainValidationResult,
+        *,
+        receipt_verification_key: Optional[bytes] = None,
+        receipt_verification_key_id: Optional[str] = None,
     ) -> EvidenceRecord:
         if not isinstance(observation, OnChainObservation) or not isinstance(validation, OnChainValidationResult):
             raise ValueError("on-chain evidence adapter requires Module 9 observation and validation records")
+        try:
+            receipt_config = load_onchain_receipt_config_from_env()
+        except ValueError:
+            receipt_config = None
+        trusted_ids = _onchain_trusted_receipt_key_ids()
+        verification_key = receipt_verification_key
+        if verification_key is None and receipt_config is not None:
+            verification_key = receipt_config.keyring.get(receipt_verification_key_id or "")
         accepted = bool(
-            validation.status == "ACCEPTED"
+            receipt_config is not None
+            and validation.status == "ACCEPTED"
             and validation.observation_id == observation.observation_id
             and validation.asset_id == observation.asset_id
             and validation.mapping_id == observation.mapping_id
             and validation.network_id == observation.network_id
             and validation.provider == observation.provider
+            and validation.receipt_key_id in trusted_ids
+            and receipt_verification_key_id == validation.receipt_key_id
+            and receipt_verification_key_id in trusted_ids
+            and OnChainIntelligenceEngine.verify_acceptance_receipt(
+                observation, validation, verification_key,
+                receipt_verification_key_id,
+            )
         )
-        return EvidenceRecord(
+        receipt_envelope = (
+            json.dumps({
+                "version": validation.receipt_version,
+                "key_id": validation.receipt_key_id,
+                "signature": validation.receipt_signature,
+            }, sort_keys=True, separators=(",", ":")) if accepted else None
+        )
+        receipt_payload = (
+            json.dumps({
+                "observation": asdict(observation),
+                "validation": asdict(validation),
+            }, sort_keys=True, separators=(",", ":"), allow_nan=False) if accepted else None
+        )
+        record = EvidenceRecord(
             source_id=observation.observation_id, source_family=observation.provider,
             source_kind="ONCHAIN", publisher=observation.provider, subject=observation.asset_id,
             claim_key="onchain.transaction_hash", value=observation.transaction_hash,
@@ -1021,7 +1604,16 @@ class EvidenceVerificationEngine:
             timeframe=observation.network_id, event_at=observation.block_time,
             source_status="ACCEPTED" if accepted else "UNVERIFIED",
             is_primary=accepted, status_value=observation.finality,
+            source_receipt_key_id=validation.receipt_key_id if accepted else None,
+            source_receipt=receipt_envelope,
+            source_receipt_payload=receipt_payload,
         )
+        if accepted:
+            record = _issue_evidence_record(
+                record, authority_id="onchain_receipt",
+                independence_group="onchain:" + observation.network_id + ":" + observation.provider,
+            )
+        return record
 
     @staticmethod
     def evidence_from_onchain_summary(summary: Mapping[str, Any]) -> EvidenceRecord:
@@ -1062,8 +1654,8 @@ class EvidenceVerificationEngine:
             value=summary["summary_id"], published_at=summary["last_block_time"],
             updated_at=summary["observed_at"], observed_at=summary["observed_at"],
             asset_id=summary["asset_id"], mapping_id=summary["mapping_id"],
-            timeframe=summary["network_id"], event_at=summary["last_block_time"], is_primary=True,
-            source_status="ACCEPTED", status_value="THRESHOLD_MET",
+            timeframe=summary["network_id"], event_at=summary["last_block_time"], is_primary=False,
+            source_status="UNVERIFIED", status_value="THRESHOLD_MET",
         )
 
     @staticmethod
@@ -1107,7 +1699,7 @@ class EvidenceVerificationEngine:
         matching = [
             item for item in evidence_records
             if item.subject == subject and item.asset_id == asset_id
-            and item.source_status == "ACCEPTED"
+            and _effective_evidence_status(item) == "ACCEPTED"
         ]
         trend_topics = sorted({
             item.value for item in matching
@@ -1177,7 +1769,7 @@ class EvidenceVerificationEngine:
             "Market Cap": ("market.market_cap", r"\$([+-]?(?:\d+(?:\.\d*)?|\.\d+))", "USDT", "spot"),
         }
         interpretation_prefixes = (
-            "Stage:", "Sector:", "Freshness:", "Level:", "Analysis:", "Volume Signal Index:",
+            "Stage:", "Sector:", "Freshness:", "Level:", "Analysis:", "Turnover / market cap:",
             "Top 5 Coin:", "Square Interest:", "Entry:", "Liquidity:",
             "Trade Ready:", "Risk:", "Repetition Risk:",
         )
@@ -1202,7 +1794,7 @@ class EvidenceVerificationEngine:
                     item for item in evidence_records
                     if item.claim_key == trend_key and item.subject == subject
                     and item.asset_id == asset_id and item.value == topic
-                    and item.source_kind in {"SOCIAL", "MARKET"} and item.source_status == "ACCEPTED"
+                    and item.source_kind in {"SOCIAL", "MARKET"} and _effective_evidence_status(item) == "ACCEPTED"
                 ]
                 if candidates:
                     latest_observed = max(_timestamp(item.observed_at) for item in candidates)
@@ -1238,7 +1830,7 @@ class EvidenceVerificationEngine:
                     if item.claim_key == "onchain.transfer_summary"
                     and item.source_id == summary_id and item.value == summary_id
                     and item.subject == subject and item.asset_id == asset_id
-                    and item.source_kind == "ONCHAIN" and item.source_status == "ACCEPTED"
+                    and item.source_kind == "ONCHAIN" and _effective_evidence_status(item) == "ACCEPTED"
                     and item.status_value == "THRESHOLD_MET"
                 ]
                 linked = tuple(sorted(item.evidence_id for item in candidates))
@@ -1284,7 +1876,7 @@ class EvidenceVerificationEngine:
                         and (not require_preferred_market_content_hash
                              or (preferred_market_content_hash is not None
                                  and item.content_hash == preferred_market_content_hash))
-                        and item.source_status in {"ACCEPTED", "STALE", "UNVERIFIED"}
+                        and _effective_evidence_status(item) in {"ACCEPTED", "STALE", "UNVERIFIED"}
                     ]
                     claim_value: Any = numeric_value
                     if related:
@@ -1515,6 +2107,8 @@ class EvidenceVerificationEngine:
         *,
         onchain_records: Sequence[tuple[OnChainObservation, OnChainValidationResult]] = (),
         onchain_summary_refs: Sequence[Mapping[str, Any]] = (),
+        onchain_receipt_verification_key: Optional[bytes] = None,
+        onchain_receipt_verification_key_id: Optional[str] = None,
     ) -> ClaimRegistry:
         required_reads = (
             "iter_announcement_revisions", "iter_market_observations", "iter_trend_signals",
@@ -1529,7 +2123,11 @@ class EvidenceVerificationEngine:
         for signal in store.iter_trend_signals():
             evidence.extend(self.evidence_from_trend_signal(signal))
         for observation, validation in onchain_records:
-            evidence.append(self.evidence_from_onchain_observation(observation, validation))
+            evidence.append(self.evidence_from_onchain_observation(
+                observation, validation,
+                receipt_verification_key=onchain_receipt_verification_key,
+                receipt_verification_key_id=onchain_receipt_verification_key_id,
+            ))
         for summary in onchain_summary_refs:
             evidence.append(self.evidence_from_onchain_summary(summary))
         claims = self._source_assertion_claims(evidence)
@@ -1674,6 +2272,7 @@ def render_claim_registry(registry: ClaimRegistry, *, asset_id: Optional[str] = 
     if not isinstance(registry, ClaimRegistry):
         return "CLAIM VERIFICATION REGISTER: unavailable; do not state unsupported claims as facts."
     claims_by_id = {claim.claim_id: claim for claim in registry.claims}
+    evidence_by_id = {item.evidence_id: item for item in registry.evidence_records}
     all_selected = []
     for result in registry.results:
         claim = claims_by_id.get(result.claim_id)
@@ -1720,7 +2319,17 @@ def render_claim_registry(registry: ClaimRegistry, *, asset_id: Optional[str] = 
     if not verified:
         lines.append("- None. No factual claim is currently approved by this registry.")
     for claim, result in verified[:30]:
-        attribution = "Attribute this as a source assertion." if claim.claim_type == "SOURCE_ASSERTION" else ""
+        attribution = ""
+        if claim.claim_type == "SOURCE_ASSERTION":
+            publishers = sorted({
+                evidence_by_id[evidence_id].publisher.replace("\r", " ").replace("\n", " ").strip()
+                for evidence_id in result.supporting_evidence_ids
+                if evidence_id in evidence_by_id
+            })
+            attribution = (
+                "Attribute this as a source assertion; source publishers: "
+                + (", ".join(publishers) if publishers else "UNAVAILABLE") + "."
+            )
         lines.append(
             f"- [{result.state}/{claim.claim_type}] {claim.text} "
             f"(claim ID: {claim.claim_id}; evidence IDs: {', '.join(result.supporting_evidence_ids)}) {attribution}".strip()
@@ -1740,6 +2349,8 @@ def render_claim_registry(registry: ClaimRegistry, *, asset_id: Optional[str] = 
         lines.append(f"- {len(unresolved) - 30} additional unresolved claims omitted from this prompt view.")
     lines.extend((
         "RULE: Use only VERIFIED or CORROBORATED claims as factual statements.",
+        "SOURCE_ASSERTION is not factual verification: VERIFIED here means only that the named publisher made the assertion.",
+        "A SOURCE_ASSERTION records only what its named publisher asserted; it is not independently confirmed truth.",
         "Attribute SOURCE_ASSERTION claims to the named source; do not upgrade the source's assertion into independently established truth.",
         "Do not state UNVERIFIED, CONTRADICTED, STALE or UNCLASSIFIED claims as facts; any such unresolved claim blocks publication.",
         "QUALIFIED NON-FACTUAL ANALYSIS is not evidence: use it only when clearly labelled as analysis, estimate or hypothesis, and never convert it into a factual assertion.",

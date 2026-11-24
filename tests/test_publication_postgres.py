@@ -143,6 +143,17 @@ class PublicationPostgresMigrationTests(unittest.TestCase):
                 self.assertEqual(connection.execute.call_count, 1)
                 self.assertTrue(connection.execute.call_args.args[0].startswith("SELECT"))
 
+    def test_validation_chronology_migration_is_additive_and_preserves_legacy_ambiguity(self):
+        path = (Path(__file__).resolve().parents[1] / "layer1" / "migrations"
+                / "publication_postgresql" / "0005_validation_chronology.sql")
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("ADD COLUMN IF NOT EXISTS validation_sequence BIGINT", source)
+        self.assertIn("SET DEFAULT nextval('content_draft_validation_sequence_seq')", source)
+        self.assertIn("SET DEFAULT nextval('visual_validation_sequence_seq')", source)
+        self.assertIn("WHERE validation_sequence IS NOT NULL", source)
+        self.assertNotRegex(source, r"UPDATE\s+(content_draft_validation_results|visual_validation_results)")
+        self.assertNotIn("ctid", source.lower())
+
     def test_migration_is_additive_and_covers_publication_critical_records(self):
         path = Path(__file__).resolve().parents[1] / "layer1" / "migrations" / "publication_postgresql" / "0001_publication_storage.sql"
         sql = path.read_text(encoding="utf-8").upper()
@@ -1031,13 +1042,25 @@ class PublicationPostgresResearchPackageTests(unittest.TestCase):
         hash2 = hashlib.sha256(json.dumps(payload2, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         try:
             first = store.save_research_package(research_key=key, package_hash=hash1, cutoff_at="2026-11-15T00:00:00Z", payload=payload1)
+            from psycopg.types.json import Jsonb
+            tampered_payload = {"asset_id": "coingecko:bitcoin", "symbol": "BTC", "facts": ["tampered"]}
+            store.conn.execute(
+                "UPDATE layer1_research_package_versions SET payload_json=%s WHERE research_key=%s AND package_hash=%s",
+                (Jsonb(tampered_payload), key, hash1),
+            )
+            with self.assertRaisesRegex(ValueError, "package hash"):
+                store.load_latest_research_package(key)
+            store.conn.execute(
+                "UPDATE layer1_research_package_versions SET payload_json=%s WHERE research_key=%s AND package_hash=%s",
+                (Jsonb(payload1), key, hash1),
+            )
             replay = store.save_research_package(research_key=key, package_hash=hash1, cutoff_at="2026-11-15T00:00:00Z", payload=payload1)
             second = store.save_research_package(research_key=key, package_hash=hash2, cutoff_at="2026-11-15T01:00:00Z", payload=payload2)
             self.assertEqual(first["package_id"], replay["package_id"])
             self.assertEqual(first["version"], replay["version"])
             self.assertEqual((first["version"], second["version"]), (1, 2))
             self.assertEqual(store.load_latest_research_package(key)["payload"], payload2)
-            with self.assertRaisesRegex(ValueError, "immutable"):
+            with self.assertRaisesRegex(ValueError, "package hash"):
                 store.save_research_package(research_key=key, package_hash=hash1, cutoff_at="2026-11-15T00:00:00Z", payload={"tampered": True})
         finally:
             store.conn.execute("DELETE FROM layer1_research_package_versions WHERE research_key=%s", (key,))
@@ -1086,7 +1109,7 @@ class PublicationPostgresResearchPackageTests(unittest.TestCase):
             research = store.save_research_package(research_key=research_key, package_hash=research_hash, cutoff_at="2026-11-18T00:00:00Z", payload=research_payload)
             brief = store.save_editorial_brief(event_id=event_id, angle_id=angle_id, research_package_id=research["package_id"], brief_hash=brief_hash, payload=brief_payload)
             draft = store.save_draft(content, asset_id="coingecko:bitcoin", research_package_id=research["package_id"], editorial_brief_id=brief["brief_id"], approved_claim_ids=["a" * 64])
-            text_validation_id = store.save_text_validation(draft_hash=content_hash, status="PASS", reasons=["claim-backed"], validation_version="process-text-v1")
+            text_validation_id = store.save_text_validation(draft_hash=content_hash, status="PASS", reasons=["PROCESS_RESTART_TEST"], validation_version="content-verification-v2-claim-attribution", verification_result=__import__("tests.evidence_fixtures", fromlist=["verifier_issued_content_result"]).verifier_issued_content_result(content, reasons=("PROCESS_RESTART_TEST",), asset_id="coingecko:bitcoin", symbol="BTC"))
             visual_validation_id = store.save_visual_validation(draft_hash=content_hash, image_hash=image_hash, status="PASS", reasons=["legible"], validation_version="process-visual-v1")
             artifact_id = store.save_image_artifact(artifact_metadata, image_path="/tmp/fresh-process-image-fixture.png")
             decision = OpportunityDecision("PROCEED", 91.0, reasons, "process-test-v1", decision_id, decision_snapshot)
@@ -1159,11 +1182,23 @@ class PublicationPostgresEditorialBriefTests(unittest.TestCase):
         try:
             research = store.save_research_package(research_key=research_key, package_hash=research_hash, cutoff_at="2026-11-15T00:00:00Z", payload=research_payload)
             first = store.save_editorial_brief(event_id=event_id, angle_id=angle_id, research_package_id=research["package_id"], brief_hash=brief_hash, payload=brief_payload)
+            from psycopg.types.json import Jsonb
+            tampered_brief = {"headline": "Tampered headline", "claims": ["claim-1"]}
+            store.conn.execute(
+                "UPDATE editorial_brief_versions SET payload_json=%s WHERE event_id=%s AND angle_id=%s AND brief_hash=%s",
+                (Jsonb(tampered_brief), event_id, angle_id, brief_hash),
+            )
+            with self.assertRaisesRegex(ValueError, "brief hash"):
+                store.load_latest_editorial_brief(event_id, angle_id)
+            store.conn.execute(
+                "UPDATE editorial_brief_versions SET payload_json=%s WHERE event_id=%s AND angle_id=%s AND brief_hash=%s",
+                (Jsonb(brief_payload), event_id, angle_id, brief_hash),
+            )
             replay = store.save_editorial_brief(event_id=event_id, angle_id=angle_id, research_package_id=research["package_id"], brief_hash=brief_hash, payload=brief_payload)
             self.assertEqual(first["brief_id"], replay["brief_id"])
             self.assertEqual(first["version"], 1)
             self.assertEqual(store.load_latest_editorial_brief(event_id, angle_id)["payload"], brief_payload)
-            with self.assertRaisesRegex(ValueError, "immutable"):
+            with self.assertRaisesRegex(ValueError, "brief hash"):
                 store.save_editorial_brief(event_id=event_id, angle_id=angle_id, research_package_id=research["package_id"], brief_hash=brief_hash, payload={"tampered": True})
         finally:
             store.conn.execute("DELETE FROM editorial_brief_versions WHERE event_id=%s AND angle_id=%s", (event_id, angle_id))
@@ -1249,6 +1284,15 @@ class PublicationPostgresDraftTests(unittest.TestCase):
             cleanup.conn.execute("DELETE FROM layer1_research_package_versions WHERE research_key=%s", (research_key,))
             cleanup.close()
 
+    def test_postgres_text_validation_store_rejects_caller_asserted_pass_before_database_access(self):
+        from layer1.publication_postgres import PostgresPublicationStore
+        store = object.__new__(PostgresPublicationStore)
+        with self.assertRaisesRegex(ValueError, "verifier-issued content result"):
+            store.save_text_validation(
+                draft_hash="a" * 64, status="PASS", reasons=(),
+                validation_version="caller-forged-v1",
+            )
+
     def test_validation_input_normalization_and_hashing(self):
         from layer1.publication_postgres import validate_validation_input
 
@@ -1267,14 +1311,43 @@ class PublicationPostgresDraftTests(unittest.TestCase):
         from layer1.publication_postgres import PostgresPublicationStore
 
         store = PostgresPublicationStore(os.environ["TEST_POSTGRES_DSN"])
-        draft_hash, image_hash = "e" * 64, "f" * 64
+        import hashlib
+        validation_content = "PostgreSQL validation fixture"
+        draft_hash, image_hash = hashlib.sha256(validation_content.encode()).hexdigest(), "f" * 64
         try:
-            text_id = store.save_text_validation(draft_hash=draft_hash, status="PASS", reasons=["claim-backed"], validation_version="text-v1")
-            self.assertEqual(text_id, store.save_text_validation(draft_hash=draft_hash, status="PASS", reasons=["claim-backed"], validation_version="text-v1"))
+            text_id = store.save_text_validation(draft_hash=draft_hash, status="PASS", reasons=["claim-backed"], validation_version="content-verification-v2-claim-attribution", verification_result=__import__("tests.evidence_fixtures", fromlist=["verifier_issued_content_result"]).verifier_issued_content_result(validation_content, reasons=("claim-backed",)))
+            self.assertEqual(text_id, store.save_text_validation(draft_hash=draft_hash, status="PASS", reasons=["claim-backed"], validation_version="content-verification-v2-claim-attribution", verification_result=__import__("tests.evidence_fixtures", fromlist=["verifier_issued_content_result"]).verifier_issued_content_result(validation_content, reasons=("claim-backed",))))
             visual_id = store.save_visual_validation(draft_hash=draft_hash, image_hash=image_hash, status="PASS", reasons=["legible"], validation_version="visual-v1")
             self.assertEqual(visual_id, store.save_visual_validation(draft_hash=draft_hash, image_hash=image_hash, status="PASS", reasons=["legible"], validation_version="visual-v1"))
             self.assertEqual(store.load_latest_text_validation(draft_hash)["validation_id"], text_id)
             self.assertEqual(store.load_latest_visual_validation(draft_hash, image_hash)["validation_id"], visual_id)
+            visual_created_at = store.conn.execute(
+                "SELECT created_at FROM visual_validation_results WHERE validation_id=%s", (visual_id,),
+            ).fetchone()["created_at"]
+            later_visual_id = "b" * 64
+            store.conn.execute(
+                "INSERT INTO visual_validation_results "
+                "(validation_id,draft_hash,image_hash,status,reasons_json,validation_version,created_at) "
+                "VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s)",
+                (later_visual_id, draft_hash, image_hash, "NEEDS_REVISION", '["later revision"]', "visual-v2", visual_created_at),
+            )
+            self.assertEqual(store.load_latest_visual_validation(draft_hash, image_hash)["status"], "NEEDS_REVISION")
+            store.conn.execute("DELETE FROM visual_validation_results WHERE validation_id=%s", (later_visual_id,))
+            legacy_hash = "d" * 64
+            legacy_time = visual_created_at
+            with store.conn.cursor() as cursor:
+                cursor.executemany(
+                    "INSERT INTO content_draft_validation_results "
+                    "(validation_id,draft_hash,status,reasons_json,validation_version,created_at,validation_sequence) "
+                    "VALUES (%s,%s,%s,%s::jsonb,%s,%s,NULL)",
+                    [
+                        ("c" * 64, legacy_hash, "PASS", "[]", "legacy-v1", legacy_time),
+                        ("a" * 64, legacy_hash, "REJECT", '["legacy later"]', "legacy-v1", legacy_time),
+                    ],
+                )
+            with self.assertRaisesRegex(ValueError, "chronology is ambiguous for legacy records"):
+                store.load_latest_text_validation(legacy_hash)
+            store.conn.execute("DELETE FROM content_draft_validation_results WHERE draft_hash=%s", (legacy_hash,))
             revised_id = store.save_text_validation(draft_hash=draft_hash, status="REJECT", reasons=["claim-backed"], validation_version="text-v2")
             self.assertNotEqual(revised_id, text_id)
             self.assertEqual(store.load_latest_text_validation(draft_hash)["status"], "REJECT")
@@ -1522,23 +1595,75 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
         symbol = "AUTH" + suffix[:8].upper()
         package_payload = {"asset_id":"coingecko:bitcoin","symbol":"BTC"}
         package_hash = hashlib.sha256(json.dumps(package_payload,sort_keys=True,separators=(",", ":")).encode()).hexdigest()
-        brief_payload = {"angle":"auth-test"}
-        brief_hash = hashlib.sha256(json.dumps(brief_payload,sort_keys=True,separators=(",", ":")).encode()).hexdigest()
+        from layer1.editorial_strategy import editorial_brief_payload_hash
+        brief_payload = {
+            "event_id": event_id, "angle_id": "auth-angle",
+            "research_package_id": "PENDING_RESEARCH_PACKAGE_ID",
+            "research_question": "Explain the verified BTC market context",
+            "format": "MARKET_MOVEMENT_EXPLAINER", "angle": "Explain only approved BTC facts",
+            "audience": "Binance Square readers", "tone": "analytical and cautious",
+            "min_words": 20, "max_words": 120, "outline": ["State verified market facts"],
+            "approved_claim_ids": ["e" * 64], "prohibited_claims": [],
+            "uncertainty_notes": [], "status": "READY", "policy_version": "test-v1",
+            "brief_id": "pending", "version": 0, "brief_hash": "0" * 64,
+        }
         content = "BTC market update supported by verified source " + suffix + "."
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         claim_ids = ("e"*64,)
         reservation = None
-        attempt_key = "test-authorized-attempt:" + suffix
+        fixture_attempt_key = "test-authorized-attempt:" + suffix
+        attempt_key = fixture_attempt_key
+        extra_reservation = None
+        extra_auth_id = None
+        extra_attempt_key = None
+        extra_validation_ids = []
+        extra_visual_validation_ids = []
+        extra_image_hash = None
         try:
             package = store.save_research_package(research_key=research_key,package_hash=package_hash,cutoff_at=now_s,payload=package_payload)
+            brief_payload["research_package_id"] = package["package_id"]
+            brief_payload["brief_hash"] = editorial_brief_payload_hash(brief_payload)
+            brief_payload["brief_id"] = brief_payload["brief_hash"]
+            brief_hash = brief_payload["brief_hash"]
             brief = store.save_editorial_brief(event_id=event_id,angle_id="auth-angle",research_package_id=package["package_id"],brief_hash=brief_hash,payload=brief_payload)
             draft = store.save_draft(content,asset_id="coingecko:bitcoin",research_package_id=package["package_id"],editorial_brief_id=brief["brief_id"],approved_claim_ids=claim_ids)
-            store.save_text_validation(draft_hash=content_hash,status="PASS",reasons=[],validation_version="text-v1")
+            store.save_text_validation(draft_hash=content_hash,status="PASS",reasons=[],validation_version="content-verification-v2-claim-attribution",verification_result=__import__("tests.evidence_fixtures", fromlist=["verifier_issued_content_result"]).verifier_issued_content_result(content, asset_id="coingecko:bitcoin", symbol="BTC"))
             authorization_engine = PostgresPublicationAuthorizationEngine(store)
             reservation = authorization_engine.reserve_daily_quota(
                 symbol=symbol, daily_limit=1, now=now_s,
             )
             self.assertIsNotNone(reservation)
+            persisted_pass = store.load_latest_text_validation(content_hash)
+            tied_validation_time = store.conn.execute(
+                "SELECT created_at FROM content_draft_validation_results WHERE validation_id=%s",
+                (persisted_pass["validation_id"],),
+            ).fetchone()["created_at"]
+            for later_status in ("REJECT", "NEEDS_REVISION"):
+                later_id = uuid.uuid4().hex + uuid.uuid4().hex
+                store.conn.execute(
+                    "INSERT INTO content_draft_validation_results "
+                    "(validation_id,draft_hash,status,reasons_json,validation_version,created_at) "
+                    "VALUES (%s,%s,%s,%s::jsonb,%s,%s)",
+                    (later_id, content_hash, later_status, '["later decision"]', "text-v2", tied_validation_time),
+                )
+                self.assertEqual(store.load_latest_text_validation(content_hash)["status"], later_status)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "(latest persisted text validation is no longer PASS|persisted text validation is not PASS)",
+                ):
+                    authorization_engine.authorize(
+                        symbol=symbol, asset_id="coingecko:bitcoin", content=content,
+                        image_hashes=[], eligibility_snapshot_at=now_s,
+                        eligibility_max_age_seconds=300, event_state="NO_EVENT",
+                        evidence_status="VERIFIED", text_validation_status="PASS",
+                        visual_validation_status="NOT_REQUIRED",
+                        quota_reservation_id=reservation, repetition_hard_hours=12,
+                        now=now_s, ttl_seconds=60,
+                    )
+                store.conn.execute(
+                    "DELETE FROM content_draft_validation_results WHERE validation_id=%s",
+                    (later_id,),
+                )
             auth = authorization_engine.authorize(
                 symbol=symbol, asset_id="coingecko:bitcoin", content=content,
                 image_hashes=[], eligibility_snapshot_at=now_s,
@@ -1641,11 +1766,150 @@ class PublicationPostgresAuthorizationTests(unittest.TestCase):
                     self.assertFalse(Path(config.database_path).exists())
                 finally:
                     publisher.db.close()
+
+            # Reopen a fresh connection after the publisher lifecycle; close the prior
+            # test handle explicitly so the fixture never leaks a connection.
+            store.close()
+            store = PostgresPublicationStore(os.environ["TEST_POSTGRES_DSN"])
+            authorization_engine = PostgresPublicationAuthorizationEngine(store)
+
+            # Revalidate the durable SUBMITTING attempt against the latest persisted
+            # validation, even when the authorization originally captured PASS.
+            final_symbol = "FINAL" + suffix[:8].upper()
+            # Use a dedicated future quota day so unrelated disposable-DB fixtures
+            # cannot exhaust today's shared daily limit.
+            final_now = datetime(2099, 12, 30, 12, 0, tzinfo=timezone.utc)
+            final_now_s = final_now.isoformat()
+            extra_reservation = authorization_engine.reserve_daily_quota(
+                symbol=final_symbol, daily_limit=1, now=final_now_s,
+            )
+            self.assertIsNotNone(extra_reservation)
+            extra_image_hash = hashlib.sha256(("final-image:" + suffix).encode()).hexdigest()
+            image_metadata = {
+                "provider": "cloudflare_workers_ai",
+                "model": "@cf/black-forest-labs/flux-2-klein-4b",
+                "generated_at": final_now_s,
+                "prompt_hash": "a" * 64,
+                "generation_parameters": {"width": 1024, "height": 1024, "output_format": "PNG"},
+                "source_image_hash": hashlib.sha256(("source-image:" + suffix).encode()).hexdigest(),
+                "final_image_hash": extra_image_hash,
+                "draft_hash": content_hash,
+                "asset_id": "coingecko:bitcoin",
+                "symbol": final_symbol,
+                "dimensions": [1024, 1024],
+                "request_id": "test-final-validation-gate:" + suffix,
+            }
+            store.save_image_artifact(
+                image_metadata, image_path="/tmp/pg-final-validation-gate-" + suffix + ".png",
+            )
+            store.save_visual_validation(
+                draft_hash=content_hash, image_hash=extra_image_hash, status="PASS",
+                reasons=[], validation_version="visual-quality-v3",
+            )
+            visual_pass = store.load_latest_visual_validation(content_hash, extra_image_hash)
+            tied_visual_time = visual_pass["created_at"]
+            final_auth = authorization_engine.authorize(
+                symbol=final_symbol, asset_id="coingecko:bitcoin", content=content,
+                image_hashes=[extra_image_hash], eligibility_snapshot_at=final_now_s,
+                eligibility_max_age_seconds=300, event_state="NO_EVENT",
+                evidence_status="VERIFIED", text_validation_status="PASS",
+                visual_validation_status="PASS",
+                quota_reservation_id=extra_reservation, repetition_hard_hours=12,
+                now=final_now_s, ttl_seconds=60,
+            )
+            extra_auth_id = final_auth.authorization_id
+            store.save_publication_authorization(final_auth)
+            extra_attempt_key = "test-final-validation-gate:" + suffix
+            self.assertIsNone(store.begin_authorized_attempt(
+                authorization_id=extra_auth_id, idempotency_key=extra_attempt_key,
+                symbol=final_symbol, content_hash=content_hash,
+            ))
+            for later_status in ("REJECT", "NEEDS_REVISION"):
+                later_id = uuid.uuid4().hex + uuid.uuid4().hex
+                extra_validation_ids.append(later_id)
+                store.conn.execute(
+                    "INSERT INTO content_draft_validation_results "
+                    "(validation_id,draft_hash,status,reasons_json,validation_version,created_at) "
+                    "VALUES (%s,%s,%s,%s::jsonb,%s,%s)",
+                    (later_id, content_hash, later_status, '["final gate regression"]',
+                     "text-v2", tied_validation_time),
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "latest persisted text validation is no longer PASS",
+                ):
+                    store.validate_authorized_attempt_before_submit(
+                        authorization_id=extra_auth_id, idempotency_key=extra_attempt_key,
+                        symbol=final_symbol, content_hash=content_hash,
+                    )
+                store.conn.execute(
+                    "DELETE FROM content_draft_validation_results WHERE validation_id=%s",
+                    (later_id,),
+                )
+                extra_validation_ids.remove(later_id)
+            for later_status in ("REJECT", "NEEDS_REVISION"):
+                later_visual_id = uuid.uuid4().hex + uuid.uuid4().hex
+                extra_visual_validation_ids.append(later_visual_id)
+                store.conn.execute(
+                    "INSERT INTO visual_validation_results "
+                    "(validation_id,draft_hash,image_hash,status,reasons_json,validation_version,created_at) "
+                    "VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s)",
+                    (later_visual_id, content_hash, extra_image_hash, later_status,
+                     '["final visual gate regression"]', "visual-quality-v3", tied_visual_time),
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "latest persisted image artifact/visual validation is not publishable",
+                ):
+                    store.validate_authorized_attempt_before_submit(
+                        authorization_id=extra_auth_id, idempotency_key=extra_attempt_key,
+                        symbol=final_symbol, content_hash=content_hash,
+                    )
+                store.conn.execute(
+                    "DELETE FROM visual_validation_results WHERE validation_id=%s",
+                    (later_visual_id,),
+                )
+                extra_visual_validation_ids.remove(later_visual_id)
         finally:
+            if extra_validation_ids:
+                store.conn.execute(
+                    "DELETE FROM content_draft_validation_results WHERE validation_id = ANY(%s)",
+                    (extra_validation_ids,),
+                )
+            if extra_auth_id:
+                store.conn.execute(
+                    "DELETE FROM publication_authorizations WHERE authorization_id=%s",
+                    (extra_auth_id,),
+                )
+            if extra_visual_validation_ids:
+                store.conn.execute(
+                    "DELETE FROM visual_validation_results WHERE validation_id = ANY(%s)",
+                    (extra_visual_validation_ids,),
+                )
+            if extra_image_hash:
+                store.conn.execute(
+                    "DELETE FROM visual_validation_results WHERE draft_hash=%s AND image_hash=%s",
+                    (content_hash, extra_image_hash),
+                )
+                store.conn.execute(
+                    "DELETE FROM image_generation_artifacts WHERE draft_hash=%s AND image_hash=%s",
+                    (content_hash, extra_image_hash),
+                )
+            if extra_reservation:
+                store.conn.execute(
+                    "DELETE FROM publication_quota_reservations WHERE reservation_id=%s",
+                    (extra_reservation,),
+                )
+            if extra_attempt_key:
+                store.conn.execute(
+                    "DELETE FROM publication_attempts WHERE idempotency_key=%s",
+                    (extra_attempt_key,),
+                )
             if reservation:
                 store.conn.execute("DELETE FROM publication_authorizations WHERE quota_reservation_id=%s",(reservation,))
                 store.conn.execute("DELETE FROM publication_quota_reservations WHERE reservation_id=%s",(reservation,))
-            store.conn.execute("DELETE FROM publication_attempts WHERE idempotency_key=%s",(attempt_key,))
+            store.conn.execute(
+                "DELETE FROM publication_attempts WHERE idempotency_key = ANY(%s)",
+                ([attempt_key, fixture_attempt_key],),
+            )
             store.conn.execute("DELETE FROM post_analytics WHERE remote_post_id=%s",("pg-integration-post-1",))
             store.conn.execute("DELETE FROM posts WHERE metadata->>'remote_post_id'=%s",("pg-integration-post-1",))
             store.conn.execute("DELETE FROM content_draft_validation_results WHERE draft_hash=%s",(content_hash,))

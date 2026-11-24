@@ -41,6 +41,45 @@ def _hash(payload: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+_RESEARCH_PACKAGE_CONTENT_FIELDS = frozenset({
+    "asset_id", "symbol", "research_question", "cutoff_at", "completeness",
+    "required_source_kinds", "source_coverage", "verified_facts", "inferences",
+    "disputed_claims", "unknown_claims", "event_states", "gaps",
+})
+_RESEARCH_PACKAGE_IDENTITY_FIELDS = frozenset({
+    "research_key", "package_id", "version", "package_hash",
+})
+
+
+def is_research_package_payload(payload: Any) -> bool:
+    return isinstance(payload, dict) and _RESEARCH_PACKAGE_CONTENT_FIELDS.issubset(payload)
+
+
+def research_package_payload_hash(payload: Mapping[str, Any]) -> str:
+    """Hash typed research content or the complete canonical legacy JSON object.
+
+    Typed packages exclude generated/storage identity fields. Legacy generic
+    payloads have no such schema contract, so every supplied field is content
+    and participates in the digest.
+    """
+    if not isinstance(payload, Mapping):
+        raise ValueError("research package payload must be an object")
+    if is_research_package_payload(dict(payload)):
+        canonical = {
+            key: value for key, value in payload.items()
+            if key not in _RESEARCH_PACKAGE_IDENTITY_FIELDS
+        }
+        return _hash(canonical)
+    try:
+        canonical = json.dumps(
+            dict(payload), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError("research package payload must be finite JSON data") from None
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class ResearchPackage:
     research_key: str
@@ -114,6 +153,7 @@ class DeepResearchEngine:
     ) -> ResearchPackage:
         if not isinstance(registry, ClaimRegistry):
             raise TypeError("deep research requires a typed ClaimRegistry")
+        registry.assert_verifier_issued_and_unchanged()
         if not isinstance(asset_id, str) or not asset_id.startswith("coingecko:"):
             raise ValueError("deep research requires canonical CoinGecko asset identity")
         if not isinstance(symbol, str) or not symbol.strip():
@@ -293,6 +333,8 @@ class ResearchPackageStore:
 
     def save(self, package: ResearchPackage) -> ResearchPackage:
         payload = asdict(package)
+        if research_package_payload_hash(payload) != package.package_hash:
+            raise ValueError("research package hash does not match canonical package payload")
         payload.pop("version")
         payload.pop("package_id")
         with self.connection:
@@ -323,8 +365,16 @@ class ResearchPackageStore:
 
     def load_latest(self, research_key: str) -> dict[str, Any] | None:
         row = self.connection.execute(
-            "SELECT payload_json FROM layer1_research_package_versions "
+            "SELECT package_hash,payload_json FROM layer1_research_package_versions "
             "WHERE research_key=? ORDER BY version DESC LIMIT 1",
             (research_key,),
         ).fetchone()
-        return json.loads(row[0]) if row else None
+        if row is None:
+            return None
+        payload = json.loads(row[1])
+        actual_hash = research_package_payload_hash(payload)
+        if actual_hash != row[0]:
+            raise ValueError("stored research package hash does not match canonical package payload")
+        if is_research_package_payload(payload) and actual_hash != payload.get("package_hash"):
+            raise ValueError("stored research package hash does not match canonical package payload")
+        return payload

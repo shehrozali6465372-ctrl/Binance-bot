@@ -264,6 +264,35 @@ class EventIntelligenceGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "evidence reference"):
             graph.validate()
 
+    def test_equal_timestamp_relationship_deduplication_prefers_stronger_status_before_confidence(self):
+        source = GraphEntity("project", "project:abc", iso())
+        source_evidence = announcement()
+        evidence = GraphEntity(
+            "announcement", source_evidence.source_id + "|" + source_evidence.content_hash,
+            source_evidence.observed_at,
+        )
+        target = GraphEntity("asset", "coingecko:abc", source_evidence.observed_at)
+        timestamp = iso()
+        confirmed = GraphRelationship(
+            source.stable_id, "RELATED_TO", target.stable_id,
+            (evidence.stable_id,), timestamp, 0.4, "CONFIRMED",
+        )
+        unknown = GraphRelationship(
+            source.stable_id, "RELATED_TO", target.stable_id,
+            (evidence.stable_id,), timestamp, 0.99, "UNKNOWN",
+        )
+        for ordered in ((confirmed, unknown), (unknown, confirmed)):
+            graph = EventIntelligenceGraphEngine().build(
+                announcements=[source_evidence], project_entities=[source],
+                additional_relationships=ordered,
+            )
+            retained = next(
+                edge for edge in graph.relationships
+                if edge.relationship_id == confirmed.relationship_id
+            )
+            self.assertEqual(retained.status, "CONFIRMED")
+            self.assertEqual(retained.confidence, 0.4)
+
 
 if __name__ == "__main__":
     unittest.main()

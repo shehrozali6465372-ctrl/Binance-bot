@@ -33,8 +33,11 @@ class FakeTransport:
 
 
 class FakeHttpResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, headers=None):
         self.payload = payload
+        self.headers = headers or {}
+        self.read_calls = []
+        self._offset = 0
 
     def __enter__(self):
         return self
@@ -42,8 +45,13 @@ class FakeHttpResponse:
     def __exit__(self, *args):
         return False
 
-    def read(self):
-        return self.payload
+    def read(self, size=-1):
+        self.read_calls.append(size)
+        if size is None or size < 0:
+            size = len(self.payload) - self._offset
+        chunk = self.payload[self._offset:self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 class OnChainProviderTests(unittest.TestCase):
@@ -256,7 +264,7 @@ class OnChainProviderTests(unittest.TestCase):
 
     def test_default_json_rpc_transport_rejects_redirects_for_keyed_endpoints(self):
         with patch("layer1.onchain_providers._open_without_redirect", create=True) as safe_open:
-            transport = ReadOnlyJsonRpcTransport("https://provider.example/v2/secret-api-key")
+            transport = ReadOnlyJsonRpcTransport("https://provider.example/v2/secret-api-key", max_response_bytes=1024)
         self.assertIs(transport._opener, safe_open)
 
     def test_json_rpc_transport_validates_envelope_and_redacts_endpoint_on_http_error(self):
@@ -266,7 +274,7 @@ class OnChainProviderTests(unittest.TestCase):
             captured["timeout"] = timeout
             return FakeHttpResponse(b'{"jsonrpc":"2.0","id":1,"result":"0x1"}')
         transport = ReadOnlyJsonRpcTransport(
-            "https://example.invalid/v2/secret", opener=opener,
+            "https://example.invalid/v2/secret", opener=opener, max_response_bytes=1024,
         )
         self.assertEqual(transport.call("eth_chainId"), "0x1")
         self.assertEqual(captured["body"]["method"], "eth_chainId")
@@ -275,7 +283,7 @@ class OnChainProviderTests(unittest.TestCase):
         def http_error_opener(request, timeout):
             raise HTTPError(request.full_url, 429, "rate limited", None, None)
         limited = ReadOnlyJsonRpcTransport(
-            "https://example.invalid/v2/secret", opener=http_error_opener,
+            "https://example.invalid/v2/secret", opener=http_error_opener, max_response_bytes=1024,
         )
         with self.assertRaises(ProviderTransportError) as error:
             limited.call("eth_blockNumber")
@@ -304,7 +312,7 @@ class OnChainProviderTests(unittest.TestCase):
             captured["method"] = request.get_method()
             captured["url"] = request.full_url
             return FakeHttpResponse(b'{"ok":true}')
-        transport = ReadOnlyJsonRpcTransport("https://example.invalid/v2/secret", opener=opener)
+        transport = ReadOnlyJsonRpcTransport("https://example.invalid/v2/secret", opener=opener, max_response_bytes=1024)
         self.assertEqual(transport.get_json("api/v2/address/test", {"page": 2}), {"ok": True})
         self.assertEqual(captured["method"], "GET")
         self.assertIn("page=2", captured["url"])
@@ -314,7 +322,7 @@ class OnChainProviderTests(unittest.TestCase):
     def test_transport_rejects_mismatched_json_rpc_response_id(self):
         def opener(request, timeout):
             return FakeHttpResponse(b'{"jsonrpc":"2.0","id":99,"result":"0x1"}')
-        transport = ReadOnlyJsonRpcTransport("https://example.invalid/key", opener=opener)
+        transport = ReadOnlyJsonRpcTransport("https://example.invalid/key", opener=opener, max_response_bytes=1024)
         with self.assertRaises(ProviderTransportError) as error:
             transport.call("eth_chainId")
         self.assertEqual(error.exception.reason_code, "INVALID_RPC_ENVELOPE")
@@ -668,6 +676,109 @@ class OnChainProviderTests(unittest.TestCase):
             ChainstackXrplReadOnlyAdapter("https://xrpl-testnet.core.chainstack.com/key")
         with self.assertRaisesRegex(ValueError, "mainnet endpoint"):
             ChainstackXrplReadOnlyAdapter("http://xrpl-mainnet.core.chainstack.com/key")
+
+
+    def test_transport_requires_an_explicit_positive_response_byte_limit(self):
+        with self.assertRaisesRegex(ValueError, "max_response_bytes"):
+            ReadOnlyJsonRpcTransport("https://provider.example/v2/key")
+        with self.assertRaisesRegex(ValueError, "max_response_bytes"):
+            ReadOnlyJsonRpcTransport("https://provider.example/v2/key", max_response_bytes=0)
+        with self.assertRaisesRegex(ValueError, "max_response_bytes"):
+            ReadOnlyJsonRpcTransport("https://provider.example/v2/key", max_response_bytes=True)
+
+    def test_transport_rejects_content_length_over_limit_before_reading(self):
+        response = FakeHttpResponse(
+            b'{"ok":true}', headers={"Content-Length": "11"},
+        )
+        transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/v2/key", max_response_bytes=10,
+            opener=lambda request, timeout: response,
+        )
+        with self.assertRaises(ProviderTransportError) as error:
+            transport.get_json("api/v1/status")
+        self.assertEqual(error.exception.reason_code, "RESPONSE_TOO_LARGE")
+        self.assertEqual(response.read_calls, [])
+
+    def test_transport_enforces_streamed_byte_limit_without_content_length(self):
+        response = FakeHttpResponse(b'{"ok":true}')
+        transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/v2/key", max_response_bytes=8,
+            opener=lambda request, timeout: response,
+        )
+        with self.assertRaises(ProviderTransportError) as error:
+            transport.get_json("api/v1/status")
+        self.assertEqual(error.exception.reason_code, "RESPONSE_TOO_LARGE")
+        self.assertTrue(all(size > 0 for size in response.read_calls))
+        self.assertLessEqual(sum(response.read_calls), 9)
+
+    def test_transport_accepts_response_exactly_at_byte_limit(self):
+        payload = b'{"ok":1}'
+        response = FakeHttpResponse(payload, headers={"Content-Length": str(len(payload))})
+        transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/v2/key", max_response_bytes=len(payload),
+            opener=lambda request, timeout: response,
+        )
+        self.assertEqual(transport.get_json("api/v1/status"), {"ok": 1})
+
+    def test_provider_adapters_require_explicit_response_limit_for_default_transport(self):
+        with self.assertRaisesRegex(ValueError, "max_response_bytes"):
+            AlchemyReadOnlyAdapter("test-key")
+        with self.assertRaisesRegex(ValueError, "max_response_bytes"):
+            ChainstackXrplReadOnlyAdapter(
+                "https://xrpl-mainnet.core.chainstack.com/key",
+            )
+
+    def test_provider_from_env_requires_explicit_response_limit(self):
+        with self.assertRaisesRegex(ValueError, "ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES"):
+            AlchemyReadOnlyAdapter.from_env({"ALCHEMY_API_KEY": "test-key"})
+        with self.assertRaisesRegex(ValueError, "ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES"):
+            ChainstackXrplReadOnlyAdapter.from_env({
+                "CHAINSTACK_XRPL_ENDPOINT": "https://xrpl-mainnet.core.chainstack.com/key",
+            })
+
+    def test_provider_from_env_uses_explicit_response_limit_for_default_transport(self):
+        alchemy = AlchemyReadOnlyAdapter.from_env({
+            "ALCHEMY_API_KEY": "test-key",
+            "ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES": "8192",
+        })
+        alchemy_transport = alchemy._transport_factory("https://provider.example/key", 10)
+        self.assertEqual(alchemy_transport._max_response_bytes, 8192)
+
+        xrpl = ChainstackXrplReadOnlyAdapter.from_env({
+            "CHAINSTACK_XRPL_ENDPOINT": "https://xrpl-mainnet.core.chainstack.com/key",
+            "ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES": "4096",
+        })
+        xrpl_transport = xrpl._transport_factory("https://xrpl-mainnet.core.chainstack.com/key", 10)
+        self.assertEqual(xrpl_transport._max_response_bytes, 4096)
+
+    def test_provider_from_env_rejects_non_positive_or_non_integer_response_limits(self):
+        for value in ("0", "-1", "1.5", "1e6", ""):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES"):
+                    AlchemyReadOnlyAdapter.from_env({
+                        "ALCHEMY_API_KEY": "test-key",
+                        "ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES": value,
+                    })
+
+    def test_transport_bounds_json_rpc_response_and_rejects_malformed_content_length(self):
+        oversized = FakeHttpResponse(b'{"jsonrpc":"2.0","id":1,"result":"0x1"}')
+        transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/key", max_response_bytes=8,
+            opener=lambda request, timeout: oversized,
+        )
+        with self.assertRaises(ProviderTransportError) as error:
+            transport.call("eth_chainId")
+        self.assertEqual(error.exception.reason_code, "RESPONSE_TOO_LARGE")
+
+        malformed = FakeHttpResponse(b'{"ok":true}', headers={"Content-Length": "unknown"})
+        transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/key", max_response_bytes=64,
+            opener=lambda request, timeout: malformed,
+        )
+        with self.assertRaises(ProviderTransportError) as error:
+            transport.get_json("api/v1/status")
+        self.assertEqual(error.exception.reason_code, "INVALID_CONTENT_LENGTH")
+        self.assertEqual(malformed.read_calls, [])
 
 
 if __name__ == "__main__":

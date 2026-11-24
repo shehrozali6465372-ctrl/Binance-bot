@@ -9,6 +9,41 @@ class PostgresEventLifecycleAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "PostgreSQL publication store"):
             PostgresEventLifecycleStore(object())
 
+    def test_postgres_adapter_rejects_caller_asserted_resolution_before_database_access(self):
+        from layer1.event_lifecycle_postgres import PostgresEventLifecycleStore
+        from layer1.foundation import AnnouncementEvidence
+
+        store = object.__new__(PostgresEventLifecycleStore)
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        evidence = AnnouncementEvidence(
+            source_id="stable-event-lifecycle-test",
+            source_url="https://www.binance.com/en/support/announcement/stable-event-lifecycle-test",
+            publisher="Binance", event_type="listing", title="ABC Spot listing",
+            published_at=now, observed_at=now, asset_ids=("coingecko:abc",),
+            content_hash="a" * 64,
+        )
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
+            store.observe(
+                evidence, verification_state="VERIFIED", resolved=True,
+                resolution_evidence_id="evidence:caller-asserted",
+            )
+
+    def test_postgres_adapter_rejects_caller_asserted_verified_state_before_database_access(self):
+        from layer1.event_lifecycle_postgres import PostgresEventLifecycleStore
+        from layer1.foundation import AnnouncementEvidence
+
+        store = object.__new__(PostgresEventLifecycleStore)
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        evidence = AnnouncementEvidence(
+            source_id="stable-event-lifecycle-unverified-test",
+            source_url="https://www.binance.com/en/support/announcement/stable-event-lifecycle-unverified-test",
+            publisher="Binance", event_type="listing", title="ABC Spot listing",
+            published_at=now, observed_at=now, asset_ids=("coingecko:abc",),
+            content_hash="b" * 64,
+        )
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
+            store.observe(evidence, verification_state="VERIFIED")
+
     def test_adapter_does_not_close_shared_postgres_connection(self):
         from layer1.event_lifecycle_postgres import PostgresEventLifecycleStore
 
@@ -67,6 +102,11 @@ class PostgresEventLifecycleIntegrationTests(unittest.TestCase):
                 self.owner.conn.execute("DELETE FROM layer1_event_lifecycle WHERE event_id = ANY(%s)", (self.event_ids,))
         self.owner.close()
 
+    def _observe_verified(self, announcement):
+        from tests.event_lifecycle_fixtures import test_receipted_announcement_registry
+        registry = test_receipted_announcement_registry(announcement)
+        return self.store.sync_announcements([announcement], registry)[0]
+
     def _evidence(self, revision="a", title="Test listing", body="Listing details", observed_delta=0):
         from layer1.foundation import AnnouncementEvidence, utc_now
         observed = datetime.now(timezone.utc) + timedelta(seconds=observed_delta)
@@ -85,7 +125,7 @@ class PostgresEventLifecycleIntegrationTests(unittest.TestCase):
         from layer1.publication_postgres import PostgresPublicationStore
         from layer1.event_lifecycle_postgres import PostgresEventLifecycleStore
 
-        initial = self.store.observe(self._evidence("a"), verification_state="VERIFIED")
+        initial = self._observe_verified(self._evidence("a"))
         self.event_id = initial.event_id
         expected_history = self.store.history(self.event_id)
         self.owner.close()
@@ -136,15 +176,13 @@ class PostgresEventLifecycleIntegrationTests(unittest.TestCase):
             temporary.cleanup()
 
     def test_postgres_sync_uses_semantic_paraphrase_and_status_change_classifier(self):
-        from layer1.evidence_verification import EvidenceVerificationEngine
+        from tests.event_lifecycle_fixtures import test_receipted_announcement_registry
 
-        engine = EvidenceVerificationEngine()
         first = self._evidence(
             "a", title="ABC Spot listing announced",
             body="Binance will list ABC on 2026-12-01. Trading starts at 08:00 UTC.",
         )
-        first_evidence = engine.evidence_from_announcement(first)
-        first_registry = engine.verify(engine._source_assertion_claims(first_evidence), first_evidence)
+        first_registry = test_receipted_announcement_registry(first)
         initial = self.store.sync_announcements([first], first_registry)[0]
         self.event_id = initial.event_id
         self.assertEqual(initial.state, "CONFIRMED")
@@ -154,10 +192,7 @@ class PostgresEventLifecycleIntegrationTests(unittest.TestCase):
             body="Binance is going to list ABC on 2026-12-01. Trading will begin at 08:00 UTC.",
             observed_delta=1,
         )
-        paraphrase_evidence = engine.evidence_from_announcement(paraphrase)
-        paraphrase_registry = engine.verify(
-            engine._source_assertion_claims(paraphrase_evidence), paraphrase_evidence,
-        )
+        paraphrase_registry = test_receipted_announcement_registry(paraphrase)
         unchanged = self.store.sync_announcements([paraphrase], paraphrase_registry)[0]
         self.assertEqual(unchanged.state, "CONFIRMED")
 
@@ -166,10 +201,7 @@ class PostgresEventLifecycleIntegrationTests(unittest.TestCase):
             body="Trading for ABC has been suspended at 08:00 UTC on 2026-12-01.",
             observed_delta=2,
         )
-        status_evidence = engine.evidence_from_announcement(status_change)
-        status_registry = engine.verify(
-            engine._source_assertion_claims(status_evidence), status_evidence,
-        )
+        status_registry = test_receipted_announcement_registry(status_change)
         developing = self.store.sync_announcements([status_change], status_registry)[0]
         self.assertEqual(developing.state, "DEVELOPING")
         self.assertEqual(self.store.history(developing.event_id)[-1]["reason_code"], "MATERIAL_NEW_EVIDENCE")
@@ -182,31 +214,29 @@ class PostgresEventLifecycleIntegrationTests(unittest.TestCase):
         self.assertEqual([item["to_state"] for item in self.store.history(record.event_id)],
                          ["DISCOVERED", "UNDER_VERIFICATION"])
 
-        verified = self.store.observe(first, verification_state="VERIFIED")
+        verified = self._observe_verified(first)
         self.assertEqual(verified.state, "CONFIRMED")
         self.assertEqual(len(self.store.history(record.event_id)), 3)
 
         changed = self._evidence("b", title="Test listing", body="Listing date moved", observed_delta=1)
-        developing = self.store.observe(changed, verification_state="VERIFIED", materially_new=True)
+        developing = self._observe_verified(changed)
         self.assertEqual(developing.state, "DEVELOPING")
         self.assertEqual(len(self.store.history(record.event_id)), 4)
 
-        replay = self.store.observe(changed, verification_state="VERIFIED", materially_new=True)
+        replay = self._observe_verified(changed)
         self.assertEqual(replay.state, "DEVELOPING")
         self.assertEqual(len(self.store.history(record.event_id)), 4)
 
 
     def test_postgres_non_material_revision_does_not_reopen_stale_event(self):
-        initial = self.store.observe(self._evidence("a"), verification_state="VERIFIED")
+        initial = self._observe_verified(self._evidence("a"))
         self.event_id = initial.event_id
         stale = self.store.mark_stale(
             initial.event_id, now=(datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat(),
             max_age_seconds=1,
         )
         revised = self._evidence("b", observed_delta=30)
-        result = self.store.observe(
-            revised, verification_state="VERIFIED", materially_new=False,
-        )
+        result = self._observe_verified(revised)
         self.assertEqual(stale.state, "STALE")
         self.assertEqual(result.state, "STALE")
         self.assertEqual(
@@ -214,22 +244,20 @@ class PostgresEventLifecycleIntegrationTests(unittest.TestCase):
             ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED", "STALE"],
         )
 
-    def test_postgres_non_material_revision_does_not_reopen_resolved_event(self):
-        initial = self.store.observe(self._evidence("a"), verification_state="VERIFIED")
+    def test_postgres_direct_api_cannot_create_resolved_terminal_event_from_caller_string(self):
+        initial = self._observe_verified(self._evidence("a"))
         self.event_id = initial.event_id
-        resolved = self.store.observe(
-            self._evidence("b"), verification_state="VERIFIED", resolved=True,
-            resolution_evidence_id="evidence:explicit-resolution",
-        )
+        with self.assertRaisesRegex(ValueError, "verifier-issued"):
+            self.store.observe(
+                self._evidence("b"), verification_state="VERIFIED", resolved=True,
+                resolution_evidence_id="evidence:explicit-resolution",
+            )
         revised = self._evidence("c", observed_delta=30)
-        result = self.store.observe(
-            revised, verification_state="VERIFIED", materially_new=False,
-        )
-        self.assertEqual(resolved.state, "RESOLVED")
-        self.assertEqual(result.state, "RESOLVED")
+        result = self._observe_verified(revised)
+        self.assertEqual(result.state, "CONFIRMED")
         self.assertEqual(
             [item["to_state"] for item in self.store.history(initial.event_id)],
-            ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED", "RESOLVED"],
+            ["DISCOVERED", "UNDER_VERIFICATION", "CONFIRMED"],
         )
 
 

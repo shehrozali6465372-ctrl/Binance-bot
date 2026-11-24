@@ -11,10 +11,16 @@ class FakeResponse:
     status = 200
 
     def __init__(self, payload):
-        self.payload = json.dumps(payload).encode("utf-8")
+        self.payload = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        self.headers = {}
+        self.read_sizes = []
 
-    def read(self):
-        return self.payload
+    def read(self, size=-1):
+        self.read_sizes.append(size)
+        if size is None or size < 0:
+            size = len(self.payload)
+        result, self.payload = self.payload[:size], self.payload[size:]
+        return result
 
     def __enter__(self):
         return self
@@ -26,11 +32,11 @@ class FakeResponse:
 class DeepSeekClientTests(unittest.TestCase):
     def test_default_transport_rejects_redirects_for_bearer_secret(self):
         with patch("layer1.deepseek_client._open_without_redirect", create=True) as safe_open:
-            client = DeepSeekClient("test-secret")
+            client = DeepSeekClient("test-secret", max_response_bytes=65536)
         self.assertIs(client._opener, safe_open)
 
     def _client(self, opener):
-        return DeepSeekClient("test-secret", opener=opener)
+        return DeepSeekClient("test-secret", max_response_bytes=65536, opener=opener)
 
     def test_sends_direct_api_request_and_extracts_text_and_usage(self):
         captured = {}
@@ -59,6 +65,53 @@ class DeepSeekClientTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["safety_check"], {"level": "high"})
         self.assertEqual(captured["payload"]["stream"], False)
         self.assertEqual(captured["headers"]["Authorization"], "Bearer test-secret")
+
+    def test_response_limit_is_mandatory_and_positive(self):
+        with self.assertRaisesRegex(ValueError, "max_response_bytes"):
+            DeepSeekClient("key")
+        for value in (0, -1, True, 1.5, "1024"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "max_response_bytes"):
+                    DeepSeekClient("key", max_response_bytes=value)
+
+    def test_declared_oversized_response_is_rejected_before_body_read(self):
+        response = FakeResponse(b"unused")
+        response.headers = {"Content-Length": "4097"}
+        client = DeepSeekClient("key", max_response_bytes=4096,
+                                opener=lambda request, timeout: response)
+        self.assertIsNone(client.chat("prompt"))
+        self.assertEqual(response.read_sizes, [])
+
+    def test_malformed_content_length_is_rejected_before_body_read(self):
+        for raw_length in ("-1", "1.5", "1e6", "not-a-number"):
+            with self.subTest(raw_length=raw_length):
+                response = FakeResponse(b"unused")
+                response.headers = {"Content-Length": raw_length}
+                client = DeepSeekClient("key", max_response_bytes=1024,
+                                        opener=lambda request, timeout: response)
+                self.assertIsNone(client.chat("prompt"))
+                self.assertEqual(response.read_sizes, [])
+
+    def test_chunked_or_undeclared_oversized_response_is_stopped_at_limit(self):
+        response = FakeResponse(b"x" * 10000)
+        client = DeepSeekClient("key", max_response_bytes=1024,
+                                opener=lambda request, timeout: response)
+        self.assertIsNone(client.chat("prompt"))
+        self.assertLessEqual(sum(size for size in response.read_sizes if size > 0), 1025)
+        self.assertTrue(response.read_sizes)
+
+    def test_response_at_exact_byte_limit_is_accepted(self):
+        payload = {
+            "id": "response-boundary", "object": "chat.completion",
+            "model": "deepseek-flash",
+            "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+        }
+        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        response = FakeResponse(raw)
+        response.headers = {"Content-Length": str(len(raw))}
+        result = DeepSeekClient("key", max_response_bytes=len(raw),
+                                opener=lambda request, timeout: response).chat("prompt")
+        self.assertEqual(result.text, "ok")
 
     def test_missing_choices_returns_no_response_without_raising(self):
         client = self._client(lambda request, timeout: FakeResponse({
@@ -136,7 +189,7 @@ class DeepSeekClientTests(unittest.TestCase):
                 )
             return FakeResponse(payload)
         client = DeepSeekClient(
-            "test-secret", opener=opener, retry_backoff_seconds=0,
+            "test-secret", max_response_bytes=65536, opener=opener, retry_backoff_seconds=0,
         )
         with patch("layer1.deepseek_client.time.sleep") as sleep:
             result = client.chat("prompt")
@@ -151,7 +204,7 @@ class DeepSeekClientTests(unittest.TestCase):
             raise urllib.error.HTTPError(
                 request.full_url, 401, "unauthorized", {}, io.BytesIO(b""),
             )
-        client = DeepSeekClient("test-secret", opener=opener)
+        client = DeepSeekClient("test-secret", max_response_bytes=65536, opener=opener)
         with patch("layer1.deepseek_client.time.sleep") as sleep:
             self.assertIsNone(client.chat("prompt"))
         self.assertEqual(len(attempts), 1)
@@ -159,9 +212,9 @@ class DeepSeekClientTests(unittest.TestCase):
 
     def test_retry_configuration_is_bounded(self):
         with self.assertRaisesRegex(ValueError, "max_retries"):
-            DeepSeekClient("key", max_retries=4)
+            DeepSeekClient("key", max_response_bytes=1024, max_retries=4)
         with self.assertRaisesRegex(ValueError, "retry_backoff_seconds"):
-            DeepSeekClient("key", retry_backoff_seconds=5.1)
+            DeepSeekClient("key", max_response_bytes=1024, retry_backoff_seconds=5.1)
 
     def test_non_official_https_proxy_and_unsupported_model_are_rejected(self):
         for endpoint in (
@@ -172,9 +225,9 @@ class DeepSeekClientTests(unittest.TestCase):
         ):
             with self.subTest(endpoint=endpoint):
                 with self.assertRaisesRegex(ValueError, "official api.deepseek.com"):
-                    DeepSeekClient("key", base_url=endpoint)
+                    DeepSeekClient("key", max_response_bytes=1024, base_url=endpoint)
         with self.assertRaisesRegex(ValueError, "official model IDs"):
-            DeepSeekClient("key", model="deepseek-chat")
+            DeepSeekClient("key", max_response_bytes=1024, model="deepseek-chat")
 
     def test_secret_not_in_logged_transport_error(self):
         def opener(request, timeout):

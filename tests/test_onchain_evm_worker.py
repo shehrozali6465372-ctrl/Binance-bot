@@ -63,7 +63,7 @@ class EvmTransferIngestionWorkerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         path = os.path.join(self.tmp.name, "onchain.sqlite3")
         self.mapping_store = OnChainStore(
-            path, OnChainIntelligenceEngine({"bnb-smart-chain-mainnet": 86400})
+            path, OnChainIntelligenceEngine({"bnb-smart-chain-mainnet": 86400}, receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum", receipt_key_id="test-key-v1")
         )
         self.ingestion_store = OnChainIngestionStore(path)
         now = datetime.now(timezone.utc)
@@ -250,7 +250,7 @@ class EthereumTransferIngestionWorkerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         path = os.path.join(self.tmp.name, "ethereum.sqlite3")
         self.mapping_store = OnChainStore(
-            path, OnChainIntelligenceEngine({"ethereum-mainnet": 86400})
+            path, OnChainIntelligenceEngine({"ethereum-mainnet": 86400}, receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum", receipt_key_id="test-key-v1")
         )
         self.ingestion_store = OnChainIngestionStore(path)
         now = datetime.now(timezone.utc)

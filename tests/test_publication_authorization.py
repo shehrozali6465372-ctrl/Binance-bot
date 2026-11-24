@@ -1,5 +1,6 @@
 import sqlite3
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 from layer1.publication_authorization import PublicationAuthorizationEngine
@@ -36,8 +37,9 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
 
     def authorize(self, reservation, **overrides):
         from layer1.content_generation import DraftStore
+        from layer1.editorial_strategy import EditorialBrief, EditorialBriefStore, editorial_brief_payload_hash
         visual_validation_version = overrides.pop(
-            "visual_validation_version", "visual-quality-v2",
+            "visual_validation_version", "visual-quality-v3",
         )
         args = {
             "symbol": "ABC", "asset_id": "coingecko:abc",
@@ -51,26 +53,36 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
         event_type = overrides.pop("event_type", "other")
         args.update(overrides)
         draft_hash = __import__("hashlib").sha256(args["content"].encode()).hexdigest()
-        store = DraftStore(self.conn)
         research_id = "research:test:" + args["asset_id"]
-        brief_id = "brief:test:" + draft_hash
+        brief_store = EditorialBriefStore(self.conn)
+        brief_payload = {
+            "event_id": "event:test", "angle_id": "angle:test",
+            "research_package_id": research_id, "research_question": "Explain ABC",
+            "format": "MARKET_MOVEMENT_EXPLAINER", "angle": "Verified ABC context",
+            "audience": "readers", "tone": "cautious",
+            "min_words": 20, "max_words": 120, "outline": ("State facts",),
+            "approved_claim_ids": ("a" * 64,), "prohibited_claims": (),
+            "uncertainty_notes": (), "status": "READY", "policy_version": "test-v1",
+        }
+        brief_hash = editorial_brief_payload_hash(brief_payload)
+        brief = brief_store.save(EditorialBrief(
+            event_id=brief_payload["event_id"], angle_id=brief_payload["angle_id"],
+            brief_id=brief_hash, version=0, research_package_id=research_id,
+            research_question=brief_payload["research_question"],
+            format=brief_payload["format"], angle=brief_payload["angle"],
+            audience=brief_payload["audience"], tone=brief_payload["tone"],
+            min_words=brief_payload["min_words"], max_words=brief_payload["max_words"],
+            outline=brief_payload["outline"], approved_claim_ids=brief_payload["approved_claim_ids"],
+            prohibited_claims=brief_payload["prohibited_claims"],
+            uncertainty_notes=brief_payload["uncertainty_notes"], status="READY",
+            brief_hash=brief_hash, policy_version=brief_payload["policy_version"],
+        ))
+        store = DraftStore(self.conn)
         store.save_draft(
             args["content"], asset_id=args["asset_id"],
             research_package_id=research_id,
-            editorial_brief_id=brief_id,
+            editorial_brief_id=brief.brief_id,
             approved_claim_ids=("a" * 64,),
-        )
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS editorial_brief_versions (
-                event_id TEXT NOT NULL, angle_id TEXT NOT NULL, version INTEGER NOT NULL,
-                brief_id TEXT NOT NULL UNIQUE, research_package_id TEXT NOT NULL,
-                brief_hash TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
-            )
-        """)
-        self.conn.execute(
-            "INSERT OR IGNORE INTO editorial_brief_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("event:test", "angle:test", 1, brief_id, research_id,
-             "b" * 64, "{}", now()),
         )
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS layer1_event_lifecycle (
@@ -86,7 +98,8 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
         self.conn.commit()
         store.save_text_validation(
             draft_hash=draft_hash, status=args["text_validation_status"],
-            reasons=(), validation_version="content-verification-v1",
+            reasons=(), validation_version="content-verification-v2-claim-attribution",
+            verification_result=__import__("tests.evidence_fixtures", fromlist=["verifier_issued_content_result"]).verifier_issued_content_result(args["content"], asset_id=args["asset_id"], symbol=args["symbol"]),
         )
         for image_hash in args["image_hashes"]:
             if not isinstance(image_hash, str) or len(image_hash) != 64 or any(
@@ -99,6 +112,51 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
                 validation_version=visual_validation_version,
             )
         return self.engine.authorize(**args)
+
+    def _seed_tied_pass_then_later_failure(self, store, *, draft_hash, status, reasons, validation_version):
+        tied_time = "2026-11-24T00:00:00+00:00"
+        store.connection.executemany(
+            "INSERT OR IGNORE INTO validation_sequence_ledger(sequence) VALUES (?)",
+            [(1,), (2,)],
+        )
+        store.connection.executemany(
+            "INSERT INTO content_draft_validation_results "
+            "(validation_id,draft_hash,status,reasons_json,validation_version,created_at,validation_sequence) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [
+                ("f" * 64, draft_hash, "PASS", "[]", "text-v1", tied_time, 1),
+                ("a" * 64, draft_hash, status, '["later failure"]', "text-v2", tied_time, 2),
+            ],
+        )
+        return "a" * 64
+
+    def test_actual_authorization_rejects_older_pass_when_equal_timestamp_later_reject_exists(self):
+        from layer1.content_generation import DraftStore
+        reservation = self.reserve()
+        def seed_reject(store, *, draft_hash, status, reasons, validation_version, **kwargs):
+            return self._seed_tied_pass_then_later_failure(
+                store, draft_hash=draft_hash, status="REJECT",
+                reasons=reasons, validation_version=validation_version,
+            )
+        with patch.object(DraftStore, "save_text_validation", seed_reject):
+            with self.assertRaisesRegex(ValueError, "persisted text validation is not PASS"):
+                self.authorize(reservation)
+        draft_hash = __import__("hashlib").sha256(b"$ABC market update. #ABC").hexdigest()
+        self.assertEqual(DraftStore(self.conn).latest_text_validation(draft_hash), "REJECT")
+
+    def test_actual_authorization_rejects_older_pass_when_equal_timestamp_later_needs_revision_exists(self):
+        from layer1.content_generation import DraftStore
+        reservation = self.reserve()
+        def seed_needs_revision(store, *, draft_hash, status, reasons, validation_version, **kwargs):
+            return self._seed_tied_pass_then_later_failure(
+                store, draft_hash=draft_hash, status="NEEDS_REVISION",
+                reasons=reasons, validation_version=validation_version,
+            )
+        with patch.object(DraftStore, "save_text_validation", seed_needs_revision):
+            with self.assertRaisesRegex(ValueError, "persisted text validation is not PASS"):
+                self.authorize(reservation)
+        draft_hash = __import__("hashlib").sha256(b"$ABC market update. #ABC").hexdigest()
+        self.assertEqual(DraftStore(self.conn).latest_text_validation(draft_hash), "NEEDS_REVISION")
 
     def test_authorization_rejects_pass_from_an_obsolete_visual_validation_version(self):
         reservation = self.reserve()
@@ -156,6 +214,26 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
             self.engine.validate_persisted_event_binding(auth),
         )
 
+    def test_tampered_editorial_claim_allowlist_invalidates_authorization(self):
+        reservation = self.reserve()
+        auth = self.authorize(reservation, event_state="CONFIRMED")
+        row = self.conn.execute(
+            "SELECT payload_json FROM editorial_brief_versions WHERE brief_id=?",
+            (auth.editorial_brief_id,),
+        ).fetchone()
+        import json
+        payload = json.loads(row[0])
+        payload["approved_claim_ids"] = []
+        self.conn.execute(
+            "UPDATE editorial_brief_versions SET payload_json=? WHERE brief_id=?",
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")), auth.editorial_brief_id),
+        )
+        self.conn.commit()
+        self.assertIn(
+            "EDITORIAL_CLAIM_ALLOWLIST_INVALID",
+            self.engine.validate_persisted_event_binding(auth),
+        )
+
     def test_persisted_event_asset_mismatch_invalidates_authorization(self):
         reservation = self.reserve()
         auth = self.authorize(reservation, event_state="CONFIRMED")
@@ -174,7 +252,7 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
         self.assertTrue(auth.verify_integrity())
         self.assertTrue(auth.draft_id)
         self.assertEqual(auth.research_package_id, "research:test:coingecko:abc")
-        self.assertEqual(auth.editorial_brief_id, "brief:test:" + auth.content_hash)
+        self.assertTrue(auth.editorial_brief_id)
         self.assertEqual(auth.approved_claim_ids, ("a" * 64,))
         self.assertEqual(len(auth.draft_provenance_hash), 64)
         self.assertEqual(auth.validate_for_submission(
@@ -190,7 +268,8 @@ class PublicationAuthorizationEngineTests(unittest.TestCase):
         draft_hash = __import__("hashlib").sha256(content.encode()).hexdigest()
         DraftStore(self.conn).save_text_validation(
             draft_hash=draft_hash, status="PASS", reasons=(),
-            validation_version="content-verification-v1",
+            validation_version="content-verification-v2-claim-attribution",
+            verification_result=__import__("tests.evidence_fixtures", fromlist=["verifier_issued_content_result"]).verifier_issued_content_result(content),
         )
         with self.assertRaisesRegex(ValueError, "exact draft must be persisted"):
             self.engine.authorize(

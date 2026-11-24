@@ -12,11 +12,15 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from .onchain import OnChainAssetMapping, OnChainStore
-from .onchain_ingestion import OnChainIngestionStore, normalize_xrpl_payment
+from .onchain import OnChainAssetMapping
+from .onchain_ingestion import normalize_xrpl_payment
 from .onchain_providers import (
     ProviderTransportError, XrplAccountTransaction, is_valid_xrpl_classic_address,
     retry_provider_operation,
+)
+from .onchain_protocols import (
+    OnChainIngestionStoreProtocol, OnChainMappingStoreProtocol,
+    require_ingestion_store, require_mapping_store,
 )
 
 
@@ -25,15 +29,15 @@ _RETRYABLE = {"TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"}
 
 class XrplIssuedCurrencyIngestionWorker:
     def __init__(
-        self, provider, mapping_store: OnChainStore, ingestion_store: OnChainIngestionStore, *,
+        self, provider, mapping_store: OnChainMappingStoreProtocol, ingestion_store: OnChainIngestionStoreProtocol, *,
         monitored_accounts: dict[str, tuple[str, ...]], start_ledgers: dict[str, int],
         max_ledgers_per_run: int, page_size: int = 200, max_pages_per_run: int = 10,
         reorg_lookback_ledgers: int = 20, retry_attempts: int = 3,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
-        if not isinstance(mapping_store, OnChainStore) or not isinstance(ingestion_store, OnChainIngestionStore):
-            raise ValueError("worker requires the existing mapping and ingestion stores")
+        require_mapping_store(mapping_store)
+        require_ingestion_store(ingestion_store)
         if not isinstance(monitored_accounts, dict) or not monitored_accounts:
             raise ValueError("explicit monitored XRPL account seeds are required")
         if not isinstance(start_ledgers, dict) or set(monitored_accounts) != set(start_ledgers):

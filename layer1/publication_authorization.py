@@ -275,7 +275,7 @@ class PublicationAuthorizationEngine:
             raise ValueError("persisted draft provenance does not match the authorized content")
         try:
             editorial_brief = self.connection.execute(
-                "SELECT event_id, research_package_id FROM editorial_brief_versions "
+                "SELECT event_id, research_package_id, payload_json FROM editorial_brief_versions "
                 "WHERE brief_id=?",
                 (persisted_draft[2],),
             ).fetchone()
@@ -283,6 +283,12 @@ class PublicationAuthorizationEngine:
             raise ValueError("persisted editorial event provenance ledger is unavailable") from None
         if editorial_brief is None or editorial_brief[1] != persisted_draft[1]:
             raise ValueError("persisted editorial brief does not match the draft research package")
+        try:
+            brief_payload = json.loads(editorial_brief[2])
+            from layer1.editorial_strategy import editorial_brief_approved_claim_ids
+            brief_claim_ids = editorial_brief_approved_claim_ids(brief_payload)
+        except (TypeError, json.JSONDecodeError, ValueError):
+            raise ValueError("persisted editorial brief allowlist is invalid") from None
         event_id = editorial_brief[0]
         try:
             approved_claim_ids = json.loads(persisted_draft[3])
@@ -293,23 +299,21 @@ class PublicationAuthorizationEngine:
             or any(not isinstance(value, str) or not value for value in approved_claim_ids)
         ):
             raise ValueError("persisted draft requires approved claim references")
-        text_validation = self.connection.execute(
-            "SELECT status FROM content_draft_validation_results WHERE draft_hash=? "
-            "ORDER BY created_at DESC, validation_id DESC LIMIT 1",
-            (draft_hash,),
-        ).fetchone()
+        if not set(approved_claim_ids).issubset(set(brief_claim_ids)):
+            raise ValueError("draft approved claims exceed the persisted editorial brief allowlist")
+        from layer1.content_generation import load_latest_validation_record
+        text_validation = load_latest_validation_record(
+            self.connection, draft_hash=draft_hash,
+        )
         if text_validation is None or text_validation[0] != "PASS":
             raise ValueError("persisted text validation is not PASS for this exact draft hash")
         for image_hash in image_hashes:
-            visual_validation = self.connection.execute(
-                "SELECT status, validation_version FROM visual_validation_results "
-                "WHERE draft_hash=? AND image_hash=? "
-                "ORDER BY created_at DESC, validation_id DESC LIMIT 1",
-                (draft_hash, image_hash),
-            ).fetchone()
+            visual_validation = load_latest_validation_record(
+                self.connection, draft_hash=draft_hash, image_hash=image_hash,
+            )
             if (
                 visual_validation is None or visual_validation[0] != "PASS"
-                or visual_validation[1] != "visual-quality-v2"
+                or visual_validation[1] != "visual-quality-v3"
             ):
                 raise ValueError(
                     "persisted visual validation is not PASS from the current visual validation version "
@@ -500,7 +504,7 @@ class PublicationAuthorizationEngine:
         reasons: list[str] = []
         try:
             brief = self.connection.execute(
-                "SELECT event_id, research_package_id FROM editorial_brief_versions WHERE brief_id=?",
+                "SELECT event_id, research_package_id, payload_json FROM editorial_brief_versions WHERE brief_id=?",
                 (authorization.editorial_brief_id,),
             ).fetchone()
         except sqlite3.OperationalError:
@@ -511,6 +515,14 @@ class PublicationAuthorizationEngine:
             reasons.append("EDITORIAL_EVENT_IDENTITY_CHANGED")
         if brief[1] != authorization.research_package_id:
             reasons.append("EDITORIAL_RESEARCH_PACKAGE_CHANGED")
+        try:
+            brief_payload = json.loads(brief[2])
+            from layer1.editorial_strategy import editorial_brief_approved_claim_ids
+            allowed_claim_ids = set(editorial_brief_approved_claim_ids(brief_payload))
+            if not set(authorization.approved_claim_ids).issubset(allowed_claim_ids):
+                reasons.append("EDITORIAL_CLAIM_ALLOWLIST_CHANGED")
+        except (TypeError, json.JSONDecodeError, ValueError):
+            reasons.append("EDITORIAL_CLAIM_ALLOWLIST_INVALID")
         try:
             event = self.connection.execute(
                 "SELECT asset_id, state FROM layer1_event_lifecycle WHERE event_id=?",

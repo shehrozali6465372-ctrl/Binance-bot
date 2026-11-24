@@ -5,20 +5,24 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from .onchain import OnChainAssetMapping, OnChainStore
+from .onchain import OnChainAssetMapping
 from .onchain_ingestion import (
-    OnChainIngestionStore, normalize_solana_token_transfer_instructions,
+    normalize_solana_token_transfer_instructions,
     _solana_base58_decode,
 )
 from .onchain_providers import ProviderTransportError, SolanaAddressTransaction, retry_provider_operation
+from .onchain_protocols import (
+    OnChainIngestionStoreProtocol, OnChainMappingStoreProtocol,
+    require_ingestion_store, require_mapping_store,
+)
 
 _RETRYABLE = {"TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"}
 
 
 class SolanaAddressIngestionWorker:
     def __init__(
-        self, provider, mapping_store: OnChainStore,
-        ingestion_store: OnChainIngestionStore, *,
+        self, provider, mapping_store: OnChainMappingStoreProtocol,
+        ingestion_store: OnChainIngestionStoreProtocol, *,
         monitored_addresses: dict[str, tuple[str, ...]],
         start_slots: dict[str, int],
         max_slots_per_run: int,
@@ -28,8 +32,8 @@ class SolanaAddressIngestionWorker:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
-        if not isinstance(mapping_store, OnChainStore) or not isinstance(ingestion_store, OnChainIngestionStore):
-            raise ValueError("worker requires existing mapping and ingestion stores")
+        require_mapping_store(mapping_store)
+        require_ingestion_store(ingestion_store)
         if not isinstance(monitored_addresses, dict) or not monitored_addresses:
             raise ValueError("explicit monitored Solana address seeds are required")
         if not isinstance(start_slots, dict) or set(start_slots) != set(monitored_addresses):

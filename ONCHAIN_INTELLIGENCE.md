@@ -469,3 +469,35 @@ Official XRPL references: [currency formats](https://xrpl.org/docs/references/pr
 - The pre-existing .venv/ directory was not staged. The temporary test DSN file is test-only and will be removed after the integration run.
 - No real Binance Square post, provider RPC, production database mutation, deployment, PR merge or publishing workflow activation occurred.
 - Module 9 remains not production-ready: worker supervision/lifecycle, distributed ownership/leases, observability/alerts, retention/runbook, and live provider verification still require separate work and approval.
+
+## Acceptance receipt signing and durable key rotation (v1; local implementation, not production activation)
+
+Module 9 emits an ACCEPTED validation result only when an explicit HMAC signing key is injected into OnChainIntelligenceEngine. The key must contain at least 32 bytes; receipt_key_id must be a stable 1–128 character identifier using letters, digits, dot, underscore or hyphen. Without an active signing key, a structurally valid observation returns UNAVAILABLE / ONCHAIN_RECEIPT_SIGNING_NOT_CONFIGURED.
+
+`OnChainIntelligenceEngine.from_env()` now loads the operator-provisioned keyring through `layer1/onchain_receipt_config.py`:
+
+- `ONCHAIN_RECEIPT_HMAC_KEYRING_JSON`: JSON object mapping key IDs to hex-encoded HMAC keys (minimum 32 bytes each).
+- `ONCHAIN_RECEIPT_ACTIVE_KEY_ID`: key ID used to sign new receipts. It must exist in the keyring and in the trusted allowlist.
+- `ONCHAIN_RECEIPT_TRUSTED_KEY_IDS`: comma-separated explicit allowlist for receipt verification. Retained historical key IDs must remain in this allowlist and keyring while receipts signed by those keys are still expected to be read.
+
+A verification-only keyring may omit the active signer; in that mode no new ACCEPTED result is signed. Empty environment configuration disables receipt signing and trust. Malformed or inconsistent configuration fails closed. The repository/environment used for this local continuation has no Module 9 keyring, active key ID or trusted key IDs configured; no key was generated, read, stored or committed.
+
+`EvidenceVerificationEngine.evidence_from_onchain_observation()` requires an explicit expected receipt key ID and a trusted key; the verification key can be supplied directly or resolved from the configured keyring. It now carries the signed validation envelope and the exact serialized observation/validation payload into `EvidenceRecord`. ClaimRegistry replay re-parses those fields and re-verifies the HMAC, key ID, observation identity and corresponding evidence fields before restoring primary provenance. A persisted key ID alone is no longer sufficient. SQLite and PostgreSQL on-chain stores verify persisted ACCEPTED rows by the receipt's own key ID, so trusted historical receipts remain readable after the active signing key rotates.
+
+Operational requirements: provision keys only through an approved secret manager; never commit them, log them, expose them to untrusted callers/plugins, or place them in ordinary project configuration. Keep old verification keys only as long as required by the receipt retention policy, then retire their IDs from the allowlist deliberately. No production key IDs or secrets are supplied by this code.
+
+Security boundary: receipt v1 authenticates that a holder of the configured shared key signed the supplied eligibility/mapping/observation snapshot and detects observation/receipt tampering. It does not authenticate the upstream provider response itself or prove that the observation was derived from that response. The individual observation path is not currently activated by main.py. Keep AUD-ONCHAIN-001 OPEN until provider-response binding, worker wiring, approved key provisioning, and disposable PostgreSQL worker/store acceptance are complete. This remains a local hardening slice, not production certification.
+
+## Storage adapter contracts — structural, not runtime activation
+- Module 9 workers and `OnChainTransferAggregator` now depend on structural protocols in `layer1/onchain_protocols.py`, rather than concrete SQLite store classes. SQLite and PostgreSQL adapters remain separate implementations.
+- The ingestion contract requires `commit_page` calls to supply `expected_cursor` and `(network_id, provider, scope)` identity, and requires explicit provider/scope on reorg reconciliation. Constructor validation checks the relevant callable methods and keyword-capable signatures.
+- This resolves the constructor-level nominal type incompatibility only. It does not wire workers into `main.py`, run provider ingestion, or establish PostgreSQL transaction/concurrency acceptance. A disposable PostgreSQL worker+aggregator integration suite remains required before Module 9 can be marked complete.
+
+
+## Provider response body limits (AUD-ONCHAIN-004 — local remediation, not activated)
+
+The shared `ReadOnlyJsonRpcTransport` now rejects unbounded reads. Construction requires an explicit positive `max_response_bytes`; both REST JSON and JSON-RPC responses use the same bounded incremental reader. The reader rejects a declared `Content-Length` above the configured ceiling before reading, rejects malformed content lengths, and reads at most one byte beyond the remaining budget to detect chunked/incorrectly declared oversized bodies. Redirect behavior remains disabled.
+
+Default Alchemy and Chainstack XRPL adapters require the same explicit limit. Their `from_env()` constructors require `ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES` as a positive base-10 integer; missing, zero, negative, fractional, scientific-notation or otherwise malformed values fail closed. There is deliberately no guessed default. A custom injected transport factory is a trusted test/integration seam and must independently enforce an equivalent response bound if used outside tests.
+
+No provider response-size telemetry or representative production payload corpus has been collected in this task. Operators must choose and document a ceiling using actual maximum legitimate response sizes for the configured page/range limits plus a justified safety margin. The environment variable is not provisioned in this worktree. No live RPC/provider request was made. Therefore AUD-ONCHAIN-004 is **PARTIALLY REMEDIATED / OPEN**, not closed; deployment activation and provider acceptance remain pending.

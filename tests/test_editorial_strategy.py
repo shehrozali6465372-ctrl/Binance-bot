@@ -43,6 +43,93 @@ class EditorialStrategyEngineTests(unittest.TestCase):
         self.assertEqual(first.version, 1)
         self.assertEqual(second.version, 2)
 
+    def test_store_rejects_brief_hash_that_does_not_commit_to_brief_payload(self):
+        from dataclasses import replace
+
+        forged = replace(self.engine.build(self.package), brief_hash="f" * 64)
+        with self.assertRaisesRegex(ValueError, "brief hash"):
+            self.store.save(forged)
+
+    def test_store_detects_tampered_existing_payload_on_idempotent_save(self):
+        import json
+
+        brief = self.store.save(self.engine.build(self.package))
+        row = self.conn.execute(
+            "SELECT payload_json FROM editorial_brief_versions WHERE event_id=? AND angle_id=?",
+            (brief.event_id, brief.angle_id),
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["angle"] = "tampered editorial angle"
+        self.conn.execute(
+            "UPDATE editorial_brief_versions SET payload_json=? WHERE event_id=? AND angle_id=?",
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")), brief.event_id, brief.angle_id),
+        )
+        with self.assertRaisesRegex(ValueError, "brief hash"):
+            self.store.save(brief)
+
+    def test_postgres_editorial_brief_validator_recomputes_full_brief_hash(self):
+        from dataclasses import asdict
+        from layer1.publication_postgres import _validate_editorial_brief_input
+
+        brief = self.engine.build(self.package)
+        payload = asdict(brief)
+        payload.pop("version")
+        payload.pop("brief_id")
+        _validate_editorial_brief_input(
+            brief.event_id, brief.angle_id, brief.research_package_id,
+            brief.brief_hash, payload,
+        )
+        payload["angle"] = "tampered editorial angle"
+        with self.assertRaisesRegex(ValueError, "brief hash"):
+            _validate_editorial_brief_input(
+                brief.event_id, brief.angle_id, brief.research_package_id,
+                brief.brief_hash, payload,
+            )
+
+    def test_postgres_editorial_validator_rejects_generic_payload_hash_mismatch(self):
+        import hashlib
+        import json
+        from layer1.publication_postgres import _validate_editorial_brief_input
+
+        payload = {"headline": "Verified update", "claims": ["claim-1"]}
+        brief_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        _validate_editorial_brief_input("event:1", "angle:1", "research:1", brief_hash, payload)
+        with self.assertRaisesRegex(ValueError, "brief hash"):
+            _validate_editorial_brief_input(
+                "event:1", "angle:1", "research:1", "f" * 64, payload,
+            )
+
+    def test_postgres_editorial_loader_rejects_tampered_generic_payload(self):
+        import hashlib
+        import json
+        from layer1.publication_postgres import _load_latest_editorial_brief
+
+        original = {"headline": "Verified update", "claims": ["claim-1"]}
+        brief_hash = hashlib.sha256(
+            json.dumps(original, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        tampered = {"headline": "Tampered update", "claims": ["claim-1"]}
+
+        class Cursor:
+            def fetchone(self):
+                return {
+                    "event_id": "event:1", "angle_id": "angle:1", "version": 1,
+                    "brief_id": "event:1:angle:1:1", "research_package_id": "research:1",
+                    "brief_hash": brief_hash, "payload_json": tampered,
+                }
+
+        class Connection:
+            def execute(self, *args, **kwargs):
+                return Cursor()
+
+        class Store:
+            conn = Connection()
+
+        with self.assertRaisesRegex(ValueError, "brief hash"):
+            _load_latest_editorial_brief(Store(), "event:1", "angle:1")
+
     def test_incomplete_research_cannot_create_editorial_brief(self):
         from dataclasses import replace
         incomplete = replace(self.package, completeness="RESEARCH_MORE")

@@ -22,6 +22,14 @@ from urllib.parse import urlparse
 
 
 LAYER1_VERSION = "1.1.0"
+CONTENT_HASH_KINDS = frozenset({
+    "UNSPECIFIED",
+    "CANONICAL_NORMALIZED_PAYLOAD_SHA256",
+    "CANONICAL_SELECTED_PROJECTION_SHA256",
+    "CANONICAL_PARSED_PROVIDER_JSON_SHA256",
+    "LOCAL_ASSERTION_FINGERPRINT_SHA256",
+    "CANONICAL_AGGREGATE_FINGERPRINT_SHA256",
+})
 SCORE_VERSION = "layer1-relevance-v1"
 OFFICIAL_BINANCE_HOSTS = {"binance.com", "www.binance.com", "developers.binance.com"}
 BINANCE_ANNOUNCEMENT_LANDING_URL = "https://www.binance.com/en/support/announcement"
@@ -675,6 +683,7 @@ class MarketObservation:
     freshness_by_field: Mapping[str, str] = field(default_factory=dict)
     provider_metadata: Mapping[str, Any] = field(default_factory=dict)
     cache_hit: bool = False
+    data_hash_kind: str = "UNSPECIFIED"
 
     def validate(self) -> None:
         if not all(isinstance(value, str) and value.strip() for value in
@@ -690,6 +699,10 @@ class MarketObservation:
             raise ValueError("market observation hash/cache metadata is invalid")
         if self.data_hash and not re.fullmatch(r"[0-9a-f]{64}", self.data_hash):
             raise ValueError("market observation data_hash must be a lowercase SHA-256 digest")
+        if not isinstance(self.data_hash_kind, str) or self.data_hash_kind not in CONTENT_HASH_KINDS:
+            raise ValueError("market observation data_hash_kind is invalid")
+        if not self.data_hash and self.data_hash_kind != "UNSPECIFIED":
+            raise ValueError("market observation hash semantics requires data_hash")
         _parse_time(self.observed_at)
         for timestamp_name in ("published_at", "source_timestamp"):
             timestamp = getattr(self, timestamp_name)
@@ -1107,7 +1120,8 @@ class MarketDataIntelligenceEngine:
             asset_id=identity.asset_id, provider="binance_spot", endpoint=url,
             observed_at=observed_at, price=values["price"], currency=identity.quote_asset,
             change_24h=values["change_24h"], volume_24h=values["volume_24h"],
-            data_hash=data_hash, source_timestamp=source_timestamp,
+            data_hash=data_hash, data_hash_kind="CANONICAL_PARSED_PROVIDER_JSON_SHA256",
+            source_timestamp=source_timestamp,
             field_availability=availability, field_provenance=provenance,
             freshness_by_field=freshness, provider_metadata=provider_metadata,
         )
@@ -1163,7 +1177,8 @@ class MarketDataIntelligenceEngine:
             price=values["price"], currency=currency, change_24h=values["change_24h"],
             volume_24h=values["volume_24h"], market_cap=values["market_cap"],
             history=history, published_at=source_timestamp, source_timestamp=source_timestamp,
-            data_hash=data_hash, field_availability=availability,
+            data_hash=data_hash, data_hash_kind="CANONICAL_PARSED_PROVIDER_JSON_SHA256",
+            field_availability=availability,
             field_provenance=provenance, freshness_by_field=freshness,
             provider_metadata={
                 **dict(provider_metadata or {}),
@@ -1392,6 +1407,8 @@ class TrendSignal:
     asset_ids: tuple[str, ...] = ()
     source_item_id: str = ""
     content_hash: str = ""
+    content_hash_kind: str = "UNSPECIFIED"
+    source_endpoint: str = ""
 
     def validate(self) -> None:
         if not isinstance(self.topic, str) or not self.topic.strip() or not isinstance(self.source, str) or not self.source.strip():
@@ -1414,6 +1431,12 @@ class TrendSignal:
             or not re.fullmatch(r"[0-9a-f]{64}", self.content_hash)
         ):
             raise ValueError("trend content_hash must be a lowercase SHA-256 hex digest")
+        if not isinstance(self.content_hash_kind, str) or self.content_hash_kind not in CONTENT_HASH_KINDS:
+            raise ValueError("trend content_hash_kind is invalid")
+        if not isinstance(self.source_endpoint, str):
+            raise ValueError("trend source endpoint must be text")
+        if not self.content_hash and self.content_hash_kind != "UNSPECIFIED":
+            raise ValueError("trend hash semantics requires content_hash")
 
 
 @dataclass(frozen=True)
