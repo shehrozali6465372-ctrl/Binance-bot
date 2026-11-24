@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import pg from "pg";
 import { AnnouncementStore } from "../src/store.js";
+import { createSourceIngestionReceipt, loadReceiptSigningConfig } from "../src/receipts.js";
 
 const { Pool, Client } = pg;
 const workerUrl = process.env.POSTGRES_WORKER_URL;
@@ -17,7 +18,7 @@ function makeEvent() {
     sourceId: createHash("sha256").update(`source-${contentHash}`).digest("hex"),
     contentHash,
     topic: "com_announcement_en",
-    catalogId: "integration-test",
+    catalogId: "48",
     catalogName: "Integration Test",
     eventType: "test",
     title: "Disposable PostgreSQL integration test",
@@ -36,11 +37,11 @@ test("PostgreSQL roles enforce runtime least privilege over verified TLS", { ski
     const migrator = new Pool({ connectionString: migrationUrl, max: 1 });
     try {
       const ledger = await migrator.query(
-        "SELECT version, checksum FROM binance_announcement_schema_migrations WHERE version = $1",
-        ["001_initial_schema"],
+        "SELECT version, checksum FROM binance_announcement_schema_migrations WHERE version = ANY($1::text[]) ORDER BY version",
+        [["001_initial_schema", "002_ingestion_receipts"]],
       );
-      assert.equal(ledger.rowCount, 1, "the applied schema migration is recorded exactly once");
-      assert.match(ledger.rows[0].checksum.trim(), /^[a-f0-9]{64}$/);
+      assert.deepEqual(ledger.rows.map((row) => row.version), ["001_initial_schema", "002_ingestion_receipts"]);
+      assert.ok(ledger.rows.every((row) => /^[a-f0-9]{64}$/.test(row.checksum.trim())));
     } finally {
       await migrator.end();
     }
@@ -69,21 +70,34 @@ test("PostgreSQL roles enforce runtime least privilege over verified TLS", { ski
 
     const event = makeEvent();
     testEvent = event;
-    assert.equal(await store.save(event), true, "worker can insert an event and RETURNING id");
-    assert.equal(await store.save(event), false, "content hash uniqueness prevents duplicate persistence");
+    const signingKey = Buffer.from("postgres-integration-cms-receipt-key-32-bytes", "utf8");
+    const receiptConfig = loadReceiptSigningConfig({
+      BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON: JSON.stringify({ "cms-ci-v1": signingKey.toString("hex") }),
+      BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID: "cms-ci-v1",
+      BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS: "cms-ci-v1",
+    });
+    const receipt = createSourceIngestionReceipt(event, receiptConfig);
+    assert.equal(await store.save(event, receipt), true, "worker can insert normalized event and receipt in one SQL statement");
+    assert.equal(await store.save(event, receipt), false, "content hash uniqueness prevents duplicate persistence");
     await store.setState("LISTENING", { startedAt: new Date().toISOString() });
 
     const imported = await importer.query(
-      "SELECT content_hash, title FROM binance_announcement_events WHERE content_hash = $1",
+      "SELECT content_hash, title, ingestion_receipt FROM binance_announcement_events WHERE content_hash = $1",
       [event.contentHash],
     );
     assert.equal(imported.rowCount, 1, "importer can read the event ledger");
     assert.equal(imported.rows[0].title, event.title);
+    assert.deepEqual(imported.rows[0].ingestion_receipt, receipt, "importer can read the exact persisted receipt");
 
     await assert.rejects(
       worker.query("SELECT title FROM binance_announcement_events LIMIT 1"),
       /permission denied/i,
       "worker cannot read event payload columns",
+    );
+    await assert.rejects(
+      worker.query("SELECT ingestion_receipt FROM binance_announcement_events LIMIT 1"),
+      /permission denied/i,
+      "worker cannot read back persisted receipt or event provenance",
     );
     await assert.rejects(
       worker.query("CREATE TABLE public.worker_must_not_ddl(id integer)"),

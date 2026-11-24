@@ -21,8 +21,15 @@ test("worker receives only dedicated secrets and validates verified PostgreSQL T
   assert.match(workflow, /BINANCE_API_KEY:\s*\$\{\{\s*secrets\.BINANCE_API_KEY\s*\}\}/);
   assert.match(workflow, /BINANCE_API_SECRET:\s*\$\{\{\s*secrets\.BINANCE_API_SECRET\s*\}\}/);
   assert.match(workflow, /DATABASE_URL:\s*\$\{\{\s*secrets\.BINANCE_ANNOUNCEMENT_DATABASE_URL\s*\}\}/);
+  assert.match(workflow, /BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON:\s*\$\{\{\s*secrets\.BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON\s*\}\}/);
+  assert.match(workflow, /BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID:\s*\$\{\{\s*vars\.BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID\s*\}\}/);
+  assert.match(workflow, /BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS:\s*\$\{\{\s*vars\.BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS\s*\}\}/);
   assert.match(workflow, /sslmode=verify-full/);
   assert.match(workflow, /npm ci --omit=dev/);
+  const jobHeader = workflow.split("jobs:")[1].split("steps:")[0];
+  const installStep = workflow.split("- name: Install locked worker dependencies")[1].split("- name: Validate required secrets")[0];
+  assert.doesNotMatch(jobHeader, /secrets\./, "credentials must not be job-wide");
+  assert.doesNotMatch(installStep, /secrets\./, "dependency installation must not receive credentials");
 });
 
 test("each run uses a bounded four-minute CMS stream and graceful SIGTERM", () => {
@@ -33,4 +40,13 @@ test("each run uses a bounded four-minute CMS stream and graceful SIGTERM", () =
 test("scheduled ingestion invokes only the isolated read-only worker", () => {
   assert.match(workflow, /working-directory:\s*announcement-worker/);
   assert.doesNotMatch(workflow, /python main\.py|PostPublisher|publish\(/);
+});
+
+
+test("scheduled worker refuses to run unless CMS receipt signing is configured and validated", () => {
+  const validation = workflow.split("- name: Validate required secrets")[1].split("- name: Run CMS listener")[0];
+  for (const name of ["BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON", "BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID", "BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS"]) {
+    assert.match(validation, new RegExp(name));
+  }
+  assert.match(validation, /loadReceiptSigningConfig/);
 });

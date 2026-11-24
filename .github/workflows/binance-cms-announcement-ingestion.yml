@@ -20,10 +20,6 @@ jobs:
     name: Bounded read-only CMS ingestion window
     runs-on: ubuntu-latest
     timeout-minutes: 8
-    env:
-      BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
-      BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
-      DATABASE_URL: ${{ secrets.BINANCE_ANNOUNCEMENT_DATABASE_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,10 +36,17 @@ jobs:
         run: npm ci --omit=dev
 
       - name: Validate required secrets without printing values
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+          DATABASE_URL: ${{ secrets.BINANCE_ANNOUNCEMENT_DATABASE_URL }}
+          BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON: ${{ secrets.BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON }}
+          BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID: ${{ vars.BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID }}
+          BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS: ${{ vars.BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS }}
         shell: bash
         run: |
           set -euo pipefail
-          for name in BINANCE_API_KEY BINANCE_API_SECRET DATABASE_URL; do
+          for name in BINANCE_API_KEY BINANCE_API_SECRET DATABASE_URL BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS; do
             if [[ -z "${!name:-}" ]]; then
               echo "Required GitHub Actions secret is missing: $name" >&2
               exit 1
@@ -54,9 +57,18 @@ jobs:
             if (!["postgres:", "postgresql:"].includes(url.protocol) || url.searchParams.get("sslmode") !== "verify-full") {
               throw new Error("BINANCE_ANNOUNCEMENT_DATABASE_URL must be PostgreSQL with sslmode=verify-full");
             }
+            const { loadReceiptSigningConfig } = await import("./src/receipts.js");
+            if (!loadReceiptSigningConfig()) throw new Error("CMS receipt signing configuration is required");
           '
 
       - name: Run CMS listener for a bounded four-minute window
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+          DATABASE_URL: ${{ secrets.BINANCE_ANNOUNCEMENT_DATABASE_URL }}
+          BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON: ${{ secrets.BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON }}
+          BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID: ${{ vars.BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID }}
+          BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS: ${{ vars.BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS }}
         working-directory: announcement-worker
         shell: bash
         run: |

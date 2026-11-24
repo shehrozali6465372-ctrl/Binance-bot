@@ -2,6 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { startAnnouncementWorker } from "../src/worker.js";
 
+const originalReceiptEnv = Object.fromEntries([
+  "BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON",
+  "BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID",
+  "BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS",
+].map((name) => [name, process.env[name]]));
+const testReceiptKey = Buffer.from("worker-lifecycle-test-key-material-over-32-bytes", "utf8");
+process.env.BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON = JSON.stringify({ "cms-test-v1": testReceiptKey.toString("hex") });
+process.env.BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID = "cms-test-v1";
+process.env.BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS = "cms-test-v1";
+process.env.PORT = "0";
+
 class FakePool {
   constructor({ failInitialize = false, insertBarrier = null, onInsertStarted = null, failStateUpdates = {} } = {}) {
     this.queries = [];
@@ -232,7 +243,7 @@ test("worker sends WebSocket heartbeats and restores LISTENING after a pong", as
 
 test("worker marks the CMS stream DEGRADED when heartbeat pong times out", async () => {
   const { worker, pool, connection } = await startWithFakes({ heartbeatIntervalMs: 5, heartbeatTimeoutMs: 5 });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await new Promise((resolve) => setTimeout(resolve, 40));
   assert.ok(connection.pingCount > 0, "worker should send a ping before waiting for pong");
   const degraded = pool.queries.find(({ sql, values }) =>
     sql.includes("binance_announcement_worker_state") && values[0] === "DEGRADED" &&
@@ -505,4 +516,80 @@ test("worker rejects a database URL without verified TLS before creating a pool"
     logger,
   }), /DATABASE_URL must include sslmode=verify-full/);
   assert.equal(poolFactoryCalled, false);
+});
+
+
+test("worker signs and atomically persists a receipt with each normalized CMS event", async () => {
+  const { worker, pool, connection } = await startWithFakes();
+  connection.stream.emitMessage({
+    catalogId: 48, catalogName: "New Cryptocurrency Listing", publishDate: Date.now(),
+    title: "Receipt-backed announcement (RCPT)", body: "Mock announcement body", disclaimer: "",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const insert = pool.queries.find(({ sql }) => sql.includes("INSERT INTO binance_announcement_events"));
+  assert.ok(insert);
+  const receipt = JSON.parse(insert.values[14]);
+  assert.equal(receipt.authority_id, "binance_announcement_cms");
+  assert.equal(receipt.key_id, "cms-test-v1");
+  assert.equal(receipt.version, 1);
+  assert.match(receipt.payload_hash, /^[a-f0-9]{64}$/);
+  assert.match(receipt.signature, /^[a-f0-9]{64}$/);
+  await worker.shutdown("test");
+});
+
+test("worker keeps ingesting without a signer but records DEGRADED and stores no receipt", async () => {
+  const names = [
+    "BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON",
+    "BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID",
+    "BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS",
+  ];
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  for (const name of names) delete process.env[name];
+  try {
+    const { worker, pool, connection } = await startWithFakes();
+    connection.stream.emitMessage({
+      catalogId: 48, catalogName: "New Cryptocurrency Listing", publishDate: Date.now(),
+      title: "Unreceipted announcement (UNTR)", body: "Mock announcement body", disclaimer: "",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const insert = pool.queries.find(({ sql }) => sql.includes("INSERT INTO binance_announcement_events"));
+    assert.ok(insert);
+    assert.equal(insert.values[14], null);
+    assert.ok(pool.queries.some(({ sql, values }) =>
+      sql.includes("binance_announcement_worker_state") && values[0] === "DEGRADED"
+      && String(values[4]).includes("receipt signing is not configured"),
+    ));
+    await worker.shutdown("test");
+  } finally {
+    for (const name of names) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  }
+});
+
+test("partial CMS receipt signing configuration prevents worker resource startup", async () => {
+  const names = [
+    "BINANCE_CMS_RECEIPT_HMAC_KEYRING_JSON",
+    "BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID",
+    "BINANCE_CMS_RECEIPT_TRUSTED_KEY_IDS",
+  ];
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  for (const name of names) delete process.env[name];
+  process.env.BINANCE_CMS_RECEIPT_ACTIVE_KEY_ID = "cms-test-v1";
+  let poolCreated = false;
+  try {
+    await assert.rejects(startAnnouncementWorker({
+      apiKey: "offline-test-key", apiSecret: "offline-test-secret",
+      databaseUrl: "postgresql://offline.invalid/db?sslmode=verify-full",
+      poolFactory: () => { poolCreated = true; throw new Error("pool must not be created"); },
+      logger,
+    }), /CMS receipt signing configuration is incomplete/);
+    assert.equal(poolCreated, false);
+  } finally {
+    for (const name of names) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  }
 });

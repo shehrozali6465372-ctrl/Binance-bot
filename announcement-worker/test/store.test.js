@@ -64,6 +64,7 @@ test("runtime initialization checks required table access without executing DDL"
   assert.equal(calls.length, 2);
   assert.match(calls[0], /^SELECT id FROM binance_announcement_events LIMIT 0$/);
   assert.match(calls[1], /^SELECT worker_name FROM binance_announcement_worker_state LIMIT 0$/);
+  assert.ok(calls.every((sql) => !/ingestion_receipt/.test(sql)), "worker startup must not read its write-only receipt column");
   assert.ok(calls.every((sql) => !/\b(CREATE|ALTER|DROP)\b/i.test(sql)));
 });
 
@@ -76,4 +77,38 @@ test("runtime grants are least privilege and importer cannot mutate the event le
   assert.match(grants, /GRANT SELECT ON TABLE binance_announcement_events\s+TO binance_announcement_importer/);
   assert.doesNotMatch(grants, /GRANT (ALL|INSERT|UPDATE|DELETE).*binance_announcement_importer/i);
   assert.doesNotMatch(grants, /GRANT ALL/i);
+});
+
+test("event receipt is persisted atomically in the same insert as its normalized payload", async () => {
+  let captured;
+  const pool = { async query(sql, params) { captured = { sql, params }; return { rowCount: 1, rows: [{ id: 7 }] }; } };
+  const store = new AnnouncementStore(pool);
+  const event = {
+    sourceId: "a".repeat(64), contentHash: "b".repeat(64), topic: "com_announcement_en",
+    catalogId: "48", catalogName: "Listing", eventType: "listing", title: "A listing",
+    body: "body", disclaimer: "", publisher: "Binance",
+    sourceUrl: "https://www.binance.com/en/support/announcement",
+    publishedAt: "2026-11-09T23:00:00.000Z", observedAt: "2026-11-10T00:00:00.000Z",
+    rawPayload: { title: "A listing" },
+  };
+  const receipt = { version: 1, authority_id: "binance_announcement_cms", key_id: "cms-v1", payload_hash: "c".repeat(64), signature: "d".repeat(64) };
+  assert.equal(await store.save(event, receipt), true);
+  assert.match(captured.sql, /ingestion_receipt/);
+  assert.equal(captured.params[14], JSON.stringify(receipt));
+});
+
+test("missing receipt is stored as SQL NULL and never synthesized by the store", async () => {
+  let captured;
+  const pool = { async query(sql, params) { captured = { sql, params }; return { rowCount: 1, rows: [{ id: 8 }] }; } };
+  const store = new AnnouncementStore(pool);
+  const event = {
+    sourceId: "a".repeat(64), contentHash: "b".repeat(64), topic: "com_announcement_en",
+    catalogId: "48", catalogName: "Listing", eventType: "listing", title: "A listing",
+    body: "body", disclaimer: "", publisher: "Binance",
+    sourceUrl: "https://www.binance.com/en/support/announcement",
+    publishedAt: "2026-11-09T23:00:00.000Z", observedAt: "2026-11-10T00:00:00.000Z",
+    rawPayload: { title: "A listing" },
+  };
+  await store.save(event);
+  assert.equal(captured.params[14], null);
 });

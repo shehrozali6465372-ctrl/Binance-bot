@@ -3,6 +3,7 @@ import pg from "pg";
 import { createServer } from "node:http";
 import { normalizeAnnouncementMessage } from "./normalize.js";
 import { AnnouncementStore } from "./store.js";
+import { createSourceIngestionReceipt, loadReceiptSigningConfig } from "./receipts.js";
 
 const { Pool } = pg;
 
@@ -83,6 +84,7 @@ export async function startAnnouncementWorker({
   fetchImpl = globalThis.fetch,
 } = {}) {
   databaseUrl = requireVerifiedPostgresUrl(databaseUrl, "DATABASE_URL");
+  const receiptSigningConfig = loadReceiptSigningConfig();
   const maxTimerDelayMs = 2_147_483_647;
   if (!Number.isSafeInteger(heartbeatIntervalMs) || heartbeatIntervalMs < 1 || heartbeatIntervalMs > maxTimerDelayMs) {
     throw new RangeError(`heartbeatIntervalMs must be between 1 and ${maxTimerDelayMs}`);
@@ -127,6 +129,9 @@ export async function startAnnouncementWorker({
   let keepaliveInFlight = false;
   let awaitingHeartbeatPong = false;
   const degradationReasons = new Map();
+  if (!receiptSigningConfig) {
+    degradationReasons.set("receipt_signing", "CMS receipt signing is not configured; stored events remain untrusted");
+  }
 
   const persistOperationalState = async (fields = {}, healthyStatus = "LISTENING") => {
     const errors = [...degradationReasons.values()];
@@ -179,7 +184,10 @@ export async function startAnnouncementWorker({
     });
     connection = await client.websocketStreams.connect();
     stream = connection.comAnnouncementEn();
-    await store.setState("LISTENING");
+    await persistOperationalState({}, "LISTENING");
+    if (!receiptSigningConfig) {
+      logger.warn("CMS receipt signing is not configured; announcements will be stored without trusted receipts");
+    }
     logger.info("Binance CMS announcement stream connected; read-only ingestion active");
 
     const healthHandler = (request) => {
@@ -231,7 +239,10 @@ export async function startAnnouncementWorker({
         await persistOperationalState({ lastMessageAt: receivedAt }, "RECEIVING");
         try {
           const event = normalizeAnnouncementMessage(message, receivedAt);
-          const inserted = await store.save(event);
+          const receipt = receiptSigningConfig
+            ? createSourceIngestionReceipt(event, receiptSigningConfig)
+            : null;
+          const inserted = await store.save(event, receipt);
           degradationReasons.delete("message");
           degradationReasons.delete("queue");
           if (inserted) {
@@ -240,6 +251,7 @@ export async function startAnnouncementWorker({
               catalogId: event.catalogId,
               eventType: event.eventType,
               contentHash: event.contentHash,
+              receiptStatus: receipt ? "SIGNED" : "MISSING_UNTRUSTED",
             });
           } else {
             await persistOperationalState({ lastMessageAt: receivedAt });

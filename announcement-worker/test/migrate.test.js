@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
-import { runAnnouncementMigrations } from "../src/migrate.js";
+import { readFile } from "node:fs/promises";
+import { MIGRATIONS, RECEIPT_MIGRATION_SQL, runAnnouncementMigrations } from "../src/migrate.js";
+import { SCHEMA_SQL } from "../src/store.js";
 
 const databaseUrl = "postgresql://migration.invalid/db?sslmode=verify-full";
-const version = "001_initial_schema";
 const lockKey = "binance-cms-announcement-schema";
+const checksum = (sql) => createHash("sha256").update(sql).digest("hex");
 
 function createPoolHarness({ appliedRows = [], failAt = null } = {}) {
   const calls = [];
@@ -16,7 +18,8 @@ function createPoolHarness({ appliedRows = [], failAt = null } = {}) {
       calls.push({ sql, params });
       if (failAt && sql === failAt) throw new Error("database operation failed");
       if (sql.startsWith("SELECT checksum FROM binance_announcement_schema_migrations")) {
-        return { rows: appliedRows, rowCount: appliedRows.length };
+        const row = appliedRows.find((item) => item.version === params[0]);
+        return { rows: row ? [{ checksum: row.checksum }] : [], rowCount: row ? 1 : 0 };
       }
       return { rows: [], rowCount: 0 };
     },
@@ -38,7 +41,7 @@ test("migration requires a dedicated migration URL before opening a pool", async
   assert.equal(poolFactoryCalled, false);
 });
 
-test("first migration is locked, applied transactionally, and recorded in the ledger", async () => {
+test("initial schema and additive receipt migration apply transactionally in order", async () => {
   const harness = createPoolHarness();
   await runAnnouncementMigrations({ databaseUrl, poolFactory: harness.poolFactory });
 
@@ -47,32 +50,47 @@ test("first migration is locked, applied transactionally, and recorded in the le
   assert.match(sql[1], /pg_advisory_xact_lock/);
   assert.deepEqual(harness.calls[1].params, [lockKey]);
   assert.match(sql[2], /CREATE TABLE IF NOT EXISTS binance_announcement_schema_migrations/);
-  assert.match(sql[3], /SELECT checksum FROM binance_announcement_schema_migrations/);
-  assert.ok(sql.some((statement) => /CREATE TABLE IF NOT EXISTS binance_announcement_events/.test(statement)));
-  const record = harness.calls.find((call) => call.sql.startsWith("INSERT INTO binance_announcement_schema_migrations"));
-  assert.ok(record, "applied migration is recorded");
-  assert.equal(record.params[0], version);
-  assert.match(record.params[1], /^[a-f0-9]{64}$/);
-  assert.equal(record.params[1], createHash("sha256").update(sql.find((statement) => /CREATE TABLE IF NOT EXISTS binance_announcement_events/.test(statement))).digest("hex"));
+  assert.ok(sql.includes(SCHEMA_SQL));
+  assert.ok(sql.includes(RECEIPT_MIGRATION_SQL));
+  assert.ok(sql.indexOf(SCHEMA_SQL) < sql.indexOf(RECEIPT_MIGRATION_SQL));
+  const records = harness.calls.filter((call) => call.sql.startsWith("INSERT INTO binance_announcement_schema_migrations"));
+  assert.deepEqual(records.map((record) => record.params), [
+    ["001_initial_schema", checksum(SCHEMA_SQL)],
+    ["002_ingestion_receipts", checksum(RECEIPT_MIGRATION_SQL)],
+  ]);
   assert.equal(sql.at(-1), "COMMIT");
   assert.equal(harness.released, true);
   assert.equal(harness.ended, true);
 });
 
-test("an already-applied migration with the same checksum is skipped", async () => {
-  const source = await import("../src/store.js");
-  const checksum = createHash("sha256").update(source.SCHEMA_SQL).digest("hex");
-  const same = createPoolHarness({ appliedRows: [{ checksum }] });
-  await runAnnouncementMigrations({ databaseUrl, poolFactory: same.poolFactory });
-  assert.equal(same.calls.some((call) => /CREATE TABLE IF NOT EXISTS binance_announcement_events/.test(call.sql)), false);
-  assert.equal(same.calls.some((call) => call.sql.startsWith("INSERT INTO binance_announcement_schema_migrations")), false);
-  assert.equal(same.calls.at(-1).sql, "COMMIT");
-  assert.equal(same.released, true);
-  assert.equal(same.ended, true);
+test("receipt migration file exactly matches the checksum-pinned migration", async () => {
+  const file = await readFile(new URL("../migrations/002_ingestion_receipts.sql", import.meta.url), "utf8");
+  assert.equal(file.trim(), RECEIPT_MIGRATION_SQL.trim());
+});
+
+test("already-applied migrations with matching checksums are skipped", async () => {
+  const harness = createPoolHarness({ appliedRows: MIGRATIONS.map((migration) => ({
+    version: migration.version, checksum: checksum(migration.sql),
+  })) });
+  await runAnnouncementMigrations({ databaseUrl, poolFactory: harness.poolFactory });
+  assert.equal(harness.calls.some((call) => call.sql === SCHEMA_SQL || call.sql === RECEIPT_MIGRATION_SQL), false);
+  assert.equal(harness.calls.some((call) => call.sql.startsWith("INSERT INTO binance_announcement_schema_migrations")), false);
+  assert.equal(harness.calls.at(-1).sql, "COMMIT");
+  assert.equal(harness.released, true);
+  assert.equal(harness.ended, true);
+});
+
+test("already-applied initial schema is not rewritten while new receipt migration is applied", async () => {
+  const harness = createPoolHarness({ appliedRows: [{ version: "001_initial_schema", checksum: checksum(SCHEMA_SQL) }] });
+  await runAnnouncementMigrations({ databaseUrl, poolFactory: harness.poolFactory });
+  assert.equal(harness.calls.some((call) => call.sql === SCHEMA_SQL), false);
+  assert.equal(harness.calls.some((call) => call.sql === RECEIPT_MIGRATION_SQL), true);
+  const inserted = harness.calls.find((call) => call.sql.startsWith("INSERT INTO binance_announcement_schema_migrations"));
+  assert.deepEqual(inserted.params, ["002_ingestion_receipts", checksum(RECEIPT_MIGRATION_SQL)]);
 });
 
 test("migration checksum drift aborts and rolls back", async () => {
-  const harness = createPoolHarness({ appliedRows: [{ checksum: "0".repeat(64) }] });
+  const harness = createPoolHarness({ appliedRows: [{ version: "001_initial_schema", checksum: "0".repeat(64) }] });
   await assert.rejects(
     runAnnouncementMigrations({ databaseUrl, poolFactory: harness.poolFactory }),
     /checksum mismatch/i,

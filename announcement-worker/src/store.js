@@ -1,3 +1,5 @@
+import { validateSourceIngestionReceipt } from "./receipts.js";
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS binance_announcement_events (
   id BIGSERIAL PRIMARY KEY,
@@ -43,14 +45,18 @@ export class AnnouncementStore {
     // the narrow privileges required by the worker without executing DDL.
     await this.pool.query("SELECT id FROM binance_announcement_events LIMIT 0");
     await this.pool.query("SELECT worker_name FROM binance_announcement_worker_state LIMIT 0");
+    // Do not SELECT ingestion_receipt here: the worker deliberately has INSERT
+    // privilege but no read privilege on receipt or event payload columns.
   }
 
-  async save(event) {
+  async save(event, receipt = null) {
+    const normalizedReceipt = receipt == null ? null : validateSourceIngestionReceipt(receipt);
     const result = await this.pool.query(
       `INSERT INTO binance_announcement_events
        (source_id, content_hash, topic, catalog_id, catalog_name, event_type,
-        title, body, disclaimer, publisher, source_url, published_at, observed_at, raw_payload)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb)
+        title, body, disclaimer, publisher, source_url, published_at, observed_at, raw_payload,
+        ingestion_receipt)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb)
        ON CONFLICT (content_hash) DO NOTHING
        RETURNING id`,
       [
@@ -58,6 +64,7 @@ export class AnnouncementStore {
         event.catalogName, event.eventType, event.title, event.body,
         event.disclaimer, event.publisher, event.sourceUrl, event.publishedAt,
         event.observedAt, JSON.stringify(event.rawPayload),
+        normalizedReceipt == null ? null : JSON.stringify(normalizedReceipt),
       ],
     );
     return result.rowCount === 1;
