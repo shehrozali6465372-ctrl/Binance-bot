@@ -33,6 +33,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install Pillow
+          pip install -r requirements-announcement-importer.txt
 
       - name: Restore post history cache
         uses: actions/cache/restore@v4

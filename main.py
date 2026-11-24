@@ -4145,11 +4145,44 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
 
     store = Layer1Store(database_path)
     summary = {
-        "observations": 0, "trends": 0, "candidates": 0,
+        "observations": 0, "trends": 0, "announcements": 0, "candidates": 0,
         "ready": 0, "rejected": 0, "rejected_inputs": 0,
         "scores_deferred": 0, "ready_asset_ids": [],
         "provider_health": {},
     }
+    announcement_evidence_by_asset = {}
+    announcement_import_status = "UNAVAILABLE_NO_DATABASE_URL"
+    announcement_database_url = os.getenv("ANNOUNCEMENT_DATABASE_URL", "").strip()
+    if announcement_database_url:
+        # This importer is an optional enrichment source. Its outage must not
+        # interrupt the established market-data/publishing pipeline.
+        try:
+            from layer1.announcement_importer import import_recent_binance_announcements
+            imported = import_recent_binance_announcements(
+                announcement_database_url, candidates, store
+            )
+        except Exception as exc:
+            # Do not log exception text: database driver errors can include DSNs.
+            announcement_import_status = "DEGRADED_IMPORT_FAILED"
+            summary["announcement_import_error_type"] = type(exc).__name__
+            LOGGER.warning(
+                "Layer 1 Binance CMS import unavailable; continuing without announcement evidence (%s)",
+                type(exc).__name__,
+            )
+        else:
+            announcement_evidence_by_asset = imported["by_asset_id"]
+            summary["announcements"] = imported["evidence_saved"]
+            summary["announcement_rows_read"] = imported["rows_read"]
+            summary["announcement_rows_unmatched"] = imported["unmatched_rows"]
+            summary["announcement_rows_invalid"] = imported["invalid_rows"]
+            announcement_import_status = (
+                "AVAILABLE" if imported["evidence_saved"] else "AVAILABLE_NO_MATCHING_RECENT_EVENTS"
+            )
+            LOGGER.info(
+                "Layer 1 Binance CMS import: rows=%d saved=%d unmatched=%d invalid=%d",
+                imported["rows_read"], imported["evidence_saved"],
+                imported["unmatched_rows"], imported["invalid_rows"],
+            )
     trend_signals = []
     for record in (trend_records or []):
         asset_id = record.get("asset_id")
@@ -4249,7 +4282,10 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
             store.save_market(market)
             summary["observations"] += 1
             asset_trends = [signal for signal in trend_signals if asset_id in signal.asset_ids]
-            candidate = candidate_engine.build(identity, eligibility, [market], [], asset_trends)
+            asset_announcements = announcement_evidence_by_asset.get(asset_id, [])
+            candidate = candidate_engine.build(
+                identity, eligibility, [market], asset_announcements, asset_trends
+            )
             store.save_candidate(candidate)
             summary["candidates"] += 1
             summary["ready" if candidate.state == "READY_FOR_RESEARCH" else "rejected"] += 1
@@ -4282,7 +4318,7 @@ def _persist_layer1_market_intelligence(candidates, database_path: str, trend_re
                 "AVAILABLE" if any(signal.source.startswith("market_") for signal in trend_signals)
                 else "UNAVAILABLE"
             ),
-            "binance_announcements": "UNAVAILABLE_NO_VERIFIED_DOCUMENTED_ADAPTER",
+            "binance_announcements": announcement_import_status,
         }
         _LAYER1_LAST_SUMMARY = dict(summary)
         LOGGER.info("Layer 1 evidence persisted: %s", json.dumps(summary, sort_keys=True))
