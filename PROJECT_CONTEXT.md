@@ -5229,3 +5229,19 @@ AUD-EVID-001 remains PARTIALLY REMEDIATED / OPEN; Module 11 PARTIAL. Overall pro
   - Follow-up Layer 1 run `45505482792` for commit `ae3f542` was observed QUEUED at this checkpoint. Do not claim it passed until the final workflow and PostgreSQL job conclusions are observed.
 - Final remote refs were read back and matched local commit SHAs at push time. No force push, PR merge, deployment, workflow dispatch, production DB/Neon access, migration, secret provisioning, live provider request or real Binance Square post occurred.
 - PR #14 and PR #2 remain review/merge decisions; pushing commits does not merge either PR. Overall project status remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**. CMS receipt evidence remains UNVERIFIED until its remaining operational and source-identity gates are accepted.
+
+
+## GitHub CI acceptance update — 25 November 2026
+
+- Follow-up PostgreSQL fixture correction was committed and pushed to the existing Layer 1 branch:
+  - Commit: `054737dbf0d51c03b5289147605af58b038e3ef8`
+  - Branch: `layer-1/module9-onchain-continuation`
+  - Correction: the guarded importer integration fixture now mirrors the worker table's required `topic` and `raw_payload` columns, as well as the receipt column. The prior hosted PostgreSQL failure was a test-fixture schema mismatch, not a defect in the importer SQL or worker migration.
+- GitHub Actions run `45505900356` for this commit completed **SUCCESS**:
+  - `mocked-safety-tests`: PASS.
+  - `Isolated PostgreSQL integration acceptance`: PASS; **102 tests** completed. Both `test_postgres_jsonb_round_trip_verifies_receipt_and_rejects_legacy_null` and `test_postgres_row_tampering_invalidates_the_persisted_receipt` passed against the guarded ephemeral PostgreSQL service.
+  - The PostgreSQL target guard passed before the test job performed schema/data operations; the service container was stopped successfully.
+- CMS worker branch `feature/binance-cms-announcement-worker`, commit `9f91646a398d95765072b300c462987f4350fc5e`, remains pushed. GitHub Actions run `45504868037` completed **SUCCESS** for mocked Node tests, PostgreSQL TLS/least-privilege worker/importer roles and Python Layer 1 tests.
+- Latest local Layer 1 full suite: **1078 tests, 0 failures/errors, 69 skipped**. Focused CMS importer/receipt suite: **34 tests, 0 failures, 2 skipped locally**; the two database tests were exercised successfully in hosted run `45505900356`.
+- These are branch-scoped CI and disposable PostgreSQL results only. They do not certify live CMS feed coverage, production key provisioning, deployed worker health, provider-origin authenticity, production database configuration or Binance publishing.
+- Both workstreams are pushed to their existing PR branches; neither PR was merged. No deployment, production migration, secret provisioning, live provider operation or real Square post occurred. Overall project remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
