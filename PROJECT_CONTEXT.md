@@ -5215,3 +5215,17 @@ AUD-EVID-001 remains PARTIALLY REMEDIATED / OPEN; Module 11 PARTIAL. Overall pro
 - PostgreSQL acceptance remains BLOCKED, not passed: `TEST_POSTGRES_DSN` is unset, Docker is unavailable, and local PostgreSQL reports no response on `/var/run/postgresql:5432`. No database was contacted and migration 002 was not applied. No hosted CI run was dispatched or observed.
 - No secrets/key material were read or provisioned; no live CMS/Binance provider, production DB/Neon, deployment, workflow dispatch, publication, stage, commit, push or merge occurred.
 - Next: obtain an explicitly approved, verified disposable PostgreSQL target or wait for the guarded hosted PostgreSQL CI run. Then execute producer/importer JSONB round-trip, timestamp fidelity, legacy NULL/tamper rejection, duplicate idempotency, atomicity, and role-boundary acceptance. Until then CMS evidence remains UNVERIFIED; `AUD-EVID-001` PARTIAL/OPEN, Module 11 PARTIAL, overall **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+
+## GitHub publication checkpoint — 25 November 2026
+
+- User explicitly authorized publishing the accumulated local progress to GitHub. Both workstreams were committed separately and pushed without force:
+  - Layer 1 / PR #14 branch: `layer-1/module9-onchain-continuation`, latest pushed commit `ae3f542116a26fdb45dd21d27ea0e8b482c70e23`. The main implementation/audit batch is commit `de5c4962d36062dc5e10a29b5876c7445a100899`; the follow-up CI environment-isolation test fix is `ae3f542116a26fdb45dd21d27ea0e8b482c70e23`.
+  - CMS worker / PR #2 branch: `feature/binance-cms-announcement-worker`, pushed commit `9f91646a398d95765072b300c462987f4350fc5e`.
+- The Layer 1 push initially encountered a remote-ahead branch. Remote commits were fetched and preserved; the local implementation commit was rebased onto the updated remote branch. Three merge conflicts were resolved by retaining both current remote history and the new implementation/audit sections. No force push was used. The follow-up test commit was a normal fast-forward push.
+- GitHub Actions:
+  - CMS worker run `45504868037` completed SUCCESS: mocked Node worker tests, isolated PostgreSQL TLS/least-privilege migration/role integration, and Python Layer 1 tests all passed.
+  - Initial Layer 1 run `45505115560` exposed two test failures caused by CI's `GITHUB_ACTIONS=true` environment leaking into unit tests intended to exercise local mode. Production code correctly failed closed. The two tests now explicitly set `GITHUB_ACTIONS=false`; the failure was reproduced locally under the CI environment, both focused tests passed after the test-only fix, and the full local suite passed **1078 tests, 0 failures/errors, 69 skipped**.
+  - Follow-up Layer 1 run `45505482792` for commit `ae3f542` was observed QUEUED at this checkpoint. Do not claim it passed until the final workflow and PostgreSQL job conclusions are observed.
+- Final remote refs were read back and matched local commit SHAs at push time. No force push, PR merge, deployment, workflow dispatch, production DB/Neon access, migration, secret provisioning, live provider request or real Binance Square post occurred.
+- PR #14 and PR #2 remain review/merge decisions; pushing commits does not merge either PR. Overall project status remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**. CMS receipt evidence remains UNVERIFIED until its remaining operational and source-identity gates are accepted.
