@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
+import main
+
 from image_engine import CloudflareImageArtifact, CloudflareWorkersAIImageGenerator, ImageComposer
 from layer1.content_generation import DraftStore
 from layer1.content_verification import ContentVerificationEngine
@@ -33,6 +35,17 @@ def iso(delta=0):
 
 
 class EndToEndPipelineTests(unittest.TestCase):
+    def test_market_scanner_candidates_are_review_only_without_fabricated_scores(self):
+        first = main.Coin("AAA", "Asset AAA", 1.0, 8.0, 10_000_000, 2.0, 100_000_000, [])
+        second = main.Coin("BBB", "Asset BBB", 2.0, -4.0, 20_000_000, 1.0, 200_000_000, [])
+        first._skills_score = 99.0  # stale score metadata must not leak into fallback routing
+
+        routed = [main._route_market_scanner_candidate_for_review(coin) for coin in (first, second)]
+
+        self.assertEqual(routed, [first, second])
+        self.assertEqual([coin._skills_publish_decision for coin in routed], ["review", "review"])
+        self.assertFalse(any(hasattr(coin, "_skills_score") for coin in routed))
+
     def test_unreceipted_announcement_blocks_research_and_publication(self):
         tmp = tempfile.TemporaryDirectory()
         old_cwd = os.getcwd()

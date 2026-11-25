@@ -1472,6 +1472,18 @@ class Coin:
         }
 
 
+def _route_market_scanner_candidate_for_review(coin: Coin) -> Coin:
+    """Route an unscored MarketScanner candidate to editorial review.
+
+    Discovery order is preserved by the caller. No synthetic opportunity score
+    is assigned: the fallback inputs have no calibrated ranking policy.
+    """
+    coin._skills_publish_decision = "review"
+    if hasattr(coin, "_skills_score"):
+        delattr(coin, "_skills_score")
+    return coin
+
+
 class Database:
     def __init__(self, path: str):
         self.path = path
@@ -5133,12 +5145,9 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
                 LOGGER.info("  GATE: $%s score=%.1f < %d → REJECTED", 
                            coin.symbol, score, SCORE_MINIMUM)
         else:
-            # MarketScanner fallback: use heuristic, send to DeepSeek review
-            heuristic = min(abs(coin.change_24h) * 3 + coin.turnover_ratio_pct * 10, 100)
-            LOGGER.info("  SCORE: $%s heuristic=%.1f/100 (fallback scanner)", coin.symbol, heuristic)
-            coin._skills_publish_decision = "review"
-            coin._skills_score = heuristic
-            scored_candidates.append(coin)
+            # MarketScanner candidates have no calibrated score; preserve discovery order.
+            LOGGER.info("  ROUTE: $%s discovery-order → DEEPSEEK REVIEW", coin.symbol)
+            scored_candidates.append(_route_market_scanner_candidate_for_review(coin))
     
     if not scored_candidates:
         LOGGER.info("SCORING GATE: all candidates rejected — no post this cycle")
@@ -5146,8 +5155,9 @@ def _run_once_impl(config, scanner, announcement_engine, research, generator, pu
     
     candidates = scored_candidates
     
-    # Sort by score descending
-    candidates.sort(key=lambda c: getattr(c, '_skills_score', 0), reverse=True)
+    # Skills Hub scores are policy-defined; fallback candidates retain provider discovery order.
+    if skills_used:
+        candidates.sort(key=lambda c: getattr(c, '_skills_score', 0), reverse=True)
     
     # Show top candidates after scoring
     for c in candidates[:5]:

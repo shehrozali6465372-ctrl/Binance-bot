@@ -854,9 +854,9 @@ This register is authoritative over earlier duplicate/stale status text in the r
 | AUD-GIT-002 | HIGH (original) | CLOSED for active `_try_git_push()` path — explicit pathspec prevents unrelated staged files entering its commit; does not close legacy image uploader path |
 | AUD-GIT-003 | HIGH | FIXED LOCALLY / HOSTED CI PENDING — startup retry checks exact origin/current-branch upstream, detects clean ahead commits, validates every ahead commit path, rejects unrelated/behind/mismatched states, retries and verifies ls-remote HEAD |
 | AUD-GIT-006 | MEDIUM | OPEN — scheduled-run delivery far below configured cadence; cause not isolated |
-| AUD-GIT-007 | HIGH | OPEN — live default-branch scheduled publisher lacks PR branch's explicit default-off publisher gate |
+| AUD-GIT-007 | HIGH | REMEDIATED IN PR #14 WORKTREE / HOSTED CI PENDING / DEFAULT MAIN NOT ALIGNED — PR code has independent default-off gate; scheduled workflow now explicitly sets PUBLISHER_ENABLED=0 locally |
 | AUD-IMG-001 | HIGH | FIXED LOCALLY / HOSTED CI PENDING — legacy GitHub REST/Git repository-write uploader interfaces are disabled; active authorized Binance media flow unchanged |
-| AUD-SCORE-001 | MEDIUM | OPEN — active MarketScanner coefficients lack documented empirical/source justification |
+| AUD-SCORE-001 | MEDIUM | REMEDIATED LOCALLY / HOSTED CI PENDING — unsupported fallback coefficients removed; MarketScanner candidates retain discovery order and route to review without a synthetic score |
 | AUD-CODE-001 | MEDIUM | REVIEW / CLEANUP — Skills Hub scoring/provider subsystem appears unreachable from current runtime; not independently established as a direct production exploit |
 | AUD-WF-001 | — | SUPERSEDED by AUD-WF-002; do not count separately as an active blocker |
 
@@ -925,7 +925,7 @@ Reasons production readiness cannot be approved:
 | M4 Announcement intelligence | PARTIAL | `AUD-ANN-001` replay/backfill and read-only DB role evidence missing |
 | M5 Trend intelligence | PARTIAL | one-shot wiring restored; provider coverage, trend provenance and production acceptance remain unverified |
 | M6 Candidate discovery | NOT VERIFIED | Full module and cross-layer behavior not completed |
-| M7 Relevance / scoring | PARTIAL | `AUD-SCORE-001` heuristic coefficients lack documented empirical/source justification |
+| M7 Relevance / scoring | PARTIAL | `AUD-SCORE-001` fallback heuristic removed locally; Skills Hub policy/provider path and broader module acceptance remain unverified |
 | M8 Market analysis | PARTIAL | `AUD-MARKET-001` historical baseline coverage incomplete |
 | M9 On-chain intelligence | FAIL / PARTIAL | `AUD-ONCHAIN-005` fixed locally with all four PostgreSQL-backed workers + aggregator tested; `AUD-ONCHAIN-001`, `002`, `004` and runtime activation remain open; `AUD-ONCHAIN-003` closed as documented summary-only ClaimRegistry design |
 | M10 Event graph | PARTIALLY REMEDIATED | `AUD-GRAPH-001` fixed locally; hosted CI and broader graph review pending |
@@ -2267,3 +2267,708 @@ Do not wire a raw response digest into `OnChainObservation` as if that alone sol
 - Local run: both PostgreSQL integration cases skipped because `TEST_POSTGRES_DSN` is absent; no Docker daemon was available. The test is not claimed as executed against PostgreSQL or hosted CI. Python mocked importer and fixed cross-language vector tests remain green.
 - Latest full isolated Python suite: **1078 tests, 0 failures/errors, 69 skipped**. The two new importer PostgreSQL tests account for two of the skips in this local environment. CMS worker Node suite remains **62 passed, 0 failures, 1 skipped**.
 - No DB connection/migration, workflow dispatch, commit, push or deployment. AUD-EVID-001 remains PARTIALLY REMEDIATED / OPEN; overall project remains NOT PRODUCTION-READY / NO-GO.
+
+
+## 85. Publication safety re-audit — AUD-MAIN-001, AUD-PUB-001, AUD-PUB-002 (25 November 2026)
+
+### Scope and method
+- Re-read the active implementation in `main.py`, the existing master-audit findings, and the focused regression suites in the current Layer 1 continuation worktree.
+- No production provider, database, migration, deployment, or publishing action was performed. All publisher transport tests use controlled local test fixtures/mocks.
+- This addendum supersedes older OPEN dispositions for the specific code paths below; it does not certify the whole Module 21 publication lifecycle.
+
+### AUD-MAIN-001 — publication-history integrity fail-open
+- Current `_verify_persistence_integrity()` now treats Git command non-zero exits, timeouts, malformed UTF-8/JSONL, invalid records, missing committed records, and invalid repository/ref state as blocked outcomes.
+- It verifies repository root and history path containment, checks command return codes, validates each JSONL object and its symbol/timestamp fields, and only initializes an empty ledger after positively verifying a valid unborn branch/no committed history.
+- Empty/missing local history can be restored only from a successfully retrieved and validated committed Git baseline.
+- Focused verification: `tests.test_persistence_integrity` — **11 tests, 0 failures/errors**. Covered broken branch state, corrupt JSONL, valid restoration, valid first-run initialization, Git non-zero exit, Git timeout, restore failure, missing committed records, and valid local extension of committed baseline.
+- CI evidence: branch workflow run `45505900356` completed SUCCESS for code commit `054737dbf0d51c03b5289147605af58b038e3ef8`; its mocked safety job runs full Python unittest discovery. The later `7acbb8f` commit adds documentation only.
+- Disposition: **FIXED IN CURRENT BRANCH / HOSTED CI PASS** for the identified fail-open defect. This does not certify correctness of every JSONL consumer or all Git synchronization/recovery paths; related Git findings remain separate.
+
+### AUD-PUB-001 — SQLite final authorization TOCTOU
+- Current SQLite submission path acquires `BEGIN IMMEDIATE` before the final persisted event-binding and duplicate-policy checks and holds the SQLite write reservation across the bounded HTTP request dispatch and response-header acquisition.
+- The lock is released before response-body reading and local persistence. The socket timeout is capped at 15 seconds. This intentionally narrows the serialized interval to the check-to-submit boundary rather than holding the lock during body processing.
+- Regression coverage includes concurrent quota reservation, event withdrawal, `NO_EVENT` insertion, and recent-post insertion through the transport boundary, plus lock release before response-body read and bounded timeout behavior.
+- Focused verification: `tests.test_publisher_safety` — **56 tests, 0 failures/errors**. The concurrency tests use separate SQLite connections and controlled transport fixtures; no live Binance request was made.
+- Disposition: **FIXED IN CURRENT BRANCH / HOSTED CI PASS** for the identified SQLite final-check-to-dispatch race under the implemented bounded transport guard. Residual operational risk remains: SQLite writers can be blocked for the bounded request-header interval, and production workload contention/lock-timeout behavior has not been measured. PostgreSQL uses its separate advisory-lock guard.
+
+### AUD-PUB-002 — SQLite attempt/quota finalization consistency
+- Current `_finish_attempt()` updates the attempt and quota reservation in one SQLite transaction. In the authorized path it requires exactly one reservation bound to the attempt, matching authorization ID, attempt ID and symbol, and validates the permitted source quota state before transition.
+- Missing, released, mismatched, or illegal reservation state raises and rolls back the attempt update; it can no longer silently commit a terminal attempt without a valid quota transition.
+- Regression coverage includes missing reservation rollback, released reservation rollback, authorization identity mismatch, illegal source state, successful atomic finalization, and quota-binding failure before any request dispatch.
+- Focused verification: `tests.test_publisher_safety` — **56 tests, 0 failures/errors**.
+- Disposition: **FIXED IN CURRENT BRANCH / HOSTED CI PASS** for the reproduced missing/released quota inconsistency. The legacy no-quota-table private ledger-only path remains isolated as documented in code; it is not the normal authorized submission path.
+
+### Verification summary and limits
+- `tests.test_persistence_integrity`: **11/11 PASS**.
+- `tests.test_publisher_safety`: **56/56 PASS**.
+- Both test modules ran with the isolated interpreter `/tmp/binance-module11-test-venv/bin/python`.
+- Hosted Layer 1 CI run `45505900356` is SUCCESS on code commit `054737d`; latest branch tip `7acbb8f` is documentation-only after that tested code commit.
+- No live publisher, live Binance provider, real Square post, production DB/Neon, production migration, secret access, deployment, workflow dispatch, stage, commit, push, or merge occurred during this re-audit.
+- Overall remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**. Module 21 remains **PARTIAL**, because end-to-end operational recovery, deployed runtime, provider acceptance, and remaining independent publication/security findings are not certified.
+
+
+## 86. Git history write/recovery safety re-verification — AUD-GIT-001 and AUD-GIT-003 (25 November 2026)
+
+### Current implementation and tests
+- Re-read `_try_git_push()`, `_retry_pending_push()`, and `.github/workflows/run_bot.yml`.
+- In GitHub Actions, `_try_git_push()` requires a branch-valued `GITHUB_REF`, exact equality with the checked-out local branch, a non-empty explicit `GIT_HISTORY_ALLOWED_REFS` allowlist, valid branch-ref entries, and exact allowlist membership before staging/commit/push. Main, detached HEAD, mismatched refs and absent allowlists fail closed.
+- `run_bot.yml` supplies `vars.GIT_HISTORY_ALLOWED_REFS`; an unset variable disables workflow history writes. No repository variable was changed in this pass.
+- `_retry_pending_push()` requires an exact non-main upstream, rejects missing/mismatched upstreams and remote-ahead state, detects clean local commits ahead of origin, permits only commits touching publication-history paths, and verifies the advertised remote SHA after push. Authentication is passed through process-scoped Git config, not persisted in the remote URL or repository config.
+- Focused verification: `tests.test_git_push_security` — **16/16 PASS**. The clean-ahead recovery test uses an isolated local bare remote; negative cases cover unrelated commits, missing upstream, mismatched upstream, detached HEAD, main, missing allowlist and checkout/workflow-ref mismatch.
+- Hosted Layer 1 workflow run `45505900356` completed SUCCESS for code commit `054737d`; its full Python unittest discovery includes the Git security tests. This verifies test execution in hosted CI, not an authenticated write against the live repository or branch-protection policy.
+
+### Disposition
+- `AUD-GIT-001`: **FIXED IN CURRENT BRANCH / HOSTED TEST CI PASS** for the detached/main/ambiguous workflow-ref push fallback. Actual scheduled GitHub Actions history writes remain disabled unless an operator explicitly configures exact approved refs.
+- `AUD-GIT-003`: **FIXED IN CURRENT BRANCH / HOSTED TEST CI PASS** for the reproduced clean-ahead history recovery gap, with local bare-remote simulation. Live GitHub push authentication/branch protection remains unexercised.
+- No workflow dispatch, repository variable change, real GitHub write, stage, commit, push, merge, deployment, DB/provider call or publication occurred during this re-audit.
+- Overall remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+
+## 87. Module 9 owner-policy gate and focused re-audit — 25 November 2026
+
+### Re-audit scope
+- Re-read `ONCHAIN_MAPPING_SOURCE_POLICY_PROPOSAL.md`, `ONCHAIN_PROVIDER_RESPONSE_ATTESTATION_DESIGN.md`, `layer1/onchain.py`, `layer1/onchain_providers.py`, SQLite/PostgreSQL mapping reads, and focused Module 9 tests.
+- No implementation, provider request, database access, migration, secret provisioning, runtime activation, deployment, or publication was performed.
+
+### AUD-ONCHAIN-001 — provider response provenance
+- Reconfirmed the current HMAC acceptance receipt binds the supplied application eligibility/mapping/observation snapshot, but not raw provider response bytes or the multi-call derivation chain.
+- Transport currently returns decoded JSON/results; `ProviderDataPage` carries no request/response attestation. Workers normalize and persist response-shaped records without a verifiable transport receipt. Aggregation does not independently verify a fetch-bound receipt.
+- The provider attestation design remains design-only. It correctly distinguishes trusted ingestion-service TLS attestation from an actual provider digital signature and requires every response used in event derivation to be linked to a typed derivation manifest.
+- Disposition: **HIGH / PARTIALLY REMEDIATED / OPEN**. Do not add a raw response hash alone and label it authentic; no provider host/method/TLS/proxy policy or signer custody was approved in this pass.
+
+### AUD-ONCHAIN-002 — mapping source authority and freshness
+- Reconfirmed `_validate_mapping()` checks source-type labels and HTTPS URL syntax, but does not bind source labels to exact host/path/network/asset assertions. `verified_at` is future-checked but not aged/expired. SQLite and PostgreSQL mapping list methods reuse the same validator, so neither read path applies source-specific expiry.
+- The mapping policy proposal still requires owner decisions on authoritative source/host/path matrix, project-domain association, corroboration policy, source-class/network-specific expiry, verifier identity/key custody and fixture classification.
+- Disposition: **HIGH / OPEN**. No arbitrary allowlist, corroborator rule, or TTL was invented. Existing mappings must not be treated as reproducible source-backed proof solely because `mapping_status=VERIFIED`.
+
+### AUD-ONCHAIN-004 — bounded provider responses
+- Reconfirmed the transport enforces an explicit positive byte cap, checks declared Content-Length before reading, streams with a one-byte overflow probe, and rejects malformed lengths/oversized bodies. Default Alchemy and Chainstack adapter construction requires an explicit cap; `from_env()` requires `ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES`.
+- Presence-only runtime environment check: `ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES`, `ALCHEMY_API_KEY`, `CHAINSTACK_XRPL_ENDPOINT`, `ONCHAIN_RECEIPT_HMAC_KEYRING_JSON`, `ONCHAIN_RECEIPT_ACTIVE_KEY_ID`, and `ONCHAIN_RECEIPT_TRUSTED_KEY_IDS` are all **NOT_CONFIGURED** in the inspected RDC process environment. No values were read or printed.
+- Disposition: **PARTIALLY REMEDIATED / OPEN**. Code path is bounded if configured, but no approved response-cap value or representative maximum legitimate payload measurements exist. No provider request was made.
+
+### Focused verification
+- Ran with `/tmp/binance-module11-test-venv/bin/python`:
+  `python -m unittest tests.test_onchain_providers tests.test_onchain_receipt_config tests.test_onchain_acceptance_receipts tests.test_onchain_intelligence tests.test_onchain_aggregation tests.test_onchain_store_protocols -v`
+- Result: **122 tests, 0 failures, 0 errors, 0 skips**.
+- These are unit/adapter/aggregation/store-contract tests with controlled fixtures. They do not prove live provider response behavior, provider account entitlement, TLS/proxy operation in production, receipt key custody, or PostgreSQL worker acceptance.
+- Existing design documents and test suites were not changed. No source behavior was changed.
+
+### Activation and disposition
+- Runtime activation of Module 9 workers/aggregator in `main.py` remains absent in the inspected call path. Do not wire it into scheduled production publishing until provider provenance, mapping policy, response cap, and separately approved disposable PostgreSQL acceptance are complete.
+- Module 9 remains **FAIL / PARTIAL**. AUD-ONCHAIN-001 and AUD-ONCHAIN-002 remain open; AUD-ONCHAIN-004 remains partially remediated/open.
+- Overall project remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+## 88. AUD-ANN-001 — CMS WebSocket reconnect does not provide a durable announcement replay checkpoint (25 November 2026)
+
+### Scope and evidence
+- Read the existing CMS worker implementation in the separate /tmp/binance-cms-worker-receipts worktree, its lifecycle tests, normalizer/store, and installed official @binance/cms package version 1.0.3 documentation and declaration surface. This was read-only; neither worktree was modified by the inspection.
+- announcement-worker/src/worker.js:179-187 connects and subscribes to comAnnouncementEn() with a reconnect delay. Lines 235-245 process only messages delivered to the live stream callback and serialize accepted writes in an in-memory promise queue.
+- announcement-worker/src/store.js:73-91 persists operational timestamps (last_message_at, last_persisted_at) but no provider cursor, sequence, resume token, or replay watermark. Event uniqueness by content_hash is duplicate suppression, not missing-message recovery.
+- announcement-worker/src/normalize.js:109-112 derives sourceId from catalogId + publishDate + title; the code explicitly says this is an exact-payload fingerprint, not a stable article ID across edited revisions. sourceUrl is the generic announcement landing page, not an article permalink (lines 110-118).
+- Installed SDK README node_modules/@binance/cms/README.md:50-73 describes the stream as real-time push notifications. Lines 85-99 document reconnect delay; lines 147-149 say active subscriptions are re-subscribed after reconnection/renewal. The inspected README and SDK declaration/API surface expose no replay cursor, historical offset, or missed-message recovery contract. This is a statement about the inspected SDK surface, not proof that no separate Binance announcements API exists.
+- Worker test announcement-worker/test/worker-lifecycle.test.js:447-460 verifies transport error -> DEGRADED and subsequent open -> LISTENING. It does not simulate a disconnect with announcements published during the gap and prove that those announcements are replayed or backfilled.
+
+### Confirmed gap and operational impact
+- Automatic reconnection restores the live subscription, but does not by itself establish delivery of announcements published while disconnected. The worker has no durable provider checkpoint or reconciliation/backfill step after reconnect.
+- last_message_at is an observability timestamp, not a replay cursor. content_hash deduplicates messages received more than once; it cannot discover messages never delivered to this process.
+- Because the feed lacks a documented stable article ID in the inspected payload contract, current local source_id also cannot safely correlate edited revisions as one canonical article.
+- Impact: a transient WebSocket/network outage or process downtime can leave an undetected hole in announcement intelligence. Downstream research may then miss listing, delisting, maintenance, security, or other announcements. A healthy LISTENING state after reconnect is not evidence that the gap was repaired.
+
+### Disposition
+- AUD-ANN-001 remains HIGH / PARTIALLY REMEDIATED / OPEN. Existing worker reconnect/heartbeat/degraded-state handling is useful transport resilience, but it is not historical replay or completeness assurance.
+- Do not invent a Binance replay cursor, sequence number, or endpoint. Before implementation, verify whether a separate official announcements REST/history API is available and permitted for this account, its pagination/retention/rate-limit semantics, and how its records map to the CMS push payload. If no supported history source exists, document the irreducible completeness limitation and define an owner-approved gap-alert/manual reconciliation procedure.
+- Closure requires an outage-window acceptance test: persist a known pre-outage watermark, simulate messages published during disconnection, run the approved reconciliation path, prove every missed item is ingested exactly once, and verify source identity/revision handling. Also test retention-window expiry and unrecoverable gaps fail visibly rather than returning a false completeness/healthy status.
+- No code, test, schema, migration, provider request, secret, DB, deployment, workflow, publication, stage, commit or push was changed/performed during this re-audit. Overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+## 89. AUD-ANN-001 — Official-source historical backfill feasibility check (25 November 2026)
+
+### Official documentation findings
+- Opened Binance Developer Documentation: `https://developers.binance.com/en/docs/products/announcements/announcement` (page last modified 8 August 2026). It documents one announcement topic, `com_announcement_en`, and says subscribers receive push notifications when Binance publishes English announcements. The documented response fields are catalogId, catalogName, publishDate, title, body, and disclaimer. The page does not document a REST history/list endpoint, cursor, offset, pagination, retention window, or replay/resume semantics.
+- Binance Support Center has a public category/archive page at `https://www.binance.com/en/support/announcement`, with topic links and latest article links. That confirms a human-facing archive exists; the page alone does not establish a supported machine API or a stable pagination contract.
+- Binance Spot API official repository README states that streams, endpoints, parameters and payloads described in its docs are official/supported, while other undocumented streams/endpoints/parameters/payloads are unsupported and used at the user's own risk. This is Spot API documentation scope, so it is a cautionary policy signal, not a direct legal ruling on the separate CMS support website.
+- A community-maintained RSSHub route currently illustrates use of `https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query` with pageNo/pageSize/catalogId, and the legacy project adapter once referenced a similar `/bapi/composite/...` path. This is third-party reverse-engineered evidence, not official endpoint documentation; it cannot be promoted into a production dependency or source-authority claim.
+
+### Existing code disposition verified
+- `main.py` class `BinanceAnnouncementEngine` still defines the legacy BAPI URL but `fetch_announcements()` deliberately logs `legacy undocumented Binance BAPI is disabled` and returns an empty list. The fail-closed behavior is correct and must not be bypassed merely to obtain backfill.
+- CMS worker README already explicitly says the documented interface used by this worker is WebSocket push, scheduled invocations can have gaps, and no historical replay guarantee exists. This aligns with the official docs.
+
+### Feasibility conclusion
+- **No official, documented historical announcement API/backfill contract was found in the official CMS announcement documentation reviewed.** A public Support Center archive exists, but its programmatic access/pagination contract and permission for automated reconciliation are not documented by the sources reviewed.
+- Therefore no implementation against the observed BAPI route is approved or justified by current evidence. Do not enable the legacy adapter, scrape internal endpoints, or treat RSSHub as an authoritative provider.
+- Recommended safe disposition: retain the live official CMS WebSocket as a low-latency signal, keep the feed-completeness limitation explicit, and pursue one of two owner-approved paths: (1) obtain written/official confirmation and documentation for a historical API/feed including stable article identity, pagination, retention, rate limits and usage permissions; or (2) accept the absence of supported replay and implement visible coverage-gap alerting/manual reconciliation against the human-facing Support Center archive, with no claim of complete automated coverage.
+- A follow-up acceptance design must test disconnect windows, missed-item detection, duplicate idempotency, revision correlation, archive unavailability, and expiry beyond the archive's available window. No production source should be implemented until its authority and usage contract are established.
+
+### Changes and verification
+- This is a research/audit addendum only. No source code, tests, schema, migrations, dependencies, environment variables, secrets, provider credentials, DB, runtime wiring, deployment, workflow, or publication was changed.
+- Existing `main.py` fail-closed adapter behavior was read-only verified. CMS worker worktree remained clean at HEAD `9f91646a398d95765072b300c462987f4350fc5e`.
+- Overall status remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+## 90. AUD-GIT-007 — revalidation of default-branch scheduled publisher safety (25 November 2026)
+
+### Current remote state inspected (read-only)
+- `git ls-remote origin HEAD refs/heads/main` returned the same current default-branch SHA: `a0c34ef68c276b8ff48eb719d475ee9613f1f2bd`. The local `origin/main` tracking ref was stale (`bab7b7b6...`) and was not used as evidence.
+- Read the live `main` files through the connected GitHub repository integration at that exact default branch. Workflow blob SHA: `cf5f6224b08f2248495f740602a3bb31186be4ae`; `main.py` blob SHA: `fcde74b8a42c2844435470d830d8125c674418e3`.
+- Current `.github/workflows/run_bot.yml` still has `schedule: "*/5 * * * *"`, `workflow_dispatch`, and the `run-agent` job for non-PR events. However, the job explicitly sets `DRY_RUN: "1"` in the environment for the `python main.py` invocation. The same environment applies to scheduled and manually dispatched non-PR runs.
+- Current `main.py` parses `DRY_RUN` with a safe default of `"1"`; `Config.from_env()` treats only `0`, `false`, or `no` as live mode. `PostPublisher.publish()` returns through the local `[DRY-RUN]` save path before `_try_square_api()` whenever `config.dry_run` is true. The normal run path calls `publisher.publish()`, so the workflow's explicit value currently fences this call from Square publication.
+- Current default-branch code does **not** expose an independent `PUBLISHER_ENABLED` authorization gate. Thus the default-branch workflow is presently default-off through its explicit `DRY_RUN=1`, but a future workflow/environment change to `DRY_RUN=0` would still enable the Square API path if the key is available. The stronger PR-branch gate is not yet universal.
+
+### Updated disposition
+- The prior Section 27 / register statement that current live `main` sets `DRY_RUN=0` and had already published successfully is historical evidence from an earlier default-branch commit; it is not an accurate description of the current `a0c34ef...` tip.
+- `AUD-GIT-007` is therefore **PARTIALLY REMEDIATED / OPEN (revalidation supersedes prior current-state claim)**: scheduled workflow is currently dry-run fenced, but there is no independent fail-closed publisher authorization gate in default-branch `main.py`, and the current workflow still injects `SQUARE_API_KEY` into the job environment.
+- Closure requires an owner-approved activation contract and an independent publisher gate that remains false unless explicitly enabled through a separately controlled setting; tests must prove `DRY_RUN=0` alone cannot publish. Do not alter the live default branch, workflow, secrets or schedule as part of this audit.
+
+### Boundaries
+- This pass only read remote refs, the current default-branch workflow and current `main.py`, and official GitHub Actions schedule documentation. No `fetch` changed local refs; no workflow dispatch, provider request, publishing, secret access, workflow mutation, deployment, database operation, stage, commit, push or merge occurred.
+- The local `origin/main` tracking ref remains stale and was not refreshed. The current remote SHA was obtained directly from `git ls-remote`.
+- Overall project remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+## 91. AUD-GIT-007 — PR-branch publisher kill-switch workflow hardening (25 November 2026)
+
+### Reconciliation against PR #14 and local continuation branch
+- Re-read PR #14 metadata and full PR description through the GitHub integration. PR #14 head is `layer-1/module9-onchain-continuation` at `7acbb8f5014b52288e110dee368173ae7edd7429`; it remains OPEN / DRAFT / UNMERGED. Its declared scope explicitly includes an independent default-off `PUBLISHER_ENABLED` gate, requiring both `DRY_RUN=false` and explicit enablement for live publication.
+- Inspected the current local continuation branch `main.py`: `Config.publisher_enabled` defaults to `False`; `Config.from_env()` parses `PUBLISHER_ENABLED` with default false; `Config.validate()` rejects live mode unless enabled; `PostPublisher.publish()` returns `PUBLISHER_DISABLED` before authorization/network if false; the image upload call site is also guarded by both `not dry_run` and `publisher_enabled`. Existing tests cover default-off config, live config validation and no-network publisher disablement.
+- This confirms the independent code gate exists on the PR #14/local continuation branch. The earlier Section 90 statement that current default-branch `main.py` lacks it remains accurate for the separately inspected default-branch blob, but must not be generalized to PR #14.
+
+### Workflow defense-in-depth change (local PR branch only)
+- Added explicit `PUBLISHER_ENABLED: "0"` beside `DRY_RUN: "1"` in `.github/workflows/run_bot.yml` for the scheduled/manual `run-agent` process. This makes the workflow-level default-off intent explicit rather than relying only on the application's default value.
+- Added a static regression assertion in `tests/test_scheduled_persistence_safety.py` requiring both `DRY_RUN: "1"` and `PUBLISHER_ENABLED: "0"` in the scheduled workflow.
+- TDD: RED confirmed the new workflow assertion failed because the explicit publisher environment variable was absent. GREEN: after adding the workflow setting, the regression passed.
+- Focused tests passed: scheduled workflow contract **1/1**; publisher kill-switch/config/no-network tests **3/3**. Full isolated repository suite after this workflow/test change: **1078 tests, 0 failures/errors, 69 skipped** (68.248 seconds).
+
+### Current disposition and remaining boundary
+- `AUD-GIT-007` is **REMEDIATED IN PR #14 WORKTREE / HOSTED CI PENDING / DEFAULT MAIN NOT YET ALIGNED**. This is not a production closure: default branch still has the older code without the independent publisher gate; PR #14 remains draft/unmerged; the local workflow/test changes are uncommitted and unpublished.
+- The current remote `main` workflow's explicit `DRY_RUN: "1"` continues to fence the current default-branch publisher call, but it does not provide the second independent application gate. Do not change default branch or activate publishing as part of this continuation.
+- No real Binance API request, media upload, publication, workflow dispatch, secret read, DB/Neon operation, migration, deployment, stage, commit, push or merge occurred. Project remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+
+### Section 92 — AUD-SCORE-001 fallback ranking remediation (25 November 2026)
+
+- Re-inspected the active candidate path and its downstream routing. `skills_used` is false for the current MarketScanner fallback; fallback candidates are marked `review`, enter the DeepSeek review path, and do not meet the `direct` candidate predicate. Module 14 remains independently fail-closed with `factors=None` and `policy=None`.
+- Removed the undocumented `abs(change_24h) * 3 + turnover_ratio_pct * 10` score assignment. Added `_route_market_scanner_candidate_for_review()` to mark fallback candidates review-only and clear any stale `_skills_score` metadata. The caller now logs discovery-order routing and does not sort MarketScanner candidates by a synthetic score; Python input/discovery order is preserved. The Skills Hub scoring/sort branch remains separate and unchanged.
+- Added `test_market_scanner_candidates_are_review_only_without_fabricated_scores` in `tests/test_end_to_end_pipeline.py`. TDD evidence: the new test first failed because the helper did not exist; after implementation it passed. The regression also seeds a stale score and verifies it is removed, preserves input order, and verifies all candidates remain review-only.
+- Focused verification: `tests.test_end_to_end_pipeline` + `tests.test_scheduled_persistence_safety`: **23 tests, 0 failures/errors**. Full isolated suite: **1079 tests, 0 failures/errors, 69 skipped** (71.535 seconds). `compileall -q main.py image_engine.py layer1 tests`: PASS; `git diff --check`: PASS; source scan confirms the retired fallback formula is absent.
+- Scope: this removes an unsupported ranking influence; it does not validate the Skills Hub score policy, candidate discovery completeness, DeepSeek review quality, Module 14 scoring/provenance, or publication authorization. No publish eligibility is granted by this change.
+- Status: **AUD-SCORE-001 REMEDIATED LOCALLY / HOSTED CI PENDING**. M7 remains PARTIAL.
+- No provider calls, live market requests, Binance publication, production DB/Neon, migration, deployment, workflow dispatch, secret reads, staging, commit, push or merge.
+
+
+## 93. AUD-M14-001 — scoring activation gate revalidation (25 November 2026)
+
+### Proposal and policy state
+- Re-read `MODULE14_OPPORTUNITY_SCORING_POLICY_PROPOSAL.md` from the worktree. Its status is explicitly **PROPOSAL ONLY — NOT APPROVED FOR RUNTIME**; activation is prohibited until evidence instrumentation, historical calibration, owner sign-off and separate runtime acceptance are complete. It defines no numeric weights, cut-offs, per-factor floors or production factor values.
+- The proposal's approval checklist remains unchecked for source-backed typed feature providers, sufficient point-in-time historical examples, independent adjudicated labels, chronological out-of-time evaluation, subgroup/sensitivity/false-PROCEED analysis, shadow-only acceptance and explicit owner/runtime activation approval. No evidence in the inspected repository establishes that these gates have since been completed.
+- Module 7 `SCORING_POLICY.md` is explicitly not Module 14 policy; borrowing its weights remains prohibited. Public Binance Square policy research supports hard compliance gates and qualitative rubric boundaries, not numeric scoring coefficients.
+
+### Runtime integration revalidation
+- `main.py` current `OpportunityEvaluationEngine().evaluate()` call at approximately lines 5001–5015 passes `factors=None` and `policy=None`. This preserves the intended fail-closed `DEFER` path; it does not create a production score or `PROCEED`.
+- The same call currently hard-codes `unsupported_causal_framing=False` and `materially_new=False`; `duplicate_angle` is inferred from a short publication cooldown (`posted_hours_ago < repetition_soft_hours`), not from semantic editorial-angle comparison. The proposal itself says the cooldown is not a novelty proof and notes that event-level material-change comparison is not yet wired into this Module 14 call.
+- These booleans are not a present authorization bypass because policy and factor inputs remain absent and the evaluator defers. They are, however, incomplete/unsafe inputs for any future activation. Before a policy is enabled, the caller must provide verified gate assessments and novelty evidence from the exact research/event/publication lineage; unknown gate states must not be represented as `False`.
+- Do not wire the existing event comparator into `materially_new` without separate tests for asset/event scope, exact event identity, lifecycle state, and editorial-angle distinction. Event-level lexical material change is not equivalent to semantic editorial novelty.
+
+### Verification and disposition
+- Re-read evaluator hard-gate ordering and the raw-factor fail-closed regression tests. Focused `tests.test_opportunity` + `tests.test_opportunity_registry_resolution`: **71 tests, 0 failures/errors, 2 skipped**. Existing regression `test_raw_numeric_factor_mapping_cannot_produce_proceed` confirms a complete all-90 raw mapping still returns `DEFER`, no score, and `REGISTRY_BOUND_FACTOR_PROVENANCE_REQUIRED`; `test_unconfigured_policy_defers_instead_of_guessing_weights` confirms `policy=None` returns `DEFER`.
+- No factor provider, policy value, threshold, floor, label, calibration corpus or owner approval was invented. No scoring activation or runtime change made in this review.
+- **AUD-M14-001 remains HIGH / OPEN / FAIL-CLOSED DEFER.** Additional pre-activation caller gaps are recorded above. M14 remains FAIL / DEFER; overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+- No live provider, production DB/Neon, migration, secret read, workflow dispatch, deployment, publisher call, Binance post, staging, commit, push or merge.
+
+## 94. AUD-M21-001 — current PostgreSQL recovery test revalidation (25 November 2026)
+
+### Scope and preserved state
+- Continued from the existing Layer 1 worktree `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `7acbb8f5014b52288e110dee368173ae7edd7429`.
+- Re-read the current project context, the Module 21 audit section, the PostgreSQL publication store, `tests/test_publication_postgres.py`, `tests/test_scheduled_postgres_acceptance.py`, `tests/test_reconcile_publications.py`, and `tests/test_publication_runtime.py`.
+- Existing six-file dirty worktree was preserved. No source code, migration, test, workflow, runtime configuration, credential or database was changed in this pass.
+
+### Current local execution
+- Presence-only checks found `TEST_POSTGRES_DSN`, `POSTGRES_DSN` and `ANNOUNCEMENT_DATABASE_URL` all UNSET. No DSN values were read and no database connection was attempted.
+- Ran with `/tmp/binance-module11-test-venv/bin/python`:
+  `python -m unittest tests.test_publication_postgres tests.test_scheduled_postgres_acceptance tests.test_reconcile_publications tests.test_publication_runtime -v`
+- Result: **78 tests run; 48 passed, 0 failures/errors, 30 skipped**. All 30 skips were guarded by the missing `TEST_POSTGRES_DSN`. The passing set includes six pure PostgreSQL state-machine tests, reconciliation CLI/backend contract tests, runtime adapter/configuration tests, and deterministic input/migration contract tests.
+- The two real `run_once` PostgreSQL scheduled acceptance tests were skipped. DB-backed tests for process-kill rollback, fresh-process lease recovery, explicit operator recovery, competing lease acquisition, quota concurrency, interrupted `SUBMITTING` attempt reconciliation and unknown-outcome reconciliation were also skipped.
+
+### Revalidated implementation contract
+- PostgreSQL backend selection requires an explicit DSN and does not silently fall back to SQLite.
+- Runtime migration verification checks expected migration checksums without applying migrations.
+- Singleton run lease acquisition is advisory-lock serialized. Recovery requires explicit process-termination confirmation, expected run ID, operator identity and evidence; it does not reclaim a lease solely because it is old.
+- Lease completion updates the run and removes only the matching lease transactionally.
+- PostgreSQL attempt/quota state transitions and unknown-outcome reconciliation are implemented as transactional store operations; pure state-machine tests validate allowed transitions, but not database lock behavior or crash durability.
+
+### Disposition and exact remaining acceptance
+- **AUD-M21-001 remains HIGH / PARTIAL / OPEN.** This pass found no reproducible local defect and does not upgrade Module 21 status.
+- A prior DB-backed acceptance result, if referenced elsewhere in this report, must remain scoped to its exact named disposable test batch and must not be conflated with this DSN-absent local run or a production recovery drill.
+- Still required: run the guarded migration and scheduled `run_once` acceptance against an explicitly approved disposable PostgreSQL target; execute fresh-process crash recovery, process-kill rollback, concurrent lease/authorization and unknown-publication-outcome reconciliation against that database; then separately approve and execute operator recovery/restore drills with recorded operator identity and evidence. Production DB/Neon remains out of scope.
+- No endpoint was started, no migration applied, no provider or publisher called, no workflow dispatched, no deployment/publication performed, and no stage/commit/push/merge occurred.
+- Overall remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+## 95. AUD-ONCHAIN-001 — acceptance-receipt trust-boundary revalidation (25 November 2026)
+
+### Scope
+- Continued in `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `7acbb8f5014b52288e110dee368173ae7edd7429`.
+- Re-read `layer1/onchain.py`, `layer1/onchain_providers.py`, `layer1/onchain_postgres.py`, `layer1/onchain_aggregation.py`, and the current acceptance-receipt tests. The guessed legacy test path `tests/test_onchain.py` does not exist; current focused receipt suite is `tests/test_onchain_acceptance_receipts.py`.
+
+### Current controls confirmed
+- An unsigned caller-constructed `OnChainValidationResult(status='ACCEPTED', ...)` does not pass the persisted receipt verifier; receipt signing disabled returns `UNAVAILABLE` and persistence rejects it.
+- Signed receipts bind a canonical observation fingerprint, result identity/status/reason fields, key ID, and an evidence fingerprint that is included in the HMAC payload. Reads require a configured trusted key ID and verify the HMAC; tampered observation payloads are downgraded/rejected. Trusted retired keys can be retained during key rotation.
+- The current receipt tests explicitly cover unapproved key IDs, missing signing configuration, SQLite observation tampering, evidence restoration/reverification, and trusted previous-key rotation.
+- Focused execution: `/tmp/binance-module11-test-venv/bin/python -m unittest tests.test_onchain_acceptance_receipts -v` — **6 tests, 6 passed, 0 failures/errors**.
+
+### Remaining trust-boundary limitation
+- The receipt is an application HMAC over the observation and the engine's assertion that its supplied eligibility/mapping/observation inputs passed validation. It does not prove the observation was derived from an authentic raw provider response, does not cryptographically authenticate provider TLS/endpoint response bytes, and does not independently prove source authority/freshness for the asset mapping.
+- `evidence_fingerprint` is signed but the persistence read API only receives the observation and validation result; it cannot independently recompute the original eligibility+mapping+observation envelope from the stored record. This is an integrity/attestation limitation, not evidence that the current signature check is bypassable. Do not overstate the HMAC as provider-origin authenticity.
+- No new adversarial defect was reproduced in this pass. A complete fix requires an approved trust architecture: fetch-bound typed provider response attestations/derivation manifest, durable eligibility+mapping snapshot linkage, explicit source-host/TLS/proxy policy, key custody/rotation/revocation, and adversarial SQLite/PostgreSQL tamper and fresh-process acceptance. Do not invent provider authority rules or treat a raw response hash alone as authenticity.
+
+### Disposition
+- `AUD-ONCHAIN-001` remains **HIGH / PARTIALLY REMEDIATED / OPEN**. The HMAC receipt closes the earlier unsigned-status-object weakness for the tested persisted paths; it does not close upstream provider provenance.
+- No provider request, DB/Neon connection, migration, secret read/provisioning, worker activation, deployment, publisher action, workflow dispatch, stage, commit, push or merge occurred. Overall remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+## 96. AUD-ONCHAIN-002 — source-policy proposal and current enforcement boundary (25 November 2026)
+
+### Source review
+- Re-read the complete `ONCHAIN_MAPPING_SOURCE_POLICY_PROPOSAL.md` (98 lines), `ONCHAIN_PROVIDER_RESPONSE_ATTESTATION_DESIGN.md`, `_validate_mapping()` and the Module 9 intelligence tests.
+- The mapping proposal is explicitly **PROPOSAL ONLY — NOT APPROVED, NOT IMPLEMENTED**. It identifies six owner decisions: source-class semantics; exact authoritative host/path/contract evidence matrix; source-specific maximum age/revalidation cadence; independent corroboration requirements; verifier identity/key custody/revocation; and treatment of generic fixtures as synthetic-only.
+- The proposal explicitly warns that `OFFICIAL_NETWORK` documentation of a standard does not prove a particular token contract; an explorer does not by itself prove issuer ownership; Binance Spot eligibility/CoinGecko identity do not alone prove on-chain mapping.
+- Current `_validate_mapping()` still accepts a source-type label plus syntactically valid HTTPS URL and future-checks `verified_at`; it does not fetch or bind a source payload, enforce host/path/network/asset-class authority, or expire old mappings. SQLite and PostgreSQL mapping readers reuse that validator. Aggregation does not add mapping-attestation expiry.
+
+### Verification
+- Re-ran the Module 9 local unit/contract batch with the isolated interpreter:
+  `python -m unittest tests.test_onchain_providers tests.test_onchain_receipt_config tests.test_onchain_acceptance_receipts tests.test_onchain_intelligence tests.test_onchain_aggregation tests.test_onchain_store_protocols -v`
+- Result: **122 tests, 0 failures, 0 errors, 0 skips**. This is controlled fixture/unit/structural protocol evidence only; it does not prove source authenticity, source ownership, approved TTLs, provider account operation, or disposable PostgreSQL mapping-expiry acceptance.
+
+### Decision and disposition
+- No host/path allowlist, source-to-field authority matrix, corroboration policy, TTL, verifier identity, or key custody rule can be responsibly selected from the code/tests alone. Implementing a guessed value would create false source authority and could either reject legitimate mappings or admit unsafe ones.
+- Therefore no behavior change was made. `AUD-ONCHAIN-002` remains **HIGH / OPEN / OWNER POLICY APPROVAL BLOCKED**. Until the owner decisions are supplied, mappings with `mapping_status=VERIFIED` must not be represented as reproducible source-backed proof, and Module 9 must remain inactive.
+- No provider request, database/Neon connection, migration, secret read/provisioning, worker activation, deployment, workflow dispatch, publication, staging, commit, push or merge occurred. Overall remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+## 97. AUD-ONCHAIN-002 — `VERIFIED` mapping fixture and caller reachability inventory (25 November 2026)
+
+- Searched all Python source and test files for `mapping_status="VERIFIED"`, source-class labels, mapping persistence calls, `list_verified_mappings()`, and `_validate_mapping()`.
+- No production `OnChainAssetMapping(... mapping_status="VERIFIED" ...)` construction or mapping-seeding/approval service was found in non-test application code. The concrete `save_verified()` writes found are exercised from tests; the store method itself validates the mapping and observation before persistence.
+- Generic URLs such as `https://bitcoin.org/`, `https://solana.com`, `https://xrpl.org`, and `https://example.org/token` occur in test fixtures only. These are not evidence that those domains are approved source authorities for the corresponding asset/contract assertion.
+- SQLite and PostgreSQL `list_verified_mappings()` both re-run the central `_validate_mapping()` before returning a mapping. The worker-local validators check network/representation/contract shape but do not independently implement source authority; they rely on the injected mapping-store contract. Production stores apply the central syntactic validator, which still lacks source host/path binding and expiry.
+- `main.py` contains no construction/activation of the four Module 9 workers or `OnChainTransferAggregator`; the current scheduled runtime therefore does not currently consume these fixture mappings through the on-chain worker pipeline. This reachability fact reduces current runtime exposure but does not resolve the pre-activation trust blocker.
+- No production mapping ingestion/review workflow exists to retrieve source documents, verify project-domain ownership, bind extracted fields to a source payload, or issue a verifier-bound mapping record. This confirms the source-policy proposal's stated implementation gap.
+- Disposition unchanged: fixtures are test-only by location and usage; no evidence supports elevating their URLs to trusted sources. `AUD-ONCHAIN-002` remains HIGH / OPEN pending exact owner-approved source matrix and freshness policy plus an implemented verifier. No code behavior changed.
+
+## 98. AUD-ONCHAIN-004 — current cap configuration and repository-wide regression verification (26 November 2026)
+
+- Re-read the bounded transport implementation, adapter environment constructors, worker page/range bounds, and previous AUD-ONCHAIN-004 acceptance record.
+- The shared reader enforces the configured positive byte ceiling for both REST and JSON-RPC, rejects oversized declared Content-Length before reading, and uses a bounded stream read/overflow probe. Both default Alchemy and Chainstack environment constructors require ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES; no implicit default is used.
+- Worker record/page/range limits (including Bitcoin/XRPL page sizes, Solana page sizes, and per-run block/slot/ledger windows) constrain requested work but do not prove an upper bound on serialized JSON response size. Provider response shapes can include nested transaction/metadata structures, so record counts cannot be converted into a defensible byte ceiling without representative telemetry.
+- Presence-only environment check in the inspected RDC process: ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES, ALCHEMY_API_KEY, and CHAINSTACK_XRPL_ENDPOINT are all UNSET. No values were read. No provider request was made.
+- Repository-wide isolated test suite after the latest audit/context updates: python -m unittest discover -s tests -p 'test_*.py' — 1,079 tests, 0 failures, 0 errors, 69 skipped (68.737s test runtime; process runtime 73.69s). The 69 skips remain environment/integration-gated and this suite does not establish live provider payload envelopes or provider account behavior.
+- AUD-ONCHAIN-004 remains MEDIUM / PARTIALLY REMEDIATED / OPEN. Do not provision an arbitrary cap: collect authorized representative maximum payload telemetry per actual query shape/provider/network, define a memory budget and safety margin, then approve a cap value and perform controlled provider acceptance. No provider, database/Neon, migration, secret, runtime activation, deployment, publication, workflow dispatch, staging, commit, push or merge occurred.
+
+## 99. AUD-GIT-006 — scheduled execution contract revalidation (26 November 2026)
+
+- Re-read the active local continuation workflow and Python entrypoint. Workflow remains cron every five minutes, job timeout five minutes, concurrency group binance-square-bot, cancel-in-progress false, and does not set queue: max.
+- The workflow explicitly sets POST_INTERVAL=0 and MAX_ITERATIONS=1. main.py entrypoint therefore selects main() single-run mode rather than main_loop(); main() invokes run_once() exactly once and closes its stores. This removes the prior ambiguity that the scheduled job itself intends a 24-iteration/two-hour loop: that loop is not selected by the current workflow environment.
+- The five-minute job timeout still bounds installation plus the one-shot run. If an invocation is still running when later schedule events arrive, the concurrency group can retain only the default pending slot; a newer pending run can replace an older pending run. The local workflow does not configure a durable catch-up queue.
+- Current local code/workflow proves the intended invocation shape, not GitHub actual event delivery. Historical run-gap statistics in the earlier finding were measured on 22 November and are not re-measured here; no fresh hosted Actions API/run-history query was performed in this local pass. Therefore no cause for missed scheduled events is claimed.
+- Disposition: AUD-GIT-006 remains MEDIUM / OPEN. The current five-minute one-shot contract is statically coherent; remaining acceptance requires fresh hosted run-history telemetry, an owner-defined missed-tick/catch-up SLO, and alerting/idempotent bounded catch-up if missed ticks are not acceptable. Do not change concurrency queueing or trigger schedule without that contract.
+- No workflow dispatch, live run, deployment, publication, DB/provider call, staging, commit, push or merge occurred.
+
+## 100. AUD-CODE-001 and AUD-MARKET-001 — quarantined legacy provider and scheduled market-history durability (26 November 2026)
+
+### AUD-CODE-001 — Skills Hub is explicitly quarantined
+- Re-inspected the current candidate path. It contains an explicit comment that the undocumented Skills Hub BAPI remains disabled; runtime sets skills_used=false and skills_candidates=[] and obtains the candidate universe from MarketScanner.
+- The SkillsHubEngine class and weighted score/parser implementation remain in main.py, but repository search found no runtime instantiation or invocation outside the class definition. The only active candidate path marks MarketScanner fallback candidates review-only and does not apply Skills Hub score thresholds.
+- Disposition: treat Skills Hub as INTENTIONALLY QUARANTINED / NOT AN ACTIVE PROVIDER. Keep the disabled guard. Do not activate the undocumented endpoint. Physical deletion/archive is deferred cleanup because the old class and helper branches are interleaved with the large main.py module; removing them now would be a broad refactor without a demonstrated runtime defect. The audit status is updated from ambiguous dead-path review to documented quarantine, not to a claim that the legacy code is production-ready.
+
+### AUD-MARKET-001 — root cause of missing 24h timestamped baseline in scheduled GitHub Actions mode
+- Re-read MarketAnalysisEngine._return(): 1h/24h returns require a prior observation for the exact same canonical asset, provider and currency within the documented window tolerance. Untimestamped sparkline arrays are correctly excluded. Missing history remains PARTIAL with explicit HISTORY_BASELINE_24H_UNAVAILABLE; no zero or synthetic return is generated.
+- The scheduled workflow defaults PERSISTENCE_BACKEND to sqlite unless the repository variable explicitly selects postgresql. In SQLite mode, _persist_layer1_market_intelligence() opens Layer1Store(database_path), whose market observations are stored in local agent.db. The workflow checks out the repository and uploads agent.db only as an artifact after execution; it does not restore/download the prior run's artifact, and agent.db is not tracked in Git. A GitHub-hosted job workspace is therefore not a durable cross-run market-observation store.
+- When PERSISTENCE_BACKEND=postgresql is explicitly selected, the runtime passes the PostgreSQL publication-store connection into PostgresLayer1Store for Layer 1 market history. That is the durable design path, but requires an explicitly configured PostgreSQL DSN, successful migration/runtime verification and isolated acceptance. The inspected workflow comments already state PostgreSQL must be configured before scheduled live-publishing enablement; this audit does not assume the variable/secret exists.
+- Consequence: the default GitHub scheduled workflow can repeatedly start with an empty local SQLite market-history database, so timestamped 1h/24h baselines cannot reliably accumulate across invocations. The partial status is honest and safe, but the default scheduled configuration does not meet a requirement for persistent historical market analysis.
+- Disposition: AUD-MARKET-001 remains MEDIUM / OPEN. Closure requires an approved durable Layer 1 history backend for scheduled execution (or another authenticated, versioned durable store), verified retention/query semantics, and a multi-run acceptance proving observations from run A are available to run B and produce correctly windowed returns. Do not turn artifact upload into an assumed restore mechanism or switch the workflow to a production DSN without separate authorization.
+- No provider/DB connection, migration, workflow dispatch, deploy, publication, staging, commit, push or merge occurred.
+
+## 101. AUD-EVID-001 — CMS producer receipt implementation revalidation across isolated worktrees (26 November 2026)
+
+### Current evidence supersedes the earlier pre-integration statements
+- Re-read the Layer 1 downstream importer and shared Python receipt contract, plus the separate CMS worker worktree at /tmp/binance-cms-worker-receipts/announcement-worker. The CMS producer receipt integration described in the 24-November implementation section is present in the current isolated worktree; earlier Section 65/66 statements that the producer contract is absent are historical and superseded by that implementation record.
+- CMS producer signs the normalized SDK event using the dedicated authority binance_announcement_cms and a separate keyring, then persists the receipt in the same parameterized INSERT as the normalized event. Migration 002 adds nullable ingestion_receipt JSONB; old rows remain unreceipted. The worker has insert-only access to the event/receipt payload and does not read back the receipt column.
+- Layer 1 importer selects ingestion_receipt and reconstructs the exact normalized payload, including canonical UTC timestamps, catalog/source/content identity, body/title/disclaimer/publisher and source URL. It verifies HMAC, authority and trusted key ID before saving AnnouncementEvidence. Missing/tampered/untrusted receipts are counted as untrusted and not persisted.
+- Both components use the same domain-separated HMAC envelope and canonical JSON contract. The Node test suite includes a deterministic cross-language vector; the Python suite independently verifies that Node-produced receipt.
+- Trust semantics remain bounded: the HMAC proves that a holder of the CMS worker key attested to the normalized message received via the official SDK transport. It is not a Binance-origin digital signature and does not establish a stable Binance article ID/permalink; source_id remains a local fingerprint and source_url remains the announcement landing page.
+
+### Verification in current isolated worktrees
+- CMS worker: npm test — **63 tests total, 62 passed, 0 failed, 1 skipped**. The skipped test is PostgreSQL role/TLS integration; no database connection or migration was attempted.
+- Layer 1 receipt/importer/Spot/evidence batch: **123 tests, 0 failures/errors, 0 skipped**. Includes the Node-to-Python receipt vector, importer payload tamper rejection, missing/untrusted receipt handling, separate CMS keyring, Spot fetch-bound receipt and persisted ClaimRegistry evidence tests.
+- The CMS worker worktree remains branch work/cms-worker-receipts, HEAD 9f91646a398d95765072b300c462987f4350fc5e, clean. It was inspected only; no modifications made. Layer 1 remains branch work/module9-continuation-local, HEAD 7acbb8f5014b52288e110dee368173ae7edd7429.
+- The Layer 1 workflow supplies only the CMS verification keyring/trusted IDs. The CMS worker's separate workflow requires the active signer/keyring/trusted IDs. Presence of those production secrets/variables was not checked in GitHub and no key values were read or provisioned.
+
+### Remaining acceptance and disposition
+- AUD-EVID-001 is **PARTIALLY REMEDIATED / OPEN**, not closed. Producer code is in an isolated unmerged CMS worktree/PR #2; Layer 1 importer code is local/uncommitted. Hosted CI, disposable PostgreSQL migration + producer/importer/least-privilege/tamper acceptance, approved production key custody/provisioning, deployed worker verification and real feed-coverage acceptance remain outstanding.
+- The PostgreSQL integration test was skipped; no PostgreSQL endpoint was available in the current RDC environment. Docker CLI exists but no local PostgreSQL server/listener or usable Docker daemon was available. No fallback to production/Neon was attempted.
+- No CMS provider request, database connection/migration, secret read/provisioning, worker deployment, workflow dispatch, publication, staging, commit, push or merge occurred. Module 11 remains PARTIAL; overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+
+## 102. AUD-LIFE-001 — lifecycle transition trust-boundary revalidation (26 November 2026)
+
+- Re-read the SQLite and PostgreSQL lifecycle adapters, AnnouncementEvidence model, and the publication authorization/revalidation consumers.
+- Current behavior remains fail-closed: direct observe() cannot create VERIFIED/CONFIRMED state from caller-supplied status strings; caller-supplied resolved/withdrawn flags or resolution_evidence_id strings are rejected unless an exact verifier-issued proof contract exists. sync_announcements() requires an exact verifier-issued, unchanged ClaimRegistry and binds verified claim/evidence pairs to the exact asset and event evidence.
+- Existing material revision handling distinguishes material status/body/title/event-time changes from cosmetic formatting and non-material revisions. Stale events are not reopened by old evidence. Publication authorization rechecks the exact persisted lifecycle event and rejects withdrawn/changed/missing event bindings.
+- Focused execution: tests.test_event_lifecycle, tests.test_event_lifecycle_postgres, tests.test_module4_announcement_runtime_integration, tests.test_publication_authorization, tests.test_publication_runtime — **74 tests, 68 passed, 6 skipped, 0 failures/errors**. All six skips are TEST_POSTGRES_DSN-gated lifecycle integration tests; previously recorded dedicated disposable PostgreSQL lifecycle suite 10/10 remains historical acceptance evidence, not a fresh run in this pass.
+- Disposition unchanged: AUD-LIFE-001 remains MEDIUM / PARTIALLY REMEDIATED / OPEN. A typed verifier-issued resolution/withdrawal proof still has no approved contract for authority, exact event/asset linkage, supported resolution/withdrawal claim types, evidence freshness and conflict handling. Do not re-enable terminal transitions using arbitrary strings or invent a policy.
+- No code change. No DB/Neon connection, migration, provider call, publication, workflow dispatch, stage, commit, push or merge occurred.
+
+## 103. Module 6 candidate discovery — focused implementation and runtime-integration revalidation (26 November 2026)
+
+- Re-read CandidateDiscoveryFilteringEngine.build(), its market/event/trend freshness validation, asset-scoped matching, candidate identity fingerprint rules, and optional on-chain corroboration path.
+- Confirmed discovery candidates require exact canonical asset identity, ELIGIBLE Binance Spot decision, at least one fresh source-backed market/event/trend signal; invalid, stale or missing signals are rejected with explicit reason codes. Candidate identity is asset + material event, else trend cluster, else market references. Additional sources update evidence without changing an existing material event identity.
+- On-chain aggregation is optional corroboration only: cannot create a discovery candidate, bypass eligibility, or affect scoring. The integration path checks exact asset/symbol/network/mapping/representation/decimals/threshold, timestamp bounds and summary identity.
+- Focused verification: tests.test_layer1_foundation + tests.test_onchain_candidate_integration — **115 tests, 0 failures/errors, 0 skips**. Coverage includes stale/future provider timestamps, canonical identity, exact Binance pair eligibility, material event grouping, trend deduplication/independence, on-chain corroboration non-authority, persistence, runtime integration and failure paths.
+- Reconciliation: prior register marked M6 NOT VERIFIED. Current evidence justifies upgrading that coarse status to **PARTIAL**, not PASS: implementation and focused tests exist, but production provider coverage/availability, durable scheduled history, and cross-module hosted/runtime acceptance remain incomplete. No module-level production certification is inferred from unit tests.
+- No code change. No live provider, DB/Neon, migration, publication, workflow dispatch, stage, commit, push or merge occurred.
+
+## 104. Module 19 Cloudflare image generation and visual QA — local revalidation (26 November 2026)
+
+- Re-read CloudflareWorkersAIImageGenerator, ImageComposer, image artifact sidecar, authorized Binance media upload path and VisualQualityEngine.
+- Local controls verified in code/tests: fixed FLUX.2 klein 4B model identifier; account ID/token required before network; no redirect-following transport; request timeout and prompt/dimension bounds; hard 20 MiB response read limit; base64/JSON/image decode validation; pixel/dimension/format bounds; atomic output write; prompt/final-image hashes and sidecar metadata; exact draft/image binding; dry-run image generation disabled; legacy GitHub repository upload interfaces disabled.
+- Authorized Binance media upload remains separate from image generation and requires exact publication authorization/hash, allowlisted presigned host, no redirects, bounded file bytes, HTTP 200/201 storage acknowledgement and validated final Binance CDN URL. Tests verify polling is not attempted after an unconfirmed storage PUT.
+- Focused verification: tests.test_cloudflare_image_generation + tests.test_visual_quality — **52 tests, 0 failures/errors, 0 skipped**. These use mocked transport and local image fixtures; they do not establish Cloudflare account entitlement, real Workers AI inference, deployed model availability, billing/quota, or authenticated Binance media upload.
+- Presence-only check: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are both UNSET in the inspected RDC process. No secret values read; no provider request made.
+- Reconciliation: M19 remains PARTIAL. The earlier register's "Pillow unavailable" statement is stale for this isolated test interpreter (the focused image suite imports and uses PIL successfully), but live Cloudflare/account smoke acceptance remains absent. No live request should be made without explicit provider/account approval.
+- No code change, provider, DB/Neon, migration, media upload, publication, workflow dispatch, deployment, stage, commit, push or merge occurred.
+
+## 105. Module 15 DeepSeek client and generation gates — local revalidation (26 November 2026)
+
+- Re-read Config validation, DeepSeekGenerator Phase 1/2 gates, and layer1.deepseek_client transport/response validation.
+- Current controls: direct official HTTPS endpoint/model allowlist; bearer-secret redirect rejection; mandatory positive operator response-byte cap whenever DEEPSEEK_API_KEY is configured; Content-Length validation before body read; incremental bounded read for chunked/undeclared lengths; bounded retry/backoff; non-transient auth errors are not retried; unexpected model/tool calls/refusals/truncated generation are rejected; response identity/usage fields are validated; logs avoid secret/response-body disclosure.
+- Generation is gated on resolved ClaimRegistry, research package, editorial brief and opportunity decision; failed or malformed model responses return no ranking/post and do not fall back to another AI provider. Generated numeric claims are checked against verified register values.
+- Focused verification: tests.test_deepseek_client + tests.test_deepseek_generator — 44 tests, 0 failures/errors, 0 skips.
+- Presence-only check: DEEPSEEK_API_KEY and DEEPSEEK_MODEL are UNSET in the inspected RDC process. No secret values read; no live inference attempted. DEEPSEEK_MAX_RESPONSE_BYTES is therefore not provisioned in this process; code requires it when the API key is configured.
+- Disposition: M15 remains PARTIAL. Unit/mock acceptance does not establish current account entitlement, model availability, latency/rate-limit envelope, production response-size calibration or real generated-content quality. AUD-LLM-001 remains FIXED LOCALLY / HOSTED CI PENDING with operator cap provisioning and provider acceptance outstanding.
+- No code change, provider call, DB/Neon, migration, publication, workflow dispatch, deployment, stage, commit, push or merge occurred.
+
+## 106. Module 18 content/editorial/persisted-validation gate revalidation (26 November 2026)
+
+- Re-read ContentVerificationEngine, EditorialBrief validation/store, DraftStore validation ledger, and SQLite/PostgreSQL publication authorization paths.
+- Confirmed AUD-CONTENT-001 controls remain present: content validation requires an intact typed READY EditorialBrief; exact approved_claim_ids allowlist is enforced; prohibited-claim text is rejected; draft persistence resolves the persisted brief and exact research-package binding; publication authorization rechecks the draft's approved claim allowlist and exact persisted brief identity.
+- Confirmed AUD-CONTENT-002 controls remain present: SOURCE_ASSERTION sentence must include exact supporting publisher attribution using supported sentence forms; wrong/missing publisher attribution is rejected. Upstream source authenticity remains a separate AUD-EVID-001 concern.
+- Persisted text validation records reject caller-asserted PASS, fabricated/mutated results and mismatched draft hashes; visual validation is bound to exact draft/image hashes and version. The authorization tests recheck current lifecycle and editorial claim allowlist before permission.
+- Focused suite: tests.test_content_verification, tests.test_content_generation, tests.test_research_package, tests.test_editorial_strategy, tests.test_publication_authorization, tests.test_publication_runtime — **108 tests, 0 failures/errors, 0 skips**.
+- Disposition: AUD-CONTENT-001/002 remain PARTIALLY REMEDIATED / OPEN because PostgreSQL-backed persisted validation/authorization and hosted acceptance are not freshly verified in this pass; deterministic content/SQLite paths are present. Module 18 remains PARTIALLY REMEDIATED, not PASS. No code change.
+- No DB/Neon connection, migration, provider, publication, workflow dispatch, deployment, staging, commit, push or merge occurred.
+
+## 107. Hosted GitHub Actions and isolated PostgreSQL acceptance revalidation (26 November 2026)
+
+### PR #14 — Layer 1 / Modules 9–21
+- Read-only GitHub PR metadata: PR #14 remains OPEN / DRAFT / UNMERGED; head branch layer-1/module9-onchain-continuation; head SHA 7acbb8f5014b52288e110dee368173ae7edd7429.
+- Hosted PR workflow run 45506068788, run number 369, event pull_request, head SHA exactly 7acbb8f5014b52288e110dee368173ae7edd7429, completed SUCCESS.
+- Both jobs passed: mocked-safety-tests and Isolated PostgreSQL integration acceptance.
+- The PostgreSQL job workflow starts a disposable PostgreSQL 16 service and sets TEST_POSTGRES_DSN/TEST_POSTGRES_ALLOWED_HOST. Its command includes test_onchain_postgres, test_layer1_postgres, test_claim_registry_postgres, test_event_lifecycle_postgres, test_legacy_postgres, test_postgres_adapter_atomicity, test_publication_postgres, test_scheduled_postgres_acceptance, and test_module4_announcement_importer_postgres. Job success establishes that the selected command exited successfully against the CI disposable PostgreSQL service; it is stronger evidence than local DSN-gated skips.
+- The preceding run 45505474974 failed only its PostgreSQL integration job; the subsequent run 45506068788 on the same PR head passed both jobs. This is a corrected CI outcome, not a reason to hide the earlier failure.
+- This hosted CI result covers committed PR head 7acbb8f5014b52288e110dee368173ae7edd7429 only. It does **not** cover the current local uncommitted deltas in .github/workflows/run_bot.yml, main.py, tests/test_end_to_end_pipeline.py, or tests/test_scheduled_persistence_safety.py.
+
+### PR #2 — isolated CMS worker
+- Read-only GitHub PR metadata: PR #2 remains OPEN / DRAFT / UNMERGED; head branch feature/binance-cms-announcement-worker; head SHA 9f91646a398d95765072b300c462987f4350fc5e.
+- Hosted workflow run 45504868037 completed SUCCESS. All three jobs passed: mocked-announcement-tests, python-layer1-tests, and postgres-security-integration.
+- The PostgreSQL job provisions a disposable PostgreSQL 16 container with generated TLS certificates, applies the versioned migrations with a dedicated migrator role, applies least-privilege grants, verifies worker/importer permissions and TLS hostname validation, and runs the worker tests including the receipt persistence/role checks. This closes the prior "CMS PostgreSQL integration skipped/no hosted evidence" gap for that exact PR head.
+- This hosted CI result does not prove that production CMS secrets are provisioned, that the workflow is deployed from the default branch, that a live Binance CMS stream is received, or that source coverage/replay is complete.
+
+### Updated acceptance interpretation
+- AUD-ONCHAIN-005: disposable PostgreSQL worker/aggregator acceptance is locally and hosted-CI verified at PR #14 head; retain FIXED LOCALLY / HOSTED CI VERIFIED for that committed head. Module 9 remains FAIL/PARTIAL due to independent AUD-ONCHAIN-001/002/004 trust/policy/response-cap blockers and inactive runtime.
+- AUD-M21-001: disposable PostgreSQL publication/scheduled acceptance is hosted-CI verified at PR #14 head. The separate production operational crash/recovery/restore/operator drills, live deployment/restore evidence, and local uncommitted workflow/runtime deltas remain open. Keep HIGH / PARTIAL / OPEN.
+- AUD-EVID-001: CMS worker PostgreSQL receipt/role/TLS acceptance is hosted-CI verified at PR #2 head; importer PostgreSQL receipt acceptance is included in successful PR #14 PostgreSQL job. HMAC remains worker-boundary attestation, not Binance-origin signature. Both PRs remain unmerged and no production keys/workers were deployed.
+- No GitHub workflow was dispatched or rerun by this audit. No repository write, merge, deployment, secret access, DB/Neon connection, provider call, publication, staging, commit or push occurred.
+
+## 108. Current consolidated module disposition — reconciled 26 November 2026
+
+This section supersedes the stale 22-November status table in Section 27 for the specific items revalidated in Sections 96–107. It does not certify the project or silently close unreviewed findings.
+
+| Module | Current disposition | Verified evidence in this continuation | Remaining blocker |
+|---|---|---|---|
+| M1 Configuration / orchestration | PARTIAL | one-shot workflow contract; run lease and config safety tests | hosted operational telemetry, complete failure/recovery matrix |
+| M2 Market data intelligence | PARTIAL | timestamp/provenance validation; 115 foundation tests | durable cross-run market history and real provider coverage |
+| M3 Binance listing eligibility | PARTIAL | exact Spot pair/identity proof, final revalidation tests | approved runtime key/provider operation and deployed acceptance |
+| M4 Announcement intelligence | PARTIAL | CMS receipt producer/importer code, 123 Python tests, 62/63 Node tests; PR #2 hosted PostgreSQL/TLS job success | PR merge/deployment, production key custody, replay/backfill, live feed completeness |
+| M5 Trend intelligence | PARTIAL | trend source normalization/clustering and foundation suite | provider coverage and durable source history |
+| M6 Candidate discovery | PARTIAL | 115 foundation + on-chain candidate integration tests | full hosted/live provider and durable scheduled acceptance |
+| M7 Relevance / scoring | PARTIAL | unsupported fallback score removed locally; review-only routing | approved Skills Hub scoring policy/provider or explicit permanent retirement |
+| M8 Market analysis | PARTIAL | typed metrics and missing-history fail-closed behavior | durable cross-run history; no inferred surge baseline |
+| M9 On-chain intelligence | FAIL / PARTIAL | 122 local tests; PR #14 hosted PostgreSQL job passed worker/store suites | AUD-ONCHAIN-001 provider attestation; AUD-ONCHAIN-002 source authority/freshness policy; AUD-ONCHAIN-004 approved byte cap; runtime activation remains disabled |
+| M10 Event graph | PARTIALLY REMEDIATED | deterministic graph status tie-break tests in prior evidence | hosted CI on latest local delta and broader graph/provider acceptance |
+| M11 Evidence verification | PARTIAL | 123 receipt/importer/evidence tests; CMS producer/importer hosted PostgreSQL acceptance | HMAC is not provider-origin signature; stable CMS article ID/permalink absent; production key custody/deployment; on-chain provenance |
+| M12 Event lifecycle | PARTIALLY REMEDIATED | 74 focused tests; historical disposable PostgreSQL lifecycle 10/10; PR #14 PostgreSQL job success | typed verifier-issued resolution/withdrawal proof policy |
+| M13 Deep research | PARTIALLY REMEDIATED | research package tests and generic hash/tamper checks; PR #14 PostgreSQL job success | PRIMARY evidence completeness remains RESEARCH_MORE when absent; source authenticity |
+| M14 Opportunity evaluation | FAIL / DEFER | 71 opportunity/registry tests; raw numeric mappings DEFER | approved policy, source-backed typed factors, historical labels/out-of-time validation, shadow acceptance and owner activation |
+| M15 DeepSeek integration | PARTIAL | 44 client/generator tests | no live inference/model entitlement/quality acceptance; API key and response cap not provisioned in inspected process |
+| M16 Editorial strategy | PARTIALLY REMEDIATED | editorial tests and hash/tamper checks; PR #14 PostgreSQL job success | full production/provider/editorial acceptance |
+| M17 Content generation | PARTIAL | draft persistence/sequence and generation tests; PR #14 PostgreSQL job success | live DeepSeek, broad semantic quality and deployment acceptance |
+| M18 Content verification / safety | PARTIALLY REMEDIATED | 108 content/research/editorial/authorization/runtime tests | hosted PG execution of local deltas and semantic entailment limits; upstream source trust |
+| M19 Cloudflare image generation | PARTIAL | 52 image/visual tests; mocked bounded generator | no live Cloudflare account/model/quota acceptance; credentials unset in inspected process |
+| M20 Visual QA | PARTIAL | 52 image/visual tests, blank-image/pixel/font/hash checks | generated-background OCR and live generated-image acceptance |
+| M21 Publication / persistence / recovery | PARTIAL | PR #14 hosted disposable PostgreSQL job success including publication and scheduled acceptance | production operational crash/recovery/restore/operator drills; local uncommitted deltas not CI-tested; live publisher remains disabled |
+
+### Active cross-module blockers
+- HIGH: AUD-ONCHAIN-001 (provider response provenance), AUD-ONCHAIN-002 (mapping source authority/freshness), AUD-M14-001 (approved opportunity policy), AUD-M21-001 (operational recovery), AUD-ANN-001 (no official replay/backfill contract), AUD-EVID-001 (production CMS trust/key/deployment gates).
+- MEDIUM: AUD-ONCHAIN-004 (provider byte cap), AUD-MARKET-001 (scheduled durable market history), AUD-GIT-006 (missed-tick/catch-up SLO), AUD-LIFE-001 (typed resolution/withdrawal proof), AUD-CONTENT-001/002 PostgreSQL/local-delta and semantic limits.
+- Skills Hub is intentionally quarantined, not an active provider. The scheduled Square workflow is dry-run and publisher-disabled. No production database, live provider, authenticated media upload, or real Square publication acceptance is claimed.
+- Overall disposition remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+## 109. AUD-GIT-007 — default-branch publisher gate and protection revalidation (26 November 2026)
+
+### Current remote default-branch facts (read-only GitHub API)
+- Default branch main currently points to 94ebdc81aff1b9b6e6678e8eaac1adbabbfbd1e0 (auto-save post-record commit dated 25-Nov-2026). The branch API reports protected: false; branch protection is disabled.
+- Current default-branch workflow .github/workflows/run_bot.yml explicitly injects DRY_RUN: "1" for the scheduled and manually dispatched run-agent job and does not inject PUBLISHER_ENABLED.
+- Current default-branch main.py has no PUBLISHER_ENABLED/publisher_enabled field, config parser, or publisher gate. Config.from_env() defaults DRY_RUN to "1"; PostPublisher.publish() checks only config.dry_run before the live Square request path. _generate_image_list() also explicitly returns without generation/upload when dry-run is true.
+- Therefore the current scheduled/manual workflow configuration is dry-run fenced for both content publish and image generation/upload. However, this is a single configuration-level fence: if the workflow value is changed to DRY_RUN=0 while the Square key remains injected, the current default-branch application has no independent publisher authorization check. The PR/local branch code gate is not on default main.
+- Latest observed main schedule run in the API page was run 45588421357 (run 1836), event schedule, head commit 20edeeb46471883a4340c647b1d60f706519ca08, conclusion SUCCESS; its run-agent job succeeded and the PR-only safety job was skipped. This run predates the current auto-save main tip and is not evidence of the current SHA executing.
+- PR #14 still remains OPEN / DRAFT / UNMERGED at 7acbb8f5014b52288e110dee368173ae7edd7429. Its main.py has a default-off PUBLISHER_ENABLED gate and the local continuation workflow explicitly sets PUBLISHER_ENABLED=0. That local workflow addition is uncommitted and was not part of hosted run 45506068788. The hosted run therefore does not verify the explicit workflow env assertion.
+- The focused local publisher/workflow verification was rerun: workflow assertion 1/1 passed and tests.test_publisher_safety 57/57 passed. An initial test invocation used a non-existent test method name and failed at test discovery; the corrected exact method then passed. No application behavior change was made.
+
+### Disposition
+- AUD-GIT-007 remains PARTIALLY REMEDIATED / OPEN. Current default main is safely dry-run by explicit workflow config, and its dry-run path skips image generation; nevertheless, default-branch code lacks the independent publisher kill switch and branch protection is disabled. A future workflow/config edit could enable live publishing without a second application-level gate.
+- Required closure: integrate the independent default-off code gate into default branch through the normal reviewed PR path, set explicit PUBLISHER_ENABLED: "0" in the default-branch workflow, require suitable branch protection/review checks, and verify the merged default-branch SHA. Do not edit main, enable publishing, alter secrets, or change schedules in this continuation.
+- No workflow dispatch/rerun, remote write, branch protection change, secret access, provider request, image/media upload, publication, database operation, staging, commit, push or merge occurred.
+
+## 110. AUD-ANN-001 / AUD-EVID-001 — default-branch CMS ingestion activation and replay revalidation (26 November 2026)
+
+### Default branch workflow inventory (read-only GitHub)
+- Enumerated the current default-branch .github/workflows directory at main SHA 94ebdc81aff1b9b6e6678e8eaac1adbabbfbd1e0. It contains binance-cms-manual-smoke.yml, provider-verification.yml and run_bot.yml. There is no scheduled binance-cms-announcement-ingestion.yml on default main.
+- The only CMS workflow on default main is manual workflow_dispatch. It checks out worker source from integration/binance-cms-worker-main, installs its package and runs a four-minute bounded CMS listener; it is a smoke workflow, not a five-minute scheduled ingestion deployment.
+- The referenced integration worker commit 47e85384f2eeba2ac5bb4f2fb2cfa26ec4dc6558 tree contains announcement-worker/src/worker.js but no announcement-worker/src/receipts.js. It is not the receipt-enabled PR #2 source.
+- The separate PR #2 branch feature/binance-cms-announcement-worker contains the scheduled five-minute ingestion workflow, four-minute connection window, bounded SIGTERM drain, receipt signing keyring and active/trusted key IDs. PR #2 remains OPEN / DRAFT / UNMERGED. Its successful hosted CI proves the isolated worker build/tests and disposable DB role/TLS acceptance, not deployment from default main.
+- The default-branch manual smoke workflow does not configure the CMS receipt keyring/active/trusted key IDs used by the newer PR #2 producer. This is consistent with its checked-out integration worker being the pre-receipt branch, but it must not be described as the current receipt-enabled scheduled ingestion service.
+
+### Replay/backfill boundary
+- Re-read the pinned @binance/cms package README, SDK export contract test, worker README and ingestion workflow. The documented package surface exposes WebSocket Streams, heartbeat, reconnect/renewal and subscription management; no supported CMS historical query/replay/backfill API is exposed by the pinned package or the worker's integration.
+- The worker opens a new bounded connection for each scheduled run. The four-minute connection in a five-minute cron cadence is a target gap only; GitHub scheduled events are best-effort and may be delayed/dropped. The SDK reconnects/resubscribes within a run but does not restore messages missed while disconnected or between runs. Database deduplication cannot recover messages that were never received.
+- Current Layer 1 correctly reports OBSERVED_ONLY_NO_HISTORICAL_REPLAY / PARTIAL_COVERAGE_NO_REPLAY and unresolved revision correlation when no stable provider ID is present. Do not relabel this as complete announcement coverage.
+
+### Verification and disposition
+- The full isolated Python suite was rerun after the current local changes: 1,079 tests, 0 failures, 0 errors, 69 skipped (69.401 seconds test runtime; 73.24 seconds process runtime).
+- No behavior change. AUD-ANN-001 remains HIGH / OPEN: default main does not deploy the receipt-enabled scheduled worker; PR #2 remains unmerged; historical replay/backfill is not documented; feed completeness and stable revision identity are unavailable. AUD-EVID-001 remains PARTIALLY REMEDIATED / OPEN: worker-key receipt contract is verified in PR CI, but production deployment/key custody and provider-origin authenticity remain unresolved.
+- No manual workflow dispatch, live CMS connection, database operation/migration, secret access, deployment, provider request, publication, staging, commit, push or merge occurred.
+
+## 111. AUD-GIT-001 / AUD-GIT-002 / AUD-IMG-001 — default-branch Git history and image uploader drift (26 November 2026)
+
+### Current default-main implementation re-read
+- Remote main SHA remains 94ebdc81aff1b9b6e6678e8eaac1adbabbfbd1e0; main.py blob fcde74b8a42c2844435470d830d8125c674418e3; image_engine.py blob 8558f4c76f4b1c7cbea1ff801affef12ef8bb65a.
+- main.py _try_git_push() reads GH_TOKEN/GITHUB_TOKEN and GITHUB_REPOSITORY, stages published_posts.jsonl and posts/, then commits without an explicit pathspec. It sets origin's URL to a token-bearing HTTPS URL in .git/config. It chooses the current named branch, but if branch detection returns unknown or HEAD it explicitly falls back to main. There is no exact GITHUB_REF/checked-out branch equality check, no GIT_HISTORY_ALLOWED_REFS allowlist, and no rejection of main.
+- _retry_pending_push() is invoked in the startup path before the normal market scan and is not gated by DRY_RUN. Thus the current default workflow's DRY_RUN=1 does not disable this Git history write path when a pending JSONL change exists.
+- The default-main workflow grants contents:write and actions:write and injects GH_TOKEN from GITHUB_TOKEN. GitHub reports the main branch unprotected. The combination makes the legacy write path operationally reachable in the scheduled job; this audit did not trigger or attempt it.
+- Current default-main image_engine.py still contains legacy image persistence paths: GitHub Contents API PUT /repos/{owner}/{repo}/contents/images/{filename}, Git push uploader, and raw GitHub URL fallback. The REST uploader sends Authorization: Bearer GH_TOKEN; the Git uploader sets a token-bearing origin URL, stages/commits an image and pushes. The normal image generation path is currently skipped when DRY_RUN=1, but becomes reachable if that single workflow setting is changed to live mode. PR #14's replacement disables these legacy repository-write interfaces and uses the separate authorization-bound Binance media flow.
+- Current PR #14 main.py has materially stronger Git behavior: rejects main/HEAD/unknown, requires exact GITHUB_REF match and exact operator allowlist in Actions, uses process-scoped Git config for auth rather than persisting a token URL, and commits explicit pathspecs only. The local continuation branch adds this behavior; PR #14 is still open/unmerged and does not protect default main today.
+
+### Finding disposition
+- AUD-GIT-001 remains CRITICAL / REMEDIATED IN PR #14 WORKTREE ONLY / DEFAULT MAIN OPEN. The default-main detached-HEAD-to-main fallback is confirmed in the current remote blob.
+- AUD-GIT-002 remains HIGH / REMEDIATED IN PR #14 WORKTREE ONLY / DEFAULT MAIN OPEN. The default-main git commit has no pathspec and can include unrelated pre-staged content.
+- AUD-IMG-001 remains HIGH / REMEDIATED IN PR #14 WORKTREE ONLY / DEFAULT MAIN OPEN. The default-main legacy GitHub REST/Git image repository writers remain present and are not disabled.
+- These are branch-drift findings, not regressions in the local continuation branch. The local branch's current changes remain uncommitted and no hosted CI result covers them. Do not patch remote main directly; closure requires normal PR review/merge, appropriate branch protection, and verification of the resulting default-branch SHA.
+- No workflow dispatch, Git push, GitHub Contents API write, token/secret read, image upload, publication, DB/provider call, staging, commit, push or merge occurred.
+
+### Actual default-main write observed (read-only commit inspection)
+- The latest observed scheduled run 45588421357 started on parent commit 20edeeb46471883a4340c647b1d60f706519ca08 at 2026-11-25 09:45:26 UTC and completed SUCCESS at 09:45:53 UTC.
+- Current main tip 94ebdc81aff1b9b6e6678e8eaac1adbabbfbd1e0 is the corresponding bot-authored "Auto-save: post records [2026-11-25]" commit, timestamped 09:45:48 UTC, inside that scheduled run window.
+- Read-only commit diff shows the only changed file is published_posts.jsonl and the added record is LINK with link="[DRY-RUN]" at 09:45:48 UTC. This proves the default scheduled job actually performed the legacy Git commit/push persistence path while DRY_RUN was enabled; it does not prove a real Binance Square post was published.
+- This reconciles the workflow's apparent dry-run status with a real repository write side effect: DRY_RUN blocks the Square publication/image path but does not disable startup pending-history Git sync or the post-history auto-save push.
+
+## 112. Default-branch runtime activation gap — Layer 1 / 21-module architecture is not deployed (26 November 2026)
+
+### Current main source/workflow inventory
+- Current default main SHA: 94ebdc81aff1b9b6e6678e8eaac1adbabbfbd1e0. main.py blob fcde74b8a42c2844435470d830d8125c674418e3 contains 4,003 lines.
+- Read-only source symbol scan found zero occurrences of Layer1/layer1, DeepSeek/deepseek, OnChainTransferAggregator, ContentVerificationEngine or PUBLISHER_ENABLED. It still contains GeminiGenerator and the legacy MarketScanner/PostPublisher flow.
+- Default-main run_bot.yml installs Pillow only, injects GEMINI_API_KEY and SQUARE_API_KEY, sets DRY_RUN=1, and invokes python main.py. It does not install the Layer 1 announcement importer requirements, configure the CMS read-only DB connection, configure on-chain providers, or select the PR #14 DeepSeek/Cloudflare/Layer 1 runtime.
+- Therefore the 21-module continuation code in PR #14 is not the runtime currently executed by the default scheduled workflow. Existing default-main schedule runs exercise the legacy Gemini agent in dry-run mode; the newer Layer 1 stack remains an unmerged continuation.
+
+### Current PR stack state (read-only GitHub metadata)
+- PR #12: OPEN / UNMERGED, non-draft, branch layer-1/module8-market-analysis at f7e6fc511e146b6bfb6f25afb0009c369d8afd4a; base layer-1/module5-6-candidate-intelligence.
+- PR #13: OPEN / DRAFT / UNMERGED, branch layer-1/module9-onchain-intelligence at 3afed37192b66c57aba2f17ba841a84a60227cda; base PR #12 branch.
+- PR #14: OPEN / DRAFT / UNMERGED, branch layer-1/module9-onchain-continuation at 7acbb8f5014b52288e110dee368173ae7edd7429; base PR #13 branch.
+- PR #2: OPEN / DRAFT / UNMERGED, branch feature/binance-cms-announcement-worker at 9f91646a398d95765072b300c462987f4350fc5e; base layer-1/completion-hardening.
+- PR #14 successful hosted CI validates its branch head, not default main and not the uncommitted local changes. PR #12/#13/#14 form a stacked dependency chain that has not been merged into main. PR #2 is a separate CMS worker branch and is also unmerged.
+
+### Disposition
+- Add deployment blocker AUD-DEPLOY-001 — HIGH / OPEN: the production/default scheduled entrypoint does not run the 21-module architecture. It remains on the legacy Gemini pipeline; new Layer 1 and CMS worker integrations are not deployed.
+- Closure requires an owner-approved merge/deployment sequence for the stacked PRs, resolution of the open Module 9/14/21 trust and operational blockers, reviewed default-branch workflow/dependency/config changes, and post-deploy smoke/acceptance against explicitly approved non-production services. Do not merge, rebase, retarget, dispatch, deploy or switch default main in this audit.
+- No code change, GitHub write, PR update, workflow dispatch, deployment, secret access, DB/provider operation, publication, staging, commit, push or merge occurred.
+
+
+## 113. Prioritized remediation and release-gate plan (26 November 2026)
+
+This is an execution order, not authorization to mutate the default branch, merge PRs, deploy services, access production systems, or publish. Each gate requires evidence on the exact candidate SHA. Passing unit tests alone does not close a production blocker.
+
+### P0 — Contain default-branch write and publish exposure
+1. **AUD-GIT-001 / AUD-GIT-002 / AUD-IMG-001:** default `main` still contains unsafe legacy history sync and image repository writers. The scheduled workflow has `contents:write`/`actions:write` capability and the branch is unprotected. The `[DRY-RUN]` record commit proves `DRY_RUN=1` does not prevent repository writes. Owner-approved containment should remove unnecessary write permissions/token exposure from the legacy scheduled job or otherwise disable those write paths, then migrate to the hardened explicit-pathspec/ref-allowlisted implementation through reviewed PRs. Verify no token-bearing remote URL persistence and no unrelated staged-file inclusion.
+2. **AUD-GIT-007:** default `main` lacks an independent application publisher gate; its current `DRY_RUN=1` is only a configuration fence. Bring the default-off `PUBLISHER_ENABLED` gate and explicit workflow `PUBLISHER_ENABLED=0` to the default branch through review, require branch protection/status checks, and verify the resulting default SHA. Do not enable live publishing as part of closure.
+3. **AUD-DEPLOY-001:** document the deployed entrypoint and runtime inventory. The current default workflow runs legacy Gemini `main.py`, not the 21-module stack. Treat the new architecture as not deployed until the exact merged workflow, dependencies, config, persistence and service identity are verified.
+
+**P0 exit evidence:** reviewed change on protected branch; exact default SHA; workflow permissions and environment re-read; publisher remains fail-closed; Git/image write paths either removed or explicitly authorized; no real publication.
+
+### P1 — Close trust and decision-policy blockers before activation
+1. **Module 9 / AUD-ONCHAIN-001:** establish a provider-origin trust model. Current HMAC receipts authenticate the application/key-holder envelope, not the upstream provider response. Require documented provider identity, transport/proxy boundary, response binding and key custody; do not call a raw payload hash provider authentication.
+2. **Module 9 / AUD-ONCHAIN-002:** obtain an owner-approved mapping source matrix and freshness/corroboration policy, then implement a verifier against that policy. Do not invent trusted hosts, TTLs or corroborator rules. Keep on-chain runtime inactive until this passes.
+3. **Module 14 / AUD-M14-001:** keep `PROCEED` fail-closed. Require an approved factor rubric, source-backed typed factors, historical labelled data, out-of-time evaluation, calibration/threshold governance, shadow-mode evidence and explicit owner activation.
+4. **Module 21 / AUD-M21-001:** extend acceptance beyond disposable CI to documented operational crash/restart, lease fencing, restore/backup, reconciliation and operator drills on an approved non-production target. Production DB remains untouched.
+5. **CMS / AUD-ANN-001 and AUD-EVID-001:** deploy the receipt-enabled worker only through an approved sequence; establish production key custody and provider-origin trust. Since no supported historical replay/backfill API was identified, explicitly quantify coverage limitations and missed-event handling rather than claiming complete feed coverage.
+
+**P1 exit evidence:** policy owners and exact source/provider contracts documented; verifier tests demonstrate rejection of forged/stale/ambiguous inputs; no unresolved trust shortcut; durable recovery and replay limitations accepted; all module gates still disabled until approval.
+
+### P2 — Complete integration and operational acceptance
+1. Verify scheduled durable market-history baseline (`AUD-MARKET-001`) and catch-up/missed-tick SLO (`AUD-GIT-006`).
+2. Verify DeepSeek and Cloudflare credentials/model entitlements, bounded transport, quota, latency, content quality, generated-image visual QA and cost controls in approved non-production accounts; current local tests are mocked and credentials were absent in the inspected environment.
+3. Verify end-to-end event-to-research-to-editorial-to-draft-to-image-to-authorization flow with persisted provenance and negative tests; distinguish SQLite from PostgreSQL and local deltas from hosted CI.
+4. Verify publisher authorization, quota reservation/finalization, ambiguous outcome reconciliation, duplicate suppression and recovery with no live Square post.
+5. Run the complete suite and hosted CI on the exact final candidate SHA; include all local uncommitted changes only after an authorized reviewed commit. Record skipped tests and their reasons; no skipped integration test counts as passed.
+6. Perform a deployment rehearsal on approved staging resources, followed by an explicit production-readiness review and owner sign-off. Only then consider a separate live-publication authorization.
+
+### Dependency and sequencing constraints
+- PR #12 → PR #13 → PR #14 is a stacked dependency chain; PR #2 is separate. Do not merge or retarget these mechanically. Review each base/head relationship and acceptance evidence before an owner-approved sequence.
+- The successful PR #14 hosted run applies to committed head `7acbb8f5014b52288e110dee368173ae7edd7429`, not the current six-file dirty worktree. The successful PR #2 run applies only to `9f91646a398d95765072b300c462987f4350fc5e`.
+- Current local verification (1,079 tests, 69 skipped; compileall; diff check) is evidence for the inspected local worktree only. It is not production acceptance and does not prove the skipped cases.
+- No source-policy, scoring, key-custody, replay, provider entitlement or operational recovery policy may be inferred from tests or fabricated to clear a gate.
+
+### Current release decision
+**NO-GO / NOT PRODUCTION-READY.** The project can continue in isolated development and audit mode. Live publishing, production deployment, production database access/migration, and on-chain decision activation remain prohibited pending the gates above and separate owner authorization.
+
+### 113.1 Local P0 workflow write-capability containment — 26 November 2026
+
+A minimal workflow containment change was implemented in the isolated continuation worktree using TDD:
+
+- Added `test_scheduled_workflow_has_no_repository_write_credentials`; it failed before the fix because the workflow declared `contents: write` and passed `GH_TOKEN` into the application environment.
+- Changed the scheduled job permission to `contents: read`.
+- Set `actions/checkout` `persist-credentials: false`; the checkout action can still use its read-scoped token to fetch source, but does not leave credentials in Git config for later application subprocesses.
+- Removed explicit checkout token override, application `GH_TOKEN`, and `GIT_HISTORY_ALLOWED_REFS` injection. The application no longer receives an intended GitHub write credential from this workflow.
+- Preserved `DRY_RUN: "1"` and `PUBLISHER_ENABLED: "0"`.
+
+**Verification:** focused workflow + persistence-integrity + Git-push security suite: 29 tests passed, 0 failures/errors. Full isolated suite: 1,080 tests passed, 0 failures/errors, 69 skipped (70.191s). `compileall` and `git diff --check` passed. The six-file dirty worktree remains intact, no files are staged, and HEAD remains `7acbb8f5014b52288e110dee368173ae7edd7429`.
+
+**Limitations:** this is a local uncommitted candidate change, not a fix on remote `main`; no hosted workflow run validates this exact dirty state. It also intentionally disables the workflow's Git-based publication-history push/retry path. Do not claim durable Git history synchronization from this workflow until a separately reviewed, least-privilege persistence design is approved. Existing default-main permissions, legacy Git helper/image paths, branch protection, and deployment-runtime blockers remain open. No workflow was dispatched, no remote write occurred, and no real publication/provider/media/production DB operation occurred.
+
+### 113.2 Durable-state guard and fresh default-branch comparison — 26 November 2026
+
+A follow-up risk was found in the previous local containment candidate: after removing the scheduled job's GitHub write token, the workflow still defaulted `PERSISTENCE_BACKEND` to SQLite. On ephemeral GitHub-hosted runners, SQLite and `published_posts.jsonl` are not durable across runs; removing Git sync without enforcing an external durable backend could lose cooldown/publication state. This is not an acceptable security trade-off.
+
+TDD remediation:
+- Added `test_scheduled_workflow_refuses_ephemeral_sqlite_without_git_history_writer`.
+- Confirmed it failed before the workflow change because no durable-backend preflight existed.
+- Added a preflight to the scheduled execution step. It exits nonzero before `python main.py` unless `PERSISTENCE_BACKEND` is exactly `postgresql` and `POSTGRES_DSN` is non-empty. It does not connect to a database during the preflight.
+- The workflow still has `contents: read`, `persist-credentials: false`, no app-injected `GH_TOKEN`/`GIT_HISTORY_ALLOWED_REFS`, `DRY_RUN=1`, and `PUBLISHER_ENABLED=0`.
+- Consequence: if the repository variable/secret are absent or configured for SQLite, scheduled runs stop safely rather than run with ephemeral persistence. No database configuration was inspected or changed, and no DB connection was made.
+
+Verification after this follow-up: full isolated suite **1,081 tests, 0 failures, 0 errors, 69 skipped** (64.243s); compileall PASS; PyYAML workflow parse PASS (`run-agent` job); `git diff --check` PASS. Workflow-specific preflight, read-only permission and safety contract tests: 3/3 PASS. The 69 skipped tests remain unverified.
+
+Fresh GitHub read-only comparison:
+- Default `main` workflow blob SHA `cf5f6224b08f2248495f740602a3bb31186be4ae` still declares `contents: write` and `actions: write`, and injects `GH_TOKEN` from `GITHUB_TOKEN`.
+- Default `main` image uploader blob SHA `8558f4c76f4b1c7cbea1ff801affef12ef8bb65a` still contains GitHub Contents API and Git-push image writers.
+- PR #14 image uploader blob SHA `48d7f02f34d26805f66249a01769a2e15110cbb4` disables those legacy write methods. PR #14's committed workflow still grants `contents: write` and injects `GH_TOKEN`; the read-only workflow plus durable PostgreSQL preflight exists only in the local dirty candidate.
+- GitHub's branch-protection endpoint returned 403 `Resource not accessible by integration` on this read attempt. This is an access limitation, not evidence that protection is enabled or disabled; prior audit evidence remains pending an authorized settings read.
+
+No remote branch or PR was modified. No workflow was dispatched, no credentials were read, no PostgreSQL connection/migration occurred, and no real publishing or media upload occurred. This remains a local uncommitted change and default `main` remains exposed until an approved reviewed PR is merged.
+
+
+### 113.3 Scheduled workflow artifact data-exposure review — 26 November 2026
+
+Read-only review of the current local candidate `.github/workflows/run_bot.yml` and the artifact-producing code paths identified an additional workflow data-governance issue:
+
+- The unconditional `actions/upload-artifact@v4` step runs with `if: always()` and uploads `posts/`, `research/`, `prompts/`, `drafts/`, `images/`, `agent.db`, and `published_posts.jsonl` when present. No explicit `retention-days` is set in this workflow.
+- The application writes market/research packages under `research/`, complete DeepSeek writing prompts under `prompts/`, rejected generated content under `drafts/`, generated images under `images/`, and local publication records/database files. These are application outputs, not merely transient build logs.
+- The artifact step is a separate data-egress path from Git write permissions. Setting `contents: read` and `persist-credentials: false` does not restrict who can download workflow artifacts; artifact access follows repository/workflow access controls.
+- No evidence in this review establishes that these files contain API credentials or that an unauthorized party accessed them. The confirmed issue is that potentially sensitive operational/research/editorial material is uploaded as a broad bundle without explicit per-path classification, redaction, or workflow-specific retention policy.
+- `.gitignore` currently ignores `drafts/` and `posts/`, but does not list `research/`, `prompts/`, `images/`, `agent.db`, or `published_posts.jsonl`. This is a separate local-repository hygiene concern; no local files were staged or added during this review.
+
+**Finding:** AUD-WF-003 — MEDIUM / OPEN: scheduled workflow uploads broad operational artifacts, including research packages, prompts, generated media and local persistence files, without explicit retention or content classification. Recommended closure: decide which outputs are genuinely required for debugging/review; prefer a minimal allowlist (e.g. sanitized run summary and non-sensitive failure diagnostics), exclude DBs/prompts/raw research unless approved, set a short explicit retention period, and verify artifact access policy. Add tests that assert the intended artifact allowlist and retention. Do not delete or mutate existing user artifacts as part of this audit.
+
+Other workflow security scan results:
+- Enumerated four workflow files: `announcement-worker-tests.yml`, `phase1-safety-tests.yml`, `provider-verification.yml`, and `run_bot.yml`.
+- A repository-wide scan of `.github` found no `github.token`, `secrets.GITHUB_TOKEN`, `GH_TOKEN`, `contents: write`, `actions: write`, `pull-requests: write`, `packages: write`, `id-token: write`, or `persist-credentials: true` references in the current local candidate.
+- All four workflows declare read-only `contents: read` permissions at workflow/job scope. The provider verification workflow is manual-only and its existing tests assert it cannot enter the scheduled publisher path.
+- Third-party actions use version tags (e.g. `@v4`/`@v5`) rather than immutable commit SHAs. This was recorded as a supply-chain hardening opportunity, not upgraded to a confirmed compromise.
+
+Publisher gate revalidation:
+- `Config.from_env()` defaults `publisher_enabled=False`; live config validation rejects `DRY_RUN=0` unless `PUBLISHER_ENABLED=true`.
+- `PostPublisher.publish()` checks dry-run and then the publisher kill switch before authorization/network submission. The disabled-publisher regression asserts no network opener call.
+- Focused tests already present: `test_publisher_kill_switch_defaults_off`, `test_live_config_requires_explicit_publisher_enablement`, and `test_disabled_publisher_blocks_before_authorization_or_network`. No application code change was needed in this review.
+
+No tests or source behavior were changed in this checkpoint. No workflow was dispatched, no artifact was uploaded/downloaded/deleted, no secret was read, no provider/DB was contacted, and no real media upload or publication occurred. The findings apply to the local uncommitted candidate; default `main` remains a separate remote state.
+
+### 113.4 AUD-WF-003 remediation candidate — runtime artifact export disabled (26 November 2026)
+
+TDD was applied to the scheduled workflow:
+- Added `test_scheduled_workflow_does_not_export_unclassified_runtime_artifacts` first and ran it against the previous workflow. It failed as expected because `actions/upload-artifact@v4` uploaded the full runtime directories and local persistence files.
+- Removed the unconditional `actions/upload-artifact@v4` step entirely. The scheduled workflow now exports no application runtime files as workflow artifacts. This is intentionally conservative: no research packages, complete prompts, drafts, images, SQLite DB or local publication ledger are bundled for artifact download. Normal workflow logs remain subject to GitHub Actions access/retention policy.
+- Added generated runtime paths `research/`, `prompts/`, `images/` and `agent.db` to `.gitignore` to reduce accidental addition of future generated/local state. Existing tracked images (16 files) remain tracked and untouched. `published_posts.jsonl` is already tracked by Git; adding a `.gitignore` rule would not untrack it, so it was deliberately not represented as protected by ignore rules. No index or tracked ledger mutation occurred.
+- Focused scheduled persistence suite: **24 tests passed**, 0 failures/errors.
+- Full isolated suite after the new regression and workflow change: **1,082 tests, 0 failures, 0 errors, 69 skipped** (63.079s). `compileall` PASS; PyYAML parse PASS and confirmed no artifact upload action; `git diff --check` PASS.
+
+Disposition: AUD-WF-003 is **PARTIALLY REMEDIATED LOCALLY / OPEN**. Broad application artifact export is disabled in the local uncommitted candidate. Remaining work: decide whether sanitized diagnostic artifacts are needed; if so, design a minimal explicit allowlist, redact/classify contents, set explicit retention and test access/retention policy. The current workflow has no artifact-based diagnostics. This local change has not been pushed or run in hosted CI and does not change the remote default branch.
+
+No artifact upload/download/deletion was performed. No secret, DB, provider, media upload, publication, staging, commit, push or merge occurred.
+
+### 113.5 Scheduled PostgreSQL publication-history continuity review — 26 November 2026
+
+Read-only trace of the local scheduled candidate after removal of Git write credentials and runtime artifact export:
+
+- PostPublisher._publish_postgres_authorized() persists the remote post identity as PUBLICATION_UNKNOWN, then writes the confirmed post to the shared PostgreSQL posts table via PostgresLegacyDatabase.save_post(), and only then transitions the attempt to PUBLISHED_CONFIRMED. The PostgreSQL path does not depend on the ephemeral JSONL file or Git push for the authoritative post-history row.
+- PostgresLegacyDatabase.get_posted_hours_dict() reads the persisted posts table; the scheduled pipeline merges this database history into posted_hours_data before objective candidate filtering.
+- Independently, PostgresPublicationStore._duplicate_policy_reasons_in_transaction() reads recent publication_attempts and rejects SUBMITTING / PUBLICATION_UNKNOWN attempts for the same symbol with UNRESOLVED_PUBLICATION_ATTEMPT. This protects the ambiguous-response / remote-accepted-but-not-finalized path even if the posts row has not yet been written.
+- This is static code-path verification only. No PostgreSQL endpoint was contacted and no production or disposable database was mutated in this review. Existing disposable PostgreSQL integration coverage is separately documented in Sections 107 and 110; those hosted runs apply to their recorded PR commits, not the dirty local candidate.
+
+Verification on the exact local worktree:
+- Full isolated suite: 1,082 tests, 0 failures, 0 errors, 69 skipped (64.501s).
+- compileall for main.py, image_engine.py, layer1, and tests: PASS.
+- run_bot.yml parsed with PyYAML; assertions confirmed read-only workflow, persist-credentials: false, PUBLISHER_ENABLED: 0, PostgreSQL preflight and no upload-artifact step: PASS.
+- git diff --check: PASS.
+- Worktree remains work/module9-continuation-local, HEAD 7acbb8f5014b52288e110dee368173ae7edd7429, seven existing modified files, all unstaged. Sixteen tracked image assets remain unchanged.
+
+Disposition: no additional persistence-code change was justified by this trace. The workflow's mandatory PostgreSQL preflight is conservative and intentionally prevents scheduled runs against ephemeral SQLite when Git-based history synchronization has been removed. It also means the scheduled job will exit before main.py unless repository variable PERSISTENCE_BACKEND=postgresql and secret POSTGRES_DSN are correctly configured; those settings were not inspected or tested. AUD-WF-003 remains PARTIALLY REMEDIATED LOCALLY / OPEN pending hosted validation and a decision on sanitized diagnostics. Overall project remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+
+No workflow dispatch, GitHub write, secret access, database connection/migration, provider request, image upload, Binance publication, staging, commit, push, merge or deployment occurred.
+
+
+## 113.6 Default-branch security state refresh — GitHub read-only API, 26 November 2026
+
+This read supersedes the earlier branch-protection API 403 limitation for the current default-branch state:
+
+- GitHub repository metadata confirms default branch `main`.
+- `GET /repos/shehrozali6465372-ctrl/Binance-bot/branches/main` reports current main SHA `94ebdc81aff1b9b6e6678e8eaac1adbabbfbd1e0` (commit 2026-11-25T09:45:48Z) and `protected: false`; protection reports `enabled: false`, required-status-check enforcement `off`, and no required checks.
+- At that exact SHA, `.github/workflows/run_bot.yml` still grants `contents: write` and `actions: write`, checks out with `token: ${{ secrets.GITHUB_TOKEN }}`, and exposes `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` to the application. It restores/saves the publication-history cache and uploads `posts/`, `research/`, `prompts/`, `drafts/`, `images/`, `agent.db`, and `published_posts.jsonl` as an artifact.
+- At the same exact SHA, the workflow maps Gemini credentials/model, not the DeepSeek + Cloudflare + CMS/PostgreSQL configuration present in the local continuation candidate. The workflow hardcodes `DRY_RUN: "1"`, but the main-branch `main.py` has no independent `PUBLISHER_ENABLED` control. Therefore the currently checked-in workflow is dry-run, but it lacks defense-in-depth against a future accidental dry-run toggle.
+- `main.py` at this SHA still accepts `GH_TOKEN` / `GITHUB_TOKEN` in `_try_git_push()` and `_retry_pending_push()`. `image_engine.py` still contains legacy `binance_square_upload()`, generic `upload()`, `_github_api_upload()`, and `_git_push_image()` paths. This confirms the default-branch code is materially behind the local PR #14 candidate.
+- Current PR metadata refresh: PR #12 OPEN / UNMERGED / non-draft; PR #13 OPEN / UNMERGED / DRAFT; PR #14 OPEN / UNMERGED / DRAFT. PR #14 base is `layer-1/module9-onchain-intelligence`, head `layer-1/module9-onchain-continuation`, head SHA `7acbb8f5014b52288e110dee368173ae7edd7429`. PR #2 is OPEN / UNMERGED / DRAFT, separate CMS worker branch.
+- Hosted PR #14 head run `45506068788` remains completed SUCCESS, but it tests committed SHA `7acbb8f...`, not the seven-file dirty local candidate.
+
+**Disposition:** AUD-GIT-007 is now directly confirmed HIGH / OPEN: main is unprotected with required checks disabled, while its scheduled workflow retains broad write credentials and legacy write paths. AUD-GIT-001, AUD-GIT-002, AUD-IMG-001 and AUD-WF-003 remain unremediated on default `main` until reviewed fixes reach a protected/controlled release path. No remote write was made.
+
+No GitHub settings, workflow, branch, PR, secret or repository file was changed. This was read-only metadata/source retrieval. No workflow dispatch, provider request, database access, image upload, publication, commit, push, merge or deployment occurred.
+
+### 113.7 Exact default-main tree vs committed PR #14 tree — 26 November 2026
+
+A fresh read-only Git fetch was performed in the existing continuation worktree. FETCH_HEAD resolved to the GitHub default-main commit 94ebdc81aff1b9b6e6678e8eaac1adbabbfbd1e0 (parent 20edeeb46471883a4340c647b1d60f706519ca08); the PR #14 head ref resolved to 7acbb8f5014b52288e110dee368173ae7edd7429 (parent 054737dbf0d51c03b5289147605af58b038e3ef8). The local origin/main tracking ref was stale at bab7b7b6beaa2f4d5ee86d9de5394b8324504297, so it was not used as the current default-main comparison target. Fetch updated only local Git object/ref metadata; no working-tree branch, index, remote ref, or GitHub resource was changed.
+
+Tree-to-tree comparison of exact current main and PR #14 head confirms that PR #14 contains the 21-module Layer 1 implementation and substantial changes to main.py / image_engine.py, but PR #14's committed scheduled workflow is not the same as the seven-file local candidate:
+
+- PR #14's committed .github/workflows/run_bot.yml still declares permissions: contents: write, checks out with token: ${{ secrets.GITHUB_TOKEN }}, and injects GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} plus GIT_HISTORY_ALLOWED_REFS. The workflow still uploads posts/, research/, prompts/, drafts/, images/, agent.db, published_posts.jsonl under if: always(), without an explicit retention period.
+- PR #14's committed workflow defaults PERSISTENCE_BACKEND to sqlite and invokes python main.py directly; it does not contain the local candidate's mandatory PostgreSQL/POSTGRES_DSN preflight. On an ephemeral hosted runner, the committed PR workflow therefore does not establish durable cross-run persistence by itself. Whether application-level runtime checks stop it must be separately validated; do not assume the workflow's env mapping is sufficient.
+- PR #14's committed workflow no longer contains the pull_request-triggered dry-run-safety-tests job that exists on current main. Other repository workflows may cover some tests, but this particular workflow no longer provides that PR gate.
+- PR #14's main.py does contain the explicit publisher kill switch (PUBLISHER_ENABLED defaults false and PostPublisher.publish() checks it) and the hardened Git-history writer (rejects main/HEAD/unknown, requires exact workflow-ref/allowlist match, and uses explicit staging targets). Its image_engine.py retains legacy method names for compatibility, but binance_square_upload(), upload(), _github_api_upload() and _git_push_image() are disabled stubs returning no upload result; the active Binance presigned-media path is separate. This is a meaningful code-level improvement over current main.
+- The local dirty candidate goes further than committed PR #14 for workflow containment: contents: read, persist-credentials: false, no GH_TOKEN / Git-history allowlist environment, PUBLISHER_ENABLED=0, no broad artifact upload, and a fail-closed PostgreSQL preflight. These improvements remain local/uncommitted and have not been hosted-validated.
+
+**Release disposition:** PR #14 head is not a production-ready replacement for current main as-is. Its application-code hardening must not be conflated with its still-privileged scheduled workflow. Keep AUD-GIT-007 HIGH/OPEN and AUD-WF-003 MEDIUM/OPEN on default main; add a release-blocking subfinding AUD-WF-004 HIGH/OPEN for the committed PR #14 workflow retaining write-capable checkout/token and broad runtime artifact export, and AUD-PERSIST-004 HIGH/OPEN for the committed PR #14 scheduled workflow lacking the local PostgreSQL preflight. These findings are based on exact source/tree inspection, not a live workflow run. PR #14's recorded hosted SUCCESS applies to its committed head and does not validate the dirty local workflow candidate.
+
+**Merge sequencing:** PR #14 is still OPEN/DRAFT and targets layer-1/module9-onchain-intelligence rather than main. It is part of a stacked branch/PR sequence. No merge-base was available from the fetched refs for a direct ancestry comparison, so the diff above is explicitly a tree-to-tree comparison, not proof of a safe merge order. Do not merge PR #14 directly into main or treat its successful CI as release approval. First reconcile the stack/base chain, land prerequisite PRs in order, incorporate the reviewed local workflow hardening into a dedicated PR, require protected-branch checks, then validate the exact final commit in hosted CI before deployment.
+
+No code behavior was changed in this checkpoint. No workflow was dispatched, no GitHub write, secret read, provider/database access, media upload, Binance publication, staging, commit, push, PR update, merge or deployment occurred. Existing seven modified local files remain unstaged; HEAD remains 7acbb8f5014b52288e110dee368173ae7edd7429.
+### 113.8 Exact PR stack ancestry and CMS branch divergence — 26 November 2026
+
+Read-only GitHub PR metadata plus local read-only fetch of the exact base/head branch refs established the following ancestry:
+
+- PR #12: base layer-1/module5-6-candidate-intelligence at 8b46af4; head layer-1/module8-market-analysis at f7e6fc5. The base tip is an ancestor of the head; 0 base-only commits and 4 head-only commits.
+- PR #13: base layer-1/module8-market-analysis at f7e6fc5; head layer-1/module9-onchain-intelligence at 3afed37. The base tip is an ancestor of the head; 0 base-only commits and 22 head-only commits.
+- PR #14: base layer-1/module9-onchain-intelligence at 3afed37; head layer-1/module9-onchain-continuation at 7acbb8f. The base tip is an ancestor of the head; 0 base-only commits and 261 head-only commits.
+- This confirms the PR #12 → PR #13 → PR #14 stack order. Merge prerequisites in that order; PR #14 is not a direct mainline PR.
+- PR #2 CMS worker: base layer-1/completion-hardening at d7ff271; head feature/binance-cms-announcement-worker at 9f91646. The base is NOT an ancestor of the head: merge-base ec1ee7b. The base-only side is exactly one commit, d7ff271, adding the locked 20x architecture document (1,104 lines); the head-only side contains the CMS worker history (68 commits). The mergeability API currently reports true, but that is not equivalent to full functional integration acceptance. Review the architecture-document addition and rerun the PR's hosted integration on the final merged candidate.
+
+These branch refs were fetched into local refs/remotes/origin/stack-* and refs/remotes/origin/cms-* only. The checked-out branch remains work/module9-continuation-local at 7acbb8f; no checkout, reset, rebase, cherry-pick, merge, commit, push or PR mutation occurred.
+
+### 113.9 Scheduled PostgreSQL DSN preflight rejects whitespace-only values — 26 November 2026
+
+TDD remediation of a narrow fail-open configuration edge:
+
+- Added test_scheduled_workflow_rejects_whitespace_only_postgres_dsn before the workflow change. It failed because the preflight accepted any non-empty string, including whitespace-only POSTGRES_DSN values.
+- Updated the local scheduled workflow preflight to strip all POSIX whitespace from the DSN for the emptiness check (`printf '%s' "$POSTGRES_DSN" | tr -d '[:space:]'`) while retaining the original DSN value for the application. The preflight still requires PERSISTENCE_BACKEND exactly `postgresql`; it does not print or otherwise expose the DSN.
+- Focused scheduled persistence + Git push security + publisher safety suites: 97 tests passed, 0 failures/errors.
+- Full isolated suite on the changed candidate: **1,083 tests, 0 failures, 0 errors, 69 skipped** (69.297s).
+- compileall (main.py, image_engine.py, layer1, tests): PASS. PyYAML parse and workflow safety assertions: PASS. `git diff --check`: PASS.
+
+Limitation: this preflight verifies that the configured DSN is non-whitespace, not that the database is reachable, TLS-verified, correctly permissioned, migrated, backed up or operationally durable. No connection attempt was made. The local candidate remains uncommitted and has not been hosted-validated.
+
+No workflow dispatch, secret read, DB/provider connection, migration, media upload, Binance publication, Git staging, commit, push, merge or deployment occurred. The seven modified worktree files remain unstaged; HEAD remains 7acbb8f5014b52288e110dee368173ae7edd7429. Overall project remains PARTIAL / NOT PRODUCTION-READY / NO-GO.

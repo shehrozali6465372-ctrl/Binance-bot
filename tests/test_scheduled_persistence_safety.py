@@ -280,6 +280,7 @@ class ScheduledPersistenceSafetyTests(unittest.TestCase):
         self.assertIn("PERSISTENCE_BACKEND: ${{ vars.PERSISTENCE_BACKEND || 'sqlite' }}", workflow)
         self.assertIn("POSTGRES_DSN: ${{ secrets.POSTGRES_DSN }}", workflow)
         self.assertIn('DRY_RUN: "1"', workflow)
+        self.assertIn('PUBLISHER_ENABLED: "0"', workflow)
 
 
     def test_sqlite_crashed_run_lease_requires_explicit_operator_recovery(self):
@@ -515,6 +516,31 @@ class ScheduledPersistenceSafetyTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 1)
         self.assertEqual(closed, ["postgres"])
+
+
+    def test_scheduled_workflow_refuses_ephemeral_sqlite_without_git_history_writer(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "run_bot.yml").read_text(encoding="utf-8")
+        self.assertIn('if [ "$PERSISTENCE_BACKEND" != "postgresql" ]', workflow)
+        self.assertIn("tr -d '[:space:]'", workflow)
+        self.assertIn("Scheduled run requires durable PostgreSQL; refusing ephemeral SQLite", workflow)
+
+    def test_scheduled_workflow_rejects_whitespace_only_postgres_dsn(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "run_bot.yml").read_text(encoding="utf-8")
+        self.assertIn("tr -d '[:space:]'", workflow)
+
+    def test_scheduled_workflow_does_not_export_unclassified_runtime_artifacts(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "run_bot.yml").read_text(encoding="utf-8")
+        self.assertNotIn("actions/upload-artifact", workflow)
+        for sensitive_path in ("research/", "prompts/", "drafts/", "images/", "agent.db", "published_posts.jsonl"):
+            self.assertNotIn(sensitive_path, workflow)
+
+    def test_scheduled_workflow_has_no_repository_write_credentials(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "run_bot.yml").read_text(encoding="utf-8")
+        self.assertIn("contents: read", workflow)
+        self.assertNotIn("contents: write", workflow)
+        self.assertNotIn("GH_TOKEN:", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+
 
 
 if __name__ == "__main__":

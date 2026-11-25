@@ -10,3 +10,9 @@ charts/
 .env
 .env.*
 !.env.example
+
+# Generated runtime artifacts and local persistence state.
+research/
+prompts/
+images/
+agent.db
