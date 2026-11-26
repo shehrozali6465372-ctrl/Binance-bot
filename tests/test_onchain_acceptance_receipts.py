@@ -80,26 +80,14 @@ class OnChainAcceptanceReceiptTests(unittest.TestCase):
         self.assertEqual(result.reason_code, "ONCHAIN_RECEIPT_SIGNING_NOT_CONFIGURED")
         self.assertFalse(result.receipt_signature)
 
-    def test_sqlite_read_rejects_tampered_observation_even_when_status_remains_accepted(self):
+    def test_sqlite_store_refuses_unbound_observation_before_persistence(self):
         from layer1.onchain import OnChainStore
         store = OnChainStore(":memory:", engine=self.engine)
         try:
-            self.assertEqual(
-                store.save_verified(self.eligibility, self.mapping, self.observation),
-                "INSERTED",
-            )
-            tampered = OnChainObservation(
-                **{**self.observation.__dict__, "transaction_hash": "c" * 64}
-            )
-            store.conn.execute(
-                "UPDATE layer1_onchain_observations SET payload_json=? WHERE observation_id=?",
-                (store._canonical(tampered.__dict__), self.observation.observation_id),
-            )
-            store.conn.commit()
-            recovered = store.get_observation(self.observation.observation_id)
-            self.assertEqual(recovered[1].status, "UNVERIFIED")
-            self.assertEqual(recovered[1].reason_code, "ONCHAIN_RECEIPT_INVALID")
+            with self.assertRaisesRegex(ValueError, "ONCHAIN_OBSERVATION_PROVENANCE_REQUIRED"):
+                store.save_verified(self.eligibility, self.mapping, self.observation)
             self.assertIsNone(store.get_latest_accepted_observation(self.mapping.mapping_id))
+            self.assertIsNone(store.get_observation(self.observation.observation_id))
         finally:
             store.close()
 
@@ -117,8 +105,9 @@ class OnChainAcceptanceReceiptTests(unittest.TestCase):
         self.assertFalse(untrusted.is_primary)
 
         signed = self.engine.validate(self.eligibility, self.mapping, self.observation)
-        self.assertEqual(signed.status, "ACCEPTED")
-        self.assertTrue(signed.receipt_signature)
+        self.assertEqual(signed.status, "UNVERIFIED")
+        self.assertEqual(signed.reason_code, "ONCHAIN_OBSERVATION_PROVENANCE_REQUIRED")
+        self.assertFalse(signed.receipt_signature)
         verified = EvidenceVerificationEngine.evidence_from_onchain_observation(
             self.observation, signed, receipt_verification_key=self.key,
             receipt_verification_key_id="test-key-v1",
@@ -157,82 +146,22 @@ if __name__ == "__main__":
 
 
 class OnChainReceiptPersistenceTests(unittest.TestCase):
-    def test_verified_receipt_is_carried_into_evidence_and_rechecked_on_restore(self):
-        import json
-        import os
-        from dataclasses import replace
-        from unittest.mock import patch
-
-        from layer1.evidence_verification import (
-            EvidenceRecord,
-            _effective_evidence_primary,
-            _effective_evidence_status,
-            _restore_evidence_record_proof,
-        )
-
+    def test_unbound_observation_is_not_promoted_to_accepted_evidence(self):
+        from layer1.evidence_verification import EvidenceVerificationEngine
         fixture = OnChainAcceptanceReceiptTests()
         fixture.setUp()
-        env = {
-            "ONCHAIN_RECEIPT_HMAC_KEYRING_JSON": json.dumps({"test-key-v1": fixture.key.hex()}),
-            "ONCHAIN_RECEIPT_ACTIVE_KEY_ID": "test-key-v1",
-            "ONCHAIN_RECEIPT_TRUSTED_KEY_IDS": "test-key-v1",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            configured_engine = OnChainIntelligenceEngine.from_env(
-                freshness_limits_seconds={"bitcoin-mainnet": 86400},
-                minimum_confirmations_by_network={"bitcoin-mainnet": 6},
-            )
-            self.assertEqual(configured_engine.receipt_signing_key, fixture.key)
-            self.assertEqual(configured_engine.receipt_key_id, "test-key-v1")
-
-            signed = fixture.engine.validate(
-                fixture.eligibility, fixture.mapping, fixture.observation,
-            )
-            evidence = EvidenceVerificationEngine.evidence_from_onchain_observation(
-                fixture.observation, signed,
-                receipt_verification_key=fixture.key,
-                receipt_verification_key_id="test-key-v1",
-            )
-            self.assertEqual(evidence.source_status, "ACCEPTED")
-            self.assertTrue(evidence.is_primary)
-            self.assertTrue(evidence.source_receipt)
-            self.assertTrue(evidence.source_receipt_payload)
-
-            restored = replace(evidence)
-            _restore_evidence_record_proof(restored)
-            self.assertEqual(_effective_evidence_status(restored), "ACCEPTED")
-            self.assertTrue(_effective_evidence_primary(restored))
-
-            tampered = replace(evidence, value="c" * 64)
-            _restore_evidence_record_proof(tampered)
-            self.assertEqual(_effective_evidence_status(tampered), "UNVERIFIED")
-            self.assertFalse(_effective_evidence_primary(tampered))
-
-            receipt = json.loads(evidence.source_receipt)
-            receipt["signature"] = "0" * 64
-            tampered_signature = replace(
-                evidence, source_receipt=json.dumps(receipt, sort_keys=True, separators=(",", ":")),
-            )
-            _restore_evidence_record_proof(tampered_signature)
-            self.assertEqual(_effective_evidence_status(tampered_signature), "UNVERIFIED")
-
-            payload = json.loads(evidence.source_receipt_payload)
-            payload["observation"]["transaction_hash"] = "d" * 64
-            tampered_payload = replace(
-                evidence, source_receipt_payload=json.dumps(payload, sort_keys=True, separators=(",", ":")),
-            )
-            _restore_evidence_record_proof(tampered_payload)
-            self.assertEqual(_effective_evidence_status(tampered_payload), "UNVERIFIED")
-
-            tampered_group = replace(
-                evidence, independence_group="onchain:attacker-selected-network:alchemy",
-            )
-            _restore_evidence_record_proof(tampered_group)
-            self.assertEqual(_effective_evidence_status(tampered_group), "UNVERIFIED")
-
-            tampered_event_time = replace(evidence, event_at=(NOW - timedelta(hours=2)).isoformat())
-            _restore_evidence_record_proof(tampered_event_time)
-            self.assertEqual(_effective_evidence_status(tampered_event_time), "UNVERIFIED")
+        signed = fixture.engine.validate(
+            fixture.eligibility, fixture.mapping, fixture.observation,
+        )
+        self.assertEqual(signed.status, "UNVERIFIED")
+        self.assertEqual(signed.reason_code, "ONCHAIN_OBSERVATION_PROVENANCE_REQUIRED")
+        evidence = EvidenceVerificationEngine.evidence_from_onchain_observation(
+            fixture.observation, signed,
+            receipt_verification_key=fixture.key,
+            receipt_verification_key_id="test-key-v1",
+        )
+        self.assertEqual(evidence.source_status, "UNVERIFIED")
+        self.assertFalse(evidence.is_primary)
 
     def test_environment_configured_engine_without_allowlisted_key_stays_unsigned(self):
         import json
@@ -251,50 +180,27 @@ class OnChainReceiptPersistenceTests(unittest.TestCase):
 
 
 class OnChainReceiptRotationPersistenceTests(unittest.TestCase):
-    def test_sqlite_store_revalidates_previous_trusted_key_after_rotation(self):
-        import json
+    def test_sqlite_store_does_not_persist_unbound_observation_for_key_rotation(self):
         import os
         import tempfile
-        from unittest.mock import patch
-
         from layer1.onchain import OnChainStore
 
         fixture = OnChainAcceptanceReceiptTests()
         fixture.setUp()
-        new_key = b"test-only-next-onchain-receipt-key-32-bytes"
         with tempfile.TemporaryDirectory() as directory:
             database_path = os.path.join(directory, "onchain.sqlite3")
             original_store = OnChainStore(database_path, engine=fixture.engine)
             try:
-                self.assertEqual(
+                with self.assertRaisesRegex(ValueError, "ONCHAIN_OBSERVATION_PROVENANCE_REQUIRED"):
                     original_store.save_verified(
                         fixture.eligibility, fixture.mapping, fixture.observation,
-                    ),
-                    "INSERTED",
-                )
+                    )
             finally:
                 original_store.close()
-
-            env = {
-                "ONCHAIN_RECEIPT_HMAC_KEYRING_JSON": json.dumps({
-                    "test-key-v1": fixture.key.hex(),
-                    "current-v2": new_key.hex(),
-                }),
-                "ONCHAIN_RECEIPT_ACTIVE_KEY_ID": "current-v2",
-                "ONCHAIN_RECEIPT_TRUSTED_KEY_IDS": "test-key-v1,current-v2",
-            }
-            with patch.dict(os.environ, env, clear=False):
-                rotated_engine = OnChainIntelligenceEngine.from_env(
-                    freshness_limits_seconds={"bitcoin-mainnet": 86400},
-                    minimum_confirmations_by_network={"bitcoin-mainnet": 6},
+            rotated_store = OnChainStore(database_path, engine=fixture.engine)
+            try:
+                self.assertIsNone(
+                    rotated_store.get_latest_accepted_observation(fixture.mapping.mapping_id)
                 )
-                rotated_store = OnChainStore(database_path, engine=rotated_engine)
-                try:
-                    restored = rotated_store.get_observation(fixture.observation.observation_id)
-                    self.assertEqual(restored[1].status, "ACCEPTED")
-                    self.assertEqual(restored[1].receipt_key_id, "test-key-v1")
-                    self.assertIsNotNone(
-                        rotated_store.get_latest_accepted_observation(fixture.mapping.mapping_id)
-                    )
-                finally:
-                    rotated_store.close()
+            finally:
+                rotated_store.close()

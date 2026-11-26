@@ -1,3 +1,288 @@
+# LATEST VERIFIED CHECKPOINT — 2026-11-27 (reorg lifecycle parity + receipt trust hardening)
+
+This checkpoint supersedes earlier status/test-count statements below. Preserve every existing worktree modification and untracked file.
+
+- Repo/worktree: `shehrozali6465372-ctrl/Binance-bot`, `/tmp/binance-w2e-continuation`; branch `work/module9-continuation-local`; HEAD `9426e689e19669740972ebabd6264cc16649f703`; RDC device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`.
+- AUD-ONCHAIN-010 owner-approved Option A implemented locally. Reorg invalidation now covers explicit `reconcile_block()` and `commit_page(..., allow_recanonicalized=True)` block/slot replacement, including SQLite broad-scope reconciliation. Original acceptance payload/signature/key/digest/created timestamp remain preserved and visible in the invalidation queue. No auto-delete/re-sign/reactivation/remediation.
+- AUD-ONCHAIN-001 legacy receipt downgrade fixed locally: SQLite/PostgreSQL page-material verification requires every receipt to carry the exact approved provider/network endpoint-profile fingerprint. Legacy receipt DTOs remain deserializable for diagnostics, but pages lacking the fingerprint fail closed; no fingerprint is fabricated or backfilled. Provider authenticity/TLS peer identity remain OPEN.
+- AUD-ONCHAIN-006 parser hardening fixed locally: duplicate JSON key IDs are rejected and HMAC key hex must be contiguous/even-length. Existing 32-byte minimum and explicit trust allowlist semantics remain.
+- AUD-ONCHAIN-011 (Master Audit Section 184) fixed locally: SQLite/PostgreSQL `save_verified()` now falls back to the constructor-bound ingestion store when no per-call store is supplied; explicit per-call dependency still overrides. SQLite RED/GREEN and PostgreSQL no-DB adapter contract regressions pass.
+- Producer/runtime call-graph audit reconfirmed: no production `OnChainObservation` constructor/producer, no production `provider_observations` page writer, and no production construction of Module 9 stores/workers/aggregator. Four workers persist transfer events/provider receipts only; scheduled/one-shot `main.py` paths still do not inject aggregation. This remains an activation blocker; do not wire runtime without owner-approved policies.
+- AUD-ONCHAIN-012 (Master Audit Section 185) newly confirmed HIGH/open: provider response receipt digest is not bound to the exact parsed anchor-observation record. Synthetic SQLite reproduction produced a valid signed page and `ACCEPTED` observation without any receipt-response-to-record parser linkage. No unsafe patch applied; requires versioned deterministic parser over exact captured bytes, receipt/record locator or parsed-record digest binding, bounded response retention, and adversarial substitution/replay tests.
+- AUD-ONCHAIN-012 transport/parser boundary now inspected: bounded response bytes are read and hashed in `ReadOnlyJsonRpcTransport`, decoded JSON is returned, and exact raw bytes are discarded; `ProviderDataPage` carries receipts separately from records and no parser-version/record-reference binding. No production anchor-observation parser/producer exists, and multi-call pages mean a naive one-receipt-per-page binding is unsound. Raw-body retention and parser/record linkage require an explicit design/retention decision; no placeholder digest field or unsafe code patch was added.
+- Master Audit Section 186: owner-independent producer/runtime composition audit completed. Four workers require explicit monitored address/account seeds, per-mapping start positions, stores and bounded controls; no production composition root or worker invocation exists. `main.py` only accepts optional precomputed aggregation injection, while aggregator requires per-mapping thresholds and current eligibility decisions; no production threshold policy/config or anchor-observation producer is wired. Owner-controlled mapping authority, seed/start boundaries, thresholds, provider authenticity, signer custody, backend acceptance and operational policy remain blockers. No defaults or runtime wiring added.
+- Verification after all current code changes: full suite **1,179 tests, 0 failures/errors, 72 skipped** (27 November 2026; 73.441 seconds); focused ingestion/PostgreSQL/store/migration-parser batch **107 tests, 21 skipped**; receipt config/acceptance/ingestion batch **71 passed**; accepted-observation constructor-store regressions **2 passed**; `compileall` PASS; `git diff --check` PASS.
+- PostgreSQL coverage remains adapter-contract only. `TEST_POSTGRES_DSN` is unset; no PostgreSQL server was contacted and migration 0004 was not applied. No live provider request, secret read, production DB access, Square publication, staging, commit, push, merge, deployment or workflow dispatch occurred.
+- Git state: staged paths 0; dirty paths 33 (preserve all; several pre-existed). Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+## Latest continuation — 27 November 2026 (AUD-ONCHAIN-014 threshold output bound TDD fix)
+
+- Continued from Section 187 and inspected aggregation threshold parsing/serialization. Found AUD-ONCHAIN-014: aggregator accepted arbitrarily large positive finite Decimal exponents and long decimal literals, but summary generation formats thresholds in fixed-point notation. Malformed config could force extremely large strings and resource exhaustion.
+- TDD RED reproduced acceptance of `1e256`, `1e-37`, and a 257-character integer threshold. GREEN fix in `layer1/onchain_aggregation.py`: cap threshold text at 256 characters, effective fractional precision at 36 places, and magnitude at 256 integer digits (insignificant trailing zeroes are excluded from effective-scale checks). These are serialization/resource bounds aligned with existing maximum raw amount length and mapping precision; they are not business threshold defaults.
+- Focused aggregation suite: 20 passed. Master Audit Section 188. Fix local, pending review. Full suite/static verification to be recorded after completion. No DB/provider/secret/publication/Git write operations. Module 9 remains NO-GO.
+
+## Latest continuation — 27 November 2026 (AUD-ONCHAIN-013 EVM decoder compatibility audit)
+
+- Completed read-only audit of the mapping source-policy proposal, five-network matrix, shared mapping validator, and four worker gates. No code behavior changed.
+- Master Audit Section 187: `AUD-ONCHAIN-013 MEDIUM / OPEN`. Shared `_validate_mapping()` accepts any non-empty EVM `token_standard`; `EvmTransferIngestionWorker` also omits standard validation, then unconditionally calls ERC-20 Transfer log APIs and normalizes provenance as `eth_getLogs:ERC20.Transfer`. A mapping with a different/unsupported standard can therefore be ingested under ERC-20 semantics. Solana and XRPL have explicit token-standard gates, highlighting EVM parity gap.
+- Do not implement an EVM allowlist until the owner approves the initial supported EVM standards. The source-matrix proposal recommends ERC-20/BEP-20 but remains proposal-only for this scope. After approval, TDD must reject unknown/unsupported standards before provider calls/checkpoint writes and retain approved ERC-20/BEP-20 behavior on Ethereum and BNB Chain.
+- No live provider, DB, migration, secret, publication, or Git write operation occurred. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+## Next exact task
+Master Audit Section 186 now records the production producer/runtime composition blockers and exact owner-controlled inputs. Next obtain/record explicit owner decisions for mapping authority/freshness, monitored addresses/accounts and start positions, per-mapping thresholds, provider authenticity, signer custody, backend and operational controls. In parallel, specify AUD-ONCHAIN-012 response-to-record linkage only after the raw-byte retention/extraction-envelope boundary is decided; then TDD substitution/replay adversarial cases. Do not invent defaults or wire runtime. Do not wire production workers or aggregation until owner-controlled source authority/freshness, provider identity, monitored addresses/accounts, start positions, backend, signer custody, and operational policies are explicitly approved. Do not repeat Sections 179–185.
+
+---
+
+# LATEST CONTINUATION OVERRIDE — 2026-11-27 (reorg-invalidated page lifecycle implemented locally)
+
+Supersedes prior continuation instructions where they conflict. Preserve all existing modifications and untracked files.
+
+- Repo/worktree: `shehrozali6465372-ctrl/Binance-bot`, `/tmp/binance-w2e-continuation`; branch `work/module9-continuation-local`; HEAD remains `9426e689e19669740972ebabd6264cc16649f703`; RDC device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`.
+- Owner approved Option A: retain the original HMAC signature/envelope as immutable historical evidence; add a separate `INVALIDATED` lifecycle record with reason/time/affected canonical evidence; surface invalidated signed pages in an operator-review queue; never automatically delete, re-sign, reactivate, or remediate them.
+- Implemented locally: SQLite lifecycle table; PostgreSQL migration `0004_onchain_page_acceptance_lifecycle.sql`; both adapters expose `list_invalidated_page_acceptances()`; both `reconcile_block()` paths insert invalidation metadata transactionally with canonical event reconciliation. Matching covers canonical block/slot, event and provider-observation page material at the exact network/provider/scope/height, with scope-identity indexes to avoid scanning unrelated networks/scopes.
+- TDD RED/GREEN lifecycle regressions cover preserved original signature, verifier fail-closed after reorg, operator queue visibility, idempotent invalidation, and SQLite transaction rollback on lifecycle persistence failure. Focused lifecycle tests: 4 passed. Ingestion/PostgreSQL/store protocol suites: 94 passed, 21 skipped. Full repository suite: **1,168 tests, 0 failures/errors, 72 skipped** (27 November 2026; 74.004 seconds).
+- PostgreSQL coverage remains adapter-contract only. Do not apply migration 0004 or contact a PostgreSQL server without an approved disposable `TEST_POSTGRES_DSN`. No provider calls, secrets, publication, staging, commit, push, merge or deployment.
+- The separate invalidated-page queue does not confer operator approval or re-sign authority. No automatic disposition is implemented. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+## Latest audit continuation — 27 November 2026 (AUD-ONCHAIN-010 reorg path parity)
+
+- Post-implementation audit found two missed paths: canonical block/slot journal replacement via `commit_page(..., allow_recanonicalized=True)` and SQLite `reconcile_block()` with omitted provider/scope filters. It also found the operator queue did not expose the original signed payload and original acceptance timestamp.
+- TDD reproductions were added. SQLite and PostgreSQL page commits now detect changed existing block/slot journal entries and persist lifecycle invalidation inside the same transaction. SQLite broad reorg reconciliation filters signed pages by network plus optional provider/scope, with a guarded JSON expression index. The operator queue now exposes full original envelope payload and acceptance time.
+- New tests pass: block-only replacement, Solana slot-only replacement, unscoped multi-scope reconciliation, SQLite page-commit rollback on invalidation failure, PostgreSQL helper evidence serialization, and full queue payload/time. Focused batch: 105 tests, 0 failures/errors, 21 skipped. Full repository suite after these changes: 1,173 tests, 0 failures/errors, 72 skipped. Static checks pass.
+- PostgreSQL behavior remains adapter-contract only; no server, migration or disposable DSN was used. Module 9 remains NO-GO.
+
+## Latest audit continuation — 27 November 2026 (legacy receipt endpoint-profile gap)
+
+- Found that page-material verifiers treated `endpoint_profile_sha256=None` as backward-compatible even though new page commits require the approved endpoint profile. A persisted legacy receipt could be edited to remove the fingerprint and have its receipt digest recomputed; the signer would still HMAC-accept that page.
+- TDD RED/GREEN: SQLite signer regression and PostgreSQL adapter contract now prove missing fingerprints are rejected. Both `get_page_acceptance_material()` implementations require a non-null, exact approved provider/network fingerprint for every receipt. `ProviderResponseReceipt` itself remains deserializable without the field for diagnostics; no fingerprint is invented/backfilled and no existing signature is rewritten.
+- This closes only the legacy receipt downgrade at page acceptance. Endpoint-profile fingerprint remains an application-configured origin label, not a provider signature or proof of TLS peer identity. `AUD-ONCHAIN-001` remains HIGH / OPEN.
+- Focused ingestion/PostgreSQL/store-protocol/migration-parser batch: **107 tests, 0 failures/errors, 21 skipped**. Full repository suite: **1,175 tests, 0 failures/errors, 72 skipped** (27 November 2026; 73.856 seconds). `compileall` and `git diff --check` PASS.
+- PostgreSQL server acceptance remains unverified; Module 9 remains NO-GO.
+
+## Latest audit continuation — 27 November 2026 (receipt keyring parser hardening)
+
+- Owner-independent audit found `json.loads()` silently applied last-value-wins to duplicate key IDs in `ONCHAIN_RECEIPT_HMAC_KEYRING_JSON`, while `bytes.fromhex()` accepted embedded whitespace. Both weakened strictness of security-sensitive configuration parsing.
+- TDD RED/GREEN: loader now rejects duplicate JSON object keys and requires contiguous even-length hexadecimal key strings before decoding. Existing minimum 32-byte key length, active-key trusted-ID check, and verification-only mode remain unchanged.
+- `tests.test_onchain_receipt_config`: 7/7 pass. Receipt-config + acceptance-receipt + ingestion focused suites: 71 pass, 0 fail/error. Full repository suite: **1,177 tests, 0 failures/errors, 72 skipped** (27 November 2026; 72.321 seconds).
+- No environment secrets were read; tests use synthetic keys. Production key custody, KMS/HSM, rotation overlap, emergency revocation and operator runbook remain open. Module 9 stays NO-GO.
+
+## Next exact task
+1. Finish full suite, compileall/diff-check and inspect the final dirty worktree for AUD-ONCHAIN-001/006/010; fix any regression before proceeding.
+2. Review SQLite/PostgreSQL transaction and locking parity; obtain disposable PostgreSQL acceptance before treating server behavior as verified.
+3. Continue owner-independent Module 9 audit without repeating Sections 179–180.
+4. Keep provider authenticity, mapping source authority/freshness, signer key custody, production runtime composition and operational acceptance blockers open until their owner policies and tests are resolved.
+
+---
+
+# LATEST CONTINUATION OVERRIDE — 2026-11-27 (unreceipted evidence-page recovery visibility fixed locally)
+
+Supersedes earlier continuation instructions where they conflict. Preserve the existing worktree and every pre-existing modification.
+
+- Repository/worktree: `shehrozali6465372-ctrl/Binance-bot`, `/tmp/binance-w2e-continuation`; RDC localhost device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`.
+- Branch `work/module9-continuation-local`; HEAD remains `9426e689e19669740972ebabd6264cc16649f703`. All changes remain local and unstaged.
+- Provider selection reaffirmed in this conversation: Alchemy for Bitcoin, Ethereum, BNB Smart Chain and Solana; Chainstack Developer Free for XRP Ledger. This is the existing 5-network selection, not a new provider migration. No endpoint/credential was configured and no live provider call was made.
+- New finding AUD-ONCHAIN-009: evidence-bearing page records with missing/empty provider receipts were excluded from pending acceptance recovery. SQLite and PostgreSQL adapters now include such pages in recovery classification when events, canonical blocks/slots, or provider observations exist; malformed page-material shapes are surfaced; checkpoint-only pages remain excluded. Recovery rejects but does not sign unreceipted evidence pages.
+- TDD RED/GREEN completed. Focused ingestion/acceptance/aggregation/four-worker/PostgreSQL-contract batch: **159 passed, 0 failures/errors, 21 skipped**. Full repository suite: **1,164 tests, 0 failures/errors, 72 skipped**. `compileall` and `git diff --check` PASS.
+- PostgreSQL adapter parity was tested with a no-database contract test only. No PostgreSQL server was contacted; no migration was applied. No Alchemy/Chainstack request, secret read, upload, Square publication, staging, commit, push, PR mutation, merge, deployment or workflow dispatch occurred.
+- AUD-ONCHAIN-009 is FIXED LOCALLY / PostgreSQL server acceptance pending. Section 128 post-sign reorg invalidation lifecycle/operator disposition remains unresolved. AUD-ONCHAIN-001 provider authenticity/peer identity and AUD-ONCHAIN-002 source authority/freshness remain open. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+- Preserve all dirty paths and untracked migrations/fixtures. Do not touch `/root/Binance-bot` or `main`.
+
+## Next exact task
+1. Continue owner-independent Module 9 acceptance/replay/recovery audit without repeating Sections 174–179.
+2. Reorg-invalidated acceptance rows remain stranded outside the unsigned pending queue (Section 128); obtain an explicit owner lifecycle decision before changing retention, invalidation, re-sign or operator-disposition semantics.
+3. Continue only within already approved trust policy. Do not invent source TTLs, source allowlists, delegated project-domain approvers, provider signatures, or production signer key custody.
+4. Keep runtime inactive and all work local/unstaged until remaining policy and production acceptance gates are met.
+
+---
+
+# LATEST CONTINUATION OVERRIDE — 2026-11-26 (provider receipt origin-identity gap confirmed)
+
+Supersedes earlier continuation state where it conflicts. Preserve the existing worktree and all modifications.
+
+- Repo/worktree: `shehrozali6465372-ctrl/Binance-bot`, `/tmp/binance-w2e-continuation`; RDC `localhost`, device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`. Branch `work/module9-continuation-local`; HEAD `9426e689e19669740972ebabd6264cc16649f703`.
+- Master Audit Sections 122–123 added. Section 122 reproduces `ACCEPTED / ONCHAIN_OBSERVATION_VERIFIED` for an arbitrary HTTPS mapping source host and for a 2010 `verified_at`; source-host/path binding and mapping max-age are absent. Do not invent trust policy.
+- Section 123 confirms the durable provider response receipt and request digest omit endpoint origin, resolved peer/TLS certificate identity and proxy route. This is an evidence-model gap, **not** proof that standard HTTPS certificate validation is disabled. Default urllib HTTPS transport is used; built-in Alchemy URLs are statically constructed and Chainstack adapter checks its hostname, but durable receipts cannot independently prove endpoint/peer identity.
+- No code/tests changed in this continuation step. `git diff --check` and `python -m compileall -q layer1 tests` passed after documentation updates. Existing 16 modified tracked paths and 2 untracked migrations remain; no staging/commit/push/PR mutation/merge/deploy.
+- `AUD-ONCHAIN-001` HIGH / OPEN, `AUD-ONCHAIN-002` HIGH / CONFIRMED / OPEN, `AUD-ONCHAIN-004` OPEN. Module 9 remains gated; overall **PARTIAL / NOT PRODUCTION-READY / NO-GO**. No DB connection, live provider request, secret access, media upload or Square post.
+
+## Next exact task
+1. Continue the owner-independent audit of Module 9's receipt/page acceptance verification and replay/recovery semantics; look for demonstrable gaps only.
+2. Obtain approved provider origin/proxy/TLS identity and mapping source/freshness policies before changing trust behavior.
+3. Obtain production signer key custody/revocation requirements before production key lifecycle work.
+4. Keep all work local and unstaged; no production activation until the blockers are resolved.
+
+---
+
+# LATEST CONTINUATION OVERRIDE — 2026-11-26 (AUD-ONCHAIN-002 arbitrary-origin and stale-mapping acceptance reproduced)
+
+This block supersedes earlier continuation state where it conflicts. Continue from the exact worktree; preserve every existing change and do not repeat completed work.
+
+- Repo/worktree: `shehrozali6465372-ctrl/Binance-bot`, `/tmp/binance-w2e-continuation`; RDC `localhost`, device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`.
+- Branch `work/module9-continuation-local`; HEAD `9426e689e19669740972ebabd6264cc16649f703`. Existing 16 tracked modifications and 2 untracked migrations remain present and unstaged.
+- Continued owner-independent Module 9 audit; appended Master Audit Section 122. Confirmed `layer1/onchain.py:415-434` trusts generic caller-provided `OFFICIAL_*` labels plus syntactic HTTPS only; it does not bind the hostname/path to a policy. `layer1/onchain.py:460-465` rejects future timestamps but has no max-age/expiry/revalidation bound. SQLite and PostgreSQL verified-mapping listings re-use this validator.
+- Direct in-memory reproduction using existing test fixtures: an arbitrary HTTPS host (`attacker.example`) with `OFFICIAL_NETWORK`, a 2010 `verified_at`, and both substitutions independently all returned `ACCEPTED / ONCHAIN_OBSERVATION_VERIFIED`. No network/database side effects.
+- No code/tests changed in this audit step. Do not invent source allowlists, path rules, TTLs, or trust semantics; owner policy remains required. `AUD-ONCHAIN-002` HIGH / CONFIRMED / OPEN; keep Module 9 runtime gated. `AUD-ONCHAIN-001` and `AUD-ONCHAIN-004` also remain open. Overall **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+- No DB connection, provider call, secret access, upload, Square publication, staging, commit, push, PR mutation, merge or deployment. Preserve current changes.
+
+## Next exact task
+1. Continue code-level review of Module 9 provider-origin identity and response-attestation boundaries, documenting only owner-independent, reproducible facts.
+2. Obtain owner-approved mapping source authority and source-specific freshness/revalidation policy before changing `_validate_mapping()`.
+3. Obtain provider-origin/TLS identity policy and production signer custody/revocation runbook before changing trust semantics or enabling runtime.
+4. Keep Module 9 and overall system NO-GO until all owner policy and production acceptance gates pass.
+
+---
+
+# LATEST CONTINUATION OVERRIDE — 2026-11-26 (disposable PostgreSQL acceptance passed; HMAC persistence bug fixed)
+
+This block supersedes earlier continuation state where it conflicts. Continue from this exact worktree; preserve all local changes and do not repeat completed work.
+
+- Repository: `shehrozali6465372-ctrl/Binance-bot`; worktree `/tmp/binance-w2e-continuation`; RDC `localhost`, device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`.
+- Branch `work/module9-continuation-local`; HEAD `9426e689e19669740972ebabd6264cc16649f703`.
+- Environment file path from this context: `/tmp/binance-deepseek-verify/.env` (mode 0600; only `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST`). Loaded in-process only; values never printed/copied/exported. Older `/tmp/binance-postgres-test.env` was not used.
+- Target verified as `binance_onchain_test` on Neon branch `module9-pg-lease-fencing-disposable` (`br-falling-butterfly-az03rryi`), endpoint `module9-disposable-test` (`ep-autumn-frost-azvk3fj4`) in project `orange-glade-36037611`. This is a dedicated child branch; production root branch `br-rough-mud-az28jpxs` was not connected. Read-only guard passed: exact host allowlist, `sslmode=require`, `channel_binding=require`, no `hostaddr`, database identity correct, read-only transaction and client TLS active.
+- Applied/revalidated migration chain 0001–0003 on that disposable branch. Read-only migration registry check confirmed checksum-bearing entries for all three on-chain migrations. `tests.test_onchain_postgres`: **21/21 passed**, zero skipped.
+- Live PostgreSQL integration uncovered `NameError: re is not defined` in `PostgresOnChainIngestionStore.get_page_acceptance_material()`. Fixed minimally by adding top-level `import re` to `layer1/onchain_postgres.py`. The page-acceptance-after-reopen regression now passes.
+- Targeted harness corrections: CMS importer PostgreSQL **2/2 passed** with `PGSSLROOTCERT=/etc/ssl/certs/ca-certificates.crt`; publisher reconciliation tests **5/5 passed** with repository `PYTHONPATH=.`. These were test-process-only environment settings; no system/repo config changed.
+- Final full suite with guarded disposable DSN, `PYTHONPATH=.` and `PGSSLROOTCERT` supplied to the process: **1,110 tests, 0 failures, 0 errors, 0 skipped** (545.103s). This is the latest complete repository suite result.
+- Disposable endpoint was suspended after acceptance; final state idle.
+- Security disposition unchanged: `AUD-ONCHAIN-001` HIGH / OPEN (application HMAC is not upstream provider authenticity); `AUD-ONCHAIN-002` HIGH / OPEN (source authority/freshness policy needs owner decisions); `AUD-ONCHAIN-004` remains open (payload/memory-budget acceptance). Signer production key custody/revocation and provider-origin trust remain unresolved. Overall **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+- Preserve all existing modifications and two untracked migrations. No staging/commit/push/PR mutation/merge/deploy/workflow dispatch. No production DB, live provider, media upload or real Square post.
+
+## Next exact task
+1. Complete owner-approved provider identity policy for exact provider origins/paths, TLS/proxy constraints, supported upstream signatures and network/provider profile; do not invent allowlists or trust semantics.
+2. Obtain owner-approved mapping source authority, URL/network/asset/contract binding, max-age/revalidation and independent corroboration policy for `AUD-ONCHAIN-002`.
+3. Obtain production signer key custody/revocation runbook and perform adversarial origin-substitution, replay, revocation, stale-evidence and crash-recovery tests.
+4. Only then reassess Module 9 runtime activation. Keep runtime gated and overall NO-GO until all module and production acceptance criteria pass.
+
+---
+
+# LATEST CONTINUATION OVERRIDE — 2026-11-26 (Module 9 provenance URL hardening, two RED/GREEN fixes)
+
+This block supersedes earlier continuation state where it conflicts. Continue from this exact worktree; do not repeat completed work or discard modifications.
+
+- Repository: `shehrozali6465372-ctrl/Binance-bot`; worktree `/tmp/binance-w2e-continuation`; RDC `localhost`, device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`.
+- Branch: `work/module9-continuation-local`; HEAD: `9426e689e19669740972ebabd6264cc16649f703`.
+- New RED/GREEN fixes: `layer1/onchain.py` rejects mapping source URLs with embedded user-info, missing hostnames or URL parse errors; `layer1/onchain_providers.py` rejects HTTPS transport endpoints with user-info username/password. Tests: `tests.test_onchain_intelligence` 28 passed; `tests.test_onchain_providers` 62 passed.
+- Latest full isolated suite after both fixes: **1,110 tests, 0 failures, 0 errors, 71 skipped** (70.219s). `compileall` and `git diff --check` pass.
+- These are URL syntax/deception defenses only. They do not authenticate provider origin/TLS peer, official mapping source authority, source contents, verifier identity, freshness or provider honesty. `AUD-ONCHAIN-001` and `AUD-ONCHAIN-002` remain HIGH / OPEN.
+- PostgreSQL: `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST` remain UNSET; no DB contacted; migrations 0001–0003 unapplied. Do not use production DB.
+- Preserve all current local changes: 16 modified tracked paths and 2 untracked migrations (plus updated audit/context files already in that count). No commit/push/PR mutation/merge/deploy/workflow dispatch. No secrets, live providers, DB migration, uploads or publishing. Do not touch `/root/Binance-bot` or `main`.
+- Overall remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+## Next exact task
+1. Obtain an explicitly approved disposable PostgreSQL test DSN and allowlisted test host; then run migrations 0001–0003 and the DSN-gated ingestion/acceptance integration suite only against that disposable database.
+2. Obtain owner-approved exact provider origins/paths, TLS/proxy constraints, source authority/network/asset mapping, evidence max-age/revalidation and corroboration policy. Do not invent them.
+3. Obtain production signer key custody/revocation requirements; then adversarially test provider-origin substitution, replay, key revocation, stale canonical evidence and crash recovery.
+
+---
+
+# LATEST CONTINUATION OVERRIDE — 2026-11-26 (mapping provenance URL hardening)
+
+This block supersedes earlier continuation state where it conflicts. Continue from the exact local worktree; do not repeat completed work or discard changes.
+
+- Repository: `shehrozali6465372-ctrl/Binance-bot`. Worktree: `/tmp/binance-w2e-continuation` on RDC `localhost`, device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`.
+- Branch: `work/module9-continuation-local`; HEAD: `9426e689e19669740972ebabd6264cc16649f703`.
+- Added a narrow Module 9 mapping-source URL hardening fix in `layer1/onchain.py:419-434`: rejects deceptive HTTPS user-info URLs, missing hostnames and URL parser `ValueError`; no source authority is inferred. TDD RED was observed (`ACCEPTED` before fix); GREEN passes. Test: `tests.test_onchain_intelligence` — 28 passed.
+- Latest focused Module 9 suite: **239 tests, 0 failures/errors, 20 skipped**. Latest full suite: **1,109 tests, 0 failures, 0 errors, 71 skipped** (72.222s). `compileall` and `git diff --check` pass.
+- PostgreSQL remains unverified: `TEST_POSTGRES_DSN` and `TEST_POSTGRES_ALLOWED_HOST` are UNSET. Do not contact production DB; migrations 0001–0003 remain unapplied.
+- `AUD-ONCHAIN-001` and `AUD-ONCHAIN-002` remain HIGH / OPEN. URL syntax hardening does not prove official source identity, URL/network/asset binding, source contents, verifier identity or evidence freshness. `AUD-ONCHAIN-004` remains open pending representative payload/memory-budget acceptance.
+- Overall status remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+- Current changes remain local and unstaged; preserve all 16 modified tracked files and 2 untracked PostgreSQL migrations. No commit/push/PR mutation/merge/deploy/workflow dispatch. No secrets, live providers, DB connections/migrations, uploads or publishing. Do not touch `/root/Binance-bot` or `main`.
+
+## Next exact task
+1. PostgreSQL acceptance: requires an explicitly approved disposable test DSN and allowlisted test host. Then run migrations 0001–0003 and PostgreSQL ingestion/page-acceptance tests only against that disposable target.
+2. Owner policy: obtain exact provider origins/paths, TLS/proxy constraints, source authority and network/asset mapping rules, max-age/revalidation, corroboration and verifier policy. Do not invent an allowlist or TTL.
+3. Key custody: obtain owner-approved signer custody/revocation/runbook requirements, then test origin substitution, replay, revocation, stale canonical evidence and crash recovery.
+
+---
+
+# LATEST CONTINUATION OVERRIDE — 2026-11-26 (restricted HMAC page acceptance integrated)
+
+Supersedes earlier handoff state where it conflicts. Continue from this exact local state; do not repeat prior work or discard modifications.
+
+- Repo: `shehrozali6465372-ctrl/Binance-bot`; worktree `/tmp/binance-w2e-continuation` on RDC `localhost`, device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`.
+- Branch: `work/module9-continuation-local`; HEAD: `9426e689e19669740972ebabd6264cc16649f703`.
+- All current changes are local and unstaged. Preserve them. No commit, push, PR mutation, merge, deployment or workflow dispatch.
+- Latest full suite: **1,108 tests, 0 failures, 0 errors, 71 skipped** (66.438s). `compileall`, `git diff --check`, and SQL migration statement parsing passed. PostgreSQL tests remain skipped because no approved disposable `TEST_POSTGRES_DSN` is configured.
+- Implemented locally: durable provider page receipts in SQLite/PostgreSQL (migration 0002); full worker-run receipt capture including shared tip/finality/head evidence replayed per address/account; opaque collector-issued receipt batches (raw tuples rejected); store-re-read validation of normalized events + canonical block/slot journals; HMAC page acceptance envelope using existing receipt keyring and domain separation; SQLite acceptance table + PostgreSQL migration 0003; fresh-store/new-engine verification; pending-page acceptance recovery integrated at the end of all four worker `run_once` methods. Worker summaries now report signed/pending/rejected acceptance counts.
+- `AUD-ONCHAIN-001` remains HIGH / OPEN: HMAC is an application signer attestation, not upstream provider authenticity. No provider-signed payload, approved endpoint/TLS identity profile, or independent upstream trust proof exists. The opaque batch is an in-process programming guard, not a security sandbox. Acceptance signing is a separate transaction after page commit; crashes leave pending unsigned pages and recovery signs valid pages on a later run.
+- PostgreSQL migrations 0002/0003 are **not applied** and PostgreSQL integration is unverified. Do not connect production DB or apply migrations.
+- `AUD-ONCHAIN-002` remains HIGH / OPEN pending owner decisions for source authority, host/path/network/asset matrix, max-age/revalidation, corroboration, verifier identity/key custody/revocation and fixture policy. `AUD-ONCHAIN-004` remains open pending representative payload/memory budget and explicit cap configuration.
+- Overall project remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+## Next exact task
+1. Obtain/use only an explicitly approved disposable PostgreSQL test DSN; run migrations 0001–0003 and PostgreSQL ingestion/acceptance tests. No production DB.
+2. Define an owner-approved provider identity policy: exact allowed origins/paths, TLS peer verification/proxy constraints, network and provider profile, and any provider-supported signed response mechanism. Do not fabricate trust profiles.
+3. Define production signer key custody and revocation runbook (KMS/HSM or other owner-approved mechanism), then adversarially test provider-origin substitution, replay, key revocation, stale canonical evidence and crash recovery.
+
+## Safety
+Do not touch `/root/Binance-bot` or `main`. No secrets, production DB access/migrations, live provider calls, media uploads or Square publishing. No staging/commit/push/PR changes/merge/deploy/workflow dispatch without separate authorization. Preserve all current unstaged changes.
+
+---
+
+# LATEST CONTINUATION OVERRIDE — 2026-11-26 (full worker provider-call receipt capture)
+
+Supersedes earlier handoff state where it conflicts. Continue from this exact local state; do not repeat prior work or discard modifications.
+
+- Repo: `shehrozali6465372-ctrl/Binance-bot`; worktree `/tmp/binance-w2e-continuation` on RDC `localhost` device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`.
+- Branch: `work/module9-continuation-local`; HEAD: `9426e689e19669740972ebabd6264cc16649f703`.
+- All changes are local and unstaged. Preserve existing work. No commit/push/PR mutation/merge/deploy/workflow dispatch.
+- Latest full test suite: **1,095 tests, 0 failures, 0 errors, 70 skipped**. `compileall` and `git diff --check` passed. PostgreSQL integration skipped because no approved disposable `TEST_POSTGRES_DSN` was configured.
+- Durable provider page receipt work from Audit Sections 116 and 117 is implemented locally: SQLite/PostgreSQL adapters and migration 0002 (not applied); page identity and receipt digests; read-time digest verification; worker page commits; worker-run context-local receipt collection that includes supporting calls from Bitcoin headers/tx details, EVM finalized-height/headers, Solana finalized-slot/slot evidence, and XRPL ledger headers. Nested collectors, exception cleanup and concurrent-context isolation tested.
+- `AUD-ONCHAIN-001` remains HIGH / OPEN. Application-observed response hashes are not provider signatures/origin authentication. A restricted ingestion signer/HMAC acceptance envelope binding page identity, receipts, normalized observations and canonical evidence is still outstanding. Do not sign arbitrary caller-constructed observations.
+- `AUD-ONCHAIN-002` remains HIGH / OPEN pending owner decisions on source authority, exact host/path/network/asset policy, max-age/revalidation, corroboration, verifier identity/key custody/revocation and fixture semantics. Do not invent these policies.
+- `AUD-ONCHAIN-004` remains open pending representative response payload/memory-budget acceptance and explicit cap provisioning.
+- PostgreSQL migration 0002 has not been applied; no PostgreSQL instance was contacted in this continuation.
+- Overall project remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+## Next exact task
+Design and implement a restricted ingestion-signer acceptance envelope. The signing boundary must accept only a store-produced validated page receipt/result object (not arbitrary observation objects), bind durable page identity + ordered response receipts + normalized event/observation IDs and canonical block/slot evidence, persist the envelope atomically or with a well-defined idempotent follow-up, and verify it in a fresh process. Before implementing key lifecycle semantics, inspect existing signer/HMAC code and tests; do not invent production key custody, rotation or revocation policy. Add adversarial tests for forged caller input, altered events, altered receipts, replay, cross-scope substitution and missing/rotated keys. Continue with TDD.
+
+## Safety
+Do not touch `/root/Binance-bot` or `main`. No production DB, secrets, live provider calls, media uploads or Square publishing. No staging/commit/push/PR updates/merge/deployment/workflow dispatch without separate authorization. Preserve all current unstaged changes.
+
+---
+
+# LATEST AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-26 (Module 9 durable provider page receipts)
+
+This block supersedes earlier handoff state where it conflicts. Continue from the exact local state below; do not repeat completed tests or discard existing modifications.
+
+## Exact repository state
+- Repository: `shehrozali6465372-ctrl/Binance-bot`.
+- Worktree: `/tmp/binance-w2e-continuation` on RDC `localhost`, device ID `3e1f3ba9-027c-4dfd-b210-005287a1e1c5` (verify online before the next command).
+- Branch: `work/module9-continuation-local`.
+- HEAD: `9426e689e19669740972ebabd6264cc16649f703`.
+- Existing PR #14 remains OPEN / DRAFT / UNMERGED at its previously verified older head. Do not create a duplicate PR, merge, deploy, or work on `main`.
+- All 15 current paths listed in Master Audit Section 116 are local and unstaged, including new migration `layer1/migrations/postgresql/0002_onchain_provider_page_receipts.sql`. Preserve them. No commit or push has been made.
+
+## Latest verified work
+- Continued `AUD-ONCHAIN-001` from transport-local response digests → immutable page-scoped `ProviderResponseReceipt` collection → durable ingestion-page journal.
+- SQLite and PostgreSQL ingestion adapters now accept typed `provider_receipts`; page records bind a deterministic page identity to cursor state, scope, normalized event payloads, canonical blocks/slots and ordered provider receipts. Receipt and page-material digests are checked when loading. Same page identity with substituted response evidence fails closed.
+- Added PostgreSQL migration 0002 (not applied). Wired Bitcoin, EVM, Solana and XRPL worker page commits to pass `page.response_receipts`.
+- New TDD coverage proves RED before support existed, SQLite close/reopen retrieval, identity mismatch rejection, receipt substitution rejection, digest-tampering detection and transaction rollback. A PostgreSQL fresh-store test is gated on `TEST_POSTGRES_DSN`.
+- Latest full suite: **1,092 tests, 0 failures, 0 errors, 70 skipped**. Skipped tests are not passes; PostgreSQL integration remains unverified because no approved disposable test DSN was configured. `compileall` and `git diff --check` passed.
+
+## Remaining blockers — do not mark production-ready
+- `AUD-ONCHAIN-001` remains HIGH / OPEN: receipts are application-observed digests, not provider identity/authenticity proofs; approved provider origin/TLS policy is missing; auxiliary header/detail/finality calls are not all in the same receipt scope; restricted signer/HMAC binding and fresh-process acceptance verification remain outstanding.
+- `AUD-ONCHAIN-002` remains HIGH / OPEN pending owner policy for source authority, exact host/path/network/asset mapping, max age/revalidation, independent corroboration, verifier identity/key custody/revocation and fixture semantics. Do not invent these decisions.
+- `AUD-ONCHAIN-004` still needs representative response payload/memory-budget acceptance and explicit cap provisioning.
+- PostgreSQL adapter/migration 0002 have not been run against a disposable DB in this continuation. Do not contact production DB or apply migration without separate authorization.
+- Overall remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**.
+
+## Next exact task
+1. Inspect provider call boundaries and add a context-local receipt scope around each full worker page operation so separate Bitcoin tx/header, EVM finality/header, Solana slot-state and XRPL ledger-header calls are included with the transaction page receipts.
+2. Add tests proving every supporting call appears in order and no receipt leaks across pages/concurrent contexts.
+3. Then bind persisted page identity + normalized observations + canonical evidence into a restricted ingestion-signer acceptance envelope; do not let arbitrary caller-constructed observations be signed as trusted.
+4. Add fresh-process replay/tamper tests and run disposable PostgreSQL acceptance only when a dedicated approved test DSN is available.
+
+## Safety boundaries
+- Do not touch `/root/Binance-bot`; do not work directly on `main`.
+- No secrets/API-key values, production DB access/migrations, live Binance/provider calls, media uploads or real Square publishing.
+- No staging, commit, push, PR mutation, merge, deployment or workflow dispatch unless separately authorized.
+- Preserve the current isolated worktree and all uncommitted changes. TDD is mandatory for behavior changes.
+
+---
+
 # LATEST AUTHORITATIVE CONTINUATION OVERRIDE — 2026-11-26 (Sections 106–113 reconciled)
 
 This top block is the current handoff authority. All older checkpoints below are historical unless explicitly superseded here. Continue from this state; do not repeat completed audits or overwrite existing changes.
@@ -5683,3 +5968,669 @@ AUD-EVID-001 remains PARTIALLY REMEDIATED / OPEN; Module 11 PARTIAL. Overall pro
 - No workflow dispatch, secret access, DB/provider, migration, media upload, publication, stage, commit, push, merge or deployment. No PR status or repository setting was changed.
 - Overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
 - Final direct shell execution check: whitespace-only DSN was rejected; a non-empty DSN passed only the preflight's syntactic emptiness check (not a connectivity or credential validation). Final `git diff --check` passed; no staged paths; seven modified files remain on the existing branch/HEAD.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-ONCHAIN-001 transport digest foundation)
+
+- Reconnected to RDC localhost device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`; verified `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`, clean before edits.
+- Continued Module 9 `AUD-ONCHAIN-001` from the exact existing code. Transport raw bytes were bounded-read and discarded; adapter `_call()` returned only decoded result; `ProviderDataPage` and worker persistence did not carry response provenance.
+- Added a TDD regression test; observed RED (`AttributeError` for missing `last_response_attestation`). Implemented a transport-local, non-secret metadata property with canonical request SHA-256, exact raw response SHA-256, response byte count, HTTP status and UTC receive time. No endpoint/host/credential-bearing URL, raw response body or headers are retained. Metadata resets before each request to prevent stale receipt reuse after a failed call.
+- Focused `tests.test_onchain_providers`: 55 passed. Full isolated suite: 1,085 tests, 0 failures/errors, 69 skipped (61.209s). `compileall` and `git diff --check`: PASS.
+- Important limitation: metadata remains on the individual transport instance and is not yet carried into adapter result/page, normalized event, HMAC receipt or persistence. It is not a provider signature or provider identity proof. AUD-ONCHAIN-001 remains HIGH / OPEN; Module 9 remains non-production.
+- Current local changes: `layer1/onchain_providers.py`, `tests/test_onchain_providers.py`, `BINANCE_SQUARE_W2E_MASTER_CODE_AUDIT.md`, `PROJECT_CONTEXT.md`. No stage, commit, push, PR creation/update, merge, deployment, workflow dispatch, live provider, secret, database, migration, media upload or Binance publication.
+- Next exact step: propagate each call's transport metadata into a typed per-call response envelope and immutable derivation manifest without losing multiple-call lineage (transaction page + finalized head + canonical block/ledger headers), then persist and verify only under an approved provider trust profile. Do not activate signing/acceptance until signer authority and source profile policy are approved.
+
+
+## Continuation checkpoint — 26 November 2026 (page-scoped provider response provenance)
+
+- Continued `AUD-ONCHAIN-001` on existing branch `work/module9-continuation-local`, base HEAD `9426e689e19669740972ebabd6264cc16649f703`; preserved all prior local modifications.
+- Added immutable `ProviderResponseReceipt` and `ProviderDataPage.response_receipts` tuple. Scoped `ContextVar` collector captures all successful attested calls in a page operation and resets on both success and failure. No shared mutable adapter-level collector. Each entry records sequence, provider adapter label, network, method, request SHA-256, exact bounded raw response SHA-256, byte count, HTTP status and receive time; no endpoint/host/credential URL, response body or headers.
+- Receipt capture wired to Bitcoin address pages, Ethereum asset transfer and ERC-20 log pages, BNB ERC-20 log pages, Solana address pages, and Chainstack XRPL account_tx pages. ETH/BNB multi-request page preserves chain ID + finalized header + logs as separate ordered receipts.
+- Added fake-opener integration test verifying hashes against exact raw HTTP response bytes, sequence, byte lengths, status, credential non-disclosure and immutable receipts; XRPL page receipt assertions. No live provider requests.
+- Focused provider suite: 56 passed. Full suite: 1,086 tests, 0 failures/errors, 69 skipped (63.885s). `compileall` and `git diff --check`: PASS.
+- Current modified files: `layer1/onchain_providers.py`, `tests/test_onchain_providers.py`, `BINANCE_SQUARE_W2E_MASTER_CODE_AUDIT.md`, `PROJECT_CONTEXT.md`. No stage, commit, push, PR, merge, deployment, workflow dispatch, secret access, DB connection, migration, media upload or publishing.
+- Critical remaining gap: page receipts are in-memory only; no durable store, normalized observation/receipt binding, HMAC inclusion or fresh-process verification. They do not authenticate provider identity/TLS origin. Dict-returning Bitcoin transaction/header and XRPL ledger-header methods are not yet receipt-enveloped. AUD-ONCHAIN-001 remains HIGH / OPEN; Module 9 stays non-production.
+- Next exact work: inspect Module 9 ingestion boundary and store interfaces, then introduce a typed provenance-bearing observation envelope and durable receipt persistence with replay/fresh-process verification tests. Must preserve fail-closed behavior and must not treat unapproved provider identity policy as trusted.
+
+# INTERIM CONTINUATION OVERRIDE — 2026-11-26 (page-acceptance canonical TOCTOU fixed; corrected full suite running)
+
+- Worktree /tmp/binance-w2e-continuation, RDC localhost device 3e1f3ba9-027c-4dfd-b210-005287a1e1c5; branch work/module9-continuation-local; HEAD 9426e689e19669740972ebabd6264cc16649f703. Preserve all existing changes and two untracked migrations; all remain unstaged.
+- Master Audit Section 124 records a reproduced signer/persistence race: canonical block hash changed in a second SQLite connection after get_page_acceptance_material() returned but before acceptance save. Previously the signer returned/persisted an HMAC which immediately failed verification and was excluded from pending recovery.
+- Local fix: SQLite acceptance save now takes BEGIN IMMEDIATE, revalidates the current page/canonical evidence and compares the signed payload to that exact snapshot before insert. PostgreSQL acceptance save locks the page and its event/block/slot evidence rows with FOR UPDATE/FOR SHARE, revalidates and compares inside the transaction before insert.
+- TDD: regression test failed RED before fix; SQLite regression 1/1 GREEN; ingestion suite 37/37 passed; disposable PostgreSQL suite 22/22 passed, including second-connection race regression. Five publisher reconciliation tests also passed 5/5 after correcting PYTHONPATH to be set before Python startup.
+- First all-suite run: 1,112 tests, 5 errors solely because PYTHONPATH=. was set after Python startup. A corrected full-suite run is currently executing with PYTHONPATH=. and PGSSLROOTCERT=/etc/ssl/certs/ca-certificates.crt set before interpreter startup and the dedicated disposable DSN validated in-process. Record its exact final result after completion.
+- Disposable Neon endpoint ep-autumn-frost-azvk3fj4 on branch br-falling-butterfly-az03rryi (project orange-glade-36037611, Binance bot account) was explicitly suspended after PostgreSQL tests; tool response confirmed current_state=idle, suspended_at=2026-11-26T12:41:23Z.
+- git diff --check and python -m compileall -q layer1 tests passed. No live provider, production DB, real Square publication, media upload, stage/commit/push/PR mutation/deploy.
+- Overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO. AUD-ONCHAIN-001 and AUD-ONCHAIN-002 remain HIGH / OPEN; AUD-ONCHAIN-004 remains open. A post-sign reorg currently makes verification fail but leaves an acceptance row outside the unsigned pending queue; operator reconciliation/visibility is a follow-up audit item.
+
+# CONTINUATION NOTE — 2026-11-26 (aggregator acceptance enforcement gap)
+
+- Master Audit Section 125 added after repository-wide call-graph review. No production code calls verify_ingestion_page_acceptance(); OnChainTransferAggregator.aggregate_store() reads canonical events via list_all_events(canonical_only=True) and checks event persistence/canonical block hashes but does not verify the HMAC page envelope. The page HMAC is therefore currently a durable audit artifact, not an enforced downstream authorization gate.
+- Severity recorded as MEDIUM / CONFIRMED CODE-PATH GAP pending owner clarification: decide whether page HMAC is required to gate aggregation or is diagnostic provenance only. Do not add a hard gate or invent failure behavior while key custody/rotation/revocation and unsigned-page operational semantics remain unresolved.
+- Full corrected suite (PYTHONPATH and PGSSLROOTCERT set before interpreter startup) remains in progress. The separate SQLite 37/37, disposable PostgreSQL 22/22 and publisher reconciliation 5/5 targeted checks have passed.
+- Preserve local unstaged changes. No staging/commit/push/PR update/merge/deployment. Disposable Neon endpoint was suspended after DB acceptance.
+
+# LATEST CONTINUATION OVERRIDE — 2026-11-26 (page-acceptance TOCTOU fixed; full suite and post-refinement PostgreSQL passed)
+
+- Exact repo/worktree: shehrozali6465372-ctrl/Binance-bot at /tmp/binance-w2e-continuation; RDC localhost device 3e1f3ba9-027c-4dfd-b210-005287a1e1c5. Branch work/module9-continuation-local; HEAD 9426e689e19669740972ebabd6264cc16649f703. Existing local modifications and two untracked migrations remain unstaged. Do not commit/push/PR update/merge/deploy.
+- Section 124 documents and remediates the confirmed page-acceptance TOCTOU: after material validation but before HMAC persistence, concurrent canonical block mutation previously caused an invalid acceptance envelope to be persisted and hidden from pending recovery. SQLite now revalidates under BEGIN IMMEDIATE; PostgreSQL locks/revalidates all relevant evidence rows before insertion.
+- Section 126 refines PostgreSQL lock ordering to match commit_page(): event rows -> block rows -> Solana slot rows -> page row. This avoids the earlier event/block lock inversion under concurrent reorg ingestion.
+- Final full repository suite after the TOCTOU fix and new SQLite/PostgreSQL regression tests: **1,112 tests, 0 failures, 0 errors, 0 skipped** (539.621s), with PYTHONPATH=. and PGSSLROOTCERT set before Python startup and dedicated disposable DSN validated. This was before the final PostgreSQL lock-order-only refinement.
+- Post-refinement PostgreSQL integration suite: **22/22 passed** (107.822s), including the two-connection canonical-evidence race test. SQLite ingestion suite 37/37 passed; five publisher reconciliation tests 5/5 passed; compileall and git diff --check passed.
+- Disposable Neon endpoint ep-autumn-frost-azvk3fj4, child branch br-falling-butterfly-az03rryi, project orange-glade-36037611 (Binance bot account) was suspended after tests; Neon confirmed current_state=idle and suspended_at=2026-11-26T13:03:00Z. Production root branch was not contacted.
+- Section 125 records a MEDIUM / OPEN contract gap: no production consumer calls verify_ingestion_page_acceptance(); transfer aggregator reads canonical events without checking the page HMAC. Owner must clarify whether this HMAC is a required aggregation gate or diagnostic provenance only. Section 124 also notes post-sign reorgs invalidate envelopes but are not surfaced in the unsigned pending queue.
+- Other blockers remain: AUD-ONCHAIN-001 HIGH (provider origin/TLS peer identity/upstream authenticity), AUD-ONCHAIN-002 HIGH (mapping source authority and freshness), AUD-ONCHAIN-004 (response payload/memory budget), plus production signer key custody/revocation. Overall project remains PARTIAL / NOT PRODUCTION-READY / NO-GO. Keep Module 9 runtime gated.
+- No live provider, production DB, real Square publication, media upload, staging, commit, push, PR mutation or deployment.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-ONCHAIN-004 response-size and memory-boundary audit)
+
+- Reconnected to RDC device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`; verified `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`. All 16 modified tracked files and both untracked migrations from the handover remain present and unstaged.
+- Master audit Section 127 records the full provider response/memory review. Shared Module 9 reader bounds HTTP body bytes when explicitly configured, rejects oversized Content-Length early, and bounds missing-length/chunked reads. No implicit/default cap exists; `ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES` was UNSET in the RDC process environment.
+- Source review found decode/JSON object allocation after the byte cap, overlapping chunk/join/raw/text/object allocations, no configured upper cap policy, and an injected transport-factory seam that can bypass the shared reader. No production adapter construction was found outside adapter definitions in the inspected repository tree.
+- TDD reproduced four response-cardinality violations: Bitcoin, Alchemy asset transfers, Solana and XRPL accepted arrays larger than their requested page limits. Added `PAGE_LIMIT_EXCEEDED` checks before normalization. Four regression tests failed RED before the fix and passed GREEN afterward.
+- Focused provider + four worker suites: 107 passed, 0 failures/errors/skips. compileall and git diff --check passed. Full suite not rerun. Synthetic tracemalloc measurements showed shape-dependent JSON parse amplification (500,001-byte small-object array: 10,643,534 peak traced bytes; 21.29x). This is not production telemetry or a universal ratio.
+- Ethereum/BNB eth_getLogs and Bitcoin vin/vout still lack a source-backed record-count ceiling. Do not invent one. Legitimate payload telemetry, owner-approved process memory/concurrency budget and cap, and external custom-factory verification remain required. AUD-ONCHAIN-004 remains MEDIUM / PARTIALLY REMEDIATED / OPEN.
+- No live provider, secret value, database, migration, deployment, publication, staging, commit, push or merge was used. Module 9 and project remain non-production / NO-GO.
+- Exact next task: Task 2 in the handover — inspect and reproduce post-sign reorg invalidation lifecycle, operator visibility, pending recovery and aggregation consequences. Do not change lifecycle semantics without owner approval.
+
+
+
+## Continuation checkpoint — 26 November 2026 (post-sign reorg invalidation reproduced)
+
+- Master audit Section 128 records a deterministic SQLite reproduction using the existing `_commit_signable_page()` fixture: a valid signed page verifies before reorg; `reconcile_block()` tombstones one event; verification then returns False, but the acceptance row remains stored and the pending queue stays empty.
+- Exact recovery output after reorg: `{'signed': 0, 'pending': 0, 'rejected': 0}`. This occurs because both SQLite/PostgreSQL pending queries exclude every page with an acceptance row, without checking whether that acceptance still verifies.
+- No invalidation status, list-invalidated API, queue, or operator reconciliation path exists. PostgreSQL source has equivalent pending-query and tombstoning semantics; no live PostgreSQL test was run and the disposable endpoint was not resumed.
+- Canonical aggregator reads canonical-only events and the tombstoned event is excluded; this is separate from page-HMAC enforcement.
+- No lifecycle semantics or acceptance records were changed. Owner decision required for invalidation status, retention, reorg/recanonicalization, and re-sign/replay policy.
+- Task 2 reproduction and source audit are complete. Exact next task: Task 3 — inspect every production consumer of canonical on-chain events, identify paths that can act on unsigned or invalidated pages, and document the enforcement gap. Do not add a hard HMAC gate without the owner's explicit authorization contract and failure/recovery semantics.
+
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-ONCHAIN-005 consumer contract)
+
+- Master audit Section 129 completes the canonical-event consumer inventory. The only production business consumer found is `OnChainTransferAggregator.aggregate_store()`; it reads canonical-only events and does not verify page HMAC acceptance. `aggregate()` also rechecks persisted event equality and canonical block hash, but not page acceptance.
+- SQLite reproduction: an unsigned page with a canonical event was pending yet produced one network summary and one qualifying asset. A second reproduction tampered the receipt payload after signing: acceptance verification became False while the event stayed CANONICAL, the page was not pending, and aggregation still produced one network summary and one qualifying asset.
+- The Section 128 post-sign reorg case is different: its event became REORGED and was excluded by canonical-only listing. That does not protect against invalid acceptance from key revocation/receipt corruption while the event remains canonical.
+- `main.py` accepts optional `TransferAggregationResult` objects and checks only asset/result types; the argument defaults to None and no in-repository worker/aggregator construction or explicit injection call site was found. This is a pre-activation contract gap; current default schedule is not shown consuming Module 9 results.
+- No hard HMAC gate added. Owner must decide authorization semantics, page-to-event lineage, key rotation/revocation, invalidation, outage and recovery behavior. AUD-ONCHAIN-005 remains MEDIUM / OPEN.
+- Audit report contains a historical duplicate use of AUD-ONCHAIN-005 for PostgreSQL worker/store compatibility; reconcile IDs in the final index without merging the distinct findings.
+- Task 3 complete. Next: Task 4 — continue independent master audit from the highest-severity unresolved critical/high finding, validating current code without repeating completed work.
+
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-ANN-001 importer revalidation)
+
+- Master audit Section 130 revalidated the current Layer 1 importer. It queries only the latest source IDs within a 7-day default window and a 250-row default cap; main.py passes no overrides. The SQL has no cursor/offset/continuation or historical backfill path and selects only the latest row per source_id.
+- Receipt verification, TLS and read-only PostgreSQL controls are present, but do not guarantee complete feed coverage. main.py correctly reports PARTIAL_COVERAGE_NO_REPLAY / OBSERVED_ONLY_NO_HISTORICAL_REPLAY and unresolved stable revision correlation.
+- Current RDC process presence checks only: ANNOUNCEMENT_DATABASE_URL, CMS receipt keyring and trusted key IDs all UNSET. No values read and no DB connection attempted.
+- Focused Module 4 tests: 17 passed, 0 failures/errors, 2 skipped. PostgreSQL cases skipped because test DSN is absent.
+- Prior official CMS worker/SDK review remains authoritative for lack of documented replay cursor/history API; the separate CMS worker worktree was not opened or changed. AUD-ANN-001 remains HIGH / PARTIAL / OPEN; M4 remains PARTIAL.
+- Task 4 continues with remaining highest-severity open findings; next candidate is AUD-M21-001 operational PostgreSQL crash/recovery acceptance, with production DB and live infrastructure explicitly out of scope.
+
+## Continuation checkpoint — 26 November 2026 (AUD-M21-001 target TLS gate and operator recovery recheck)
+
+- Master audit Section 131 records the known disposable Neon target probe. Restricted /tmp/binance-deepseek-verify/.env exists mode 0600; only key names and non-secret parsed metadata were inspected. DSN host matches explicit allowlist and exact disposable endpoint, DB binance_onchain_test, sslmode=require and channel_binding=require. Secret values were not printed.
+- Target is Neon project orange-glade-36037611, non-default branch br-falling-butterfly-az03rryi (module9-pg-lease-fencing-disposable), endpoint ep-autumn-frost-azvk3fj4 (module9-disposable-test). A single SELECT via Neon connector returned PostgreSQL 16.16, expected DB, pg_is_in_recovery=false, but pg_stat_ssl.ssl=false for backend PID. Connector reports transaction_read_only=off; only SELECT executed, no mutation.
+- This violates the strict backend-TLS acceptance gate recorded in the historical B-PG-01 checkpoint. No migrations/writes/DSN-gated tests were run. The probe activated the idle compute; endpoint was immediately suspended and Neon confirmed idle at 2026-11-26T13:58:09Z. Production/default branch and active production endpoint were not touched.
+- Repository search: no dedicated run-lease recovery CLI; recovery exists only as PostgresRunLease.recover_interrupted() / PostgresPublicationStore.recover_interrupted_run_lease(). scripts/reconcile_publications.py only reconciles publication attempts. No dedicated backup/restore/PITR runbook or RPO/RTO definition found in checked operational docs/scripts/workflows.
+- Do not weaken TLS gate. M21 DB acceptance remains blocked until an approved disposable endpoint satisfies backend TLS (or owner formally changes the requirement), then guarded migrations and process-kill/fresh-process/unknown-outcome tests can run. Separate operator CLI/runbook and tested backup/restore/PITR with RPO/RTO remain needed.
+- No code/schema/migration changes, integration tests, production DB, publication, staging, commit or push. AUD-M21-001 remains HIGH / PARTIAL / OPEN.
+- Next task: continue independent high-severity audit at AUD-GIT-003 (clean local commit ahead of remote not retried) without touching Git refs or publishing changes.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-GIT-003 current-branch status reconciliation)
+
+- Master audit Section 132 reconciles the stale early AUD-GIT-003 summary against the current continuation source. main.py and tests/test_git_push_security.py already contain clean-ahead recovery, exact upstream/ref checks, per-commit path allowlist, missing/mismatched upstream rejection, fail-closed no-commit behavior and remote SHA verification.
+- Existing evidence in Sections 72 and 86: RED/GREEN; 16 focused tests passed; full isolated suite 1,025 tests / 0 failures / 63 skipped; hosted workflow 45505900356 succeeded on commit 054737d. Not rerun because relevant files are unchanged.
+- AUD-GIT-003 is FIXED IN CURRENT CONTINUATION BRANCH / HOSTED TEST CI VERIFIED; actual GitHub authenticated write/branch-protection acceptance remains untested.
+- Scope caveat: default main is still a separate exposure tracked by AUD-GIT-007 because PR #14 remains open/unmerged. Do not mark default main fixed.
+- No Git state or remote/PR/workflow mutation occurred. Next audit candidate: revalidate AUD-GIT-007's default-main exposure against current remote state, read-only only.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-GIT-007 default-main revalidation)
+
+- Master audit Section 133 revalidated current GitHub default branch main. Branch SHA is 7bf4d7017999166ad42531405b67297c13cd2aef; branch API reports protected=false. Branch-protection detail endpoint returned 403 to the integration, so required-check settings are not freshly claimed.
+- PR #14 remains OPEN / DRAFT / UNMERGED, base layer-1/module9-onchain-intelligence, head layer-1/module9-onchain-continuation at 7acbb8f5014b52288e110dee368173ae7edd7429. Local continuation worktree is separate and dirty/unstaged.
+- Current default-main run_bot.yml still has 5-minute schedule + workflow_dispatch, contents:write/actions:write, repository token checkout, GH_TOKEN, fixed mutable post-history cache restore/save and DRY_RUN=1. Current default-main main.py retains detached HEAD/unknown fallback to main, token-bearing origin URL mutation, unscoped git commit and startup history retry that only checks dirty files.
+- The continuation AUD-GIT-001/003 safeguards are not present on default main because PR #14 is unmerged. This is a HIGH release-path blocker; do not edit main, dispatch workflow or push. Require controlled owner-approved release and verify exact deployed SHA.
+- No remote repository state, workflow, secret, variable, PR, Git ref, DB or provider was mutated. No stage/commit/push/merge/deploy/dispatch.
+- Next task: continue the high-severity independent audit of AUD-ONCHAIN-001 provider-origin trust and receipt binding from the latest recorded checkpoint; preserve all existing Module 9 work and do not activate it.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-ONCHAIN-001 missing supporting receipts reproduced)
+
+- Master audit Section 134 corrects the earlier Section 117 coverage claim. Current adapter code does not append transport attestations for three material worker calls: Bitcoin fetch_bitcoin_transaction() (vin/vout detail), XRPL probe() (server_info validated head), and XRPL fetch_ledger_header() (canonical ledger hash/time).
+- Worker code calls all three within _capture_provider_run_receipts scopes, but each adapter method uses the transport directly and never appends last_response_attestation. A synthetic in-process reproduction returned valid data for each and drained exactly zero receipts in each case.
+- Current store/signer only checks that the page receipt batch is non-empty and collector-issued; other page receipts allow the page to be signed despite missing supporting call lineage. Bitcoin normalized outputs and XRPL canonical evidence therefore depend on provider responses absent from the durable receipt set.
+- No code/test/schema changes made. No live provider or database call. TDD remediation should use a shared collector helper and tests for exact receipt ordering/hashes and durable page batch, then SQLite reopen and PostgreSQL integration after backend TLS acceptance.
+- This is separate from missing endpoint/TLS peer identity in Section 123; response capture does not authenticate provider origin. AUD-ONCHAIN-001 remains HIGH / OPEN.
+- Next: inspect all adapter methods that instantiate transport directly and verify there are no further uncollected calls; then produce a complete provider-call-to-receipt matrix before remediation.
+
+
+## Continuation checkpoint — 26 November 2026 (Module 9 provider receipt call matrix)
+
+- Master audit Section 135 inventories all six current self._transport_factory call sites in layer1/onchain_providers.py. Captured paths: Alchemy _call, Bitcoin address-history REST, XRPL account_tx. Missing: Bitcoin transaction-detail REST, XRPL ledger header RPC and XRPL server_info probe RPC.
+- All EVM/Solana calls and Bitcoin block-header calls use Alchemy _call and are captured. No other provider transport-factory site was found in the inspected adapter module.
+- No tests currently assert the three missing supporting responses appear in the exact worker page's persisted receipt batch. Section 134 contains deterministic synthetic reproduction for each missing call (valid data, zero receipts).
+- No code/test behavior changed. Next: before remediation, reconcile the report's Section 117 wording and add TDD regressions for all three missing receipts. Then use a shared collector helper and verify page receipt order/hashes through SQLite reopen and later PostgreSQL integration when backend TLS is accepted.
+
+
+## Continuation checkpoint — 26 November 2026 (provider documentation cross-check)
+
+- Master audit Section 136 adds official vendor evidence. Alchemy currently supports bearer Authorization-header API keys and explicitly labels URL/path keys as least secure because URLs may appear in server logs, browser history and caches. Current adapter embeds Alchemy key in endpoint path and sends no Authorization header. Verify per-chain/method compatibility before migration.
+- Alchemy states API calls use TLS; this is a vendor statement, not evidence of this process's actual TLS peer. Alchemy's HMAC signature contract found is for inbound webhook requests, not ordinary JSON-RPC response signing.
+- Chainstack Enterprise Support/SLA (last updated 8 Mar 2024) states TLS is always used and API authentication required. This does not provide client-observed peer certificate/origin evidence. Reviewed RPC examples show standard JSON-RPC over HTTPS; no signed response contract was identified in reviewed docs (not proof no private feature exists).
+- No provider account action, key read, API request or network call. No code changes. AUD-ONCHAIN-001 remains HIGH / OPEN. Candidate next task: audit production key custody/rotation/revocation and confirm the active signer/config exposure without reading or printing secret values.
+
+
+## Continuation checkpoint — 26 November 2026 (Module 9 signer key custody/runtime wiring)
+
+- Master audit Section 137 records the key configuration contract. Variables are ONCHAIN_RECEIPT_HMAC_KEYRING_JSON, ONCHAIN_RECEIPT_ACTIVE_KEY_ID and ONCHAIN_RECEIPT_TRUSTED_KEY_IDS; keys >=32 bytes, active key must be present and explicitly trusted, previous keys can remain trusted during rotation, and empty config disables signing.
+- Tests cover keyring loading, previous-key verification after rotation, and revocation by removing prior key from trusted allowlist. No production KMS/HSM/secret-manager integration, key ceremony, rotation schedule or revocation/compromise runbook found.
+- Both SQLite OnChainStore and PostgreSQL PostgresOnChainStore default to OnChainIntelligenceEngine() without env config. Repository-wide non-test search found no call to OnChainIntelligenceEngine.from_env() and no production Module 9 worker construction. Future runtime must explicitly call from_env() and inject that engine into mapping store/workers; current behavior fails closed with unsigned pages.
+- Current RDC process presence-only checks: ONCHAIN_RECEIPT_HMAC_KEYRING_JSON, ACTIVE_KEY_ID, TRUSTED_KEY_IDS, ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES, ALCHEMY_API_KEY and CHAINSTACK_XRPL_ENDPOINT all UNSET. No values read. No key references in checked workflow files; this does not prove GitHub repository secrets are absent.
+- No secret values, API keys or repository secrets accessed; no config/code changes. AUD-ONCHAIN-001 remains HIGH / OPEN. Next: reconcile complete Module 9 provider evidence requirements and produce the final audit remediation dependency plan before implementing fixes, as required by the project's audit-first checkpoint.
+
+
+## Continuation checkpoint — 26 November 2026 (Module 9 remediation dependency plan)
+
+- Master audit Section 138 provides the dependency-ordered Module 9 remediation plan. It is a plan only, not implementation authorization.
+- Gate 0: keep Module 9 inactive, do not feed on-chain aggregation into candidate scoring, and do not publish. Default-main AUD-GIT-007 remains a separate release blocker.
+- Gate 1 requires owner decisions for provider origin/TLS/proxy trust, mapping source authority/freshness, downstream HMAC authorization, post-sign reorg lifecycle, provider payload/memory/concurrency budget, and PostgreSQL backend TLS plus operator/PITR/RPO/RTO.
+- Gate 2 after decisions: complete missing Bitcoin/XRPL receipts, bind sanitized endpoint identity to receipt/HMAC, move Alchemy API key to documented Authorization header where supported, wire approved secret manager and explicit engine injection, implement acceptance invalidation/operator queue, enforce acceptance at aggregator, and provide run-lease/restore operations.
+- Gate 3: TDD; SQLite fresh-process/tamper/reorg; PostgreSQL guarded migration and crash/fencing acceptance only after backend TLS; provider acceptance only with approved non-production credentials; full suite/review; owner-authorized release; separately authorized Module 9 activation.
+- No implementation authorization inferred. No code, schema, secret, DB, provider, Git or publisher mutation occurred. Next continue independent audit/reconcile remaining modules before final remediation authorization.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-M14-003 persisted decision forgery reproduced)
+
+- Reconnected to RDC localhost device `3e1f3ba9-027c-4dfd-b210-005287a1e1c5`; verified the existing worktree `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`. Preserved all 16 modified tracked files and 2 untracked PostgreSQL migrations; no files staged.
+- Master Audit Section 139 adds AUD-M14-003, MEDIUM / CONFIRMED SQLITE REPRODUCTION / OPEN. This is distinct from AUD-M14-002: the evaluator's raw-numeric path remains fail-closed, but the decision persistence APIs accept a caller-constructed `OpportunityDecision(state="PROCEED")` when the caller recomputes the unkeyed SHA-256 digest over the supplied state and snapshot.
+- Deterministic in-memory reproduction: the real evaluator returned `DEFER` with `factors=None` and `policy=None`; a replacement object using the same snapshot but `PROCEED`, score 99 and a recomputed digest was accepted by SQLite `OpportunityDecisionStore.save()`; immediate load returned `PROCEED` / 99 / `UNCONFIGURED`.
+- Source review found one production evaluator call site in `main.py`, which uses the returned in-memory decision object; no production consumer of either SQLite or PostgreSQL decision-load API was found. Thus no current scheduled-runtime PROCEED bypass was demonstrated. The issue affects persistence authority and any future consumer treating loaded state as authorization. PostgreSQL has the same source-level save validation pattern, but was not runtime-tested in this pass.
+- Closure requires an evaluator-issued immutable proof bound to registry-backed factor assessment, gate states, policy version and research-package identity, verified on save/load; alternatively persisted records must remain explicitly diagnostic and never authorization. Add SQLite/PostgreSQL RED/GREEN parity tests only after backend-TLS disposable acceptance.
+- No code/test behavior changed; no DB, provider, secret, workflow, publisher, deployment, staging, commit, push, merge or publication action occurred. Module 14 remains FAIL / DEFER; AUD-M14-001 HIGH / OPEN, AUD-M14-002 fixed locally / hosted CI pending, AUD-M14-003 MEDIUM / OPEN. Overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+- Latest source-level M14 call-site check also reconfirmed the sole production evaluator call passes `factors=None`, `policy=None`; proposal remains explicitly not approved for runtime. No weights, thresholds or policy values were invented.
+
+## Next exact task
+1. Continue owner-independent revalidation of the remaining HIGH findings and the module status register, prioritizing current release-path blockers and any persisted decision/authorization boundaries. Do not repeat Sections 131–139.
+2. Keep Module 14 fail-closed. No M14 implementation until explicit owner-approved evaluator proof contract and acceptance target exist.
+3. Before any behavior change, reproduce with TDD RED, implement the narrow fix, run focused suites, and then run required isolated full/guarded integration acceptance only after the relevant security preconditions are met.
+4. Preserve this worktree and all changes; no stage/commit/push/merge/deploy/migration/live provider or Binance publication without separate explicit authorization.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-EVID-002 CMS legacy duplicate receipt upgrade gap)
+
+- Verified current RDC worktree `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`; prior 16 modified tracked files and 2 untracked migrations were preserved. No application source or tests were modified.
+- Revalidated CMS worker branch `work/cms-worker-receipts`, HEAD `9f91646a398d95765072b300c462987f4350fc5e`, clean. Worker signs normalized SDK events and inserts the receipt atomically with event payload; Layer 1 importer uses `sslmode=verify-full`, read-only transaction option, and verifies exact CMS authority/key/payload before persisting.
+- New AUD-EVID-002 MEDIUM / OPEN: migration 002 leaves legacy `ingestion_receipt` NULL; worker `save()` uses `ON CONFLICT(content_hash) DO NOTHING`; exact event replay has same contentHash because observedAt is excluded. A post-migration replay therefore cannot attach a newly generated receipt to the existing legacy row; worker treats rowCount=0 as ordinary duplicate and importer continues rejecting it. This is source-level deterministic SQL/control-flow evidence; no PostgreSQL DB was connected or mutated. No dedicated duplicate-upgrade test exists in inspected worker tests.
+- AUD-EVID-001 downstream trust revalidation: importer verifies CMS receipt but does not preserve it in AnnouncementEvidence. EvidenceVerificationEngine.evidence_from_announcement deliberately emits SECONDARY / UNVERIFIED / non-primary records with UNSPECIFIED hash semantics; no CMS authority is in the approved source policy. Synthetic local fixture reproduced 5 effective UNVERIFIED records, 0 VERIFIED/CORROBORATED and 0 primary. This is fail-closed, not a demonstrated bypass; any downstream promotion requires explicit owner-approved trust policy and durable receipt verification.
+- Master Audit Section 140 records the receipt boundary and AUD-EVID-002; finding index and current M4/M11 matrix were updated. AUD-ANN-001 remains HIGH / OPEN for missing replay/backfill and feed completeness. AUD-EVID-001 remains MEDIUM / PARTIALLY REMEDIATED / OPEN; AUD-EVID-002 MEDIUM / OPEN.
+- Existing PR #2/PR #14 hosted PostgreSQL results remain the evidence recorded in Section 107; both are unmerged per the last verified audit state. No current production deployment, secret provisioning or real CMS stream was verified.
+- No test suite rerun (relevant suites already have documented local/hosted results; new duplicate-upgrade case is uncovered). No code/test changes, DB/Neon, migration, provider request, secret read, workflow dispatch, deployment, publication, staging, commit, push or merge occurred. Overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+
+## Next exact task
+1. Continue independent review of remaining evidence-verification persistence and source-adapter trust boundaries, without repeating CMS producer/importer receipt checks already documented in Sections 101/107/140.
+2. Prioritize whether any other source's caller-supplied provenance can cross a persistence/reload boundary as trusted evidence; distinguish verified defects from fail-closed capability gaps.
+3. Keep all production provider, DB, secrets, publishing and Git write operations disabled absent separate explicit approval. Preserve the current worktree and all existing modifications.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-EVID-003 caller-controlled market/trend provenance)
+
+- Verified existing RDC worktree `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`. Existing 16 modified tracked files and 2 untracked migrations remain preserved; no staging or Git writes.
+- Master Audit Section 141 adds AUD-EVID-003, MEDIUM / OPEN. The market and trending adapters mint in-process provenance based on caller-controlled `provider`/`source` and official endpoint labels. Persisted proof restoration reissues proof for `binance_spot_market`, `coingecko_market` and `coingecko_trending` using authority metadata plus endpoint checks, without a signed ingestion receipt. In contrast, Binance Spot `exchangeInfo` and Module 9 on-chain restoration paths verify HMAC receipts.
+- Synthetic reproduction: direct caller-constructed CoinGecko `MarketObservation` with caller-chosen price and no receipt was adapted to effective ACCEPTED with a verifier proof; direct caller-constructed CoinGecko `TrendSignal` with caller-chosen topic and no receipt likewise became ACCEPTED. Three serialized-style unsigned market/trend EvidenceRecords also regained proof via `_restore_evidence_record_proof()`. No network, DB, provider, secret or production row was used.
+- ClaimRegistry SHA-256 is an unkeyed content-integrity digest, not an authenticity signature. Opportunity factor reconstruction verifies this digest and calls `_restore_evidence_record_proof()`; therefore the persisted digest alone cannot prove who originated provider fields. No hostile DB writer or current production exploit was demonstrated. The confirmed defect is that the adapter APIs themselves cannot distinguish a genuine provider-client observation from an internally constructed object with matching metadata.
+- Required closure: owner decision on concrete-client trust boundary vs authenticated provider receipts; if receipts required, bind exact normalized payload/request profile/asset/time/selected fields at transport boundary and reverify after reload. Add TDD for caller-constructed records, value/hash mismatch, forged persisted payload with recomputed digest, missing/tampered receipts and key revocation. No guessed trust policy or key.
+- Updated master audit finding index and current M2/M11 module matrix. No application code/test behavior changed; no DB/provider/secret/Git/publisher operation occurred. M2/M11 remain PARTIAL; AUD-EVID-001/002 remain open; overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+
+## Next exact task
+1. Continue audit of remaining trust-sensitive persistence/authorization boundaries and reconcile findings against current production call sites; do not repeat CMS receipt checks (Section 140) or the market/trend provenance checks (Section 141).
+2. Prioritize HIGH release-path findings and determine whether any stored event, publication, lifecycle, image or workflow authorization can be forged or replayed across save/load boundaries.
+3. No code behavior changes until the master audit and owner-approved remediation plan are complete. Preserve current worktree. No production DB/provider/secrets/publishing/Git write operations without separate explicit approval.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-PUB-003 verifier-to-draft claim binding gap)
+
+- Verified existing RDC worktree `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`; all prior modifications preserved, no staged files.
+- Master Audit Section 142 adds AUD-PUB-003, MEDIUM / OPEN. `DraftStore.save_text_validation()` and PostgreSQL equivalent require a verifier-issued unchanged PASS `ContentVerificationResult` but persist only status/reasons/version/hash, not the result's `approved_claim_ids`. The authorization engines separately load the draft's persisted claim IDs and check only that they are in the editorial brief allowlist. No exact equality check ties the verifier-approved claim set to the draft claim set.
+- Deterministic in-memory SQLite reproduction used the real `ContentVerificationEngine`: ClaimRegistry/content verification returned PASS for claim A. An exact same content hash was then persisted as a draft referencing claim B, where both A and B were allowed by the editorial brief. The verifier-issued PASS result for A was saved. Real `PublicationAuthorizationEngine.authorize()` accepted the draft and minted a valid integrity-checked authorization for B with `evidence_status=VERIFIED`. No publisher call or network request occurred.
+- PostgreSQL implementation has the same source-level gap (`PostgresPublicationStore.save_text_validation()` and `PostgresPublicationAuthorizationEngine.authorize()`); no PostgreSQL runtime reproduction was performed. The current only production `main.py` call site correctly saves draft IDs and validation result from the same `content_verification` object, so no current scheduled caller mismatch was demonstrated. The defect is an unenforced API/persistence invariant affecting alternate/future callers and any mismatched persisted data.
+- Required fix after approval: persist the canonical approved-claim set/digest with the PASS validation and exact draft hash; require equality with draft claim IDs in both authorization and final pre-submit revalidation; fail closed for legacy validation rows lacking claim binding. TDD cases: A verified/B draft, A/A valid, normalized ordering, altered validation, legacy row, SQLite/PostgreSQL parity.
+- Updated master audit index and M18/M21 matrix. No application code/test behavior changed, no live publisher/network, DB, migration, secret or Git write operation. M18/M21 remain PARTIAL; overall PARTIAL / NOT PRODUCTION-READY / NO-GO.
+
+## Next exact task
+1. Continue independent review of the remaining image authorization and upload persistence boundary, especially whether uploaded image URLs/artifacts are re-bound to the exact validated image hashes through the final publisher call. Do not repeat Sections 140-142.
+2. Then reconcile publication authorization, image authorization, visual QA and final POST preflight as one end-to-end gate, recording verified invariants and any remaining gaps.
+3. No behavior changes until audit and owner-approved remediation plan are complete. Preserve worktree. No live publishing, provider, production DB, secret, migration or Git write operations without separate explicit approval.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-IMG-002 visual downgrade before media upload)
+
+- Verified existing RDC worktree `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`; all pre-existing changes preserved and no staging/Git writes.
+- Master Audit Section 143 adds AUD-IMG-002, MEDIUM / OPEN. `upload_authorized_image()` validates the immutable authorization and exact local image hash, snapshots bytes and checks the returned Binance CDN URL, but does not re-read latest persisted visual-QA status or artifact before invoking the upload function. The final `PostPublisher.publish()` pre-submit gate does recheck latest visual PASS/version, but that happens after the media upload.
+- Mocked reproduction in existing isolated venv `/tmp/binance-module11-test-venv/bin/python`: generated a real short-lived authorization for an image hash with persisted visual PASS; then inserted a newer REJECT record for the same draft/image. Real `upload_authorized_image()` invoked a mocked upload function once with the exact authorized bytes and returned a synthetic allowlisted CDN URL despite latest visual state REJECT. No network, Binance upload, publish POST, secret or production DB used. System Python initially lacked Pillow; isolated test venv succeeded without package changes.
+- Risk is an unwanted external media upload/quota/storage side effect, not a demonstrated final Square POST bypass: the later publisher visual gate should block the post. Closure: re-read latest persisted visual PASS/version and image artifact identity immediately before upload; fail closed on missing/stale/ambiguous ledger; TDD PASS-to-REJECT, missing, stale, tamper and backend parity. Keep final publisher gate independent.
+- Updated master audit finding index and M19/M20/M21 matrix. AUD-IMG-002 MEDIUM/OPEN; AUD-PUB-003 MEDIUM/OPEN; overall PARTIAL / NOT PRODUCTION-READY / NO-GO. No code/test behavior changed, no real media upload or publication occurred.
+
+## Next exact task
+1. Continue independent audit of image artifact persistence and URL-to-hash lineage after upload: verify the exact returned CDN URL, authorized image hash, durable artifact and publication attempt remain bound through the final POST and success/failure recovery. Do not repeat Sections 140-143.
+2. Then reconcile the whole chain: visual QA → publication authorization → media upload → final publisher preflight → durable attempt/result.
+3. No behavior changes until audit and owner-approved remediation plan are complete. Preserve worktree. No real upload/publish, provider, production DB, secret, migration or Git write operation without separate explicit approval.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-IMG-003 outbound URL/hash binding gap)
+
+- Verified existing RDC worktree `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`; all existing modifications preserved; no stage/commit/push.
+- Master Audit Section 144 adds AUD-IMG-003, MEDIUM / OPEN. `PostPublisher.publish()` accepts `image_list` and `image_hashes` independently. It validates the supplied hash list against the immutable authorization, but does not bind outbound image URLs to those hashes or require a typed upload receipt. The current scheduled `main.py` caller uses `upload_authorized_image()` and passes its return URL; no current scheduled exploit was demonstrated. The publisher API itself remains permissive.
+- Mocked reproduction in isolated test venv: created a real publication authorization for image hash `dddd…dddd` and a persisted visual PASS. Called the real `PostPublisher.publish()` with matching authorized hashes but `image_list` containing `https://unrelated.example/not-the-authorized-image.png`. Patched only the HTTP opener with a local fake success response. Publisher accepted and sent that unrelated URL in outbound JSON; returned `PUBLISHED_CONFIRMED` solely because the fake transport response claimed success. No network, Binance media upload, credentials or real post occurred.
+- Impact: an alternate/future caller can submit an image different from the one whose bytes and visual-QA result were authorized. Remediation: typed immutable upload receipt binding authorization ID, exact image hash, draft hash, CDN URL and upload identity/time; persist/authenticate and verify it in publisher; reject substitutions and test multiple/no-image cases with mocked transport. CDN hostname alone does not prove content identity.
+- Updated master audit index and M19/M20/M21 matrix. AUD-IMG-003 MEDIUM/OPEN; AUD-IMG-002 and AUD-PUB-003 remain open; M19/M20/M21 PARTIAL. No code/test behavior changed, no actual upload/publication, DB/provider/secret or Git write occurred. Overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+
+## Next exact task
+1. Continue the end-to-end final POST review for content/image URL payload construction, idempotency key, response persistence and failure/unknown recovery. Do not repeat Sections 140-144.
+2. Reconcile all findings affecting the final publication gate and prepare the owner decision/remediation dependency list; keep real publishing disabled.
+3. No code behavior changes until audit and owner-approved remediation plan are complete. Preserve the worktree; no live publishing/upload, production DB/provider/secrets, migrations or Git writes without separate explicit approval.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-PUB-004 post-authorization hashtag rewrite)
+
+- Master Audit Section 145 adds AUD-PUB-004, MEDIUM / OPEN. `PostPublisher.publish()` authorizes the exact supplied content but both SQLite and PostgreSQL outbound payloads call `_limit_hashtags(content)`. With more than five tags, the helper strips hashtags from the body and appends only the first five, changing the text after validation/authorization. Main's deterministic quality gate checks a minimum hashtag count only; content verification does not enforce a maximum.
+- Deterministic reproduction with six hashtags: authorized text hash `6a8b3d358c00008ab74d74743c3c0c93e9a31e64cf99d449fac367effde2fd67`; outbound transformed text hash `c31379b2732cb211d72ea3b9a0284a0625c2bcf85286684133f333a35f4f4229`. Idempotency key and local post history use original text, while remote payload uses transformed text. No network or publication occurred.
+- Required closure: enforce hashtag policy before draft persistence/verification and reject >5, or normalize once before verification and use the same canonical text for draft hash, authorization, idempotency, outbound request and history. TDD 0/5/6/malformed cases and exact hash equality across every stage.
+- Updated master audit index and M18/M21 matrix. AUD-PUB-004 MEDIUM/OPEN; AUD-PUB-003 and AUD-IMG-002/003 remain open. No code/test behavior changed, no real publish/provider/DB/secret/Git write occurred. Overall PARTIAL / NOT PRODUCTION-READY / NO-GO.
+
+## Next exact task
+1. Reconcile the current publication path findings AUD-PUB-003/004 and AUD-IMG-002/003 against the current scheduled caller and prepare the dependency-ordered remediation plan; do not repeat the reproductions.
+2. Continue only with remaining independent audit of publication response durability and crash recovery if needed. Keep real publishing and media upload disabled.
+3. No behavior changes until the audit and owner-approved remediation plan are complete. Preserve all existing worktree modifications and do not stage/commit/push/merge/deploy/migrate without separate explicit approval.
+
+
+### AUD-PUB-004 reachability addendum — 26 November 2026
+
+- Ran the real `ContentVerificationEngine.validate()` against the existing verifier-issued ClaimRegistry fixture with six hashtags. It returned `PASS` and one approved claim; the resulting content had six hashtags. This confirms the content gate itself does not enforce the publisher's five-hashtag maximum. Main's later quality gate checks minimum count only.
+- Repository-wide non-test call-site check found one production authorization call (`main.py:5653`), one `upload_authorized_image()` call (`main.py:5685`) and one `publisher.publish()` call (`main.py:5717`). Current scheduled caller passes the content verifier's approved claim IDs into draft persistence, derives evidence status from the same result, obtains the image URL from the authorized upload helper, and passes the same image hash list into publisher. Therefore AUD-PUB-003 and AUD-IMG-003 were not demonstrated on the current scheduled caller; AUD-IMG-002 is a possible validation downgrade race between authorization and upload; AUD-PUB-004 is reachable if the generated content has more than five hashtags because no max is enforced before publisher normalization.
+- Final `git diff --check` passed. Branch/HEAD unchanged, 16 modified tracked files, 2 untracked migrations, 0 staged. No code/test behavior changes, live provider, database, upload, publication, secret or Git write.
+
+
+## Continuation checkpoint — 26 November 2026 (AUD-PUB-005 post-publication projection recovery gap)
+
+- Continued in the existing RDC worktree `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`. Existing source/test/migration modifications were preserved; no code behavior was changed.
+- Reviewed SQLite and PostgreSQL `PostPublisher.publish()` end-to-end. Both persist the remote post ID first as `PUBLICATION_UNKNOWN`, then save the post record, then finalize attempt/quota as `PUBLISHED_CONFIRMED`. Existing idempotency fencing blocks automatic resubmission for unresolved attempts. This is a positive verified control; the local idempotency key is derived from symbol, original content and image URL list, and no external idempotency header is sent in the request. Do not assume Binance supports one.
+- New Master Audit Section 146 adds AUD-PUB-005, MEDIUM / OPEN. Operator reconciliation resolves attempt/quota (and PostgreSQL audit event) but does not backfill a missing `posts` row, `post_analytics` row or `published_posts.jsonl` record. After publisher confirmation, the scheduled caller writes JSONL and analytics separately; no durable outbox or automatic projection repair was found. A crash after remote-ID persistence but before `save_post()` can leave the confirmed/reconciled attempt without a post row; a crash after terminal confirmation but before caller projections can leave analytics/JSONL missing.
+- This is not a demonstrated duplicate-post bypass: confirmed attempts participate in duplicate policy and quota is durably finalized. Impact is incomplete post history/performance intelligence. `post_analytics.remote_post_id` is not unique in the inspected schemas, so any repair path must be idempotent.
+- Ran `/tmp/binance-module11-test-venv/bin/python -m unittest tests.test_publisher_safety`: **56 tests passed, 0 failures** in 17.084s. These are local tests with mocked publisher transport; no real Binance POST, media upload, production database/provider access or secrets. Existing tests verify unknown-outcome fencing and mocked local-save failure, but do not verify downstream projection backfill after reconciliation.
+- Updated audit finding register from 35 to 36 unique IDs and added AUD-PUB-005. No source code, tests, migrations, environment or Git state was modified by this audit documentation update.
+- Current publication findings to carry into the owner decision: AUD-PUB-003 verifier→draft claim-set binding; AUD-IMG-002 visual-QA recheck before upload; AUD-IMG-003 URL↔authorized-image-hash binding; AUD-PUB-004 post-authorization hashtag rewrite; AUD-PUB-005 projection recovery. Existing AUD-PUB-001/002 and AUD-M21-001 remain separate ledger/concurrency/recovery items and were not re-audited here.
+- Project remains **PARTIAL / NOT PRODUCTION-READY / NO-GO**. No stage/commit/push/merge/deploy/migration, real publish/upload, production DB/provider operation or secret read occurred.
+
+## Next exact task
+1. Reconcile the complete final publication gate findings AUD-PUB-003/004/005 and AUD-IMG-002/003 against the current scheduled caller, existing PUB-001/002 and M21-001 controls, and the architecture's publication invariants. Do not repeat Sections 140–146.
+2. Produce the owner decision list and dependency-ordered remediation plan, distinguishing current scheduled-path exposure from alternate-caller/API contract gaps and operational recovery gaps.
+3. No behavior changes until the master audit and owner-approved remediation plan are complete. Preserve the worktree; no live publishing/upload, production DB/provider/secrets, migrations or Git writes without separate explicit approval.
+
+
+### Owner decision plan prepared — 26 November 2026
+- Master Audit Section 147 reconciles AUD-PUB-003/004/005, AUD-IMG-002/003, existing AUD-PUB-001/002 and AUD-M21-001 across the final publication gate. Current scheduled-path correctness is distinguished from alternate-caller API contract gaps and downstream recovery gaps.
+- Dependency order: (P0) exact canonical text + verifier claim-set binding + upload URL/hash receipt; (P1) latest visual PASS/artifact recheck before upload; (P2) preserve unknown-outcome fencing and add idempotent local projection repair; (P3) owner-select live persistence backend and complete disposable operational crash/restore/operator acceptance.
+- Owner decisions explicitly listed: PostgreSQL-only vs supported SQLite live mode; reject vs pre-verification normalization for >5 hashtags; typed upload receipt fields; manual unknown-outcome policy pending documented Binance read/idempotency capability; authoritative vs rebuildable status of posts/analytics/JSONL; and separate production activation approval.
+- This is a remediation plan only, not authorization to change behavior. No implementation or test files changed. Overall remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+
+## Continuation checkpoint — 26 November 2026 (AUD-PUB-006 SQLite response identity parity)
+
+- Reviewed SQLite/PostgreSQL response parsing and ambiguous-outcome branches. Existing code keeps missing-ID success responses, oversized/malformed bodies, transport exceptions and 408/429/5xx responses non-retryable as PUBLICATION_UNKNOWN; definitive ordinary 4xx/provider error codes are FAILED_CONFIRMED. No blind retry was found.
+- New AUD-PUB-006, MEDIUM / OPEN: SQLite accepts a success-shaped response with a malformed non-empty remote post ID and an arbitrary shareLink URL, then persists and returns PUBLISHED_CONFIRMED. PostgreSQL calls validate_attempt_completion() and rejects the same malformed ID/link. Mocked-only reproduction: SQLite accepted ID 'remote id with spaces' and URL 'https://evil.example/phishing'; one patched opener call, no network. PostgreSQL validator rejected the malformed ID with ValueError.
+- Required closure: apply the shared ID/link validator to SQLite; invalid success-shaped identity must remain PUBLICATION_UNKNOWN and fenced, not FAILED_CONFIRMED. Add backend parity tests for malformed ID, hostile/mismatched URL, HTTPS/hostname/path/credentials/fragment/port and missing shareLink.
+- This is a response-schema/backend parity issue, not evidence of a malicious real Binance response or duplicate-post bypass. No application code, tests, migrations, production DB/provider, credentials or Git state changed.
+- Next exact task: reconcile AUD-PUB-006 with AUD-PUB-003/004/005, IMG-002/003 and Module 21 final gate; update the final blocker register/matrix and preserve the owner decision plan. Do not implement until owner authorizes a specific remediation scope. No live publish/upload or production operations.
+### Publication release-gate addendum — 26 November 2026
+- Section 149 adds AUD-PUB-006 to the P0 gate: shared remote-ID/shareLink validation must run before either backend persists remote identity or returns PUBLISHED_CONFIRMED. Invalid success-shaped responses remain PUBLICATION_UNKNOWN and non-retryable; no untrusted URL is persisted. SQLite/PostgreSQL parity cases are enumerated.
+- Exact next task: perform a final consistency pass over the updated publication findings/register/matrix and the 147/149 dependency plan, then continue the remaining independent audit queue. No code behavior changes until a specific remediation scope is approved. Preserve all worktree changes; no live publish/upload, production DB/provider/secrets, migrations or Git writes.
+## Continuation checkpoint — 26 November 2026 (AUD-ONCHAIN-007 pending-page recovery exception isolation)
+
+- Verified RDC device localhost (3e1f3ba9-027c-4dfd-b210-005287a1e1c5), worktree /tmp/binance-w2e-continuation, branch work/module9-continuation-local, HEAD 9426e689e19669740972ebabd6264cc16649f703.
+- Continued the owner-independent Module 9 page-acceptance/replay/recovery audit; did not repeat Sections 122–123 or publication Sections 140–149.
+- Master Audit Section 150 adds AUD-ONCHAIN-007, MEDIUM / OPEN. sign_pending_ingestion_pages() catches only ValueError around each pending page. A malformed persisted receipt JSON item such as null passes the pending-list nonempty check; get_page_acceptance_material() then raises TypeError during ProviderResponseReceipt(**item). The exception escapes the recovery loop, so later pending pages are not attempted and the worker call can fail after its page/checkpoint has committed.
+- Reproduction: existing tests.test_onchain_ingestion.OnChainIngestionStoreTests._commit_signable_page() fixture in a temporary SQLite DB; replaced only receipts_json with canonical [null] and updated receipt_sha256 to match. list_pending_page_acceptances() returned the page; real sign_pending_ingestion_pages() raised TypeError: ProviderResponseReceipt() argument after ** must be a mapping, not NoneType. No app/test code was changed; no network/provider/PostgreSQL/production DB/secrets/upload/post used.
+- Recommended closure (not implemented): isolate each pending page's validation/signing failure; count malformed material as rejected, leave it unsigned for operator review, and continue to later pages. Add malformed receipt/event/page, bad-then-good page ordering, and SQLite/PostgreSQL parity regressions. Do not auto-delete or bless corrupt rows.
+- Master audit finding register count updated to 38 unique IDs; Module 9 matrix includes AUD-ONCHAIN-007. Existing source/test/migration changes remain preserved and unstaged.
+- AUD-ONCHAIN-001 HIGH / OPEN, AUD-ONCHAIN-002 HIGH / OPEN, AUD-ONCHAIN-004 MEDIUM / PARTIALLY REMEDIATED / OPEN, and Module 9 runtime activation remains gated. Overall PARTIAL / NOT PRODUCTION-READY / NO-GO.
+- No behavior changes, test-file changes, migrations, DB connections, live provider calls, secret reads, uploads, Square publication, staging, commits, pushes, PR mutation, merge or deployment occurred.
+
+## Next exact task
+1. Audit whether unsigned/pending page records can be consumed by downstream aggregation/evidence paths before page-acceptance HMAC verification, and whether all four worker families fail closed or merely report pending/rejected acceptance counts. Inspect actual call sites and read paths; do not infer from the existence of the HMAC table.
+2. Then continue replay/recovery consistency review for duplicate page commits, reorg invalidation and restart ordering. Record only demonstrable gaps.
+3. No code behavior changes until the audit and owner-approved remediation scope are complete. Preserve the worktree and all unstaged modifications; keep live providers, production DB, migrations, media uploads and Square publishing disabled.
+
+## Continuation correction — 26 November 2026 (do not repeat completed page-consumer audit)
+
+The immediately preceding checkpoint's proposed next task to inspect whether unsigned/pending pages reach aggregation was already completed in Master Audit Sections 125 and 129. Those sections establish that no production call site verifies page HMAC before the only business consumer, OnChainTransferAggregator.aggregate_store(); unsigned and invalidated-but-still-canonical events can be aggregated under the current API contract. This is an owner-decision blocker, not an unreviewed task. Do not repeat that call-graph audit or add a hard gate without the owner decision recorded in Section 138.
+
+Section 128 already records post-sign reorg invalidation stranded outside the pending recovery queue. Section 124/126 record the signer save TOCTOU fix and PostgreSQL lock-order verification. Section 134/135 record the three missing supporting-response receipts and the current adapter transport-to-receipt matrix. Preserve these findings and do not repeat their reproductions.
+
+### Next exact task
+1. Continue the independent Module 9 replay/recovery audit only where not already covered by Sections 124–129 and 134–138. A useful remaining check is whether page replay/idempotency and checkpoint advancement preserve event/page lineage across duplicate page IDs, cursor changes, reorg/recanonicalization and fresh-store restart; record only new, reproducible gaps.
+2. If no owner-independent defect remains, stop implementation/audit expansion and present the outstanding owner decisions from Section 138. Do not implement trust semantics or runtime activation without those decisions.
+3. No code behavior changes. Preserve all unstaged modifications and keep production DB, live providers, migrations, media uploads and Square publishing disabled.
+
+## Continuation checkpoint — 26 November 2026 (AUD-ONCHAIN-008 SQLite checkpoint replay rewind)
+
+- Reconfirmed the proposed unsigned-page/aggregation audit was already complete in Sections 125 and 129; did not repeat it. Those sections establish that the HMAC is not currently an enforced aggregation gate and that owner intent must be clarified before any gate is added.
+- Continued the remaining page replay/checkpoint contract review. Master Audit Section 151 adds AUD-ONCHAIN-008, MEDIUM / OPEN. SQLite commit_page() allows expected_cursor to be omitted; it skips compare-and-swap but still writes next_cursor. An exact replay of an earlier page after a later page therefore regresses the checkpoint. PostgreSQL rejects omitted expected_cursor.
+- Local reproduction in a temporary SQLite fixture: commit page A -> next=101; commit page B -> next=102; replay exact A -> duplicate event result but checkpoint regressed to 101. Control: explicit expected_cursor snapshots reject the stale replay with RuntimeError and preserve next=102.
+- Repository-wide worker call-site review found all four built-in workers (Bitcoin, EVM, Solana, XRPL) pass expected_cursor explicitly for page commits and checkpoint-only reset/rewind commits. Therefore no current built-in worker exploit was demonstrated; this is an SQLite public API/default and backend-parity defect for alternate/future callers.
+- Register now contains 39 unique finding IDs. Module 9 matrix includes AUD-ONCHAIN-007 and AUD-ONCHAIN-008. No source code, test behavior, migration, database, environment or Git operation was changed.
+- AUD-ONCHAIN-007 remains MEDIUM / OPEN (malformed pending receipt TypeError aborts recovery; PostgreSQL parity is source-level only). AUD-ONCHAIN-008 remains MEDIUM / OPEN. AUD-ONCHAIN-001 HIGH / OPEN, AUD-ONCHAIN-002 HIGH / OPEN, AUD-ONCHAIN-004 MEDIUM / PARTIALLY REMEDIATED / OPEN. Module 9 and overall project remain PARTIAL / NOT PRODUCTION-READY / NO-GO.
+- No live provider, database connection/migration, secret read, upload, Square publication, staging, commit, push, PR mutation, merge or deployment occurred.
+
+## Next exact task
+1. The owner-independent page-consumer, post-sign reorg, signer TOCTOU, and current adapter receipt-capture audits are already recorded in Sections 124–129 and 134–135. Do not repeat them.
+2. Continue only if another independently reproducible Module 9 replay/recovery defect is found. Otherwise the next actionable step is owner input for the explicit trust, mapping, acceptance, reorg, response-cap and key-custody decisions listed in Section 138; do not invent these policies or implement behavior changes before approval.
+3. Preserve the worktree and all unstaged modifications. No production activation, provider calls, production DB, migrations, media uploads or Square publishing.
+
+## Continuation checkpoint — 26 November 2026 (remaining Module 9 replay/recovery scan)
+
+- Reviewed SQLite/PostgreSQL page receipt ordering and page-acceptance material reconstruction, plus all four built-in worker checkpoint-only reset/rewind call sites.
+- No additional independently reproducible defect was established in this limited scan. Existing findings remain the correct records: AUD-ONCHAIN-007 (malformed persisted receipt can abort signing recovery), AUD-ONCHAIN-008 (SQLite unchecked expected_cursor can rewind checkpoint), AUD-ONCHAIN-005 (page HMAC not enforced at aggregation boundary), and Section 128 (post-sign reorg invalidation/recovery).
+- No new finding ID was created. Do not extend audit scope by guessing at policy or duplicating Sections 124–129 and 134–138.
+- Final verification: branch work/module9-continuation-local; HEAD 9426e689e19669740972ebabd6264cc16649f703; git diff --check passed; 16 tracked modifications, 2 untracked migration files, 0 staged. All prior worktree modifications preserved.
+- Work is now blocked on the explicit owner/security decisions in Master Audit Section 138, Gate 1. No code behavior changes, tests, DB, provider, secret, publication, staging, commit, push, merge or deployment occurred in this scan.
+
+
+## Continuation checkpoint — 26 November 2026 (owner-approved page HMAC authorization gate)
+
+- Owner explicitly approved policy A: a valid trusted page HMAC is mandatory before an ingestion page's events may be consumed by downstream aggregation.
+- Implemented the gate at the only production business consumer previously found, `OnChainTransferAggregator.aggregate_store()`: enumerate persisted page identities, verify each page HMAC using store-reconstructed material and the mapping store's trusted OnChainIntelligenceEngine, collect event lineage from valid signed pages, and reject any canonical event without membership in a currently valid signed page.
+- Added `list_ingestion_pages()` to SQLite/PostgreSQL stores and the structural protocol. No schema migration was required or added for this gate.
+- Added TDD regression: unsigned page aggregation failed before the fix (expected ValueError was not raised); after implementation, unsigned and tampered-signature pages are rejected. Positive signed-page aggregation and canonical-only behavior are retained.
+- Focused test modules: 92 run, 0 failures, 21 skipped. Full repository suite: 1,118 run, 0 failures/errors, 72 skipped. compileall and git diff --check passed on 26 November 2026.
+- PostgreSQL integration cases were included but skipped because no disposable PostgreSQL backend was available; no PostgreSQL server was contacted. Runtime parity remains unaccepted.
+- Scope limitation: repository audit previously found aggregate_store() to be the only production business consumer, and Module 9 is not wired into the scheduled production orchestrator. Lower-level iterable aggregate() remains a unit-test/low-level primitive; production must use aggregate_store(). Future production call sites must not bypass this gate.
+- Performance limitation: page verification currently enumerates all persisted page identities for each aggregate_store call (O(total pages)); benchmark/retention/indexed-lineage acceptance is still required before high-volume activation.
+- AUD-ONCHAIN-005 is PARTIALLY REMEDIATED / OPEN pending PostgreSQL runtime acceptance, production wiring review and operational performance acceptance. Other Section 138 owner decisions remain open. Overall project remains PARTIAL / NOT PRODUCTION-READY / NO-GO.
+- Preserved all prior unstaged worktree modifications. No live provider, production DB, migration, secret, upload, publication, staging, commit, push, merge or deployment.
+
+## Continuation checkpoint — 26 November 2026 (owner-approved provider endpoint and direct-connection policy)
+
+- Owner approved exact Alchemy/Chainstack endpoint profiles only and rejected unknown/custom hosts. Approved: bitcoin-mainnet.g.alchemy.com, eth-mainnet.g.alchemy.com, solana-mainnet.g.alchemy.com, bnb-mainnet.g.alchemy.com and xrpl-mainnet.core.chainstack.com.
+- Owner explicitly approved direct connections only; application/system proxy configuration must not be used for provider traffic.
+- Enforced fixed HTTPS origin/port 443/path profiles: Alchemy uses /v2/{single URL-safe API key}; Chainstack XRPL uses /{single URL-safe endpoint token}. Reject userinfo, query, fragment, alternate ports, extra path segments, traversal and unapproved hosts/subdomains. Redirects remain disabled.
+- Default urllib opener now explicitly installs ProxyHandler({}) so HTTP(S)_PROXY/ALL_PROXY and system proxy discovery are not used by the application transport.
+- TDD: new proxy regression failed before fix; focused provider/on-chain tests 168 passed, 0 failed/errors. Full repository suite 1,122 run, 0 failures/errors, 72 skipped. compileall and git diff --check passed.
+- This is application-level direct transport enforcement, not evidence against transparent infrastructure proxies/interception. Provider-signed proof/peer identity policy remains unresolved. AUD-ONCHAIN-001 remains PARTIALLY REMEDIATED / OPEN; project remains NO-GO.
+- No live provider, env secret read, production DB, migration, publication, staging, commit, push, merge or deployment.
+
+
+## Continuation checkpoint — 26 November 2026 (owner-approved TLS and response-integrity baseline)
+
+- Owner approved mandatory HTTPS certificate-chain and hostname verification, exact Section 153 endpoint profiles, and provider response receipts plus SHA-256 hashes as required response-integrity evidence.
+- Explicit distinction: response SHA-256 proves integrity of the captured bytes relative to the stored digest; it is not a provider digital signature and does not prove provider identity or response authorship.
+- Provider-signed responses are not required unless the relevant provider officially documents a verifiable cryptographic signature format. No custom signature scheme is to be invented.
+- This is a policy decision, not a claim that deployment-level TLS, receipt lineage or egress acceptance has completed. The actual transport must be verified to retain certificate and hostname validation, with negative tests for untrusted chains and hostname mismatch. Response hashes must be bound to exact captured bytes and request/page lineage.
+- Application ProxyHandler({}) only enforces direct-only behavior in the application transport. Infrastructure egress/interception controls and peer/source authenticity remain unproven.
+- Master Audit Section 154 records the decision and closure criteria. AUD-ONCHAIN-001 remains PARTIALLY REMEDIATED / OPEN; Module 9 and the project remain NOT PRODUCTION-READY / NO-GO.
+- No code, tests, environment, provider, database, migration, publication or Git history was changed. Existing unstaged worktree changes and untracked migration files are preserved.
+
+
+### TLS transport implementation checkpoint — 26 November 2026
+- Added TDD regression requiring an explicit HTTPSHandler with a context configured for CERT_REQUIRED and hostname checking. The test failed before the change because the opener relied on urllib's implicit HTTPS handler.
+- Provider opener now explicitly uses ssl.create_default_context() via HTTPSHandler(context=...), retaining platform CA trust and hostname verification, together with the existing direct-only empty ProxyHandler and no-redirect handler.
+- Provider test module: 71 passed. Full repository suite: 1,123 passed, 0 failures/errors, 72 skipped. compileall and git diff --check passed.
+- This verifies SSL context configuration only; no live TLS handshake or local certificate negative-case fixture was run. End-to-end untrusted-chain/hostname-mismatch tests and deployment trust-store/egress evidence remain open. No live provider call or production operation occurred.
+
+
+## Continuation checkpoint — 26 November 2026 (TLS negative handshakes and receipt persistence)
+
+- Added local HTTPS fixture tests for trusted CA + correct IP SAN (accepted), untrusted certificate chain (rejected), and trusted CA + hostname/IP SAN mismatch (rejected). Tests exercise the real provider opener against localhost only.
+- RED control: patched the opener to use an unverified SSL context; both negative tests failed as expected because the invalid handshakes were accepted. Focused provider suite: 74 passed.
+- Added an integration test proving exact raw JSON-RPC response byte hashes survive provider adapter capture, SQLite ingestion page commit, store close/reopen, and page-acceptance material reload. Focused ingestion suite: 38 passed.
+- Full repository suite: 1,127 tests run, 0 failures/errors, 72 skipped.
+- Remaining receipt gap: request_sha256 does not include the destination endpoint origin; ProviderResponseReceipt has provider/network/method labels but no endpoint-profile fingerprint. This is carried forward under AUD-EVID-003. Recommended follow-up is a non-secret endpoint-profile fingerprint in attestation and persisted receipt, with strict approved-profile validation and backward-compatibility tests. Do not silently treat historical receipts as authenticated endpoint evidence.
+- Deployment egress proof, trust-store integrity, endpoint-to-receipt binding and source-to-observation authenticity remain open. Module 9 and project remain NO-GO.
+- No live provider call, secret read, production DB, migration, publication, staging, commit, push, merge or deployment occurred.
+
+
+## Continuation checkpoint — 26 November 2026 (approved endpoint-profile fingerprint)
+
+- Owner approved adding a non-secret endpoint-profile fingerprint to provider response attestation and persisted receipts, with backward-compatible handling for historical receipts.
+- TDD RED reproduced two defects: response attestation omitted the endpoint fingerprint, and page commit accepted a new receipt with no fingerprint. A second RED test proved that an arbitrary fingerprint was also accepted by the page store.
+- The transport now hashes only the canonical HTTPS origin (scheme, IDNA-normalized hostname and effective port). API keys/tokens, URL paths, query strings, fragments and credentials are excluded.
+- Alchemy and Chainstack adapters compare the response-attestation fingerprint with the configured endpoint origin before receipt capture. SQLite and PostgreSQL commit boundaries require a fingerprint for new receipts and verify it against the exact approved provider/network origin. Page-acceptance material readers repeat that profile check.
+- Historical receipt payloads without the new optional field remain readable as legacy/unverified endpoint evidence. They are not silently upgraded. The existing JSON/JSONB receipt storage requires no SQL schema migration; none was applied.
+- Full repository suite: 1,135 tests run, 0 failures/errors, 72 skipped. The 72 skips include DSN-gated PostgreSQL integration tests; PostgreSQL contract-level missing/mismatch rejection tests ran locally without connecting to a database. compileall and git diff --check passed.
+- Security limitation: the hash identifies the application-configured approved origin; it is not a TLS peer/certificate fingerprint, provider signature, or proof of upstream data authorship. The custom transport-factory seam remains trusted and deployment egress/peer evidence remains open.
+- AUD-ONCHAIN-001 is PARTIALLY REMEDIATED / OPEN. Module 9 and the project remain PARTIAL / NOT PRODUCTION-READY / NO-GO.
+- Branch remains work/module9-continuation-local, HEAD remains 9426e689e19669740972ebabd6264cc16649f703, with no staged changes. Existing modifications and untracked migrations/fixtures are preserved. No live provider, DB, migration, secret, publication, staging, commit, push, merge or deployment occurred.
+
+
+## Continuation checkpoint — 26 November 2026 (XRPL canonical-header receipt lineage)
+
+- Factory audit found no non-test construction callsite for AlchemyReadOnlyAdapter or ChainstackXrplReadOnlyAdapter in the current Python source tree. Worker classes accept provider objects; Module 9 runtime adapter construction/activation remains absent/disabled. transport_factory is only used by adapter constructors and tests in the inspected tree; keep it unavailable to untrusted production callers. Future composition root should construct through from_env() and not accept caller-supplied transport factories.
+- Found a receipt lineage omission: ChainstackXrplReadOnlyAdapter.fetch_ledger_header() was used by XRPL worker canonical-ledger checks while a worker receipt scope was active, but its transport response was not appended to the captured provider receipt batch.
+- TDD RED: the new worker-scope test expected one Chainstack ledger receipt but got zero. GREEN: fetch_ledger_header() now requires an attestation in worker scope, validates the configured endpoint-profile fingerprint and appends the full provider receipt. Missing attestation fails with MISSING_RESPONSE_ATTESTATION. Standalone calls without a worker scope preserve their prior behavior.
+- Added negative missing-attestation test. Focused provider, ingestion and XRPL worker suites: 132 passed, 0 failures/errors. Full repository suite is being re-run for this delta.
+- No live provider, DB, migration, credential, publication, staging, commit, push, merge or deployment operation occurred.
+
+
+### Latest verification update — 26 November 2026
+- After adding Chainstack XRPL canonical-ledger header receipt capture: full repository suite **1,137 tests run, 0 failures/errors, 72 skipped**. compileall and git diff --check PASS.
+- Worktree remains unstaged on work/module9-continuation-local at HEAD 9426e689e19669740972ebabd6264cc16649f703. No commit/push/merge/deployment or production operation.
+
+
+## Continuation checkpoint — 26 November 2026 (XRPL multi-page shared evidence)
+
+- Found and reproduced a multi-page lineage gap: XRPL head probe and fixed-range canonical ledger-header receipts were attached to the first page only. After the first page drained the collector, subsequent pages persisted only their account_tx receipt despite relying on the same head/header evidence.
+- TDD RED test `test_every_xrpl_pagination_page_repeats_head_and_canonical_header_receipts` failed because the second page lacked the `server_info` receipt (and header receipts).
+- Fix: after fixed-range header acquisition/revalidation, the worker drains all accumulated shared evidence into an opaque collector-issued receipt batch; before each pagination request it reattaches that batch, then the page's account_tx receipt is captured and committed. This preserves head, reorg-check, and all fixed-range ledger-header receipts for every page in the range.
+- Test verifies both page receipts contain `server_info`, three `ledger` responses, and `account_tx`; both page acceptances are signed and verify successfully.
+- Focused XRPL worker suite: 14 passed. Full suite: **1,138 tests, 0 failures/errors, 72 skipped**. compileall and diff-check passed.
+- Worktree remains unstaged on `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`. No production operations or Git write operations occurred. Module 9 remains NOT PRODUCTION-READY.
+
+
+### Latest checkpoint — 26 November 2026 (Chainstack probe receipt)
+- Follow-up source inspection found the real `ChainstackXrplReadOnlyAdapter.probe()` called `server_info` but did not append its transport attestation. Thus the worker's head-receipt batch was empty with the real adapter; earlier worker-level multi-page fixture had modeled this receipt but did not prove the adapter emitted it.
+- TDD RED: positive test saw zero receipts; negative test showed an unattested `server_info` response was accepted inside worker scope. GREEN: probe now requires attestation in worker scope, checks the configured endpoint-profile fingerprint, and appends a Chainstack/xrpl-mainnet/server_info receipt. Standalone probes preserve prior behavior.
+- Combined with Section 159, each pagination page now receives the real head receipt, shared canonical ledger-header receipts and its own account_tx response receipt. Provider positive/negative probe tests plus XRPL worker suite: 15 passed.
+- Full repository suite: **1,140 tests run, 0 failures/errors, 72 skipped**. compileall and diff-check PASS.
+- Branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`, staged count 0. No live provider/DB/migration/secret/publication or Git write operations. Module 9 remains NOT PRODUCTION-READY.
+
+
+### Latest checkpoint — 26 November 2026 (worker-scope attestation fail-closed)
+- Found that XRPL account_tx, Alchemy JSON-RPC `_call()`, and Alchemy Bitcoin address REST only appended receipts when attestation was present; in a worker scope, absence could be silently skipped. This was especially important because shared head/header receipts could still make the page receipt set non-empty.
+- TDD RED: XRPL account_tx and Alchemy worker RPC tests proved unattested responses were accepted. GREEN: introduced `_ACTIVE_PROVIDER_RUN`, set/reset safely by the worker receipt decorator; the three inspected provider paths now require transport attestation in worker scope and validate the endpoint profile before appending receipts. Missing attestation fails with `MISSING_RESPONSE_ATTESTATION`.
+- Standalone minimal fake transport tests remain backward compatible when no worker run is active; provided fingerprints are still validated.
+- Focused provider + XRPL worker suites: 96 passed. Full suite: **1,142 tests run, 0 failures/errors, 72 skipped**. compileall and diff-check PASS.
+- Branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`, staged count 0. No production/Git write operations. Module 9 remains NOT PRODUCTION-READY.
+
+
+### Continuation checkpoint — 26 November 2026 (Solana/EVM receipt-lineage audit)
+- Inspected Solana and EVM worker/provider call graphs. The suspected Solana later-pagination missing-header-receipt issue was not confirmed: the worker processes one transaction page per run and re-fetches finalized slot plus active range produced-slot/header state on each resumed run before fetching the next page. The current run collector then binds those fresh supporting responses and the transaction-page responses to the committed page.
+- Solana call coverage: `getGenesisHash`, `getSlot`, `getBlocks`, each produced-slot `getBlock`, page-level `getGenesisHash`, `getTransactionsForAddress`. EVM call coverage: finalized chain/head, per-range chain ID/finalized header/`eth_getLogs`, and every canonical block header. Each EVM range commits its own captured batch.
+- Added provider-level receipt-order tests for Solana, Ethereum and BNB; exact methods, contiguous receipt sequence and approved endpoint-profile fingerprints are asserted. Initial erroneous test expectations about page-local receipts were corrected; no product-code defect was found in these paths.
+- Focused provider + Solana + EVM suites: 24 passed. Full suite: **1,145 tests run, 0 failures/errors, 72 skipped**. compileall and diff-check PASS.
+- Branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`, staged count 0. No live provider/DB/migration/secret/publication or Git write operations. Module 9 remains NOT PRODUCTION-READY.
+
+
+### Latest checkpoint — 26 November 2026 (Bitcoin transaction-detail REST receipt)
+- Bitcoin worker review found `fetch_bitcoin_transaction(txid)` retrieves `vin`/`vout` through `transport.get_json()` but previously omitted the transport attestation from the worker's page receipt collector. Thus normalized UTXO events were derived from transaction-detail evidence not bound into the accepted page's provider receipts.
+- TDD RED: unattested worker-scope detail response was accepted and valid attested response produced zero receipts. GREEN: method now requires response attestation in worker scope, checks the approved Alchemy Bitcoin endpoint-profile fingerprint, and appends a `GET api/v2/tx` receipt with request/response hashes and HTTP metadata.
+- Added worker integration test proving `GET api/v2/tx` and `GET api/v2/address` receipts persist together on the same page and its HMAC acceptance verifies. Standalone fake transports outside worker scope remain compatible.
+- Sweep of every `transport.call()` / `transport.get_json()` site in `onchain_providers.py` confirms all inspected worker-scoped RPC/REST methods now require and capture attestations: Alchemy JSON-RPC, Bitcoin address/detail REST and Chainstack XRPL account_tx/ledger/server_info.
+- Focused provider + Bitcoin + Solana + EVM + XRPL suites: 131 passed. Full suite: **1,148 tests run, 0 failures/errors, 72 skipped**. compileall and diff-check PASS.
+- Branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`, staged count 0. No live provider/DB/migration/secret/publication or Git write operations. Module 9 remains NOT PRODUCTION-READY.
+
+
+### Module 9 runtime composition / activation audit — 26 November 2026
+- Confirmed production activation gap: source-tree-wide production-only search and AST call scan found no construction callsites for the Alchemy/Chainstack adapters, the four worker classes (Bitcoin, EVM for ETH+BNB, Solana, XRPL), or the mapping/ingestion stores. Tests construct these components; the production scheduler does not.
+- `main_loop()` invokes `run_once(..., hot_search_engine)` and one-shot `main()` invokes `run_once(..., hot_search_engine=...)`; neither creates or schedules Module 9 components. `run_once()` forwards optional `onchain_aggregation_by_asset`, but neither production caller supplies it. `_persist_layer1_market_intelligence()` maps None to an empty mapping and records `NOT_PROVIDED`. Therefore Module 9 is not part of scheduled ingestion/candidate intelligence today.
+- Provider factories exist: Alchemy `from_env()` for Bitcoin/Ethereum/Solana/BNB and Chainstack `from_env()` for XRPL. No production caller invokes them. Current RDC process presence-only check: ALCHEMY_API_KEY, CHAINSTACK_XRPL_ENDPOINT, ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES, ONCHAIN_RECEIPT_HMAC_KEYRING_JSON, ONCHAIN_RECEIPT_ACTIVE_KEY_ID, ONCHAIN_RECEIPT_TRUSTED_KEY_IDS all UNSET. No secret values or .env files were read. Workflow reference search found no Module 9 provider/key settings in tracked .github/workflows. This does not establish what is configured in external deployment secrets.
+- Runtime composition requires explicit monitored addresses/accounts, per-mapping start positions, bounded range/page settings, reorg lookbacks, Bitcoin confirmations, and non-empty network freshness limits. SQLite and PostgreSQL mapping stores and ingestion stores are separate components; no runtime backend selection/wiring exists for Module 9.
+- Finding recorded as Master Audit Section 164, HIGH / active production capability gap (not a provider trust bypass). Remediation requires an explicit reviewed composition root, operator-provisioned configuration, durable backend selection, worker scheduling, aggregation handoff, and offline fail-closed composition/recovery tests.
+- No behavior/code change, live provider call, DB connection/mutation, migration, publication, or Git write operation occurred. Branch remains work/module9-continuation-local at 9426e689e19669740972ebabd6264cc16649f703; all existing modifications/untracked files preserved. Module 9 and project remain NOT PRODUCTION-READY / NO-GO.
+
+
+### Module 9 accepted-observation lifecycle and aggregation-order audit — 26 November 2026
+- New HIGH blocker: `OnChainTransferAggregator._eligibility_error()` requires `mapping_store.get_latest_accepted_observation(mapping_id)`; missing anchor observation rejects the mapping with `ONCHAIN_MAPPING_LACKS_ACCEPTED_SPOT_PROOF`. SQLite/PostgreSQL stores expose `save_verified(eligibility, mapping, observation)`, but production-only search/AST scan found no callsite, no production OnChainObservation constructor, and no production OnChainStore/PostgresOnChainStore construction. Workers persist canonical transfer events/page receipts into the separate ingestion store only.
+- Worker tests manually seed accepted observations before worker execution (Solana/XRPL fixtures), confirming this is currently test setup rather than a production observation lifecycle. A future runtime needs a reviewed operator-provisioned anchor-observation lifecycle or a dedicated observation producer with exact provider receipt/finality/reorg/HMAC handling; do not equate a transfer event with an anchor observation without a semantic contract.
+- Second blocker: aggregator.aggregate_store() requires current EligibilityDecision objects. main._persist_layer1_market_intelligence() generates these inside its candidate loop (main.py:6090-6093) but expects precomputed onchain_aggregation_by_asset before candidate build (6137-6140). Existing optional injection is only a precomputed TransferAggregationResult mapping, not an aggregator callback. A future integration needs a reviewed two-phase eligibility/candidate flow or safe callback after decisions exist, without duplicate identity-proof fetches.
+- Master Audit Section 165 records both blockers. Unit tests currently seed anchor observations and inject precomputed aggregation; they do not prove scheduled production composition. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+- No code behavior or runtime environment changed; no live provider/DB/migration/publication or Git write operation occurred. Existing worktree preserved.
+
+
+### Anchor-observation provenance gap — 26 November 2026
+- Confirmed a concrete AUD-ONCHAIN-001 trust-boundary gap: `OnChainObservation` contains no durable provider page/receipt reference; `OnChainIntelligenceEngine.validate()` accepts caller-created observations and signs only the supplied eligibility + mapping + observation snapshot; `OnChainStore.save_verified()` persists that ACCEPTED result without verifying any ingestion page. The signed page-HMAC path is used by the transfer aggregator but is not linked to the anchor-observation writer.
+- Local reproduction using the existing synthetic BTC fixture returned `ACCEPTED / ONCHAIN_OBSERVATION_VERIFIED` for an observation with arbitrary block/transaction identifiers and no provider receipt reference. No provider or database was contacted.
+- This proves the HMAC is an application-key-holder attestation of supplied data, not proof that the upstream response contained the supplied observation. A page ID/hash field alone is insufficient: verifier must re-read durable page material, verify acceptance, check current canonical/reorg state and exact event/observation identity, including chain-specific finality semantics.
+- Do not equate a normalized transfer event with an anchor observation without an explicit tested semantic contract. Keep AUD-ONCHAIN-002 mapping source authority/freshness policy separate and blocked pending owner decisions.
+- Master Audit Section 166 records the reproduction and required remediation. No code/test change was made because the exact observation-to-provider evidence contract is not yet specified; Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+### Chain-specific finality persistence contract — 26 November 2026
+- Further audit of all four worker commit paths confirmed that the signed ingestion page does not yet preserve enough parsed finality data to revalidate an anchor observation after restart.
+- Bitcoin validates per-record confirmations and bounds the scanned range using tip height, but page cursor stores minimum confirmations and not the observed tip height; normalized events do not retain confirmations.
+- EVM validates finalized height/reference and canonical headers, but the page cursor omits the page finality reference and normalized events have no typed finality snapshot.
+- Solana validates commitment=finalized, finalized slot and produced-slot headers; the page cursor stores the commitment string but not the exact finalized slot.
+- XRPL validates the head and validated=true page response and canonical ledger headers; the page cursor omits validated head and page finality reference.
+- Both SQLite and PostgreSQL page-material verifiers re-read canonical events/headers and verify page HMAC inputs, but cannot reconstruct parsed facts omitted from immutable page material. Receipt digests are not parsed finality evidence.
+- Master Audit Section 167 records the per-network contract. Next safe code delta: typed versioned finality snapshots on normalized events/page material, then a first-party exact observation-to-page verifier, then fail-closed validation/save. No legacy row may be silently upgraded and no test-only production bypass is allowed.
+- No code behavior or production operation changed. Module 9 remains NO-GO.
+
+### Typed chain-finality snapshot implementation — 26 November 2026
+- Added immutable OnChainFinalitySnapshot v1 to normalized transfer events. Historical event JSON without the field deserializes as legacy unknown; it is not upgraded.
+- Bitcoin worker records CONFIRMED + configured minimum policy on each event, and observed tip height + minimum confirmations in the signed page cursor. Future verifier can recompute tip - block_height + 1.
+- EVM worker records FINALIZED + exact page finality reference on each event, and finalized height/reference in cursor. Solana records FINALIZED + commitment=finalized and finalized slot in cursor. XRPL records FINALIZED + validated=true and validated head height/reference in cursor.
+- Page ID and page HMAC now cover these event snapshots and cursor facts. Moving head values intentionally stay page-scoped, not in stable event identity, to avoid replay/reorg identity collisions.
+- TDD RED/GREEN completed. Focused ingestion + Bitcoin/EVM/Solana/XRPL suites: 85 passed. Full repository suite: 1,149 tests, 0 failures/errors, 72 skipped. compileall and git diff --check PASS.
+- This does not yet bind OnChainObservation to an exact accepted page/event. Section 166 remains HIGH / OPEN; provider authenticity and mapping source authority remain open. No live provider, DB, migration, publication or Git write operation.
+
+### Latest verification update — 26 November 2026
+- Tightened OnChainFinalitySnapshot v1 constructor validation after a RED test caught Python bool-as-int acceptance for version=True.
+- Final full suite after the behavior change: **1,150 tests run, 0 failures/errors, 72 skipped**. compileall and git diff --check PASS.
+- Anchor observation provenance binding remains the next unresolved AUD-ONCHAIN-001 blocker; Module 9 remains inactive.
+
+### Observation provenance enforcement — local partial implementation, 26 November 2026
+- Added immutable \`OnChainObservationProvenance(cursor_key, page_id, event_id)\`.
+- \`OnChainIntelligenceEngine.verify_observation_provenance()\` re-reads a first-party durable ingestion page, verifies its HMAC, resolves one exact event, compares mapping/asset/network/provider/transaction/block/time, confirms the event remains canonical, and checks chain-specific cursor finality facts against the typed event snapshot.
+- \`validate()\` and both SQLite/PostgreSQL \`save_verified()\` now fail closed without a valid provenance reference. Acceptance receipt includes a signed provenance fingerprint and cursor/page/event pointer.
+- RED reproduced prior fabricated-observation acceptance; GREEN returns \`UNVERIFIED / ONCHAIN_OBSERVATION_PROVENANCE_REQUIRED\`. SQLite no-provenance persistence regression added.
+- Focused on-chain intelligence + ingestion suites: 71 passed. compileall and diff-check PASS.
+- Full repository suite after boundary change: 1,150 tests, 3 failures, 64 errors, 72 skipped. Existing worker/aggregation/receipt fixtures still seed unbound observations; positive page-bound acceptance path and fixture migration remain outstanding. Do not represent full suite as green.
+- Remaining critical work: persist/revalidate provenance on reads after restart, positive worker-page tests across all networks, migrate existing fixtures, close endpoint_id-to-receipt identity binding, then rerun full suite. AUD-ONCHAIN-001 remains OPEN; Module 9 remains NO-GO.
+- No Git writes, deployments, migrations, live providers, production database access, secret reads or publications.
+
+### Separate anchor-observation page contract — local implementation, 26 November 2026
+- Corrected the first provenance pointer design: OnChainObservation is not a normalized transfer event. Reusing transfer events as anchor observations would conflate aggregation semantics and could double-count. Provenance now points to a distinct immutable provider-observation record in page material.
+- SQLite and PostgreSQL ingestion commit_page() support optional provider_observations. New observation records require captured provider response receipts, exact page scope, unique observation ID, and canonical block/slot evidence matching block height/hash/time. Provider observation payload is included in page ID and HMAC.
+- OnChainObservationProvenance now contains cursor key, page ID and observation ID. First-party verifier compares the complete serialized observation, mapping/asset/network/chain/provider/scope and chain-specific finality cursor facts.
+- Accepted observation reads re-open and revalidate the page and canonical block/slot journal. Missing, tampered, or reorged page evidence returns no accepted observation / UNVERIFIED.
+- Aggregator revalidates using the persisted provenance receipt; anchor observation pages remain separate from transfer event aggregation.
+- TDD: SQLite positive page fixtures across BTC/EVM/Solana/XRPL, close/reopen, reorg and tamper rejection. Focused provenance/intelligence/ingestion/aggregation/receipt suites: 99 passed; worker suites: 43 passed; all on-chain tests: 283 passed, 21 skipped; full suite: 1,153 passed, 72 skipped; compileall and diff-check PASS.
+- Remaining: endpoint_id is not independently bound to endpoint instance in provider receipt; provider receipts/HMAC are application-attested, not provider-signed; no PostgreSQL server test in this step; production anchor-observation producer/composition root absent; AUD-ONCHAIN-002 still owner-policy blocked.
+- No live provider, DB, migration, secret, publication, deployment or Git write operation. Module 9 remains NO-GO.
+
+### Endpoint identity binding addendum — 26 November 2026
+- Added approved stable endpoint IDs for Alchemy per configured network and Chainstack XRPL. Provider-observation page commit, persisted page-material verification and observation provenance validation all reject mismatched endpoint_id values.
+- RED reproduced acceptance of an arbitrary endpoint alias; the new page-commit test now rejects it.
+- Focused suites: 100 passed. All on-chain: 284 passed, 21 skipped. Full repository: 1,154 passed, 72 skipped. compileall/diff-check PASS.
+- This binds endpoint_id to approved provider/network identity and endpoint-profile hash, but does not establish provider-origin signatures or independent upstream authorship. PostgreSQL has no server-level test yet; production anchor-observation composition remains absent. Module 9 remains NO-GO.
+
+### Latest PostgreSQL adapter contract regression — 26 November 2026
+- Added a no-database PostgreSQL adapter contract test proving an anchor-observation page with an unapproved endpoint_id is rejected before database access.
+- PostgreSQL live integration/reopen tests remain skipped because TEST_POSTGRES_DSN is not configured; no PostgreSQL server was contacted.
+- Latest full repository suite: 1,155 run, 0 failures/errors, 72 skipped. compileall and git diff-check PASS. Module 9 remains NO-GO.
+
+### Production composition re-scan — 26 November 2026
+- Source-tree scan after provider_observations implementation found no production OnChainObservation producer; the only remaining constructor-like occurrence is evidence deserialization in layer1/evidence_verification.py.
+- No production layer1 callsite passes provider_observations to commit_page(), and no production runtime callsite constructs the on-chain SQLite/PostgreSQL stores.
+- The page contract is tested but not activated by scheduled or one-shot production runtime. Next step requires an approved anchor-observation source/producer contract, provider trust decisions and owner-approved mapping source policy. Module 9 remains NO-GO.
+
+### Recovery remediation checkpoint — 26 November 2026
+- Owner approved remediation order AUD-ONCHAIN-008 then AUD-ONCHAIN-007.
+- AUD-ONCHAIN-008: SQLite `commit_page()` now rejects omitted `expected_cursor`; explicit `None` remains valid for a first-page/bootstrap snapshot. A stale replay using an old checkpoint snapshot is rejected and cannot rewind the durable checkpoint. Built-in workers already passed explicit snapshots. Existing tests/fixtures now supply current checkpoint snapshots.
+- AUD-ONCHAIN-007: pending page signing catches known malformed-data exceptions per page and continues. SQLite pending enumeration no longer parses raw JSON up front, so invalid JSON reaches per-page rejection; PostgreSQL JSONB enumeration includes malformed non-empty shapes. Malformed pages remain unsigned/pending for operator review; no automatic deletion/repair.
+- TDD RED/GREEN evidence: omitted-cursor test failed before fix; malformed `[null]` and invalid-JSON tests failed before fix. Multi-page recovery test proves later valid page signs after an earlier malformed page. Focused suite: 105 tests, 0 failures/errors, 21 skipped. Latest full suite: **1,161 tests, 0 failures/errors, 72 skipped**. compileall and diff-check PASS.
+- PostgreSQL live integration remains untested because `TEST_POSTGRES_DSN` is unset; no PostgreSQL server was contacted. No live provider, migration, production DB, secrets, publication, staging, commit, push, merge, or deployment.
+- Branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`; all prior worktree changes preserved. Module 9 remains inactive / NO-GO. Continue next with the next unresolved item in the approved remediation dependency plan; do not repeat AUD-ONCHAIN-007/008.
+- Added a PostgreSQL adapter contract regression proving omitted `expected_cursor` is rejected before any database access; this is a source/API contract test, not a live PostgreSQL acceptance test. Final full-suite rerun after this test: **1,161 tests, 0 failures/errors, 72 skipped**.
+
+### AUD-ONCHAIN-002 policy approval checkpoint — 26 November 2026
+- Owner approved only the semantics of `OFFICIAL_PROJECT`, `OFFICIAL_NETWORK`, and `OFFICIAL_REGISTRY` source classes in `ONCHAIN_MAPPING_SOURCE_POLICY_PROPOSAL.md`.
+- This does not approve exact hosts/paths/contracts, per-network asset source matrix, project-domain associations, TTL/revalidation, independent corroboration, verifier identity, signing key custody/rotation/revocation, or implementation. No code behavior changed.
+- AUD-ONCHAIN-002 remains HIGH / OPEN. Next owner input required: exact authoritative source/host/path/evidence matrix for supported Bitcoin, Ethereum, BNB Smart Chain, Solana and XRPL asset classes, plus named project-domain association approvers.
+
+### AUD-ONCHAIN-002 source-authority boundary approval — 26 November 2026
+- Owner approved the source-authority boundary for Bitcoin, Ethereum, BNB Smart Chain, Solana and XRPL: network-maintained documentation may establish network/native-asset facts; non-native token identity requires project-controlled evidence for the exact contract/mint/issuer+currency identity.
+- This is not approval of exact URLs/hosts/paths, registry sources, project-domain association records or approvers, freshness/TTL, corroboration, verifier/key lifecycle, or implementation. Bitcoin's exact authoritative documentation path and named project-domain association approvers remain outstanding. AUD-ONCHAIN-002 remains HIGH / OPEN; no code behavior changed.
+
+### AUD-ONCHAIN-002 source matrix review checkpoint — 26 November 2026
+- Prepared `ONCHAIN_MAPPING_SOURCE_MATRIX_REVIEW_2026-11-26.md` for owner decision. It records candidate network/native sources, registry trust limitations, project-domain association governance, implementation controls and required approvals.
+- Review identified schema/coverage constraints: XRPL MPT has a separate issuance ID and AssetScale; XRPL trust-line tokens use significant-digit precision rather than a universal decimals field; EIP-20 decimals() is optional; current Solana parser scope is base SPL Token only; current Bitcoin worker is native BTC UTXO, not overlay-token support.
+- Proposed initial scope (pending owner approval): BTC native only; Ethereum ERC-20; BNB BEP-20; Solana legacy SPL Token; XRPL XRP + trust-line issued currencies; exclude XRPL MPT and Bitcoin overlay tokens until separately implemented.
+- Recommended project-domain governance: owner as initial Mapping Policy Owner; independently prove domain control and project affiliation; scope approval to exact project/domain/network/asset identifier; audit expiry/revocation; explicit delegation only.
+- No code behavior or trust policy changed. AUD-ONCHAIN-002 remains HIGH / OPEN; Module 9 remains NO-GO.
+
+### AUD-ONCHAIN-014 verification update
+- Full repository suite: **1,180 tests, 0 failures/errors, 72 skipped** (27 November 2026; 74.830 seconds). `compileall` and `git diff --check` pass.
+
+## Latest continuation — 27 November 2026 (AUD-ONCHAIN-015 Bitcoin orphaned-row handling)
+
+- Inspected Alchemy Bitcoin address-history parsing against worker consumption. Adapter explicitly returns negative-confirmation transactions with `finality=ORPHANED`, but worker previously raised on every record below minimum confirmations, aborting otherwise valid mixed pages and blocking checkpoint progress.
+- TDD RED/GREEN: added mixed orphaned+confirmed page regression. Worker now skips only explicitly `ORPHANED` rows and increments `transactions_skipped_orphaned`; valid confirmed records continue. Pending/malformed rows still fail closed, avoiding unsafe pending checkpoint advancement.
+- Bitcoin worker focused suite: 10 passed. Master Audit Section 189. Fix local, pending review. Full suite/static verification follows. No live provider/DB/migration/secret/publication/Git write operation. Module 9 remains NO-GO.
+
+### AUD-ONCHAIN-015 verification update
+- Full repository suite: **1,181 tests, 0 failures/errors, 72 skipped** (27 November 2026; 72.770 seconds). `compileall` and `git diff --check` pass.
+
+### AUD-ONCHAIN-016 — Bitcoin mainnet address checksum/network validation (27 November 2026)
+- Confirmed weak validation in the Bitcoin worker seed constructor, Alchemy address-history adapter and transaction normalizer: non-empty strings were accepted without checksum or network validation.
+- TDD RED/GREEN: worker regressions cover mutated Base58Check checksum, invalid Bech32 checksum and wrong-network `tb1`; normalizer regressions cover malformed input/output address metadata; provider regression confirms invalid address rejected before transport creation.
+- Added shared `_is_valid_bitcoin_mainnet_address()` for mainnet P2PKH/P2SH Base58Check and SegWit Bech32/Bech32m. Worker seeds, provider request addresses and normalizer monitored/input/output addresses now fail closed unless checksummed mainnet encodings are valid.
+- Synthetic fixtures updated to valid Bitcoin mainnet addresses. Focused Bitcoin worker/provider/normalizer suites: 114 passed. No live provider calls, seed-list authorization or production configuration.
+- Scope limit: address checksum/network validation does not prove ownership, address-to-script correspondence, upstream provider authenticity or operator authorization. Master Audit Section 190. Local fix pending review; Module 9 remains NO-GO.
+- Verification addendum: full repository suite **1,188 tests, 0 failures/errors, 72 skipped** (27 November 2026; 73.556 seconds); `python -m compileall -q layer1 tests` and `git diff --check` PASS. An initial run identified a remaining synthetic invalid Bitcoin seed in protocol tests; all such fixtures were updated to valid mainnet addresses, focused protocol suite passed 14/14, and the full suite passed on rerun.
+
+### AUD-ONCHAIN-017 — XRPL issued-currency code format validation (27 November 2026)
+- Official XRPL spec review found the shared mapping validator and `normalize_xrpl_payment()` accepted arbitrary 40-hex codes, including reserved XRP/all-zero/standard-code hex encodings, and accepted printable but disallowed 3-character punctuation.
+- TDD RED/GREEN: mapping tests reject reserved `0x00`-prefixed codes and invalid standard punctuation; normalizer rejects same values; worker boundary rejects reserved XRP hex even when called directly; documented nonstandard 160-bit code remains accepted.
+- Added shared `is_valid_xrpl_issued_currency_code()` and applied it to shared mapping validation, XRPL worker mapping validation and payment normalization. Standard codes use XRPL's exact allowed character set; nonstandard 40-hex codes require a nonzero first byte; uppercase XRP is disallowed.
+- Primary references: https://xrpl.org/docs/references/protocol/data-types/currency-formats ; https://xrpl.org/docs/references/protocol/binary-format ; https://xrpl.org/docs/references/protocol/transactions/types/trustset .
+- Focused mapping/normalization/XRPL worker suites: 66 passed. No live XRPL/provider request or production mapping used. Master Audit Section 191. Local fix pending review; Module 9 remains NO-GO.
+- Verification addendum: full repository suite **1,194 tests, 0 failures/errors, 72 skipped** (27 November 2026; 72.991 seconds); `python -m compileall -q layer1 tests` and `git diff --check` PASS. Official XRPL format references reviewed; no live provider/ledger or production mapping accessed.
+
+- Latest consolidated verification after adding official BIP350 Bech32m regression vectors: Bitcoin worker suite 16 passed; full repository suite **1,196 tests, 0 failures/errors, 72 skipped** (27 November 2026; 75.894 seconds). BIP350 reference: https://bips.dev/350/.
+
+### AUD-ONCHAIN-018 — Solana Base58 decoded-length validation (27 November 2026)
+- Confirmed provider `_is_base58_pubkey()` and `_is_base58_signature()` previously checked only Base58 character lengths, not decoded lengths. Invalid 44-char key encoding decoded to 33 bytes and invalid 90-char signature decoded to 66 bytes but passed the previous regex gates.
+- TDD RED/GREEN: provider test proves malformed key is rejected before provider I/O; provider transaction-page test rejects 66-byte decoded signature. Existing valid public-key fixture remains accepted.
+- Centralized `_solana_base58_decode()` in `onchain_providers.py`; public keys require exactly 32 decoded bytes and signatures exactly 64. Ingestion and worker reuse the shared decoder. Blockhash and account key paths retain exact decoded-length checks.
+- Focused provider/Solana worker/ingestion suites: 162 passed. No live provider call. Master Audit Section 192. Local fix pending review; Module 9 remains NO-GO.
+- Latest consolidated verification after AUD-ONCHAIN-018: full repository suite **1,199 tests, 0 failures/errors, 72 skipped** (27 November 2026; 73.795 seconds); `python -m compileall -q layer1 tests` and `git diff --check` PASS. Focused provider/Solana worker/ingestion suites: 162 passed.
+
+### AUD-ONCHAIN-019 — EVM JSON-RPC canonical QUANTITY validation (27 November 2026)
+- Reproduced permissive quantity parsing: `_hex_int()` accepted `0x00`, `0x01`, `0x000a`, `0x+1`, and `0x 1`; `_parse_hex_quantity()` accepted leading-zero and uppercase encodings. These parsers feed block heights, timestamps, log indexes and transfer block numbers.
+- Official EIP-1474 / Ethereum Execution API schema requires canonical QUANTITY: zero is `0x0`; nonzero values have no leading zero and use lowercase hex. References: https://eips.ethereum.org/EIPS/eip-1474 ; https://ethereum.github.io/execution-apis/api/methods/eth_getLogs/ .
+- TDD RED/GREEN: added malformed-value rejection and canonical-value acceptance tests. Shared `_is_canonical_json_rpc_quantity()` now backs both adapter parsers; fixed-width hex DATA remains on separate validation paths.
+- Focused provider/EVM worker/ingestion suites: 166 passed. No live RPC calls. Master Audit Section 193. Local fix pending review; Module 9 remains NO-GO.
+- Latest verification after AUD-ONCHAIN-019: full repository suite **1,202 tests, 0 failures/errors, 72 skipped** (27 November 2026; 75.697 seconds); `python -m compileall -q layer1 tests` and `git diff --check` PASS. Focused provider/EVM worker/ingestion suites: 166 passed.
+
+### AUD-ONCHAIN-020 — BNB finalized-header hash shape validation (27 November 2026)
+- Found BNB `eth_getFinalizedHeader` log-query path only required a string hash, while adjacent finality/header paths require exact 32-byte hex. Malformed hash was accepted and adapter proceeded to `eth_getLogs` in the RED test.
+- Added exact `0x[0-9a-fA-F]{64}` validation before using finalized height or requesting logs. TDD RED/GREEN; focused BNB provider tests: 3 passed.
+- No live RPC/provider call. Master Audit Section 194. Local fix pending review; Module 9 remains NO-GO.
+- AUD-ONCHAIN-020 verification: focused BNB provider tests 3 passed; full suite **1,203 tests, 0 failures/errors, 72 skipped** (27 November 2026; 73.472 seconds); compileall and `git diff --check` PASS. Branch `work/module9-continuation-local`, HEAD `9426e689e19669740972ebabd6264cc16649f703`, staged 0, dirty 34; `TEST_POSTGRES_DSN` unset. No live provider/DB/migration/secrets/publication or Git write operation. Module 9 remains NO-GO.
+
+### EVM canonical block-hash audit checkpoint — 27 November 2026
+- Verified EVM worker header fetch + per-log block-hash comparison for Ethereum and BNB. Synthetic mismatches are classified `REORGED` and excluded from canonical-only reads; no code defect or fix required. Master Audit Section 195. Do not repeat this audit unless new evidence changes the implementation.
+- Continue with the next independent chain-correctness hypothesis. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO; no live providers, production DB, migrations, or Git writes authorized.
+
+### Chain correctness continuation — 27 November 2026
+- Bitcoin transaction/history/detail/canonical-header association reviewed; mismatched canonical block hash is persisted only as REORGED and excluded from canonical-only reads. No new defect; Master Audit Section 196. This is not a Merkle-inclusion proof.
+- AUD-ONCHAIN-021: Solana getBlock parent linkage gap fixed locally. Provider now validates/returns `parentSlot` and `previousBlockhash`; worker verifies in-range produced parent existence and hash consistency. Out-of-range parent is not independently fetched. TDD regressions cover missing linkage, wrong parent hash and missing in-range parent. Master Audit Section 197. Pending review; do not repeat.
+- Continue with the next independent XRPL/cross-chain correctness hypothesis. Keep Module 9 NO-GO and all live providers, production DB/migrations, publishing and Git writes disabled.
+- AUD-ONCHAIN-021 verification: focused provider + Solana worker suites 109 passed; full suite 1,206 tests, 0 failures/errors, 72 skipped; compileall and diff-check PASS. All changes remain local and unstaged.
+
+### XRPL chain integrity continuation — 27 November 2026
+- AUD-ONCHAIN-022: XRPL validated-ledger `parent_hash` now validated and compared to prior ledger hash throughout each bounded fixed range. First ledger's parent lies outside range and is not fetched. Master Audit Section 198.
+- AUD-ONCHAIN-023: XRPL response-level and nested ledger indexes/hashes must agree exactly with requested index and each other; conflicting response identities fail closed. Master Audit Section 199.
+- Both fixes are local/pending review. Continue after full-suite verification; Module 9 remains NO-GO and no live providers/production DB/Git writes are permitted.
+- AUD-ONCHAIN-022/023 verification: focused provider + XRPL worker suites 115 passed; full repository suite 1,210 tests, 0 failures/errors, 72 skipped; compileall and diff-check PASS. All changes local, unstaged and uncommitted.

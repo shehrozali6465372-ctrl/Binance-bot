@@ -9,14 +9,17 @@ from __future__ import annotations
 import json
 import re
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Callable
 
 from .onchain import OnChainAssetMapping
-from .onchain_ingestion import normalize_xrpl_payment
+from .onchain_ingestion import OnChainFinalitySnapshot, normalize_xrpl_payment
 from .onchain_providers import (
     ProviderTransportError, XrplAccountTransaction, is_valid_xrpl_classic_address,
-    retry_provider_operation,
+    is_valid_xrpl_issued_currency_code,
+    retry_provider_operation, _capture_provider_run_receipts,
+    drain_provider_run_receipts, include_provider_receipts_in_current_scope,
 )
 from .onchain_protocols import (
     OnChainIngestionStoreProtocol, OnChainMappingStoreProtocol,
@@ -88,7 +91,7 @@ class XrplIssuedCurrencyIngestionWorker:
                 or mapping.representation != "TOKEN" or mapping.contract_address is not None
                 or mapping.token_standard != "XRPL_ISSUED_CURRENCY"
                 or not is_valid_xrpl_classic_address(mapping.issuer_address)
-                or not isinstance(mapping.issued_currency, str) or not mapping.issued_currency.strip()):
+                or not is_valid_xrpl_issued_currency_code(mapping.issued_currency)):
             raise ValueError("worker requires a checksum-valid classic XRPL issuer address and verified issued-currency mapping")
 
     def _header(self, ledger_index: int) -> dict:
@@ -97,6 +100,8 @@ class XrplIssuedCurrencyIngestionWorker:
                 or isinstance(header.get("number"), bool)
                 or not isinstance(header.get("hash"), str)
                 or re.fullmatch(r"[0-9a-fA-F]{64}", header["hash"]) is None
+                or not isinstance(header.get("parent_hash"), str)
+                or re.fullmatch(r"[0-9a-fA-F]{64}", header["parent_hash"]) is None
                 or isinstance(header.get("timestamp"), bool)
                 or not isinstance(header.get("timestamp"), int) or header["timestamp"] < 0
                 or header.get("finality_reference") != "validated=true"):
@@ -125,6 +130,13 @@ class XrplIssuedCurrencyIngestionWorker:
                     earliest = ledger_index
         return changed_events, earliest, changed_ledgers
 
+    def _finalize_page_acceptances(self, summary: dict) -> None:
+        result = self.mapping_store.engine.sign_pending_ingestion_pages(self.ingestion_store)
+        summary["page_acceptances_signed"] = result["signed"]
+        summary["page_acceptances_pending"] = result["pending"]
+        summary["page_acceptances_rejected"] = result["rejected"]
+
+    @_capture_provider_run_receipts
     def run_once(self) -> dict:
         mappings = self.mapping_store.list_verified_mappings("xrpl-mainnet")
         summary = {"mappings": 0, "accounts": 0, "ledgers_scanned": 0,
@@ -132,8 +144,10 @@ class XrplIssuedCurrencyIngestionWorker:
                    "reorg_ledgers_detected": 0, "reorg_events_tombstoned": 0,
                    "checkpoints_advanced": 0, "markers_reset": 0}
         if not mappings:
+            self._finalize_page_acceptances(summary)
             return summary
         head = self._retry(self.provider.probe)
+        head_receipts = drain_provider_run_receipts()
         if (getattr(head, "provider", None) != "chainstack"
                 or getattr(head, "network_id", None) != "xrpl-mainnet"
                 or getattr(head, "status", None) != "AVAILABLE"
@@ -141,13 +155,18 @@ class XrplIssuedCurrencyIngestionWorker:
                 or isinstance(getattr(head, "head_height", None), bool)
                 or not isinstance(getattr(head, "head_height", None), int)):
             raise ProviderTransportError("XRPL_VALIDATED_HEAD_UNAVAILABLE", "Chainstack did not return a validated XRPL mainnet head")
+        summary.update({"page_acceptances_signed": 0, "page_acceptances_pending": 0,
+                        "page_acceptances_rejected": 0})
         for mapping in mappings:
+            drain_provider_run_receipts()  # isolate each mapping's account set
             self._validate_mapping(mapping)
             accounts = self.monitored_accounts.get(mapping.mapping_id)
             if not accounts or mapping.mapping_id not in self.start_ledgers:
                 raise ValueError(f"no explicit monitored accounts/start ledger configured for {mapping.mapping_id}")
             summary["mappings"] += 1
             for account in accounts:
+                drain_provider_run_receipts()  # isolate the next account scope
+                include_provider_receipts_in_current_scope(head_receipts)
                 summary["accounts"] += 1
                 scope = self._scope(mapping, account)
                 cursor_key = self._cursor_key(account, mapping)
@@ -196,6 +215,16 @@ class XrplIssuedCurrencyIngestionWorker:
                         or range_end > head.head_height):
                     raise ValueError("stored XRPL fixed ledger range is malformed or beyond validated head")
                 headers = {index: self._header(index) for index in range(range_start, range_end + 1)}
+                for index in range(range_start + 1, range_end + 1):
+                    if headers[index]["parent_hash"].lower() != headers[index - 1]["hash"].lower():
+                        raise ProviderTransportError(
+                            "XRPL_PARENT_HASH_MISMATCH",
+                            "XRPL validated ledger parent_hash does not match the preceding ledger hash",
+                        )
+                # These provider responses are shared evidence for every page in this
+                # fixed range. Preserve an opaque collector-issued batch and attach
+                # it to each page commit, not only the first pagination page.
+                supporting_receipts = drain_provider_run_receipts()
                 # Revalidate an in-progress fixed range before trusting its opaque marker.
                 # This catches a ledger-hash change between page commits and forces a full replay.
                 active_rewind = None
@@ -221,6 +250,7 @@ class XrplIssuedCurrencyIngestionWorker:
                     expected_checkpoint = checkpoint
                 pages = 0
                 while pages < self.max_pages_per_run:
+                    include_provider_receipts_in_current_scope(supporting_receipts)
                     try:
                         page = self._retry(lambda: self.provider.fetch_account_transactions(
                             account, range_start, range_end, marker=marker, limit=self.page_size))
@@ -264,7 +294,12 @@ class XrplIssuedCurrencyIngestionWorker:
                             observed_at=observed_at, scope=scope,
                         )
                         if event is not None:
-                            events.append(event)
+                            events.append(replace(
+                                event, finality_snapshot=OnChainFinalitySnapshot(
+                                    version=1, network_id="xrpl-mainnet", status="FINALIZED",
+                                    reference=page.finality_reference,
+                                ),
+                            ))
                     next_marker = page.next_cursor
                     if next_marker is not None:
                         marker_key = json.dumps(next_marker, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -284,6 +319,10 @@ class XrplIssuedCurrencyIngestionWorker:
                                            "next_ledger": range_start, "range_start": range_start,
                                            "range_end": range_end, "marker": next_marker,
                                            "seen_markers": seen_markers}
+                    next_checkpoint.update({
+                        "validated_head_height": head.head_height,
+                        "finality_reference": page.finality_reference,
+                    })
                     canonical_blocks = tuple({
                         "network_id": "xrpl-mainnet", "provider": "chainstack", "scope": scope,
                         "block_number": index, "block_hash": header["hash"].lower(),
@@ -294,6 +333,7 @@ class XrplIssuedCurrencyIngestionWorker:
                         canonical_blocks=canonical_blocks,
                         expected_cursor=expected_checkpoint,
                         scope_identity=("xrpl-mainnet", "chainstack", scope),
+                        provider_receipts=drain_provider_run_receipts(),
                     )
                     expected_checkpoint = next_checkpoint
                     summary["events_inserted"] += committed["inserted"]
@@ -305,4 +345,5 @@ class XrplIssuedCurrencyIngestionWorker:
                     marker = next_marker
                     if marker is None:
                         break
+        self._finalize_page_acceptances(summary)
         return summary

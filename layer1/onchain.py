@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Mapping, Optional
 from urllib.parse import urlparse
 
-from .onchain_providers import is_valid_xrpl_classic_address
+from .onchain_providers import is_valid_xrpl_classic_address, is_valid_xrpl_issued_currency_code
 
 from .foundation import BinanceListingEligibilityEngine, EligibilityDecision
 from .onchain_receipt_config import load_onchain_receipt_config_from_env
@@ -86,6 +86,31 @@ class OnChainObservation:
     observed_at: str
     finality: str
     finality_reference: str
+    scope: str = ""
+
+
+@dataclass(frozen=True)
+class OnChainObservationProvenance:
+    """Immutable pointer to one exact provider observation in an accepted page."""
+    cursor_key: str
+    page_id: str
+    observation_id: str
+
+    def __post_init__(self):
+        if (not isinstance(self.cursor_key, str) or not self.cursor_key.strip()
+                or not isinstance(self.page_id, str)
+                or re.fullmatch(r"[a-f0-9]{64}", self.page_id) is None
+                or not isinstance(self.observation_id, str) or not self.observation_id.strip()):
+            raise ValueError("on-chain observation provenance reference is invalid")
+
+
+@dataclass(frozen=True)
+class OnChainIngestionPageAcceptance:
+    page_id: str
+    cursor_key: str
+    key_id: str
+    payload_sha256: str
+    signature: str
 
 
 @dataclass(frozen=True)
@@ -102,6 +127,10 @@ class OnChainValidationResult:
     receipt_key_id: str = ""
     observation_fingerprint: str = ""
     evidence_fingerprint: str = ""
+    provenance_fingerprint: str = ""
+    provenance_cursor_key: str = ""
+    provenance_page_id: str = ""
+    provenance_observation_id: str = ""
     receipt_signature: str = ""
 
 
@@ -179,6 +208,206 @@ class OnChainIntelligenceEngine:
         )
 
     @staticmethod
+    def _ingestion_page_acceptance_payload(material: dict, key_id: str) -> dict:
+        return {
+            "domain": "BINANCE_SQUARE_W2E_ONCHAIN_INGESTION_PAGE_V1",
+            "receipt_version": 1,
+            "receipt_key_id": key_id,
+            "page_id": material["page_id"],
+            "cursor_key": material["cursor_key"],
+            "page_material": material["page_material"],
+            "receipts": material["receipts"],
+            "receipt_sha256": material["receipt_sha256"],
+        }
+
+    @staticmethod
+    def _require_ingestion_store(store):
+        # Signing is deliberately restricted to the two first-party durable
+        # adapters. Duck-typed caller objects cannot supply a forged page payload.
+        from .onchain_ingestion import OnChainIngestionStore
+        from .onchain_postgres import PostgresOnChainIngestionStore
+        if type(store) not in (OnChainIngestionStore, PostgresOnChainIngestionStore):
+            raise TypeError("ingestion page signing requires a first-party durable ingestion store")
+
+    def sign_ingestion_page(self, ingestion_store, cursor_key: str,
+                            page_id: str) -> OnChainIngestionPageAcceptance:
+        """Sign only a page re-read and validated by a first-party durable store."""
+        self._require_ingestion_store(ingestion_store)
+        existing = ingestion_store.get_page_acceptance(cursor_key, page_id)
+        if existing is not None:
+            if self.verify_ingestion_page_acceptance(ingestion_store, cursor_key, page_id):
+                return OnChainIngestionPageAcceptance(
+                    page_id, cursor_key, existing["key_id"],
+                    existing["payload_sha256"], existing["signature"],
+                )
+            raise ValueError("existing ingestion page acceptance is invalid or its signing key is no longer trusted")
+        if (self.receipt_signing_key is None or not self.receipt_key_id
+                or self.receipt_key_id not in self.trusted_receipt_key_ids):
+            raise ValueError("trusted ingestion page signing is not configured")
+        material = ingestion_store.get_page_acceptance_material(cursor_key, page_id)
+        payload = self._ingestion_page_acceptance_payload(material, self.receipt_key_id)
+        payload_json = self._canonical_receipt_json(payload).decode("utf-8")
+        payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        signature = hmac.new(
+            self.receipt_signing_key,
+            b"BINANCE_SQUARE_W2E_ONCHAIN_INGESTION_PAGE_V1\0" + payload_json.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        ingestion_store.save_page_acceptance(
+            cursor_key, page_id, self.receipt_key_id, payload_json,
+            payload_sha256, signature,
+        )
+        return OnChainIngestionPageAcceptance(
+            page_id, cursor_key, self.receipt_key_id, payload_sha256, signature,
+        )
+
+    def sign_pending_ingestion_pages(self, ingestion_store) -> dict:
+        """Recover unsigned committed pages without trusting caller-supplied payloads."""
+        self._require_ingestion_store(ingestion_store)
+        pending = ingestion_store.list_pending_page_acceptances()
+        if (self.receipt_signing_key is None or not self.receipt_key_id
+                or self.receipt_key_id not in self.trusted_receipt_key_ids):
+            return {"signed": 0, "pending": len(pending), "rejected": 0}
+        signed = rejected = 0
+        for cursor_key, page_id in pending:
+            try:
+                self.sign_ingestion_page(ingestion_store, cursor_key, page_id)
+                signed += 1
+            except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+                # Persisted page material is untrusted input. A malformed page
+                # remains unsigned for operator review; isolate its failure so
+                # later pending pages can still be recovered. Do not swallow
+                # process-level failures or storage/connection errors.
+                rejected += 1
+        remaining = len(ingestion_store.list_pending_page_acceptances())
+        return {"signed": signed, "pending": remaining, "rejected": rejected}
+
+    def verify_ingestion_page_acceptance(self, ingestion_store, cursor_key: str,
+                                        page_id: str) -> bool:
+        """Re-read store material and verify a persisted page HMAC after restart."""
+        try:
+            self._require_ingestion_store(ingestion_store)
+            material = ingestion_store.get_page_acceptance_material(cursor_key, page_id)
+            envelope = ingestion_store.get_page_acceptance(cursor_key, page_id)
+            if not isinstance(envelope, dict):
+                return False
+            key_id = envelope.get("key_id")
+            if key_id not in self.trusted_receipt_key_ids:
+                return False
+            key = self.receipt_verification_keys.get(key_id)
+            if not isinstance(key, bytes) or len(key) < 32:
+                return False
+            payload = self._ingestion_page_acceptance_payload(material, key_id)
+            payload_json = self._canonical_receipt_json(payload).decode("utf-8")
+            payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+            if (envelope.get("cursor_key") != cursor_key
+                    or envelope.get("payload_json") != payload_json
+                    or envelope.get("payload_sha256") != payload_sha256):
+                return False
+            expected = hmac.new(
+                key,
+                b"BINANCE_SQUARE_W2E_ONCHAIN_INGESTION_PAGE_V1\0" + payload_json.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            return hmac.compare_digest(expected, envelope.get("signature", ""))
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return False
+
+    def verify_observation_provenance(self, ingestion_store,
+                                      provenance: OnChainObservationProvenance,
+                                      mapping: OnChainAssetMapping,
+                                      observation: OnChainObservation) -> bool:
+        """Bind an anchor observation to its own immutable provider-page record.
+
+        Transfer events are deliberately not treated as anchor observations:
+        they are separate records with separate aggregation semantics.
+        """
+        try:
+            self._require_ingestion_store(ingestion_store)
+            if not isinstance(provenance, OnChainObservationProvenance):
+                return False
+            if not self.verify_ingestion_page_acceptance(
+                ingestion_store, provenance.cursor_key, provenance.page_id,
+            ):
+                return False
+            material = ingestion_store.get_page_acceptance_material(
+                provenance.cursor_key, provenance.page_id,
+            )
+            page = material["page_material"]
+            scope_identity = page.get("scope_identity")
+            if (not isinstance(scope_identity, list) or len(scope_identity) != 3
+                    or any(not isinstance(value, str) or not value for value in scope_identity)
+                    or tuple(scope_identity) != (
+                        observation.network_id, observation.provider, observation.scope,
+                    )):
+                return False
+            rows = page.get("provider_observations", [])
+            if not isinstance(rows, list):
+                return False
+            matches = [
+                item for item in rows
+                if isinstance(item, dict)
+                and item.get("observation_id") == provenance.observation_id
+            ]
+            if len(matches) != 1:
+                return False
+            if self._canonical_receipt_json(matches[0]) != self._canonical_receipt_json(asdict(observation)):
+                return False
+            from .onchain_providers import _approved_endpoint_id
+            expected_endpoint_id = _approved_endpoint_id(
+                observation.provider, observation.network_id,
+            )
+            if (expected_endpoint_id is None or observation.endpoint_id != expected_endpoint_id
+                    or observation.mapping_id != mapping.mapping_id
+                    or observation.asset_id != mapping.asset_id
+                    or observation.network_id != mapping.network_id
+                    or observation.chain_id != mapping.chain_id
+                    or observation.provider not in NETWORK_PROVIDERS.get(mapping.network_id, frozenset())
+                    or observation.block_height <= 0):
+                return False
+            cursor = page.get("next_cursor")
+            if not isinstance(cursor, dict):
+                return False
+            if observation.network_id == "bitcoin-mainnet":
+                minimum = cursor.get("minimum_confirmations")
+                tip = cursor.get("observed_tip_height")
+                confirmations = tip - observation.block_height + 1 if isinstance(tip, int) and not isinstance(tip, bool) else -1
+                if (isinstance(minimum, bool) or not isinstance(minimum, int) or minimum <= 0
+                        or isinstance(tip, bool) or not isinstance(tip, int)
+                        or confirmations < minimum
+                        or observation.finality != "CONFIRMED"
+                        or observation.finality_reference != f"confirmations={confirmations}"):
+                    return False
+            elif observation.network_id in {"ethereum-mainnet", "bnb-smart-chain-mainnet"}:
+                finalized_height = cursor.get("finalized_height")
+                reference = cursor.get("finality_reference")
+                if (isinstance(finalized_height, bool) or not isinstance(finalized_height, int)
+                        or observation.block_height > finalized_height
+                        or not isinstance(reference, str) or not reference
+                        or observation.finality != "FINALIZED"
+                        or observation.finality_reference != reference):
+                    return False
+            elif observation.network_id == "solana-mainnet":
+                finalized_slot = cursor.get("finalized_slot")
+                if (isinstance(finalized_slot, bool) or not isinstance(finalized_slot, int)
+                        or observation.block_height > finalized_slot
+                        or observation.finality != "FINALIZED"
+                        or observation.finality_reference != "commitment=finalized"):
+                    return False
+            elif observation.network_id == "xrpl-mainnet":
+                validated_head = cursor.get("validated_head_height")
+                if (isinstance(validated_head, bool) or not isinstance(validated_head, int)
+                        or observation.block_height > validated_head
+                        or observation.finality != "FINALIZED"
+                        or observation.finality_reference != "validated_ledger=true"):
+                    return False
+            else:
+                return False
+            return True
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return False
+
+    @staticmethod
     def _result(status: str, code: str, reason: str,
                 mapping: Optional[OnChainAssetMapping] = None,
                 observation: Optional[OnChainObservation] = None) -> OnChainValidationResult:
@@ -212,6 +441,10 @@ class OnChainIntelligenceEngine:
             "provider": result.provider,
             "observation_fingerprint": result.observation_fingerprint,
             "evidence_fingerprint": result.evidence_fingerprint,
+            "provenance_fingerprint": result.provenance_fingerprint,
+            "provenance_cursor_key": result.provenance_cursor_key,
+            "provenance_page_id": result.provenance_page_id,
+            "provenance_observation_id": result.provenance_observation_id,
         }
 
     @classmethod
@@ -231,7 +464,11 @@ class OnChainIntelligenceEngine:
                 or validation.receipt_key_id != expected_key_id
                 or not re.fullmatch(r"[a-f0-9]{64}", validation.receipt_signature)
                 or not re.fullmatch(r"[a-f0-9]{64}", validation.observation_fingerprint)
-                or not re.fullmatch(r"[a-f0-9]{64}", validation.evidence_fingerprint)):
+                or not re.fullmatch(r"[a-f0-9]{64}", validation.evidence_fingerprint)
+                or not re.fullmatch(r"[a-f0-9]{64}", validation.provenance_fingerprint)
+                or not isinstance(validation.provenance_cursor_key, str) or not validation.provenance_cursor_key
+                or not re.fullmatch(r"[a-f0-9]{64}", validation.provenance_page_id)
+                or not isinstance(validation.provenance_observation_id, str) or not validation.provenance_observation_id):
             return False
         if (validation.observation_id != observation.observation_id
                 or validation.asset_id != observation.asset_id
@@ -244,6 +481,13 @@ class OnChainIntelligenceEngine:
         ).hexdigest()
         if not hmac.compare_digest(observation_fingerprint, validation.observation_fingerprint):
             return False
+        provenance_fingerprint = hashlib.sha256(cls._canonical_receipt_json({
+            "cursor_key": validation.provenance_cursor_key,
+            "page_id": validation.provenance_page_id,
+            "observation_id": validation.provenance_observation_id,
+        })).hexdigest()
+        if not hmac.compare_digest(provenance_fingerprint, validation.provenance_fingerprint):
+            return False
         expected = hmac.new(
             verification_key,
             cls._canonical_receipt_json(cls._receipt_signature_payload(validation)),
@@ -253,7 +497,8 @@ class OnChainIntelligenceEngine:
 
     def _signed_acceptance_result(self, eligibility: EligibilityDecision,
                                   mapping: OnChainAssetMapping,
-                                  observation: OnChainObservation) -> OnChainValidationResult:
+                                  observation: OnChainObservation,
+                                  provenance: OnChainObservationProvenance) -> OnChainValidationResult:
         if self.receipt_signing_key is None:
             return self._result(
                 "UNAVAILABLE", "ONCHAIN_RECEIPT_SIGNING_NOT_CONFIGURED",
@@ -262,10 +507,14 @@ class OnChainIntelligenceEngine:
         observation_fingerprint = hashlib.sha256(
             self._canonical_receipt_json(asdict(observation))
         ).hexdigest()
+        provenance_fingerprint = hashlib.sha256(
+            self._canonical_receipt_json(asdict(provenance))
+        ).hexdigest()
         evidence_fingerprint = hashlib.sha256(self._canonical_receipt_json({
             "eligibility": asdict(eligibility),
             "mapping": asdict(mapping),
             "observation": asdict(observation),
+            "provenance": asdict(provenance),
         })).hexdigest()
         result = self._result("ACCEPTED", "ONCHAIN_OBSERVATION_VERIFIED",
                               "eligible asset, exact network mapping, provider, provenance, finality and freshness validated",
@@ -274,6 +523,10 @@ class OnChainIntelligenceEngine:
             result, receipt_version=1, receipt_key_id=self.receipt_key_id,
             observation_fingerprint=observation_fingerprint,
             evidence_fingerprint=evidence_fingerprint,
+            provenance_fingerprint=provenance_fingerprint,
+            provenance_cursor_key=provenance.cursor_key,
+            provenance_page_id=provenance.page_id,
+            provenance_observation_id=provenance.observation_id,
         )
         signature = hmac.new(
             self.receipt_signing_key,
@@ -303,9 +556,22 @@ class OnChainIntelligenceEngine:
             return OnChainValidationResult("UNVERIFIED", "MAPPING_SOURCE_NOT_TRUSTED", "mapping source is not an approved official source type")
         if not isinstance(mapping.source_url, str):
             return OnChainValidationResult("UNVERIFIED", "MAPPING_SOURCE_URL_INVALID", "mapping provenance must be an HTTPS source URL")
-        parsed_url = urlparse(mapping.source_url)
-        if parsed_url.scheme != "https" or not parsed_url.netloc:
-            return OnChainValidationResult("UNVERIFIED", "MAPPING_SOURCE_URL_INVALID", "mapping provenance must be an HTTPS source URL")
+        try:
+            parsed_url = urlparse(mapping.source_url)
+            # Reject user-info URLs (for example https://official.example@attacker.example)
+            # because they are routinely misread as belonging to the text before '@'.
+            # This is syntax hardening only; it does not establish source authority.
+            invalid_source_url = (
+                parsed_url.scheme != "https"
+                or not parsed_url.netloc
+                or not parsed_url.hostname
+                or parsed_url.username is not None
+                or parsed_url.password is not None
+            )
+        except ValueError:
+            invalid_source_url = True
+        if invalid_source_url:
+            return OnChainValidationResult("UNVERIFIED", "MAPPING_SOURCE_URL_INVALID", "mapping provenance must be an unambiguous HTTPS source URL without embedded credentials")
         if isinstance(mapping.decimals, bool) or not isinstance(mapping.decimals, int) or not 0 <= mapping.decimals <= 36:
             return OnChainValidationResult("UNVERIFIED", "INVALID_ASSET_DECIMALS", "asset decimals must be an integer from 0 to 36")
         if not isinstance(mapping.representation, str) or mapping.representation not in ALLOWED_REPRESENTATIONS:
@@ -316,16 +582,10 @@ class OnChainIntelligenceEngine:
                 return OnChainValidationResult("UNVERIFIED", "NATIVE_ASSET_CONTRACT_CONFLICT", "native assets must not declare a token contract, issuer or token standard")
         elif mapping.network_id == "xrpl-mainnet":
             currency = mapping.issued_currency
-            valid_standard_currency = (
-                isinstance(currency, str) and len(currency) == 3
-                and all(0x21 <= ord(char) <= 0x7E for char in currency)
-                and currency != "XRP"
-            )
-            valid_hex_currency = isinstance(currency, str) and re.fullmatch(r"[0-9a-fA-F]{40}", currency) is not None
             if (mapping.contract_address is not None
                     or mapping.token_standard != "XRPL_ISSUED_CURRENCY"
                     or not is_valid_xrpl_classic_address(mapping.issuer_address)
-                    or not (valid_standard_currency or valid_hex_currency)):
+                    or not is_valid_xrpl_issued_currency_code(currency)):
                 return OnChainValidationResult("UNVERIFIED", "XRPL_ISSUER_CURRENCY_MAPPING_REQUIRED", "non-native XRPL assets require the exact issuer and a valid non-XRP 3-character or 160-bit hex currency code")
         elif (not isinstance(mapping.contract_address, str) or not mapping.contract_address.strip()
               or not isinstance(mapping.token_standard, str) or not mapping.token_standard.strip()
@@ -369,7 +629,9 @@ class OnChainIntelligenceEngine:
     def validate(self, eligibility: EligibilityDecision,
                  mapping: OnChainAssetMapping,
                  observation: OnChainObservation,
-                 now: Optional[str] = None) -> OnChainValidationResult:
+                 now: Optional[str] = None,
+                 ingestion_store=None,
+                 provenance: Optional[OnChainObservationProvenance] = None) -> OnChainValidationResult:
         if not isinstance(eligibility, EligibilityDecision) or eligibility.status != "ELIGIBLE":
             return self._result("UNAVAILABLE", "BINANCE_SPOT_ELIGIBILITY_REQUIRED", "on-chain analysis requires a verified ELIGIBLE Binance Spot decision", mapping, observation)
         if (not isinstance(eligibility.asset_id, str) or not eligibility.asset_id.startswith("coingecko:")
@@ -455,7 +717,21 @@ class OnChainIntelligenceEngine:
             return self._result("UNAVAILABLE", "FRESHNESS_POLICY_NOT_CONFIGURED", "network freshness threshold has not been calibrated and configured", mapping, observation)
         if (current_time - block_time).total_seconds() > max_age:
             return self._result("UNAVAILABLE", "ONCHAIN_OBSERVATION_STALE", "block observation exceeds the configured network freshness threshold", mapping, observation)
-        return self._signed_acceptance_result(eligibility, mapping, observation)
+        if not self.receipt_signing_key or not self.receipt_key_id:
+            return self._result(
+                "UNAVAILABLE", "ONCHAIN_RECEIPT_SIGNING_NOT_CONFIGURED",
+                "durable observation acceptance signing is not configured",
+                mapping, observation,
+            )
+        if not self.verify_observation_provenance(
+            ingestion_store, provenance, mapping, observation,
+        ):
+            return self._result(
+                "UNVERIFIED", "ONCHAIN_OBSERVATION_PROVENANCE_REQUIRED",
+                "observation must match an exact event in a signed, currently canonical ingestion page",
+                mapping, observation,
+            )
+        return self._signed_acceptance_result(eligibility, mapping, observation, provenance)
 
 
 class OnChainStore:
@@ -465,9 +741,11 @@ class OnChainStore:
     are identical; conflicting payloads are rejected rather than overwritten.
     """
 
-    def __init__(self, database_path: str, engine: Optional[OnChainIntelligenceEngine] = None):
+    def __init__(self, database_path: str, engine: Optional[OnChainIntelligenceEngine] = None,
+                 ingestion_store=None):
         Path(database_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
         self.engine = engine or OnChainIntelligenceEngine()
+        self.ingestion_store = ingestion_store
         self.conn = sqlite3.connect(database_path, timeout=30)
         self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("PRAGMA foreign_keys=ON")
@@ -491,10 +769,18 @@ class OnChainStore:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
     def save_verified(self, eligibility: EligibilityDecision, mapping: OnChainAssetMapping,
-                      observation: OnChainObservation) -> str:
-        result = self.engine.validate(eligibility, mapping, observation)
+                      observation: OnChainObservation, *, ingestion_store=None,
+                      provenance: Optional[OnChainObservationProvenance] = None) -> str:
+        effective_ingestion_store = (
+            ingestion_store if ingestion_store is not None else self.ingestion_store
+        )
+        result = self.engine.validate(
+            eligibility, mapping, observation,
+            ingestion_store=effective_ingestion_store, provenance=provenance,
+        )
         if result.status != "ACCEPTED":
             raise ValueError(f"only an ACCEPTED on-chain observation may be persisted: {result.reason_code}")
+        self.ingestion_store = effective_ingestion_store
         mapping_json = self._canonical(mapping.__dict__)
         observation_json = self._canonical(observation.__dict__)
         validation_json = self._canonical(result.__dict__)
@@ -547,9 +833,22 @@ class OnChainStore:
                 continue
             observation = OnChainObservation(**json.loads(payload_json))
             validation_record = OnChainValidationResult(**validation)
-            if not self.engine.verify_persisted_acceptance_receipt(
-                observation, validation_record,
-            ):
+            mapping_row = self.conn.execute(
+                "SELECT payload_json FROM layer1_onchain_asset_mappings WHERE mapping_id=?",
+                (mapping_id,),
+            ).fetchone()
+            if mapping_row is None:
+                continue
+            mapping = OnChainAssetMapping(**json.loads(mapping_row[0]))
+            provenance = OnChainObservationProvenance(
+                validation_record.provenance_cursor_key,
+                validation_record.provenance_page_id,
+                validation_record.provenance_observation_id,
+            )
+            if (not self.engine.verify_persisted_acceptance_receipt(observation, validation_record)
+                    or not self.engine.verify_observation_provenance(
+                        self.ingestion_store, provenance, mapping, observation,
+                    )):
                 continue
             try:
                 observed_at = _parse_timestamp(observation.observed_at)
@@ -567,10 +866,33 @@ class OnChainStore:
             return None
         observation = OnChainObservation(**json.loads(row[0]))
         validation = OnChainValidationResult(**json.loads(row[1]))
-        if validation.status == "ACCEPTED" and not self.engine.verify_persisted_acceptance_receipt(
-            observation, validation,
-        ):
-            validation = replace(validation, status="UNVERIFIED", reason_code="ONCHAIN_RECEIPT_INVALID", reason="persisted acceptance receipt failed authentication")
+        if validation.status == "ACCEPTED":
+            mapping_row = self.conn.execute(
+                "SELECT payload_json FROM layer1_onchain_asset_mappings WHERE mapping_id=?",
+                (observation.mapping_id,),
+            ).fetchone()
+            mapping = OnChainAssetMapping(**json.loads(mapping_row[0])) if mapping_row else None
+            try:
+                provenance = OnChainObservationProvenance(
+                    validation.provenance_cursor_key,
+                    validation.provenance_page_id,
+                    validation.provenance_observation_id,
+                )
+                valid = (
+                    mapping is not None
+                    and self.engine.verify_persisted_acceptance_receipt(observation, validation)
+                    and self.engine.verify_observation_provenance(
+                        self.ingestion_store, provenance, mapping, observation,
+                    )
+                )
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                validation = replace(
+                    validation, status="UNVERIFIED",
+                    reason_code="ONCHAIN_PROVENANCE_INVALID",
+                    reason="persisted observation no longer matches its accepted canonical ingestion page",
+                )
         return observation, validation
 
     def list_verified_mappings(self, network_id: Optional[str] = None) -> list[OnChainAssetMapping]:

@@ -6,6 +6,7 @@ must only advance a cursor after a complete, validated page has been normalized.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -15,10 +16,47 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from .onchain_providers import BitcoinAddressTransaction, EvmTokenTransferLog, SolanaAddressTransaction, ProviderTransportError
+from .onchain_providers import (
+    BitcoinAddressTransaction, EvmTokenTransferLog, SolanaAddressTransaction,
+    CapturedProviderReceiptBatch, ProviderResponseReceipt, ProviderTransportError,
+    _approved_endpoint_profile_sha256, _approved_endpoint_id,
+    _is_valid_bitcoin_mainnet_address, is_valid_xrpl_issued_currency_code,
+    _solana_base58_decode,
+)
 
 
 _UNSET = object()
+
+
+@dataclass(frozen=True)
+class OnChainFinalitySnapshot:
+    """Worker-derived finality facts persisted with the exact normalized event.
+
+    The snapshot is an application-attested interpretation of provider data,
+    not a provider signature. Version 1 keeps Bitcoin confirmation semantics
+    distinct from deterministic finalized-height networks.
+    """
+    version: int
+    network_id: str
+    status: str
+    reference: str
+
+    def __post_init__(self):
+        if (isinstance(self.version, bool) or not isinstance(self.version, int)
+                or self.version != 1
+                or not isinstance(self.network_id, str) or self.network_id not in {
+                    "bitcoin-mainnet", "ethereum-mainnet", "bnb-smart-chain-mainnet",
+                    "solana-mainnet", "xrpl-mainnet",
+                }
+                or not isinstance(self.status, str)
+                or not isinstance(self.reference, str) or not self.reference.strip()):
+            raise ValueError("chain finality snapshot identity is invalid")
+        if self.network_id == "bitcoin-mainnet":
+            if (self.status != "CONFIRMED"
+                    or re.fullmatch(r"confirmations-policy:min=[1-9][0-9]*", self.reference) is None):
+                raise ValueError("Bitcoin finality snapshot must preserve its explicit confirmation policy")
+        elif self.status != "FINALIZED":
+            raise ValueError("deterministic finality snapshot must be FINALIZED")
 
 
 @dataclass(frozen=True)
@@ -43,10 +81,13 @@ class NormalizedTransferEvent:
     provenance: str
     from_addresses: tuple[str, ...] = ()
     from_addresses_complete: bool = True
+    finality_snapshot: Optional[OnChainFinalitySnapshot] = None
 
     def __post_init__(self):
         if isinstance(self.from_addresses, list):
             object.__setattr__(self, "from_addresses", tuple(self.from_addresses))
+        if isinstance(self.finality_snapshot, dict):
+            object.__setattr__(self, "finality_snapshot", OnChainFinalitySnapshot(**self.finality_snapshot))
 
 
 class OnChainIngestionStore:
@@ -90,6 +131,41 @@ class OnChainIngestionStore:
             ON layer1_onchain_transfer_events(network_id, block_number, block_hash);
         CREATE INDEX IF NOT EXISTS idx_onchain_transfer_tx
             ON layer1_onchain_transfer_events(network_id, transaction_hash);
+        CREATE TABLE IF NOT EXISTS layer1_onchain_ingestion_pages (
+            page_id TEXT PRIMARY KEY,
+            cursor_key TEXT NOT NULL,
+            scope_identity_json TEXT,
+            page_material_json TEXT NOT NULL,
+            receipt_sha256 TEXT NOT NULL,
+            receipts_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_onchain_ingestion_pages_cursor
+            ON layer1_onchain_ingestion_pages(cursor_key, created_at, page_id);
+        CREATE INDEX IF NOT EXISTS idx_onchain_ingestion_pages_scope_identity_parts
+            ON layer1_onchain_ingestion_pages(
+                (CASE WHEN json_valid(scope_identity_json) THEN json_extract(scope_identity_json, '$[0]') END),
+                (CASE WHEN json_valid(scope_identity_json) THEN json_extract(scope_identity_json, '$[1]') END),
+                (CASE WHEN json_valid(scope_identity_json) THEN json_extract(scope_identity_json, '$[2]') END)
+            );
+        CREATE TABLE IF NOT EXISTS layer1_onchain_ingestion_page_acceptances (
+            page_id TEXT PRIMARY KEY REFERENCES layer1_onchain_ingestion_pages(page_id),
+            cursor_key TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            payload_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS layer1_onchain_ingestion_page_acceptance_lifecycle (
+            page_id TEXT PRIMARY KEY REFERENCES layer1_onchain_ingestion_page_acceptances(page_id),
+            status TEXT NOT NULL CHECK (status = 'INVALIDATED'),
+            reason_code TEXT NOT NULL CHECK (reason_code = 'CANONICAL_EVIDENCE_REORGED'),
+            affected_evidence_json TEXT NOT NULL,
+            invalidated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_onchain_page_acceptance_lifecycle_status
+            ON layer1_onchain_ingestion_page_acceptance_lifecycle(status, invalidated_at, page_id);
         CREATE TABLE IF NOT EXISTS layer1_onchain_ingestion_blocks (
             network_id TEXT NOT NULL, provider TEXT NOT NULL, scope TEXT NOT NULL,
             block_number INTEGER NOT NULL, block_hash TEXT NOT NULL, block_time TEXT NOT NULL,
@@ -107,6 +183,28 @@ class OnChainIngestionStore:
     @staticmethod
     def _canonical(value: Any) -> str:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+    @staticmethod
+    def _validate_acceptance_payload_matches_material(
+        material: dict, cursor_key: str, page_id: str, key_id: str, payload_json: str,
+    ) -> None:
+        try:
+            payload = json.loads(payload_json)
+        except (TypeError, json.JSONDecodeError):
+            raise ValueError("ingestion page acceptance payload is invalid JSON") from None
+        if not isinstance(payload, dict) or OnChainIngestionStore._canonical(payload) != payload_json:
+            raise ValueError("ingestion page acceptance payload is not canonical")
+        if (
+            payload.get("domain") != "BINANCE_SQUARE_W2E_ONCHAIN_INGESTION_PAGE_V1"
+            or payload.get("receipt_version") != 1
+            or payload.get("receipt_key_id") != key_id
+            or payload.get("page_id") != page_id
+            or payload.get("cursor_key") != cursor_key
+            or payload.get("page_material") != material.get("page_material")
+            or payload.get("receipts") != material.get("receipts")
+            or payload.get("receipt_sha256") != material.get("receipt_sha256")
+        ):
+            raise ValueError("ingestion page acceptance snapshot no longer matches current canonical evidence")
 
     @classmethod
     def _validate_event(cls, event: NormalizedTransferEvent) -> None:
@@ -152,6 +250,11 @@ class OnChainIngestionStore:
             raise ValueError("event_index must be null or a non-negative integer")
         if not isinstance(event.canonical_status, str) or event.canonical_status not in cls._STATUSES:
             raise ValueError("canonical_status is not supported")
+        if event.finality_snapshot is not None:
+            if not isinstance(event.finality_snapshot, OnChainFinalitySnapshot):
+                raise ValueError("normalized event finality snapshot is invalid")
+            if event.finality_snapshot.network_id != event.network_id:
+                raise ValueError("normalized event finality snapshot network does not match its event")
         for field in (event.block_time, event.observed_at):
             try:
                 parsed = datetime.fromisoformat(field.replace("Z", "+00:00"))
@@ -166,15 +269,32 @@ class OnChainIngestionStore:
                     canonical_blocks: Iterable[dict] = (),
                     canonical_slots: Iterable[dict] = (),
                     expected_cursor: Any = _UNSET,
-                    scope_identity: Any = None) -> dict:
+                    scope_identity: Any = None,
+                    provider_receipts: Optional[CapturedProviderReceiptBatch] = None,
+                    provider_observations: Iterable[dict] = ()) -> dict:
         if not isinstance(cursor_key, str) or not cursor_key.strip():
             raise ValueError("cursor_key must be a non-empty string")
+        if expected_cursor is _UNSET:
+            raise ValueError("SQLite commits require the checkpoint snapshot in expected_cursor")
         if not isinstance(allow_recanonicalized, bool):
             raise ValueError("allow_recanonicalized must be boolean")
         cursor_json = self._canonical(next_cursor)
         batch = tuple(events)
         blocks = tuple(canonical_blocks)
         slots = tuple(canonical_slots)
+        anchor_observations = tuple(provider_observations)
+        if provider_receipts is not None and (
+            not isinstance(provider_receipts, CapturedProviderReceiptBatch)
+            or not provider_receipts.is_collector_issued()
+        ):
+            raise ValueError("provider_receipts must be a captured provider receipt batch")
+        receipts = provider_receipts.receipts if provider_receipts is not None else ()
+        if any(item.sequence != index for index, item in enumerate(receipts, 1)):
+            raise ValueError("provider response receipt sequence is invalid")
+        if receipts and any(item.endpoint_profile_sha256 is None for item in receipts):
+            raise ValueError("new provider receipts require an endpoint profile fingerprint")
+        if receipts and scope_identity is None:
+            raise ValueError("scope_identity is required when provider receipts are supplied")
         for event in batch:
             self._validate_event(event)
         for block in blocks:
@@ -213,6 +333,41 @@ class OnChainIngestionStore:
                     raise ValueError("Solana slot block time must be timezone-aware ISO-8601")
             elif slot.get("block_hash") is not None or slot.get("block_time") is not None:
                 raise ValueError("skipped Solana slots must not carry fabricated block hash or time")
+        if anchor_observations and (scope_identity is None or not receipts):
+            raise ValueError("provider observations require explicit scope identity and captured provider receipts")
+        observation_ids = set()
+        for item in anchor_observations:
+            required_text = (
+                "observation_id", "mapping_id", "asset_id", "network_id", "chain_id",
+                "provider", "endpoint_id", "observation_type", "block_hash",
+                "transaction_hash", "block_time", "observed_at", "finality",
+                "finality_reference", "scope",
+            )
+            if (not isinstance(item, dict)
+                    or any(not isinstance(item.get(field), str) or not item[field].strip()
+                           for field in required_text)
+                    or isinstance(item.get("block_height"), bool)
+                    or not isinstance(item.get("block_height"), int)
+                    or item["block_height"] <= 0
+                    or item["observation_id"] in observation_ids):
+                raise ValueError("provider observation page record is malformed or duplicated")
+            observation_ids.add(item["observation_id"])
+            expected_endpoint_id = _approved_endpoint_id(item["provider"], item["network_id"])
+            if (item["network_id"], item["provider"], item["scope"]) != tuple(scope_identity):
+                raise ValueError("provider observation identity does not match checkpoint scope_identity")
+            if expected_endpoint_id is None or item["endpoint_id"] != expected_endpoint_id:
+                raise ValueError("provider observation endpoint_id does not match the approved provider/network endpoint")
+            if item["network_id"] == "solana-mainnet":
+                slot = next((row for row in slots if row["slot"] == item["block_height"]), None)
+                if (slot is None or not slot["produced"]
+                        or slot.get("block_hash") != item["block_hash"]
+                        or slot.get("block_time") != item["block_time"]):
+                    raise ValueError("provider observation does not bind to canonical Solana slot evidence")
+            else:
+                block = next((row for row in blocks if row["block_number"] == item["block_height"]), None)
+                if (block is None or block["block_hash"] != item["block_hash"]
+                        or block["block_time"] != item["block_time"]):
+                    raise ValueError("provider observation does not bind to canonical block evidence")
         if scope_identity is not None:
             if (not isinstance(scope_identity, (tuple, list)) or len(scope_identity) != 3
                     or any(not isinstance(part, str) or not part.strip() for part in scope_identity)):
@@ -225,6 +380,17 @@ class OnChainIngestionStore:
             if any((slot["network_id"], slot["provider"], slot["scope"]) != tuple(scope_identity)
                    for slot in slots):
                 raise ValueError("canonical slot identity does not match checkpoint scope_identity")
+        if scope_identity is not None and any(
+            (item.network_id, item.provider) != (scope_identity[0], scope_identity[1])
+            for item in receipts
+        ):
+            raise ValueError("provider receipt identity does not match checkpoint scope_identity")
+        if receipts and any(
+            _approved_endpoint_profile_sha256(item.provider, item.network_id) is None
+            or item.endpoint_profile_sha256 != _approved_endpoint_profile_sha256(item.provider, item.network_id)
+            for item in receipts
+        ):
+            raise ValueError("provider receipt fingerprint does not match the approved provider/network endpoint profile")
         now = datetime.now(timezone.utc).isoformat()
         inserted = duplicates = tombstoned = 0
         self.conn.execute("BEGIN IMMEDIATE")
@@ -297,6 +463,7 @@ class OnChainIngestionStore:
                 inserted += 1
                 if event.canonical_status == "REORGED":
                     tombstoned += 1
+            reorg_changes: list[tuple[int, Optional[str]]] = []
             for block in blocks:
                 prior = self.conn.execute(
                     """SELECT block_hash, block_time FROM layer1_onchain_ingestion_blocks
@@ -315,6 +482,7 @@ class OnChainIngestionStore:
                     ).fetchone()
                     if not allow_recanonicalized or active:
                         raise ValueError("canonical block hash conflict")
+                    reorg_changes.append((block["block_number"], block["block_hash"]))
                 self.conn.execute(
                     """INSERT INTO layer1_onchain_ingestion_blocks
                        (network_id, provider, scope, block_number, block_hash, block_time, updated_at)
@@ -344,6 +512,7 @@ class OnChainIngestionStore:
                     ).fetchone()
                     if not allow_recanonicalized or active:
                         raise ValueError("canonical Solana slot journal conflict")
+                    reorg_changes.append((slot["slot"], slot.get("block_hash")))
                 self.conn.execute(
                     """INSERT INTO layer1_onchain_solana_slot_journal
                        (network_id, provider, scope, slot, produced, block_hash, block_time, updated_at)
@@ -353,6 +522,47 @@ class OnChainIngestionStore:
                          block_time=excluded.block_time, updated_at=excluded.updated_at""",
                     (slot["network_id"], slot["provider"], slot["scope"], slot["slot"],
                      int(slot["produced"]), slot.get("block_hash"), slot.get("block_time"), now),
+                )
+            if scope_identity is not None:
+                scope_network_id, scope_provider, scope_name = scope_identity
+                for changed_height, changed_hash in reorg_changes:
+                    self._invalidate_page_acceptances_for_reorg(
+                        scope_network_id, scope_provider, scope_name,
+                        changed_height, changed_hash, now,
+                    )
+            # Bind the ordered provider response receipts to the exact normalized
+            # page inputs. A retry with identical inputs is idempotent; a replay
+            # that substitutes different response evidence fails closed.
+            page_material = {
+                "cursor_key": cursor_key,
+                "expected_cursor": {"_unset": True} if expected_cursor is _UNSET else expected_cursor,
+                "next_cursor": next_cursor,
+                "scope_identity": list(scope_identity) if scope_identity is not None else None,
+                "events": [asdict(event) for event in batch],
+                "canonical_blocks": list(blocks),
+                "canonical_slots": list(slots),
+            }
+            if anchor_observations:
+                page_material["provider_observations"] = list(anchor_observations)
+            page_id = hashlib.sha256(self._canonical(page_material).encode("utf-8")).hexdigest()
+            receipts_payload = [asdict(item) for item in receipts]
+            receipts_json = self._canonical(receipts_payload)
+            receipt_sha256 = hashlib.sha256(receipts_json.encode("utf-8")).hexdigest()
+            prior_page = self.conn.execute(
+                "SELECT receipt_sha256 FROM layer1_onchain_ingestion_pages WHERE page_id=?",
+                (page_id,),
+            ).fetchone()
+            if prior_page and prior_page[0] != receipt_sha256:
+                raise ValueError("provider receipt replay conflict: page identity has different response evidence")
+            if prior_page is None:
+                self.conn.execute(
+                    """INSERT INTO layer1_onchain_ingestion_pages
+                       (page_id, cursor_key, scope_identity_json, page_material_json,
+                        receipt_sha256, receipts_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (page_id, cursor_key,
+                     self._canonical(list(scope_identity)) if scope_identity is not None else None,
+                     self._canonical(page_material), receipt_sha256, receipts_json, now),
                 )
             self.conn.execute(
                 """INSERT INTO layer1_onchain_ingestion_checkpoints(cursor_key, cursor_json, updated_at)
@@ -366,6 +576,324 @@ class OnChainIngestionStore:
             self.conn.rollback()
             raise
         return {"inserted": inserted, "duplicates": duplicates, "tombstoned": tombstoned}
+
+    def list_page_receipts(self, cursor_key: str) -> tuple[ProviderResponseReceipt, ...]:
+        """Load persisted provider response receipts in ingestion-page order."""
+        if not isinstance(cursor_key, str) or not cursor_key.strip():
+            raise ValueError("cursor_key must be a non-empty string")
+        rows = self.conn.execute(
+            """SELECT page_id, page_material_json, receipt_sha256, receipts_json
+               FROM layer1_onchain_ingestion_pages
+               WHERE cursor_key=? ORDER BY created_at, page_id""",
+            (cursor_key,),
+        ).fetchall()
+        result = []
+        for page_id, page_material_json, expected_digest, receipts_json in rows:
+            page_material = json.loads(page_material_json)
+            page_digest = hashlib.sha256(
+                self._canonical(page_material).encode("utf-8")
+            ).hexdigest()
+            if page_digest != page_id:
+                raise ValueError("persisted provider page identity digest mismatch")
+            payload = json.loads(receipts_json)
+            canonical = self._canonical(payload)
+            actual_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            if actual_digest != expected_digest:
+                raise ValueError("persisted provider receipt digest mismatch")
+            result.extend(ProviderResponseReceipt(**item) for item in payload)
+        return tuple(result)
+
+    def get_page_acceptance_material(self, cursor_key: str, page_id: str) -> dict:
+        """Re-read and validate the committed page, its receipts and canonical evidence."""
+        if not isinstance(cursor_key, str) or not cursor_key.strip() or not isinstance(page_id, str) or re.fullmatch(r"[a-f0-9]{64}", page_id) is None:
+            raise ValueError("cursor_key and page_id are required")
+        row = self.conn.execute(
+            """SELECT cursor_key, page_material_json, receipt_sha256, receipts_json
+               FROM layer1_onchain_ingestion_pages WHERE page_id=?""",
+            (page_id,),
+        ).fetchone()
+        if row is None or row[0] != cursor_key:
+            raise ValueError("persisted ingestion page does not match requested cursor/page identity")
+        page_material = json.loads(row[1])
+        if (page_material.get("cursor_key") != cursor_key
+                or hashlib.sha256(self._canonical(page_material).encode("utf-8")).hexdigest() != page_id):
+            raise ValueError("persisted provider page identity digest mismatch")
+        receipts_payload = json.loads(row[3])
+        receipts_json = self._canonical(receipts_payload)
+        if hashlib.sha256(receipts_json.encode("utf-8")).hexdigest() != row[2]:
+            raise ValueError("persisted provider receipt digest mismatch")
+        receipts = tuple(ProviderResponseReceipt(**item) for item in receipts_payload)
+        if not receipts or any(item.sequence != index for index, item in enumerate(receipts, 1)):
+            raise ValueError("ingestion page has no complete captured provider receipt lineage")
+        if any(
+            item.endpoint_profile_sha256 is None
+            or _approved_endpoint_profile_sha256(item.provider, item.network_id) is None
+            or item.endpoint_profile_sha256 != _approved_endpoint_profile_sha256(item.provider, item.network_id)
+            for item in receipts
+        ):
+            raise ValueError("persisted provider receipt lacks or mismatches the approved provider/network endpoint profile fingerprint")
+        scope_identity = page_material.get("scope_identity")
+        if (not isinstance(scope_identity, list) or len(scope_identity) != 3
+                or any(not isinstance(value, str) or not value for value in scope_identity)
+                or any((item.network_id, item.provider) != tuple(scope_identity[:2]) for item in receipts)):
+            raise ValueError("persisted provider receipt scope identity is invalid")
+        events = page_material.get("events")
+        blocks = page_material.get("canonical_blocks")
+        slots = page_material.get("canonical_slots")
+        if not isinstance(events, list) or not isinstance(blocks, list) or not isinstance(slots, list):
+            raise ValueError("persisted normalized event or canonical evidence collections are malformed")
+        if not blocks and not slots:
+            raise ValueError("ingestion page has no canonical block/slot evidence to bind")
+        if any((block.get("network_id"), block.get("provider"), block.get("scope")) != tuple(scope_identity)
+               for block in blocks):
+            raise ValueError("persisted canonical block evidence crosses the page scope")
+        if any((slot.get("network_id"), slot.get("provider"), slot.get("scope")) != tuple(scope_identity)
+               for slot in slots):
+            raise ValueError("persisted canonical slot evidence crosses the page scope")
+        provider_observations = page_material.get("provider_observations", [])
+        if not isinstance(provider_observations, list):
+            raise ValueError("persisted provider observation collection is malformed")
+        block_evidence = {
+            (block["block_number"]): (block["block_hash"], block["block_time"])
+            for block in blocks
+        }
+        for payload in events:
+            event = NormalizedTransferEvent(**payload)
+            self._validate_event(event)
+            if (event.network_id, event.provider, event.scope) != tuple(scope_identity):
+                raise ValueError("persisted normalized event crosses the page scope")
+            if block_evidence.get(event.block_number) != (event.block_hash, event.block_time):
+                raise ValueError("normalized event does not bind to its page canonical block evidence")
+            persisted = self.get_event(event.event_id, event.network_id, event.provider, event.scope)
+            if persisted != event or event.canonical_status != "CANONICAL":
+                raise ValueError("persisted normalized event no longer matches the committed canonical page")
+        slot_evidence = {
+            slot["slot"]: (slot.get("produced"), slot.get("block_hash"), slot.get("block_time"))
+            for slot in slots
+        }
+        observation_ids = set()
+        for item in provider_observations:
+            required_text = (
+                "observation_id", "mapping_id", "asset_id", "network_id", "chain_id",
+                "provider", "endpoint_id", "observation_type", "block_hash",
+                "transaction_hash", "block_time", "observed_at", "finality",
+                "finality_reference", "scope",
+            )
+            if (not isinstance(item, dict)
+                    or any(not isinstance(item.get(field), str) or not item[field].strip()
+                           for field in required_text)
+                    or isinstance(item.get("block_height"), bool)
+                    or not isinstance(item.get("block_height"), int)
+                    or item["block_height"] <= 0
+                    or item["observation_id"] in observation_ids
+                    or (item["network_id"], item["provider"], item["scope"]) != tuple(scope_identity)):
+                raise ValueError("persisted provider observation identity is malformed or outside page scope")
+            observation_ids.add(item["observation_id"])
+            expected_endpoint_id = _approved_endpoint_id(item["provider"], item["network_id"])
+            if expected_endpoint_id is None or item["endpoint_id"] != expected_endpoint_id:
+                raise ValueError("persisted provider observation endpoint_id does not match approved endpoint")
+            if item["network_id"] == "solana-mainnet":
+                if slot_evidence.get(item["block_height"]) != (
+                    True, item["block_hash"], item["block_time"],
+                ):
+                    raise ValueError("persisted provider observation does not bind to canonical Solana slot evidence")
+            elif block_evidence.get(item["block_height"]) != (
+                item["block_hash"], item["block_time"],
+            ):
+                raise ValueError("persisted provider observation does not bind to canonical block evidence")
+        for block in blocks:
+            actual = self.conn.execute(
+                """SELECT block_hash, block_time FROM layer1_onchain_ingestion_blocks
+                   WHERE network_id=? AND provider=? AND scope=? AND block_number=?""",
+                (block["network_id"], block["provider"], block["scope"], block["block_number"]),
+            ).fetchone()
+            if actual != (block["block_hash"], block["block_time"]):
+                raise ValueError("persisted canonical block evidence no longer matches the committed page")
+        for slot in slots:
+            actual = self.conn.execute(
+                """SELECT produced, block_hash, block_time FROM layer1_onchain_solana_slot_journal
+                   WHERE network_id=? AND provider=? AND scope=? AND slot=?""",
+                (slot["network_id"], slot["provider"], slot["scope"], slot["slot"]),
+            ).fetchone()
+            expected = (int(slot["produced"]), slot.get("block_hash"), slot.get("block_time"))
+            if actual != expected:
+                raise ValueError("persisted canonical Solana slot evidence no longer matches the committed page")
+        return {
+            "page_id": page_id, "cursor_key": cursor_key,
+            "page_material": page_material, "receipts": receipts_payload,
+            "receipt_sha256": row[2],
+        }
+
+    def save_page_acceptance(self, cursor_key: str, page_id: str, key_id: str,
+                             payload_json: str, payload_sha256: str, signature: str) -> str:
+        if (not isinstance(key_id, str) or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", key_id) is None
+                or not isinstance(payload_json, str) or not isinstance(payload_sha256, str)
+                or re.fullmatch(r"[a-f0-9]{64}", payload_sha256) is None
+                or not isinstance(signature, str) or re.fullmatch(r"[a-f0-9]{64}", signature) is None
+                or hashlib.sha256(payload_json.encode("utf-8")).hexdigest() != payload_sha256
+                or self._canonical(json.loads(payload_json)) != payload_json):
+            raise ValueError("ingestion page acceptance envelope is malformed")
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            material = self.get_page_acceptance_material(cursor_key, page_id)
+            self._validate_acceptance_payload_matches_material(
+                material, cursor_key, page_id, key_id, payload_json,
+            )
+            envelope = (cursor_key, key_id, payload_sha256, payload_json, signature)
+            prior = self.conn.execute(
+                """SELECT cursor_key, key_id, payload_sha256, payload_json, signature
+                   FROM layer1_onchain_ingestion_page_acceptances WHERE page_id=?""",
+                (page_id,),
+            ).fetchone()
+            if prior is not None:
+                if prior != envelope:
+                    raise ValueError("ingestion page acceptance already exists with conflicting signer evidence")
+                self.conn.commit()
+                return "DUPLICATE"
+            self.conn.execute(
+                """INSERT INTO layer1_onchain_ingestion_page_acceptances
+                   (page_id, cursor_key, key_id, payload_sha256, payload_json, signature, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (page_id, *envelope, now),
+            )
+            self.conn.commit()
+            return "INSERTED"
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def list_ingestion_pages(self) -> tuple[tuple[str, str], ...]:
+        """List durable page identities for downstream acceptance verification."""
+        rows = self.conn.execute(
+            "SELECT cursor_key, page_id FROM layer1_onchain_ingestion_pages ORDER BY created_at, page_id"
+        ).fetchall()
+        return tuple((cursor_key, page_id) for cursor_key, page_id in rows)
+
+    @staticmethod
+    def _page_material_requires_acceptance(page_material: Any) -> bool:
+        """Whether a page contains provider-derived evidence that needs HMAC acceptance."""
+        if not isinstance(page_material, dict):
+            # Malformed persisted material must remain visible for rejection/review.
+            return True
+        return any(
+            page_material.get(field, []) not in (None, [])
+            for field in ("events", "canonical_blocks", "canonical_slots", "provider_observations")
+        )
+
+    def list_pending_page_acceptances(self) -> tuple[tuple[str, str], ...]:
+        rows = self.conn.execute(
+            """SELECT p.cursor_key, p.page_id, p.page_material_json, p.receipts_json
+               FROM layer1_onchain_ingestion_pages AS p
+               LEFT JOIN layer1_onchain_ingestion_page_acceptances AS a ON a.page_id=p.page_id
+               WHERE a.page_id IS NULL ORDER BY p.created_at, p.page_id"""
+        ).fetchall()
+        pending = []
+        for cursor_key, page_id, page_material_json, receipts_json in rows:
+            # Checkpoint-only commits intentionally have no provider evidence and
+            # need no page acceptance. Every evidence-bearing page must be
+            # visible to recovery even when its receipt batch is missing/empty.
+            receipt_present = (
+                not isinstance(receipts_json, str)
+                or receipts_json.strip() not in ("", "[]")
+            )
+            try:
+                page_material = json.loads(page_material_json)
+            except (TypeError, ValueError):
+                page_material = None
+            if receipt_present or self._page_material_requires_acceptance(page_material):
+                pending.append((cursor_key, page_id))
+        return tuple(pending)
+
+    def list_invalidated_page_acceptances(self) -> tuple[dict, ...]:
+        """Return immutable signed envelopes with reorg invalidation evidence for operator review."""
+        rows = self.conn.execute(
+            """SELECT a.cursor_key, a.page_id, l.reason_code, l.affected_evidence_json,
+                      l.invalidated_at, a.key_id, a.payload_sha256, a.signature,
+                      a.payload_json, a.created_at
+               FROM layer1_onchain_ingestion_page_acceptance_lifecycle AS l
+               JOIN layer1_onchain_ingestion_page_acceptances AS a ON a.page_id=l.page_id
+               WHERE l.status='INVALIDATED' ORDER BY l.invalidated_at, a.page_id"""
+        ).fetchall()
+        return tuple({
+            "cursor_key": row[0], "page_id": row[1], "status": "INVALIDATED",
+            "reason_code": row[2], "affected_evidence": json.loads(row[3]),
+            "invalidated_at": row[4], "key_id": row[5],
+            "payload_sha256": row[6], "signature": row[7],
+            "payload_json": json.loads(row[8]), "accepted_at": row[9],
+        } for row in rows)
+
+    def _invalidate_page_acceptances_for_reorg(
+        self, network_id: str, provider: Optional[str], scope: Optional[str], block_number: int,
+        canonical_block_hash: str, invalidated_at: str,
+    ) -> int:
+        rows = self.conn.execute(
+            """SELECT p.page_id, p.page_material_json
+               FROM layer1_onchain_ingestion_pages AS p
+               JOIN layer1_onchain_ingestion_page_acceptances AS a ON a.page_id=p.page_id
+               LEFT JOIN layer1_onchain_ingestion_page_acceptance_lifecycle AS l ON l.page_id=p.page_id
+               WHERE (CASE WHEN json_valid(p.scope_identity_json)
+                            THEN json_extract(p.scope_identity_json, '$[0]') END)=?
+                 AND (? IS NULL OR (CASE WHEN json_valid(p.scope_identity_json)
+                                         THEN json_extract(p.scope_identity_json, '$[1]') END)=?)
+                 AND (? IS NULL OR (CASE WHEN json_valid(p.scope_identity_json)
+                                         THEN json_extract(p.scope_identity_json, '$[2]') END)=?)
+                 AND l.page_id IS NULL""",
+            (network_id, provider, provider, scope, scope),
+        ).fetchall()
+        invalidated = 0
+        for page_id, material_json in rows:
+            try:
+                material = json.loads(material_json)
+            except (TypeError, ValueError):
+                continue
+            affected = []
+            for field, height_field, kind in (
+                ("canonical_blocks", "block_number", "CANONICAL_BLOCK"),
+                ("canonical_slots", "slot", "CANONICAL_SLOT"),
+                ("events", "block_number", "TRANSFER_EVENT"),
+                ("provider_observations", "block_height", "PROVIDER_OBSERVATION"),
+            ):
+                for item in material.get(field, []) if isinstance(material, dict) else []:
+                    if (not isinstance(item, dict) or item.get("network_id") != network_id
+                            or (provider is not None and item.get("provider") != provider)
+                            or (scope is not None and item.get("scope") != scope)
+                            or item.get(height_field) != block_number):
+                        continue
+                    old_hash = item.get("block_hash")
+                    if old_hash is None and kind == "CANONICAL_SLOT":
+                        old_hash = "SKIPPED"
+                    if old_hash != canonical_block_hash:
+                        affected.append({
+                            "kind": kind, "network_id": network_id,
+                            "provider": item.get("provider"), "scope": item.get("scope"),
+                            "height": block_number,
+                            "canonical_block_hash": old_hash,
+                            "current_canonical_hash": canonical_block_hash,
+                        })
+            if affected:
+                self.conn.execute(
+                    """INSERT INTO layer1_onchain_ingestion_page_acceptance_lifecycle
+                       (page_id, status, reason_code, affected_evidence_json, invalidated_at)
+                       VALUES (?, 'INVALIDATED', 'CANONICAL_EVIDENCE_REORGED', ?, ?)
+                       ON CONFLICT(page_id) DO NOTHING""",
+                    (page_id, self._canonical(affected), invalidated_at),
+                )
+                invalidated += 1
+        return invalidated
+
+    def get_page_acceptance(self, cursor_key: str, page_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            """SELECT cursor_key, key_id, payload_sha256, payload_json, signature
+               FROM layer1_onchain_ingestion_page_acceptances WHERE page_id=?""",
+            (page_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row[0] != cursor_key:
+            raise ValueError("stored ingestion page acceptance belongs to a different cursor")
+        return {"cursor_key": row[0], "key_id": row[1], "payload_sha256": row[2],
+                "payload_json": row[3], "signature": row[4]}
 
     def get_checkpoint(self, cursor_key: str) -> Optional[Any]:
         row = self.conn.execute(
@@ -475,6 +1003,10 @@ class OnChainIngestionStore:
                        WHERE network_id=? AND provider=? AND scope=? AND event_id=?""",
                     (self._canonical(payload), now, row[0], row[1], row[2], row[3]),
                 )
+            self._invalidate_page_acceptances_for_reorg(
+                network_id, provider, scope, block_number,
+                canonical_block_hash, now,
+            )
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -531,10 +1063,7 @@ def normalize_xrpl_payment(
             or not isinstance(asset_id, str) or not asset_id.strip()
             or not isinstance(mapping_id, str) or not mapping_id.strip()
             or not is_valid_xrpl_classic_address(issuer_address)
-            or not isinstance(issued_currency, str) or not issued_currency.strip()
-            or not ((len(issued_currency) == 3 and all(0x21 <= ord(char) <= 0x7E for char in issued_currency)
-                     and issued_currency != "XRP")
-                    or re.fullmatch(r"[0-9a-fA-F]{40}", issued_currency) is not None)
+            or not is_valid_xrpl_issued_currency_code(issued_currency)
             or isinstance(decimals, bool) or not isinstance(decimals, int) or not 0 <= decimals <= 36):
         raise ValueError("XRPL mapping and monitored account scope are invalid")
     if not re.fullmatch(r"[0-9a-fA-F]{64}", canonical_ledger_hash or ""):
@@ -647,22 +1176,6 @@ def normalize_evm_transfer_log(event: EvmTokenTransferLog, *, asset_id: str,
         provenance="eth_getLogs:ERC20.Transfer",
     )
 
-
-
-def _solana_base58_decode(value: str) -> bytes:
-    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    if not isinstance(value, str) or not value:
-        raise ProviderTransportError("INVALID_SOLANA_INSTRUCTION", "Solana base58 value is empty")
-    number = 0
-    for char in value:
-        try:
-            digit = alphabet.index(char)
-        except ValueError:
-            raise ProviderTransportError("INVALID_SOLANA_INSTRUCTION", "Solana instruction contains invalid base58") from None
-        number = number * 58 + digit
-    body = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
-    leading = len(value) - len(value.lstrip("1"))
-    return b"\x00" * leading + body
 
 
 def _solana_account_keys(message: dict, meta: dict) -> list[str]:
@@ -924,8 +1437,8 @@ def normalize_bitcoin_transaction_outputs(
         raise ValueError("Bitcoin transaction details must be an object")
     if not isinstance(asset_id, str) or not asset_id.strip() or not isinstance(mapping_id, str) or not mapping_id.strip():
         raise ValueError("Bitcoin asset and mapping identity are required")
-    if not isinstance(monitored_address, str) or not monitored_address.strip() or any(ch.isspace() for ch in monitored_address):
-        raise ValueError("monitored_address must be a non-empty Bitcoin address")
+    if not _is_valid_bitcoin_mainnet_address(monitored_address):
+        raise ValueError("monitored_address must be a checksum-valid Bitcoin mainnet address")
     if (isinstance(minimum_confirmations, bool) or not isinstance(minimum_confirmations, int)
             or minimum_confirmations < 1):
         raise ValueError("minimum_confirmations must be a positive integer")
@@ -983,9 +1496,8 @@ def normalize_bitcoin_transaction_outputs(
                 raise ValueError("Bitcoin input isAddress=true but no decoded address was supplied")
             input_addresses_complete = False
             continue
-        if any(not isinstance(address, str) or not address.strip() or any(ch.isspace() for ch in address)
-               for address in addresses):
-            raise ValueError("Bitcoin input contains an invalid decoded address")
+        if any(not _is_valid_bitcoin_mainnet_address(address) for address in addresses):
+            raise ValueError("Bitcoin input contains a non-checksum-valid Bitcoin mainnet address")
         input_addresses.update(addresses)
 
     output_indexes = set()
@@ -1010,11 +1522,11 @@ def normalize_bitcoin_transaction_outputs(
             continue
         if not addresses:
             raise ValueError("Bitcoin output isAddress=true but no decoded address was supplied")
+        if any(not _is_valid_bitcoin_mainnet_address(address) for address in addresses):
+            raise ValueError("Bitcoin output contains a non-checksum-valid Bitcoin mainnet address")
         if len(addresses) != 1:
             continue
         destination = addresses[0]
-        if not isinstance(destination, str) or not destination.strip() or any(ch.isspace() for ch in destination):
-            raise ValueError("Bitcoin output destination address is invalid")
         source_addresses = tuple(sorted(input_addresses))
         source_address = source_addresses[0] if input_addresses_complete and len(source_addresses) == 1 else None
         events.append(NormalizedTransferEvent(

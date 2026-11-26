@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Callable
 
 from .onchain import OnChainAssetMapping
-from .onchain_ingestion import normalize_evm_transfer_log
-from .onchain_providers import EvmTokenTransferLog, ProviderTransportError, retry_provider_operation
+from .onchain_ingestion import OnChainFinalitySnapshot, normalize_evm_transfer_log
+from .onchain_providers import (
+    EvmTokenTransferLog, ProviderTransportError, retry_provider_operation,
+    _capture_provider_run_receipts, drain_provider_run_receipts,
+    include_provider_receipts_in_current_scope,
+)
 from .onchain_protocols import (
     OnChainIngestionStoreProtocol, OnChainMappingStoreProtocol,
     require_ingestion_store, require_mapping_store,
@@ -130,6 +135,13 @@ class EvmTransferIngestionWorker:
                     earliest_changed = height
         return changed, earliest_changed, detected_blocks
 
+    def _finalize_page_acceptances(self, summary: dict) -> None:
+        result = self.mapping_store.engine.sign_pending_ingestion_pages(self.ingestion_store)
+        summary["page_acceptances_signed"] = result["signed"]
+        summary["page_acceptances_pending"] = result["pending"]
+        summary["page_acceptances_rejected"] = result["rejected"]
+
+    @_capture_provider_run_receipts
     def run_once(self) -> dict:
         mappings = [
             mapping
@@ -141,7 +153,10 @@ class EvmTransferIngestionWorker:
             "duplicates": 0, "tombstoned": 0, "reorg_blocks_detected": 0,
             "reorg_events_tombstoned": 0, "checkpoints_advanced": 0,
         }
+        summary.update({"page_acceptances_signed": 0, "page_acceptances_pending": 0,
+                        "page_acceptances_rejected": 0})
         for mapping in mappings:
+            drain_provider_run_receipts()  # isolate this contract from prior mapping failures
             self._validate_mapping(mapping)
             if mapping.mapping_id not in self.start_blocks:
                 raise ValueError(f"no explicit start block configured for mapping {mapping.mapping_id}")
@@ -220,11 +235,17 @@ class EvmTransferIngestionWorker:
                         raise ProviderTransportError("PROVIDER_SCOPE_MISMATCH", "provider log is outside the requested mapping/range")
                     header = headers[record.block_number]
                     block_time = datetime.fromtimestamp(header["timestamp"], timezone.utc).isoformat()
-                    normalized.append(normalize_evm_transfer_log(
-                        record, asset_id=mapping.asset_id, mapping_id=mapping.mapping_id,
-                        expected_contract_address=mapping.contract_address,
-                        canonical_block_hash=header["hash"], decimals=mapping.decimals,
-                        block_time=block_time, observed_at=observed_at, scope=scope,
+                    normalized.append(replace(
+                        normalize_evm_transfer_log(
+                            record, asset_id=mapping.asset_id, mapping_id=mapping.mapping_id,
+                            expected_contract_address=mapping.contract_address,
+                            canonical_block_hash=header["hash"], decimals=mapping.decimals,
+                            block_time=block_time, observed_at=observed_at, scope=scope,
+                        ),
+                        finality_snapshot=OnChainFinalitySnapshot(
+                            version=1, network_id=mapping.network_id, status="FINALIZED",
+                            reference=page.finality_reference,
+                        ),
                     ))
                 next_cursor = {
                     "mapping_id": mapping.mapping_id,
@@ -234,6 +255,7 @@ class EvmTransferIngestionWorker:
                     "to_block": range_end,
                     "next_block": range_end + 1,
                     "finalized_height": finalized_height,
+                    "finality_reference": page.finality_reference,
                 }
                 committed = self.ingestion_store.commit_page(
                     cursor_key, next_cursor, normalized, allow_recanonicalized=True,
@@ -244,6 +266,7 @@ class EvmTransferIngestionWorker:
                     } for height, header in headers.items()),
                     expected_cursor=checkpoint,
                     scope_identity=(mapping.network_id, "alchemy", scope),
+                    provider_receipts=drain_provider_run_receipts(),
                 )
                 checkpoint = next_cursor
                 summary["events_inserted"] += committed["inserted"]
@@ -251,4 +274,5 @@ class EvmTransferIngestionWorker:
                 summary["tombstoned"] += committed["tombstoned"]
                 summary["blocks_scanned"] += range_end - range_start + 1
                 summary["checkpoints_advanced"] += 1
+        self._finalize_page_acceptances(summary)
         return summary

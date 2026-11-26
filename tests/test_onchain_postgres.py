@@ -13,6 +13,159 @@ TEST_DSN = os.environ.get("TEST_POSTGRES_DSN")
 
 
 class PostgresAdapterContractTests(unittest.TestCase):
+    def test_postgres_save_verified_defaults_to_constructor_bound_ingestion_store(self):
+        from types import SimpleNamespace
+        from layer1.onchain_postgres import PostgresOnChainStore
+
+        class Engine:
+            def __init__(self):
+                self.ingestion_store = None
+
+            def validate(self, eligibility, mapping, observation, *, ingestion_store=None,
+                         provenance=None):
+                self.ingestion_store = ingestion_store
+                return SimpleNamespace(status="UNVERIFIED", reason_code="TEST_REJECTION")
+
+        ingestion = object()
+        engine = Engine()
+        store = object.__new__(PostgresOnChainStore)
+        store.engine = engine
+        store.ingestion_store = ingestion
+        with self.assertRaisesRegex(ValueError, "TEST_REJECTION"):
+            store.save_verified(object(), object(), object(), provenance=object())
+        self.assertIs(engine.ingestion_store, ingestion)
+
+    def test_postgres_pending_query_surfaces_unreceipted_evidence_pages(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+
+        class Result:
+            def fetchall(self):
+                return [
+                    ("cursor-events", "a" * 64, {"events": [{"event_id": "event-1"}]}, []),
+                    ("cursor-checkpoint", "b" * 64, {"events": [], "canonical_blocks": [], "canonical_slots": []}, []),
+                    ("cursor-invalid", "c" * 64, "malformed-shape", None),
+                ]
+
+        class Connection:
+            def execute(self, query):
+                self.query = query
+                return Result()
+
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        self.assertEqual(
+            store.list_pending_page_acceptances(),
+            (("cursor-events", "a" * 64), ("cursor-invalid", "c" * 64)),
+        )
+
+    def test_postgres_page_commit_rejects_omitted_checkpoint_snapshot_before_database_access(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        store = object.__new__(PostgresOnChainIngestionStore)
+        with self.assertRaisesRegex(ValueError, "expected_cursor"):
+            store.commit_page("cursor", {"next": 1}, ())
+
+    def test_postgres_new_page_commit_rejects_receipt_without_endpoint_profile_fingerprint(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        from layer1.onchain_providers import (
+            ProviderResponseReceipt, _ACTIVE_PAGE_RECEIPTS,
+            _capture_provider_run_receipts, drain_provider_run_receipts,
+        )
+        receipt = ProviderResponseReceipt(
+            sequence=1, provider="alchemy", network_id="bnb-smart-chain-mainnet",
+            method="eth_getLogs", request_sha256="a" * 64,
+            response_sha256="b" * 64, response_bytes=128, http_status=200,
+            received_at="2026-11-26T12:00:00+00:00",
+        )
+        @_capture_provider_run_receipts
+        def captured():
+            _ACTIVE_PAGE_RECEIPTS.get().append(receipt)
+            return drain_provider_run_receipts()
+        store = object.__new__(PostgresOnChainIngestionStore)
+        with self.assertRaisesRegex(ValueError, "endpoint profile fingerprint"):
+            store.commit_page(
+                "cursor", {"next": 1}, (), expected_cursor=None,
+                scope_identity=("bnb-smart-chain-mainnet", "alchemy", "contract:test"),
+                provider_receipts=captured(),
+            )
+
+    def test_postgres_new_page_commit_rejects_fingerprint_outside_approved_profile(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        from layer1.onchain_providers import (
+            ProviderResponseReceipt, _ACTIVE_PAGE_RECEIPTS,
+            _capture_provider_run_receipts, drain_provider_run_receipts,
+        )
+        receipt = ProviderResponseReceipt(
+            sequence=1, provider="alchemy", network_id="bnb-smart-chain-mainnet",
+            method="eth_getLogs", request_sha256="a" * 64,
+            response_sha256="b" * 64, response_bytes=128, http_status=200,
+            received_at="2026-11-26T12:00:00+00:00",
+            endpoint_profile_sha256="f" * 64,
+        )
+        @_capture_provider_run_receipts
+        def captured():
+            _ACTIVE_PAGE_RECEIPTS.get().append(receipt)
+            return drain_provider_run_receipts()
+        store = object.__new__(PostgresOnChainIngestionStore)
+        with self.assertRaisesRegex(ValueError, "approved provider/network endpoint profile"):
+            store.commit_page(
+                "cursor", {"next": 1}, (), expected_cursor=None,
+                scope_identity=("bnb-smart-chain-mainnet", "alchemy", "contract:test"),
+                provider_receipts=captured(),
+            )
+
+    def test_postgres_anchor_observation_page_rejects_unapproved_endpoint_id(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        from layer1.onchain_providers import (
+            ProviderResponseReceipt, _ACTIVE_PAGE_RECEIPTS,
+            _approved_endpoint_profile_sha256, _capture_provider_run_receipts,
+            drain_provider_run_receipts,
+        )
+        receipt = ProviderResponseReceipt(
+            sequence=1, provider="alchemy", network_id="bnb-smart-chain-mainnet",
+            method="get_anchor_observation", request_sha256="a" * 64,
+            response_sha256="b" * 64, response_bytes=128, http_status=200,
+            received_at="2026-11-26T12:00:00+00:00",
+            endpoint_profile_sha256=_approved_endpoint_profile_sha256(
+                "alchemy", "bnb-smart-chain-mainnet",
+            ),
+        )
+        @_capture_provider_run_receipts
+        def captured():
+            _ACTIVE_PAGE_RECEIPTS.get().append(receipt)
+            return drain_provider_run_receipts()
+        observation = {
+            "observation_id": "obs-1", "mapping_id": "mapping-1",
+            "asset_id": "asset-1", "network_id": "bnb-smart-chain-mainnet",
+            "chain_id": "56", "provider": "alchemy",
+            "endpoint_id": "unapproved-endpoint-alias",
+            "observation_type": "TRANSFER", "block_height": 100,
+            "block_hash": "b" * 66, "transaction_hash": "a" * 66,
+            "block_time": "2026-11-26T12:00:00+00:00",
+            "observed_at": "2026-11-26T12:00:01+00:00",
+            "finality": "FINALIZED",
+            "finality_reference": "eth_getBlockByNumber:finalized",
+            "scope": "contract:0x" + "1" * 40,
+        }
+        store = object.__new__(PostgresOnChainIngestionStore)
+        with self.assertRaisesRegex(ValueError, "endpoint_id does not match"):
+            store.commit_page(
+                "cursor", {
+                    "finalized_height": 100,
+                    "finality_reference": "eth_getBlockByNumber:finalized",
+                }, (), expected_cursor=None,
+                scope_identity=(
+                    "bnb-smart-chain-mainnet", "alchemy", observation["scope"],
+                ),
+                canonical_blocks=({
+                    "network_id": "bnb-smart-chain-mainnet", "provider": "alchemy",
+                    "scope": observation["scope"], "block_number": 100,
+                    "block_hash": observation["block_hash"],
+                    "block_time": observation["block_time"],
+                },),
+                provider_receipts=captured(),
+                provider_observations=(observation,),
+            )
+
     def test_postgres_adapters_and_migration_runner_are_available(self):
         from layer1.onchain_postgres import (
             PostgresOnChainIngestionStore, PostgresOnChainStore,
@@ -53,6 +206,8 @@ class PostgresOnChainIngestionTests(unittest.TestCase):
                 layer1_onchain_transfer_events,
                 layer1_onchain_ingestion_blocks,
                 layer1_onchain_solana_slot_journal,
+                layer1_onchain_ingestion_page_acceptances,
+                layer1_onchain_ingestion_pages,
                 layer1_onchain_ingestion_checkpoints
             RESTART IDENTITY CASCADE
         """)
@@ -100,7 +255,148 @@ class PostgresOnChainIngestionTests(unittest.TestCase):
             "layer1_onchain_asset_mappings", "layer1_onchain_observations",
             "layer1_onchain_transfer_events", "layer1_onchain_ingestion_checkpoints",
             "layer1_onchain_ingestion_blocks", "layer1_onchain_solana_slot_journal",
+            "layer1_onchain_ingestion_pages", "layer1_onchain_ingestion_page_acceptances",
         }.issubset(names))
+
+    def test_provider_receipts_are_atomic_and_readable_after_store_reopen(self):
+        from layer1.onchain_providers import (
+            ProviderResponseReceipt, _ACTIVE_PAGE_RECEIPTS,
+            _capture_provider_run_receipts, drain_provider_run_receipts,
+        )
+        receipt = ProviderResponseReceipt(
+            sequence=1, provider="alchemy", network_id="bnb-smart-chain-mainnet",
+            method="eth_getLogs", request_sha256="a" * 64,
+            response_sha256="b" * 64, response_bytes=128, http_status=200,
+            received_at="2026-11-26T12:00:00+00:00",
+            endpoint_profile_sha256="ae9831d8c7fdd434108aa17b839f42f5c0ae1ce57069587a04bc0983e422252a",
+        )
+        @_capture_provider_run_receipts
+        def captured():
+            _ACTIVE_PAGE_RECEIPTS.get().append(receipt)
+            return drain_provider_run_receipts()
+        self.store.commit_page(
+            "alchemy:bnb:contract-1", {"next_block": 101}, [self.event()],
+            expected_cursor=None, scope_identity=self.identity,
+            provider_receipts=captured(),
+        )
+        self.store.close()
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        self.store = PostgresOnChainIngestionStore(TEST_DSN)
+        self.assertEqual(self.store.list_page_receipts("alchemy:bnb:contract-1"), (receipt,))
+
+    def test_ingestion_page_acceptance_is_signed_and_verified_after_store_reopen(self):
+        from layer1.onchain import OnChainIntelligenceEngine
+        from layer1.onchain_providers import (
+            ProviderResponseReceipt, _ACTIVE_PAGE_RECEIPTS,
+            _capture_provider_run_receipts, drain_provider_run_receipts,
+        )
+        event = self.event()
+        block = {
+            "network_id": event.network_id, "provider": event.provider,
+            "scope": event.scope, "block_number": event.block_number,
+            "block_hash": event.block_hash, "block_time": event.block_time,
+        }
+        receipt = ProviderResponseReceipt(
+            sequence=1, provider="alchemy", network_id="bnb-smart-chain-mainnet",
+            method="eth_getLogs", request_sha256="a" * 64,
+            response_sha256="b" * 64, response_bytes=128, http_status=200,
+            received_at="2026-11-26T12:00:00+00:00",
+            endpoint_profile_sha256="ae9831d8c7fdd434108aa17b839f42f5c0ae1ce57069587a04bc0983e422252a",
+        )
+        @_capture_provider_run_receipts
+        def captured():
+            _ACTIVE_PAGE_RECEIPTS.get().append(receipt)
+            return drain_provider_run_receipts()
+        cursor_key = "alchemy:bnb:contract-acceptance"
+        self.store.commit_page(
+            cursor_key, {"next_block": 101}, [event], expected_cursor=None,
+            scope_identity=self.identity, canonical_blocks=(block,),
+            provider_receipts=captured(),
+        )
+        page_id = self.store.conn.execute(
+            "SELECT page_id FROM layer1_onchain_ingestion_pages WHERE cursor_key=%s",
+            (cursor_key,),
+        ).fetchone()[0]
+        engine = OnChainIntelligenceEngine(
+            receipt_signing_key=b"test-only-onchain-ingestion-page-key-32-bytes",
+            receipt_key_id="postgres-ingestion-v1",
+        )
+        pending_result = engine.sign_pending_ingestion_pages(self.store)
+        self.assertEqual(pending_result, {"signed": 1, "pending": 0, "rejected": 0})
+        signed = engine.sign_ingestion_page(self.store, cursor_key, page_id)
+        self.assertEqual(engine.sign_ingestion_page(self.store, cursor_key, page_id), signed)
+        self.assertTrue(engine.verify_ingestion_page_acceptance(self.store, cursor_key, page_id))
+        self.store.close()
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        self.store = PostgresOnChainIngestionStore(TEST_DSN)
+        restarted_engine = OnChainIntelligenceEngine(
+            receipt_signing_key=b"test-only-onchain-ingestion-page-key-32-bytes",
+            receipt_key_id="postgres-ingestion-v1",
+        )
+        self.assertTrue(restarted_engine.verify_ingestion_page_acceptance(
+            self.store, cursor_key, page_id,
+        ))
+
+    def test_page_signing_rechecks_canonical_evidence_before_persisting_acceptance(self):
+        from unittest.mock import patch
+        import psycopg
+        from layer1.onchain import OnChainIntelligenceEngine
+        from layer1.onchain_providers import (
+            ProviderResponseReceipt, _ACTIVE_PAGE_RECEIPTS,
+            _capture_provider_run_receipts, drain_provider_run_receipts,
+        )
+
+        event = self.event()
+        block = {
+            "network_id": event.network_id, "provider": event.provider,
+            "scope": event.scope, "block_number": event.block_number,
+            "block_hash": event.block_hash, "block_time": event.block_time,
+        }
+        receipt = ProviderResponseReceipt(
+            sequence=1, provider="alchemy", network_id="bnb-smart-chain-mainnet",
+            method="eth_getLogs", request_sha256="a" * 64,
+            response_sha256="b" * 64, response_bytes=128, http_status=200,
+            received_at="2026-11-26T12:00:00+00:00",
+            endpoint_profile_sha256="ae9831d8c7fdd434108aa17b839f42f5c0ae1ce57069587a04bc0983e422252a",
+        )
+        @_capture_provider_run_receipts
+        def captured():
+            _ACTIVE_PAGE_RECEIPTS.get().append(receipt)
+            return drain_provider_run_receipts()
+
+        cursor_key = "alchemy:bnb:contract-acceptance-race"
+        self.store.commit_page(
+            cursor_key, {"next_block": 101}, [event], expected_cursor=None,
+            scope_identity=self.identity, canonical_blocks=(block,),
+            provider_receipts=captured(),
+        )
+        page_id = self.store.conn.execute(
+            "SELECT page_id FROM layer1_onchain_ingestion_pages WHERE cursor_key=%s",
+            (cursor_key,),
+        ).fetchone()[0]
+        engine = OnChainIntelligenceEngine(
+            receipt_signing_key=b"test-only-onchain-ingestion-page-key-32-bytes",
+            receipt_key_id="postgres-ingestion-race-v1",
+        )
+        original_save = self.store.save_page_acceptance
+
+        def reorg_between_validation_and_save(*args, **kwargs):
+            # Commit a concurrent canonical journal change after page material
+            # was read, before the acceptance transaction acquires its locks.
+            with psycopg.connect(TEST_DSN, autocommit=True) as other:
+                other.execute(
+                    """UPDATE layer1_onchain_ingestion_blocks SET block_hash=%s
+                       WHERE network_id=%s AND provider=%s AND scope=%s AND block_number=%s""",
+                    ("c" * 64, event.network_id, event.provider, event.scope, event.block_number),
+                )
+            return original_save(*args, **kwargs)
+
+        with patch.object(self.store, "save_page_acceptance", side_effect=reorg_between_validation_and_save):
+            with self.assertRaisesRegex(ValueError, "canonical block evidence"):
+                engine.sign_ingestion_page(self.store, cursor_key, page_id)
+
+        self.assertIsNone(self.store.get_page_acceptance(cursor_key, page_id))
+        self.assertEqual(self.store.list_pending_page_acceptances(), ((cursor_key, page_id),))
 
     def test_verified_asset_mapping_and_observation_round_trip_idempotently(self):
         from layer1.onchain_postgres import PostgresOnChainStore
@@ -696,3 +992,100 @@ class PostgresOnChainIngestionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PostgresInvalidationQueueContractTests(unittest.TestCase):
+    def test_postgres_invalidated_page_queue_returns_immutable_signature_and_reason(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        affected = [{"network_id": "bnb-smart-chain-mainnet", "block_number": 100,
+                     "canonical_block_hash": "b" * 64, "current_canonical_hash": "c" * 64}]
+        class Result:
+            def fetchall(self):
+                return [("cursor", "a" * 64, "CANONICAL_EVIDENCE_REORGED", affected,
+                         "2026-11-27T00:00:00+00:00", "key-v1", "d" * 64, "e" * 64,
+                         {"page_id": "a" * 64, "domain": "BINANCE_SQUARE_W2E_ONCHAIN_INGESTION_PAGE_V1"},
+                         "2026-11-26T23:59:00+00:00")]
+        class Connection:
+            def execute(self, query):
+                self.query = query
+                return Result()
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        item, = store.list_invalidated_page_acceptances()
+        self.assertEqual(item["status"], "INVALIDATED")
+        self.assertEqual(item["reason_code"], "CANONICAL_EVIDENCE_REORGED")
+        self.assertEqual(item["signature"], "e" * 64)
+        self.assertEqual(item["payload_json"]["page_id"], "a" * 64)
+        self.assertEqual(item["accepted_at"], "2026-11-26T23:59:00+00:00")
+        self.assertEqual(item["affected_evidence"], affected)
+
+
+class PostgresRecanonicalizationInvalidationContractTests(unittest.TestCase):
+    def test_postgres_recanonicalization_helper_persists_old_and_new_block_hashes(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        identity = ["bnb-smart-chain-mainnet", "alchemy", "contract:0x" + "1" * 40]
+        material = {"scope_identity": identity, "events": [], "canonical_blocks": [{
+            "network_id": identity[0], "provider": identity[1], "scope": identity[2],
+            "block_number": 100, "block_hash": "b" * 64,
+            "block_time": "2026-11-11T12:00:00+00:00",
+        }], "canonical_slots": []}
+        class Result:
+            def __init__(self, rows=()): self.rows = rows
+            def fetchall(self): return self.rows
+        class Connection:
+            def __init__(self): self.insert = None
+            def execute(self, query, params=()):
+                if "SELECT p.page_id, p.page_material_json" in query:
+                    self.selection = (query, params)
+                    return Result([("page-id", material)])
+                if "INSERT INTO layer1_onchain_ingestion_page_acceptance_lifecycle" in query:
+                    self.insert = (query, params)
+                    return Result()
+                raise AssertionError("unexpected SQL in invalidation contract")
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        store._jsonb = lambda value: value
+        changed = store._invalidate_page_acceptances_for_reorg(
+            identity[0], identity[1], identity[2], 100, "c" * 64,
+        )
+        self.assertEqual(changed, 1)
+        query, params = store.conn.insert
+        self.assertIn("CANONICAL_EVIDENCE_REORGED", query)
+        self.assertEqual(params[0], "page-id")
+        self.assertEqual(params[1][0]["canonical_block_hash"], "b" * 64)
+        self.assertEqual(params[1][0]["current_canonical_hash"], "c" * 64)
+
+
+class PostgresLegacyReceiptFingerprintAcceptanceTests(unittest.TestCase):
+    def test_postgres_page_material_rejects_legacy_receipt_without_endpoint_profile_fingerprint(self):
+        import hashlib
+        from layer1.onchain_ingestion import OnChainIngestionStore
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        from layer1.onchain_providers import ProviderResponseReceipt
+        identity = ["ethereum-mainnet", "alchemy", "contract:0x" + "1" * 40]
+        material = {
+            "cursor_key": "alchemy:ethereum:legacy-profile",
+            "scope_identity": identity, "events": [], "canonical_blocks": [{
+                "network_id": identity[0], "provider": identity[1], "scope": identity[2],
+                "block_number": 10, "block_hash": "b" * 64,
+                "block_time": "2026-11-11T12:00:00+00:00",
+            }], "canonical_slots": [],
+        }
+        receipt = ProviderResponseReceipt(
+            sequence=1, provider="alchemy", network_id=identity[0],
+            method="eth_chainId", request_sha256="a" * 64,
+            response_sha256="b" * 64, response_bytes=32, http_status=200,
+            received_at="2026-11-26T12:00:00+00:00",
+        )
+        receipts = [receipt.__dict__]
+        receipts_json = OnChainIngestionStore._canonical(receipts)
+        receipt_digest = hashlib.sha256(receipts_json.encode("utf-8")).hexdigest()
+        page_id = hashlib.sha256(OnChainIngestionStore._canonical(material).encode("utf-8")).hexdigest()
+        class Result:
+            def fetchone(self): return (material["cursor_key"], material, receipt_digest, receipts)
+        class Connection:
+            def execute(self, query, params): return Result()
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        with self.assertRaisesRegex(ValueError, "endpoint profile fingerprint"):
+            store.get_page_acceptance_material(material["cursor_key"], page_id)

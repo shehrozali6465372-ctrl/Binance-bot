@@ -501,3 +501,296 @@ The shared `ReadOnlyJsonRpcTransport` now rejects unbounded reads. Construction 
 Default Alchemy and Chainstack XRPL adapters require the same explicit limit. Their `from_env()` constructors require `ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES` as a positive base-10 integer; missing, zero, negative, fractional, scientific-notation or otherwise malformed values fail closed. There is deliberately no guessed default. A custom injected transport factory is a trusted test/integration seam and must independently enforce an equivalent response bound if used outside tests.
 
 No provider response-size telemetry or representative production payload corpus has been collected in this task. Operators must choose and document a ceiling using actual maximum legitimate response sizes for the configured page/range limits plus a justified safety margin. The environment variable is not provisioned in this worktree. No live RPC/provider request was made. Therefore AUD-ONCHAIN-004 is **PARTIALLY REMEDIATED / OPEN**, not closed; deployment activation and provider acceptance remain pending.
+
+
+### Mandatory signed-page authorization gate — owner-approved 26 November 2026
+- Policy: **a valid trusted page HMAC is mandatory before a persisted event can be used in downstream business aggregation**. Unsigned, tampered, unverifiable, revoked-key or stale page evidence does not authorize the event.
+- `aggregate_store()` enumerates durable page identities, verifies each page acceptance against store-reconstructed provider receipts and current canonical evidence, then requires every canonical event to be present in a currently valid signed page. An event without valid signed-page lineage causes aggregation to fail closed.
+- The SQLite and PostgreSQL stores expose the same `list_ingestion_pages()` protocol. PostgreSQL runtime acceptance is still outstanding; the test module was skipped when no disposable PostgreSQL backend was available.
+- The lower-level iterable `aggregate()` is not the production business-consumption boundary. Production integration must use `aggregate_store()`; future call sites must not bypass the HMAC gate.
+- Current verification: 1,118 repository tests passed, 72 skipped; compileall and diff check passed (26 November 2026). The page scan is O(total durable pages) per aggregation and needs performance/retention acceptance before high-volume activation. Module 9 remains not production-ready.
+
+### Owner-approved provider trust boundary — 26 November 2026
+- Only these exact HTTPS origins are approved: bitcoin-mainnet.g.alchemy.com, eth-mainnet.g.alchemy.com, solana-mainnet.g.alchemy.com, bnb-mainnet.g.alchemy.com, and xrpl-mainnet.core.chainstack.com.
+- Alchemy path profile: /v2/{single URL-safe API key}; Chainstack XRPL path profile: /{single URL-safe endpoint token}. Port 443 only; no userinfo, query, fragment, extra path, traversal, wildcard subdomain or custom host.
+- Direct-only application transport: explicit ProxyHandler({}) disables environment/system proxy discovery; redirects remain blocked.
+- This is not cryptographic provider attestation or infrastructure egress proof. Provider-signed proof/peer identity decisions and deployment egress verification remain open. No live endpoint call was made.
+
+
+### Owner-approved TLS and provider-response integrity baseline — 26 November 2026
+- HTTPS certificate-chain validation and hostname verification are mandatory. The exact five provider origin profiles approved in the previous checkpoint remain the only allowed origins.
+- Persist provider response receipts and SHA-256 hashes as evidence for the exact captured response bytes and their request/page lineage.
+- A SHA-256 hash is an integrity digest, not a provider signature or provider-identity proof.
+- Do not require signed provider responses unless the provider officially documents a supported cryptographic response-signature format and verification procedure. Do not invent a custom signature scheme.
+- The policy is approved, but transport negative tests, persisted receipt-lineage acceptance and deployment egress evidence remain required. Application-level direct-only proxy configuration does not prove infrastructure-level egress isolation.
+- AUD-ONCHAIN-001 remains PARTIALLY REMEDIATED / OPEN. Module 9 remains not production-ready.
+
+
+### Explicit HTTPS certificate and hostname verification — 26 November 2026
+- The provider HTTP opener now passes an explicit ssl.create_default_context() to HTTPSHandler. The context requires certificate-chain validation (CERT_REQUIRED) and hostname checking; the platform CA trust store is used.
+- TDD regression failed before the implementation because no explicit HTTPSHandler was supplied; after implementation the provider test module passed 71 tests.
+- Full repository suite: 1,123 tests passed, 0 failures/errors, 72 skipped; compileall and diff check passed.
+- Limitation: this is configuration-level verification, not an end-to-end TLS handshake test using an untrusted certificate and hostname mismatch. Those tests and deployment trust-store/egress evidence remain required. No live provider request was made.
+
+
+### TLS negative-handshake and receipt persistence verification — 26 November 2026
+- Local HTTPS integration fixtures verify a trusted chain/matching IP SAN succeeds, an untrusted chain fails, and a trusted chain with mismatched IP SAN fails. RED control with an unverified SSL context caused both negative tests to fail, confirming regression sensitivity.
+- Provider tests: 74 passed. Ingestion tests: 38 passed.
+- Raw JSON-RPC response byte hashes were checked against captured receipts, persisted with the page, and verified after SQLite store reopen and page-acceptance material reload.
+- Full repository suite: 1,127 tests passed, 0 failures/errors, 72 skipped.
+- Remaining lineage gap: request_sha256 excludes destination endpoint origin; persisted ProviderResponseReceipt contains provider/network/method labels but no endpoint-profile fingerprint. Carried forward under AUD-EVID-003. A non-secret endpoint fingerprint in attestation and persisted receipt is recommended, subject to compatibility/migration tests.
+- Deployment egress, deployed trust-store assurance, endpoint-to-receipt binding and source authenticity remain unverified. No live provider or production operation occurred.
+
+
+### Approved endpoint-profile fingerprint — 26 November 2026
+- New successful transport response attestations include endpoint_profile_sha256, computed from canonical HTTPS scheme, IDNA-normalized hostname and effective port only. Credentials, provider API-key/token paths, query strings and fragments are excluded.
+- Built-in Alchemy and Chainstack adapters compare this digest to the exact configured approved endpoint profile before receipt capture. SQLite and PostgreSQL page commits require the fingerprint for new receipts and validate it against the approved provider/network mapping. Page-acceptance material readers repeat the validation.
+- Historical receipt JSON without this optional field remains readable as legacy evidence with endpoint_profile_sha256=None; it is not upgraded. Existing JSON/JSONB persistence needs no SQL migration.
+- TDD covered missing and unapproved fingerprint rejection, adapter mismatch, persisted tampering with recomputed receipt digest, origin normalization/secrecy, and legacy deserialization. Full suite: 1,135 run, 0 failures/errors, 72 skipped; compileall and diff-check passed.
+- This origin hash is not a TLS peer/certificate fingerprint, provider signature, or proof of upstream response authorship. Custom transport injection remains a trusted seam; deployment egress and peer-identity verification remain open.
+- AUD-ONCHAIN-001 remains PARTIALLY REMEDIATED / OPEN. Module 9 is not production-ready. No live provider, database, migration, or publication operation occurred.
+
+
+### XRPL canonical-ledger response receipt lineage — 26 November 2026
+- XRPL worker canonical-ledger checks call Chainstack fetch_ledger_header() inside the worker-level receipt scope. This response was previously omitted from the captured batch even though it supports canonical block hash/time evidence.
+- The method now requires a transport attestation in worker scope, validates endpoint_profile_sha256 against the configured approved Chainstack origin, and appends a Chainstack/xrpl-mainnet/ledger receipt. Missing attestation fails closed with MISSING_RESPONSE_ATTESTATION. Standalone reads without an active worker receipt scope retain existing behavior.
+- TDD RED reproduced zero receipts; GREEN and negative missing-attestation test passed. Focused provider, ingestion and XRPL worker suites: 132 passed.
+- Factory audit: no non-test adapter construction callsite found in this Python source tree; runtime activation remains disabled. Future production composition must not expose transport_factory injection to untrusted callers.
+
+
+### Latest full-suite verification — 26 November 2026
+- Following XRPL canonical-ledger header receipt capture, full suite: **1,137 tests run, 0 failures/errors, 72 skipped**. compileall and git diff --check passed.
+- No live provider call, DB connection, migration, or publication occurred.
+
+
+### XRPL pagination shared-evidence receipt fix — 26 November 2026
+- Each XRPL page reuses the validated head and fixed-range canonical ledger headers. Previously, their response receipts were drained into page one only; later pages persisted only their account_tx response receipt.
+- The worker now drains head/reorg/header receipts into an opaque collector-issued batch after header acquisition and reattaches the immutable batch before each pagination request. Each page therefore persists the shared supporting responses plus its own account_tx receipt.
+- TDD RED reproduced missing `server_info` and header receipts on page two. GREEN verifies both page receipt sets and verifies both page HMAC acceptances.
+- Focused worker suite: 14 passed. Full repository suite: 1,138 tests run, 0 failures/errors, 72 skipped. compileall and git diff --check passed.
+- This is local test evidence only; it does not certify provider identity, production runtime wiring, or deployment egress.
+
+
+### Chainstack validated-head receipt capture — 26 November 2026
+- The real XRPL adapter's `probe()` previously called `server_info` without capturing its response attestation. This meant worker `head_receipts` were empty for the real adapter even though a test fake modeled the receipt.
+- Probe now requires attestation inside a worker receipt scope, validates the approved Chainstack endpoint-profile fingerprint, and appends a `server_info` receipt. Missing attestation fails closed. Standalone probe behavior is unchanged.
+- Combined with the Section 159 shared-batch fix, every XRPL pagination page receives the server_info receipt, fixed-range ledger-header receipts and its own account_tx receipt.
+- Positive/negative provider probe tests + XRPL worker tests: 15 passed. Full suite: **1,140 tests, 0 failures/errors, 72 skipped**. compileall and diff-check PASS.
+
+
+### Worker-scope response-attestation enforcement — 26 November 2026
+- XRPL account_tx, Alchemy JSON-RPC and Alchemy Bitcoin address REST previously skipped receipt creation if an injected transport returned no attestation, even during worker runs.
+- `_ACTIVE_PROVIDER_RUN` now marks worker capture scope. These methods fail closed with `MISSING_RESPONSE_ATTESTATION` in that scope and validate the endpoint-profile fingerprint before appending provider receipts. Standalone lightweight fake transports remain compatible outside worker scope.
+- TDD RED reproduced missing XRPL and Alchemy receipts. Focused provider + XRPL worker suites: 96 passed. Full suite: **1,142 tests run, 0 failures/errors, 72 skipped**. compileall and diff-check PASS.
+
+
+### Solana and EVM worker receipt-lineage audit — 26 November 2026
+- Audited worker/provider call paths. Solana re-fetches finalized slot and active-range produced-slot/header evidence on each resumed pagination run, then commits those fresh supporting receipts with the page's `getGenesisHash` and `getTransactionsForAddress` responses. The suspected later-page receipt omission was not confirmed.
+- EVM captures finalized-height evidence, each range's chain ID/finalized-header/`eth_getLogs` responses and canonical block-header responses. Each range commits its own receipt batch; subsequent ranges repeat their own finality checks.
+- Added exact ordered receipt tests for Solana, Ethereum and BNB, including endpoint-profile fingerprints. Focused provider + Solana + EVM suites: 24 passed. Full suite: **1,145 tests run, 0 failures/errors, 72 skipped**. compileall and diff-check PASS.
+- No product-code change was required for these audited paths. This does not certify production wiring, provider identity/authorship or live egress.
+
+
+### Bitcoin transaction-detail response receipt fix — 26 November 2026
+- Bitcoin worker derives UTXO events from `vin`/`vout` returned by `fetch_bitcoin_transaction(txid)`. That REST call previously had no response-attestation capture, so the detail payload used to normalize events was absent from the durable page receipt lineage.
+- The adapter now requires attestation in worker scope, validates the approved Alchemy Bitcoin endpoint profile, and appends a `GET api/v2/tx` receipt. Missing attestation fails closed. Standalone legacy fake transports remain compatible outside worker scope.
+- Added tests for missing attestation, valid receipt capture, and worker page persistence with both address-page and detail receipts plus verifiable HMAC acceptance.
+- Focused provider + Bitcoin + Solana + EVM + XRPL suites: 131 passed. Full suite: **1,148 tests, 0 failures/errors, 72 skipped**. compileall and diff-check PASS.
+
+
+### Runtime activation audit — 26 November 2026
+- Confirmed no production composition root currently constructs the provider adapters, network workers, mapping store, or ingestion store. The scheduled main loop and one-shot entrypoint pass no `onchain_aggregation_by_asset`; the Layer 1 summary therefore reports `NOT_PROVIDED`.
+- Current RDC process has provider and receipt configuration variables unset (presence-only check; no values read). Tracked GitHub workflow files contain no Module 9 provider/key configuration references. This does not prove external deployment secrets are absent.
+- Worker constructors require explicit address/account seeds, start positions, bounded ranges/pages, reorg lookbacks and Bitcoin confirmations; mapping-store validation requires explicit per-network freshness limits. These operational policies are not safely inferable.
+- Master Audit Section 164 records this as a HIGH active production capability gap. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY pending reviewed composition, durable store wiring, scheduling, offline fail-closed integration tests, and separately authorized deployment acceptance.
+- No code behavior or runtime environment was changed; no live provider, DB, migration, publication, or Git write operation occurred.
+
+
+### Accepted-observation lifecycle and aggregation ordering — 26 November 2026
+- Aggregator requires a latest accepted OnChainObservation per verified mapping, in addition to signed ingestion-page evidence. Production-only source/AST audit found no `save_verified()` caller or production `OnChainObservation` construction; worker tests seed observations manually. The worker ingestion store and mapping/observation store are separate.
+- Aggregator also requires fresh Binance EligibilityDecision objects. Main currently generates those inside its candidate loop, while the optional `onchain_aggregation_by_asset` parameter expects already-computed aggregation results before candidate construction. This is not yet a complete orchestration interface.
+- Master Audit Section 165 records these as additional activation blockers. A production path must define anchor-observation provenance/refresh/reorg lifecycle and integrate aggregation after current eligibility decisions are available. Do not fabricate anchor observations or equate a transfer event with one.
+- No runtime/code behavior change or production operation was performed.
+
+
+### Anchor-observation receipt binding audit — 26 November 2026
+- Reproduced that `OnChainIntelligenceEngine.validate()` accepts a directly constructed observation and signs it without any durable provider page/receipt reference. The current observation HMAC binds only the supplied eligibility, mapping and observation snapshot.
+- Transfer aggregation separately verifies signed ingestion-page acceptances, but `save_verified()` does not consult that verifier and no page/event identity is bound to the anchor observation. Therefore signed transfer pages do not currently establish the provenance of the separate accepted-observation gate.
+- A safe fix needs a first-party verifier that re-reads accepted durable page material, verifies exact provider/network/mapping/transaction/block/finality binding and current canonical state, then fails closed on unbound observations. Do not merely add a caller-controlled page ID or equate transfer events with anchor observations.
+- Master Audit Section 166 records the confirmed local reproduction. AUD-ONCHAIN-001 remains HIGH / OPEN; AUD-ONCHAIN-002 mapping authority/freshness remains owner-policy blocked. No code change or production operation was performed.
+
+### Per-network finality persistence gap — 26 November 2026
+- SQLite/PostgreSQL page acceptance revalidates persisted events and canonical block/slot journals, but parsed chain-specific finality facts are not all preserved in page material.
+- Bitcoin event payload omits observed confirmations and cursor omits actual tip height; EVM cursor omits finality reference; Solana cursor omits exact finalized slot; XRPL cursor omits validated head and page finality reference.
+- Provider response receipt hashes do not expose parsed provider response values. They cannot replace a typed, worker-derived finality snapshot.
+- Master Audit Section 167 specifies the exact per-network fields and safe implementation sequence. Next implementation should add versioned finality snapshots and provenance binding before changing observation acceptance. No code behavior or production operation changed.
+
+### Typed chain-finality snapshot v1 — local implementation, 26 November 2026
+- NormalizedTransferEvent now carries an optional immutable OnChainFinalitySnapshot. Legacy events without it remain explicitly unknown.
+- Bitcoin events carry CONFIRMED plus the configured minimum-confirmation policy; signed page cursor carries observed tip height and minimum. EVM events carry FINALIZED and exact finality reference; cursor carries finalized height/reference. Solana events carry FINALIZED/commitment=finalized; cursor carries finalized slot. XRPL events carry FINALIZED/validated=true; cursor carries validated head/reference.
+- Event snapshots and page cursors are included in page material and its HMAC acceptance. Moving head values remain page-scoped to preserve stable event identity across replay/reorg.
+- Focused ingestion and four worker suites: 85 passed. Full suite: 1,149 tests, 0 failures/errors, 72 skipped; compileall and diff-check PASS.
+- Anchor observation-to-page/event binding is still not implemented. Do not call AUD-ONCHAIN-001 closed or activate Module 9.
+
+### Finality snapshot validation hardening — 26 November 2026
+- TDD caught and fixed Python bool-as-int acceptance for snapshot version. Constructor now rejects boolean/non-integer versions and malformed network/status/reference shapes, and enforces Bitcoin CONFIRMED/minimum-policy versus deterministic FINALIZED semantics.
+- Full suite after this behavior change: 1,150 tests, 0 failures/errors, 72 skipped. compileall and diff-check PASS.
+
+### Observation provenance fail-closed boundary — partial local implementation, 26 November 2026
+- Added immutable cursor/page/event provenance reference and a first-party verifier that re-reads the durable page, verifies page HMAC, checks exact observation/event identity, current canonical state and per-network finality cursor facts.
+- \`validate()\` and SQLite/PostgreSQL \`save_verified()\` now reject missing or invalid page provenance. Signed observation acceptance payload carries the provenance fingerprint and exact pointer.
+- TDD reproduced the former fabricated-observation acceptance and verified rejection after the change. Focused intelligence + ingestion suites: 71 passed; compileall/diff-check PASS.
+- Full suite currently RED: 1,150 tests, 3 failures, 64 errors, 72 skipped. Existing fixtures have not yet been updated to create signed page material; positive acceptance tests are still required.
+- Read-time canonical revalidation after reopen, endpoint_id-to-receipt binding and migration of all worker/aggregation fixtures remain open. This is not production-ready and does not close AUD-ONCHAIN-001.
+
+### Separate provider-observation page provenance — local implementation, 26 November 2026
+- Anchor OnChainObservation records are now stored in a distinct immutable provider_observations page-material collection. They are not normalized transfer events and are not included in transfer-flow aggregation.
+- OnChainObservationProvenance binds (cursor_key, page_id, observation_id). SQLite/PostgreSQL page commit validates scope, collector-issued provider receipts, unique observation identity and matching canonical block/slot evidence. Observation payload is covered by page ID and page HMAC.
+- The first-party verifier compares the complete observation payload and mapping/asset/network/chain/provider/scope, then validates Bitcoin confirmations, EVM/BNB finalized height/reference, Solana finalized slot/commitment and XRPL validated head.
+- Accepted-observation reads re-open the page and canonical journal on every read. Missing/tampered/reorged pages fail closed. Aggregation uses the stored provenance receipt and does not count anchor observations as transfer events.
+- SQLite tests cover positive pages for all four supported network families through aggregation fixtures, reopen, reorg and tamper rejection. All on-chain tests: 283 passed, 21 skipped; full suite: 1,153 passed, 72 skipped. compileall/diff-check PASS.
+- Still open: endpoint_id-to-endpoint-instance binding; provider authenticity (application HMAC is not a provider signature); PostgreSQL live/disposable test; production anchor-observation producer/composition; mapping source authority approval. Module 9 remains NO-GO.
+
+### Approved endpoint identity binding — 26 November 2026
+- Added stable approved endpoint IDs for configured Alchemy network endpoints and Chainstack XRPL.
+- Page commit, persisted provider-observation page verification and first-party observation provenance validation now require exact endpoint_id match with provider/network. An unapproved alias is rejected before page acceptance.
+- RED/GREEN regression completed. All on-chain tests: 284 passed, 21 skipped; full repository: 1,154 passed, 72 skipped; compileall/diff-check PASS.
+- Endpoint identity is configuration-bound, not provider-authenticated. Provider-origin signatures/authorship, PostgreSQL server-level acceptance tests and production anchor-observation composition remain open. Module 9 remains NO-GO.
+
+### PostgreSQL endpoint contract test — 26 November 2026
+- Added an adapter-level regression that rejects an unapproved provider-observation endpoint_id before any PostgreSQL database operation.
+- Full repository suite: 1,155 passed, 72 skipped. No PostgreSQL server or migration was run; PostgreSQL reopen/durability integration remains unverified.
+
+### Production producer/composition status — 26 November 2026
+- Re-scanned production source-tree callsites: no OnChainObservation producer, no runtime provider_observations page writer, and no production construction of on-chain mapping/ingestion stores. The only OnChainObservation reconstruction callsite is evidence deserialization.
+- Thus page-level provenance is locally implemented/tested but not connected to scheduled/one-shot production execution. A dedicated approved observation producer and runtime composition remain required. Module 9 stays inactive and NO-GO.
+
+### Recovery hardening addendum — 26 November 2026
+- SQLite page commits now require an explicit `expected_cursor` snapshot, matching PostgreSQL. Stale replay with an old snapshot is rejected before it can update the checkpoint.
+- Pending page acceptance recovery now isolates malformed persisted page material per page and continues to later pages. SQLite invalid JSON and malformed JSON shapes are enumerated for rejection; PostgreSQL malformed JSONB shapes are likewise surfaced to page-level validation. Rejected pages remain unsigned and pending.
+- Verification: focused on-chain/store adapter suites 105 passed, 21 skipped; full repository 1,161 passed, 72 skipped; compileall and diff-check passed. No live PostgreSQL/provider/production DB operations were performed.
+- These fixes do not activate Module 9 or close provider-authenticity, mapping-authority, response-memory-budget, runtime-composition, or operational readiness blockers.
+
+
+## Pending page-acceptance recovery visibility — 27 November 2026
+
+- Evidence-bearing pages (events, canonical block/slot evidence, or provider observations) must be visible to page-acceptance recovery even if their receipt batch is missing/empty. Such pages cannot be signed and are reported as rejected while remaining unsigned/pending for operator review.
+- SQLite and PostgreSQL `list_pending_page_acceptances()` now share the page-material classifier. Receipt-bearing empty-result provider pages remain signable; pure checkpoint-only cursor-control pages are excluded.
+- This is a local code/test correction. Focused suites: 159 passed, 21 skipped. Full repository suite: 1,164 passed, 72 skipped. Compileall and diff-check passed.
+- PostgreSQL server-backed acceptance remains pending. No live Chainstack/Alchemy request or production runtime activation occurred. Module 9 remains NO-GO.
+
+### Reorg-invalidated signed page lifecycle — 27 November 2026
+- Owner-approved policy: retain the original HMAC envelope as immutable historical evidence; record a separate `INVALIDATED` lifecycle state, reason, timestamp and affected canonical evidence; expose it in an operator-review queue.
+- SQLite and PostgreSQL reorg reconciliation now persist lifecycle invalidation in the same transaction as canonical event reconciliation. Matching page material is checked across canonical blocks, Solana slots, events and provider observations for the exact network/provider/scope/height.
+- The invalidated queue returns the original key ID, payload digest and signature alongside old/new canonical evidence. The normal HMAC verifier still fails closed after canonical evidence changes.
+- Invalidated pages are not part of unsigned-page recovery. No automatic delete, re-sign, reactivation, or remediation is allowed or implemented. Operator review alone grants no approval authority.
+- PostgreSQL schema change is migration `0004_onchain_page_acceptance_lifecycle.sql`; server-backed migration/transaction/reopen acceptance has not been performed. Module 9 remains NO-GO.
+
+### Reorg lifecycle parity addendum — 27 November 2026
+- Invalidation now covers both explicit `reconcile_block()` and `commit_page(..., allow_recanonicalized=True)` when an existing canonical block or Solana slot journal entry is replaced. The invalidation write occurs in the same SQLite/PostgreSQL transaction as journal replacement and checkpoint advancement.
+- SQLite broad reconciliation now queues all signed pages matching the network and any supplied provider/scope filters, not just one exact scope. A guarded JSON-expression index supports scope selection.
+- The operator queue now returns the original signed payload and acceptance timestamp in addition to signature/key/digest and reorg evidence.
+- Regressions cover block-only and slot-only pages, unscoped multi-scope reconciliation, SQLite rollback on lifecycle write failure, and PostgreSQL helper evidence serialization. PostgreSQL server-level commit/reorg concurrency and migration application remain unverified.
+
+### Legacy provider receipt endpoint-profile enforcement — 27 November 2026
+- Historical `ProviderResponseReceipt` objects without `endpoint_profile_sha256` remain deserializable for diagnostics, but SQLite/PostgreSQL page-material verification now rejects any receipt missing the approved provider/network endpoint-profile fingerprint. This prevents pending-page recovery from newly HMAC-signing pre-fingerprint receipt rows.
+- No fingerprint is synthesized and no historical signature is rewritten or deleted. Legacy pages without the field fail closed at current page acceptance verification.
+- This is configuration-bound endpoint identity only; it does not prove upstream provider authorship or TLS peer identity. Module 9 remains NO-GO.
+
+### Receipt-key configuration parser hardening — 27 November 2026
+- Module 9 HMAC keyring JSON now rejects duplicate JSON key IDs rather than silently applying last-value-wins semantics. Hex key values must be contiguous even-length hexadecimal strings; whitespace and noncanonical encodings fail closed.
+- Existing minimum 32-byte key requirement, explicit trusted-key allowlist, active-key trust check and verification-only keyring mode are unchanged. Tests use synthetic keys only. Production key custody, KMS/HSM, rotation and revocation operations remain unapproved/unverified.
+
+
+### Accepted-observation store dependency fallback — 27 November 2026
+- `OnChainStore` and `PostgresOnChainStore` now use the constructor-bound ingestion store when `save_verified()` is called without a per-call `ingestion_store` argument. An explicit per-call store still takes precedence.
+- Before the fix, the constructor-bound store was retained for read-time provenance checks but ignored by the writer's default argument, causing otherwise valid signed-page observation writes/idempotent retries to fail closed.
+- TDD: SQLite RED/GREEN regression plus PostgreSQL no-database adapter contract pass. Full repository suite: **1,179 tests, 0 failures/errors, 72 skipped**. No PostgreSQL server or live provider was contacted.
+- This is not a producer/runtime integration. No production `OnChainObservation` producer or on-chain composition root was found; Module 9 remains NO-GO.
+
+
+### Open provenance-linkage finding — AUD-ONCHAIN-012 (27 November 2026)
+- A signed provider-observation page currently binds the observation payload and a set of provider response receipt digests under the application HMAC, but it does not prove that a particular response digest actually contains/derives the parsed observation record.
+- SQLite synthetic reproduction: a page with an approved endpoint identity, canonical block evidence and a collector-issued synthetic receipt was signed; page HMAC verification returned true and the observation was persisted as `ACCEPTED`, although no response bytes/parser binding was supplied.
+- This is an application-provenance gap, not a cryptographic HMAC break or proof of live provider compromise. Endpoint-profile fingerprinting alone does not solve it.
+- Required design: versioned deterministic parser over the exact captured response bytes, explicit receipt-to-record locator/digest linkage, verification before commit and on read, bounded response memory, and adversarial substitution/replay tests. No unsafe acceptance shortcut was introduced. See Master Audit Section 185, AUD-ONCHAIN-012. Module 9 remains NO-GO.
+
+
+### Production producer/runtime composition audit — 27 November 2026
+- Four chain workers exist but require explicit provider/store dependencies, mapping-specific monitored address/account seeds, start positions and bounded run/reorg controls. No production composition root or non-test worker invocation was found.
+- `main.py` only accepts optional precomputed `onchain_aggregation_by_asset`; scheduled and one-shot paths do not build Module 9 dependencies. The aggregator requires per-mapping thresholds and current eligibility decisions, but no production threshold config exists and eligibility is generated later inside the candidate loop.
+- No production anchor-observation producer/writer exists. Tests seed observations directly. AUD-ONCHAIN-012 separately blocks treating those records as provider-derived evidence.
+- Missing owner-controlled inputs include mapping source authority/freshness, monitored addresses/accounts, start positions, per-mapping thresholds, provider authenticity, signer custody, approved backend and operational controls. No defaults or runtime wiring added. See Master Audit Section 186. Module 9 remains NO-GO.
+
+### EVM token-standard/decoder compatibility gap — AUD-ONCHAIN-013 (27 November 2026)
+- The shared mapping validator and EVM worker accept any non-empty EVM `token_standard`, while the worker always fetches ERC-20 Transfer logs and the normalizer labels them `eth_getLogs:ERC20.Transfer`.
+- A mapping declaring a different/unsupported interface can therefore be ingested with ERC-20 semantics, risking incomplete or misleading transfer evidence. Solana and XRPL paths apply stricter standard gates; EVM does not.
+- Initial supported EVM standard scope still needs explicit owner approval. The source-matrix proposal recommends ERC-20/BEP-20, but does not authorize implementation. See Master Audit Section 187. No code change made; Module 9 remains NO-GO.
+
+### Aggregation threshold output-bound hardening — AUD-ONCHAIN-014 (27 November 2026)
+- Aggregator thresholds previously accepted arbitrary positive finite Decimal exponents and long integer strings, while summary serialization uses fixed-point formatting. Extreme values could expand to unbounded output and exhaust resources.
+- TDD RED/GREEN: regression rejects `1e256`, `1e-37`, and 257-character integer threshold inputs. Implementation bounds input text to 256 characters, effective scale to 36 fractional places and magnitude to 256 integer digits, without changing valid thresholds or choosing business values.
+- Focused aggregation suite: 20 passed. Master Audit Section 188. Fix is local and pending review; Module 9 remains NO-GO.
+
+### Bitcoin orphaned history-row handling — AUD-ONCHAIN-015 (27 November 2026)
+- Alchemy address-history parsing deliberately returns negative-confirmation transactions as `ORPHANED`, but the worker previously raised on any row below its confirmation threshold, aborting the whole page and blocking valid confirmed rows/checkpoint progress.
+- TDD RED/GREEN: mixed orphaned + confirmed page now skips only the orphaned row, records `transactions_skipped_orphaned`, and ingests the confirmed transaction. Pending/malformed rows still fail closed; no silent pending checkpoint advancement was introduced.
+- Bitcoin worker suite: 10 passed. Master Audit Section 189. Fix local, pending review; Module 9 remains NO-GO.
+
+### Bitcoin mainnet address checksum/network validation — AUD-ONCHAIN-016 (27 November 2026)
+- Bitcoin worker monitored-address seeds, Alchemy address-history request addresses, and normalized input/output/monitored address metadata now share strict mainnet address validation.
+- Supports mainnet P2PKH/P2SH Base58Check and SegWit Bech32/Bech32m (`bc` HRP), including checksum, version, witness-program length and strict padding checks. Testnet/regtest encodings and malformed checksums fail closed.
+- TDD RED/GREEN covered invalid Base58Check, invalid Bech32 checksum, wrong-network `tb1`, and malformed input/output address metadata. Focused Bitcoin worker/provider/normalizer suites: 114 passed.
+- This validates encoding/network only; it does not prove address ownership, source authority, provider authenticity or seed authorization. No live provider calls or production seed configuration. Master Audit Section 190; local fix pending review. Module 9 remains NO-GO.
+- Verification update: full repository suite **1,188 tests, 0 failures/errors, 72 skipped**; compileall and `git diff --check` PASS (27 November 2026). Master Audit Section 190 verification addendum.
+
+### XRPL issued-currency code validation — AUD-ONCHAIN-017 (27 November 2026)
+- Shared currency-code validation now follows XRPL's documented standard-code character set and 160-bit hex rules. Uppercase `XRP`, all-zero code, XRP encoded as hex, standard codes encoded as hex, `0x00`-prefixed nonstandard hex, and invalid standard-code punctuation are rejected.
+- Shared mapping validation, XRPL worker mapping validation and `normalize_xrpl_payment()` use the same validator. Documented nonstandard hex currency example remains accepted.
+- TDD RED/GREEN: mapping, normalizer and worker-boundary regressions; focused suites: 66 passed. Primary specs: https://xrpl.org/docs/references/protocol/data-types/currency-formats and https://xrpl.org/docs/references/protocol/binary-format. Master Audit Section 191. Fix local/pending review; Module 9 remains NO-GO.
+- Verification update: full repository suite **1,194 tests, 0 failures/errors, 72 skipped**; compileall and `git diff --check` PASS (27 November 2026). Master Audit Section 191 verification addendum.
+
+- Latest consolidated verification after adding official BIP350 Bech32m regression vectors: Bitcoin worker suite 16 passed; full repository suite **1,196 tests, 0 failures/errors, 72 skipped** (27 November 2026; 75.894 seconds). BIP350 reference: https://bips.dev/350/.
+
+### Solana Base58 key/signature byte-length validation — AUD-ONCHAIN-018 (27 November 2026)
+- Solana provider public-key validation now requires exactly 32 decoded Base58 bytes; transaction signature validation requires exactly 64 decoded bytes. Character-length regex checks alone were insufficient (`z` repeated 44 decoded to 33 bytes; `z` repeated 90 decoded to 66 bytes).
+- Base58 decoder is centralized in `onchain_providers.py` and shared by provider, ingestion and worker. Blockhash and account-key paths retain exact decoded-length checks.
+- TDD RED/GREEN tests cover invalid 33-byte public-key encoding and invalid 66-byte signature, plus valid existing key fixtures. Focused provider/Solana worker/ingestion suites: 162 passed. Master Audit Section 192; local fix pending review; Module 9 remains NO-GO.
+- Latest consolidated verification after AUD-ONCHAIN-018: full repository suite **1,199 tests, 0 failures/errors, 72 skipped**; compileall and `git diff --check` PASS (27 November 2026).
+
+### EVM JSON-RPC canonical QUANTITY parsing — AUD-ONCHAIN-019 (27 November 2026)
+- EVM adapter had two quantity parsers with permissive/non-identical rules. `_hex_int()` accepted leading zeroes and Python-tolerated signed/whitespace values; `_parse_hex_quantity()` also accepted noncanonical leading-zero and uppercase encodings.
+- Added shared EIP-1474 canonical QUANTITY predicate (`0x0` or lowercase `0x` followed by nonzero first hex digit and remaining lowercase hex digits); applied to both parsers. Fixed-width hex DATA parsing remains separate.
+- TDD tests cover malformed, leading-zero, uppercase, signed and whitespace encodings plus canonical valid values. Focused provider/EVM worker/ingestion suites: 166 passed. Master Audit Section 193; local fix pending review; Module 9 remains NO-GO.
+- Latest verification after AUD-ONCHAIN-019: full repository suite **1,202 tests, 0 failures/errors, 72 skipped**; compileall and `git diff --check` PASS (27 November 2026).
+
+### BNB finalized-header hash validation — AUD-ONCHAIN-020 (27 November 2026)
+- `fetch_bnb_erc20_transfer_logs()` previously accepted any string as the finalized-header hash, unlike the BNB finalized-height/header methods and Ethereum log path. It could therefore proceed to retrieve logs after receiving a malformed finality anchor.
+- TDD RED/GREEN: malformed `not-a-block-hash` was accepted and the adapter advanced to `eth_getLogs`; the adapter now requires an exact `0x`-prefixed 32-byte hexadecimal hash before continuing.
+- Focused BNB provider tests: 3 passed. No live RPC call. Master Audit Section 194. Fix local/pending review; Module 9 remains NO-GO.
+- Verification update for AUD-ONCHAIN-020: full repository suite **1,203 tests, 0 failures/errors, 72 skipped** (27 November 2026; 73.472 seconds); `compileall` and `git diff --check` PASS. No live RPC/provider or production DB access. Branch/HEAD unchanged, no staging or Git write.
+
+### EVM canonical block-hash cross-check audit — 27 November 2026
+- Reviewed the proposed per-log canonical-header hypothesis. The EVM worker independently fetches and validates every header in each requested range, then passes the corresponding header hash into the transfer normalizer.
+- The normalizer compares the provider log's block hash to that canonical header hash; mismatches and provider-marked removed logs are stored as `REORGED`, not canonical. Provider decoding separately validates exact block-hash/transaction-hash shapes and range membership.
+- Synthetic Ethereum and BNB worker checks injected a nonmatching log hash: both persisted `REORGED`; canonical-only reads returned zero events. No live provider calls.
+- No defect or code change identified; see Master Audit Section 195. This does not resolve AUD-ONCHAIN-012 or production activation blockers. Module 9 remains NO-GO.
+
+### Bitcoin transaction/block association audit — 27 November 2026
+- Reviewed the history/detail/canonical-header chain. Transaction details must match the address-history txid, block height, block hash and block time; the worker independently fetches canonical block headers and the normalizer marks any history-vs-canonical hash mismatch `REORGED`, not canonical.
+- Synthetic mismatch check yielded a REORGED event and zero canonical-only rows. No new defect or code change. This is not a cryptographic Merkle-inclusion proof and does not establish provider authorship. Master Audit Section 196.
+
+### Solana finalized block parent-link verification — AUD-ONCHAIN-021 (27 November 2026)
+- Solana `getBlock` exposes `previousBlockhash` and `parentSlot`; the adapter previously discarded the parent hash and did not require parent linkage. A synthetic wrong-parent-hash response passed the prior worker checks.
+- Adapter now validates and returns both parent fields. Worker verifies in-range parent slots are produced and their block hashes match `previousBlockhash`. Parents before the bounded range are not fetched/compared by this fix.
+- TDD RED/GREEN regressions cover missing linkage, wrong parent hash and parent slot omitted from the produced-slot set. See Master Audit Section 197. Local fix pending review; Module 9 remains NO-GO.
+- Verification addendum: focused provider + Solana worker suites **109 passed**; full repository suite **1,206 tests, 0 failures/errors, 72 skipped** (27 November 2026; 71.843 seconds); compileall and `git diff --check` PASS. No live provider/production DB access. Local fix pending review.
+
+### XRPL parent-ledger continuity — AUD-ONCHAIN-022 (27 November 2026)
+- The Chainstack adapter now validates and preserves XRPL `ledger.parent_hash`; the worker verifies every ledger after the first in its fixed contiguous range points to the immediately preceding ledger hash. A mismatch aborts before account transaction retrieval.
+- The parent of the first ledger in the fixed range is not fetched/compared. TDD reproduced a wrong parent hash before the fix; the worker now fails with `XRPL_PARENT_HASH_MISMATCH`. Master Audit Section 198.
+
+### XRPL outer/nested ledger identity consistency — AUD-ONCHAIN-023 (27 November 2026)
+- Adapter now requires the response-level and nested ledger indexes to both equal the requested index and their 32-byte hashes to agree case-insensitively. Previously conflicting outer/nested identities were accepted. TDD mismatch fixtures now fail closed with `INVALID_PROVIDER_DATA`. Master Audit Section 199.
+- Both changes are local and pending review; no live provider/production DB access. Module 9 remains NO-GO.
+- AUD-ONCHAIN-022/023 verification: focused provider + XRPL worker suites **115 passed**; full repository suite **1,210 tests, 0 failures/errors, 72 skipped** (27 November 2026; 88.505 seconds); compileall and diff-check PASS. No live Chainstack or production DB access. Both fixes remain local/pending review.

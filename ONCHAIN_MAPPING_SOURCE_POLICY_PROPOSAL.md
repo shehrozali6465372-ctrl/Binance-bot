@@ -96,3 +96,19 @@ At every trust boundary (initial verification, SQLite/PostgreSQL list/read, work
 ## 9. Current disposition
 
 No host allowlist, source contract, mapping TTL, or verifier key was invented. No code, schema, database, provider, deployment, or publication behavior was changed by this proposal. Until the owner decisions above are approved and the verifier/read-path tests pass, keep **AUD-ONCHAIN-002 HIGH / OPEN** and do not treat `mapping_status=VERIFIED` as reproducible source-backed proof.
+
+## 10. Owner approval record — source-class semantics only (26 November 2026)
+
+**Approved:** The owner approved the three source-class definitions in Section 3:
+
+- `OFFICIAL_PROJECT`: issuer/project-controlled assertion, with independently verified project-domain association and exact asset identity evidence.
+- `OFFICIAL_NETWORK`: network-maintained canonical information, primarily for network/native-asset identity; not a substitute for issuer proof for arbitrary tokens.
+- `OFFICIAL_REGISTRY`: a registry with a documented maintainer/update process and stable asset identity fields.
+
+**Approval boundary:** This approval covers definitions/semantics only. It does **not** approve any hostname, URL path, source contract, network/asset matrix, project-domain association, TTL/revalidation interval, corroboration rule, verifier identity, signing key/custody model, or implementation. Those remain explicit owner decisions. No code or runtime trust behavior is authorized by this approval alone.
+
+## 11. Owner approval record — five-network source-authority boundary (26 November 2026)
+
+**Approved:** The owner approved the proposed source-authority boundary for the five currently supported networks: Bitcoin, Ethereum, BNB Smart Chain, Solana, and XRPL. Network-maintained documentation may establish network identity and native-asset facts. Non-native token identity requires project-controlled evidence for the exact token identity (including the applicable contract, mint, or issuer/currency tuple).
+
+**Approval boundary:** This approves the authority distinction and evidence boundary only. It does not approve exact URLs, hostnames, paths, API/document contracts, registry entries, project-domain association records or approvers, source freshness/TTL, independent corroboration rules, verifier identity, key custody/rotation/revocation, or implementation. The Bitcoin documentation path and named project-domain association approvers remain unresolved. Do not admit any source host based only on this approval.

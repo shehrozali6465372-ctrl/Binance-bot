@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping, Optional, Protocol
 from .foundation import EligibilityDecision
 from .onchain import OnChainAssetMapping, OnChainObservation
 from .onchain_ingestion import NormalizedTransferEvent
+from .onchain_providers import CapturedProviderReceiptBatch, ProviderResponseReceipt
 
 
 class OnChainValidationEngineProtocol(Protocol):
@@ -23,6 +24,7 @@ class OnChainValidationEngineProtocol(Protocol):
     def validate(
         self, eligibility: EligibilityDecision, mapping: OnChainAssetMapping,
         observation: OnChainObservation, *, now: Optional[str] = None,
+        ingestion_store: Any = None, provenance: Any = None,
     ) -> Any: ...
 
 
@@ -38,6 +40,8 @@ class OnChainMappingStoreProtocol(Protocol):
     def get_latest_accepted_observation(
         self, mapping_id: str,
     ) -> Optional[OnChainObservation]: ...
+
+    def get_observation(self, observation_id: str) -> Any: ...
 
 
 class OnChainIngestionStoreProtocol(Protocol):
@@ -56,7 +60,28 @@ class OnChainIngestionStoreProtocol(Protocol):
         allow_recanonicalized: bool = False,
         canonical_blocks: Iterable[dict] = (),
         canonical_slots: Iterable[dict] = (),
+        provider_receipts: Optional[CapturedProviderReceiptBatch] = None,
+        provider_observations: Iterable[dict] = (),
     ) -> dict: ...
+
+    def list_page_receipts(
+        self, cursor_key: str,
+    ) -> tuple[ProviderResponseReceipt, ...]: ...
+
+    def get_page_acceptance_material(self, cursor_key: str, page_id: str) -> dict: ...
+
+    def save_page_acceptance(
+        self, cursor_key: str, page_id: str, key_id: str,
+        payload_json: str, payload_sha256: str, signature: str,
+    ) -> str: ...
+
+    def get_page_acceptance(self, cursor_key: str, page_id: str) -> Optional[dict]: ...
+
+    def list_ingestion_pages(self) -> tuple[tuple[str, str], ...]: ...
+
+    def list_pending_page_acceptances(self) -> tuple[tuple[str, str], ...]: ...
+
+    def list_invalidated_page_acceptances(self) -> tuple[dict, ...]: ...
 
     def get_block_hash(
         self, network_id: str, provider: str, scope: str, block_number: int,
@@ -82,10 +107,14 @@ class OnChainIngestionStoreProtocol(Protocol):
     ) -> list[NormalizedTransferEvent]: ...
 
 
-_MAPPING_METHODS = ("list_verified_mappings", "get_latest_accepted_observation")
+_MAPPING_METHODS = (
+    "list_verified_mappings", "get_latest_accepted_observation", "get_observation",
+)
 _INGESTION_METHODS = (
     "get_checkpoint", "commit_page", "get_block_hash", "reconcile_block",
-    "get_solana_slot_journal", "get_event", "list_all_events",
+    "get_solana_slot_journal", "get_event", "list_all_events", "list_page_receipts",
+    "get_page_acceptance_material", "save_page_acceptance", "get_page_acceptance",
+    "list_pending_page_acceptances", "list_ingestion_pages",
 )
 
 
@@ -120,8 +149,14 @@ def require_ingestion_store(store: Any) -> None:
                 "allow_recanonicalized": False,
                 "canonical_blocks": (),
                 "canonical_slots": (),
+                "provider_receipts": None,
             },
         ),
+        "get_page_acceptance_material": (("cursor", "a" * 64), {}),
+        "save_page_acceptance": (("cursor", "a" * 64, "key-v1", "{}", "a" * 64, "b" * 64), {}),
+        "get_page_acceptance": (("cursor", "a" * 64), {}),
+        "list_pending_page_acceptances": ((), {}),
+        "list_ingestion_pages": ((), {}),
         "get_block_hash": (("network", "provider", "scope", 1), {}),
         "reconcile_block": (
             ("network", 1, "canonical-hash"),

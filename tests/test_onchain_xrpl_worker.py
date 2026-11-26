@@ -4,9 +4,14 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from layer1.foundation import EligibilityDecision
-from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine, OnChainObservation, OnChainStore
+from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine
+from tests.onchain_test_support import MappingStoreStub
 from layer1.onchain_ingestion import OnChainIngestionStore
-from layer1.onchain_providers import ProviderDataPage, ProviderHealthResult, ProviderTransportError, XrplAccountTransaction
+from layer1.onchain_providers import (
+    ProviderDataPage, ProviderHealthResult, ProviderTransportError,
+    ProviderResponseReceipt, XrplAccountTransaction, _ACTIVE_PAGE_RECEIPTS,
+    _approved_endpoint_profile_sha256,
+)
 from layer1.onchain_xrpl_worker import XrplIssuedCurrencyIngestionWorker
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
@@ -46,6 +51,7 @@ class FakeXrplProvider:
 
     def fetch_ledger_header(self, index):
         return {"number": index, "hash": self.changed_hashes.get(index, BLOCK_HASH),
+                "parent_hash": self.changed_hashes.get(index - 1, BLOCK_HASH),
                 "timestamp": int(NOW.timestamp()) - 60, "finality_reference": "validated=true"}
 
     def fetch_account_transactions(self, account, ledger_index_min, ledger_index_max, marker=None, limit=200):
@@ -66,7 +72,10 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         path = os.path.join(self.tmp.name, "onchain.sqlite3")
-        self.mapping_store = OnChainStore(path, OnChainIntelligenceEngine({"xrpl-mainnet": 86400}, receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum", receipt_key_id="test-key-v1"))
+        engine = OnChainIntelligenceEngine(
+            {"xrpl-mainnet": 86400},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1")
         self.ingestion_store = OnChainIngestionStore(path)
         stamp = NOW.isoformat()
         self.mapping = OnChainAssetMapping(
@@ -74,17 +83,7 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
             "TOKEN", None, "XRPL_ISSUED_CURRENCY", 6, "VERIFIED", "OFFICIAL_PROJECT",
             "https://xrpl.org", (NOW - timedelta(hours=2)).isoformat(),
             issuer_address=ISSUER, issued_currency="USD")
-        eligibility = EligibilityDecision(
-            status="ELIGIBLE", asset_id="coingecko:usd-coin", symbol="USDC",
-            eligible_pairs=("USDCUSDT",), verified_at=stamp,
-            identity_proof_status="VERIFIED", identity_proof_source="coingecko_coin_tickers",
-            identity_proof_verified_at=stamp, identity_proof_source_timestamp=stamp,
-            identity_proof_data_hash="a" * 64)
-        observation = OnChainObservation(
-            "xrpl-map-proof", MAPPING_ID, "coingecko:usd-coin", "xrpl-mainnet", "xrpl-mainnet",
-            "chainstack", "xrpl-mainnet", "TRANSFER", 499, BLOCK_HASH, TX_HASH,
-            stamp, stamp, "FINALIZED", "validated_ledger=true")
-        self.mapping_store.save_verified(eligibility, self.mapping, observation)
+        self.mapping_store = MappingStoreStub(engine, self.mapping)
         self.provider = FakeXrplProvider()
         self.worker = XrplIssuedCurrencyIngestionWorker(
             self.provider, self.mapping_store, self.ingestion_store,
@@ -113,6 +112,13 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum-valid classic XRPL issuer address"):
             self.worker._validate_mapping(invalid_mapping)
 
+    def test_rejects_mapping_with_reserved_xrp_hex_currency_code(self):
+        from dataclasses import replace
+        invalid_mapping = replace(
+            self.mapping, issued_currency="0000000000000000000000005852500000000000")
+        with self.assertRaisesRegex(ValueError, "verified issued-currency mapping"):
+            self.worker._validate_mapping(invalid_mapping)
+
     def test_payment_source_and_destination_require_valid_classic_addresses(self):
         self.provider.pages = {None: ((record(destination="rBqiK7z9a7M8w2F7yQzvVJ5QJ8qQh2vKQ"),), None)}
         with self.assertRaisesRegex(ValueError, "checksum-valid classic addresses"):
@@ -129,6 +135,13 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
         self.assertEqual(events[0].scope, scope)
         self.assertEqual(events[0].event_id, TX_HASH.lower())
         self.assertEqual(events[0].block_hash, BLOCK_HASH.lower())
+        self.assertEqual(events[0].finality_snapshot.status, "FINALIZED")
+        self.assertEqual(events[0].finality_snapshot.reference, "validated=true")
+        checkpoint = self.ingestion_store.get_checkpoint(
+            f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}"
+        )
+        self.assertEqual(checkpoint["validated_head_height"], self.provider.head)
+        self.assertEqual(checkpoint["finality_reference"], "validated=true")
         self.assertEqual(events[0].from_address, ACCOUNT)
         self.assertEqual(events[0].to_address, DESTINATION)
 
@@ -147,6 +160,60 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
         self.assertEqual(self.ingestion_store.get_checkpoint(key)["next_ledger"], 503)
         self.assertEqual(self.provider.calls[0][1:4], (500, 502, None))
         self.assertEqual(self.provider.calls[1][1:4], (500, 502, "page-2"))
+
+    def test_every_xrpl_pagination_page_repeats_head_and_canonical_header_receipts(self):
+        class ReceiptProvider(FakeXrplProvider):
+            @staticmethod
+            def _capture(method):
+                collector = _ACTIVE_PAGE_RECEIPTS.get()
+                collector.append(ProviderResponseReceipt(
+                    sequence=len(collector) + 1, provider="chainstack",
+                    network_id="xrpl-mainnet", method=method,
+                    request_sha256=("a" * 64), response_sha256=("b" * 64),
+                    response_bytes=64, http_status=200,
+                    received_at=NOW.isoformat(),
+                    endpoint_profile_sha256=_approved_endpoint_profile_sha256("chainstack", "xrpl-mainnet"),
+                ))
+
+            def probe(self):
+                self._capture("server_info")
+                return super().probe()
+
+            def fetch_ledger_header(self, index):
+                self._capture("ledger")
+                return super().fetch_ledger_header(index)
+
+            def fetch_account_transactions(self, *args, **kwargs):
+                self._capture("account_tx")
+                return super().fetch_account_transactions(*args, **kwargs)
+
+        provider = ReceiptProvider()
+        worker = XrplIssuedCurrencyIngestionWorker(
+            provider, self.mapping_store, self.ingestion_store,
+            monitored_accounts={MAPPING_ID: (ACCOUNT,)}, start_ledgers={MAPPING_ID: 500},
+            max_ledgers_per_run=3, page_size=10, max_pages_per_run=2,
+            reorg_lookback_ledgers=0, retry_attempts=1, sleep=lambda _: None,
+            clock=lambda: NOW,
+        )
+        result = worker.run_once()
+        self.assertEqual(result["pages_committed"], 2)
+        self.assertEqual(result["page_acceptances_signed"], 2)
+        cursor_key = f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}"
+        rows = self.ingestion_store.conn.execute(
+            "SELECT page_id, receipts_json FROM layer1_onchain_ingestion_pages WHERE cursor_key=? ORDER BY created_at, page_id",
+            (cursor_key,),
+        ).fetchall()
+        payloads = [(row[0], __import__("json").loads(row[1])) for row in rows]
+        committed_pages = [(page_id, payload) for page_id, payload in payloads if payload]
+        page_methods = [[item["method"] for item in payload] for _, payload in committed_pages]
+        self.assertEqual(len(page_methods), 2)
+        for page_id, _ in committed_pages:
+            self.assertTrue(self.mapping_store.engine.verify_ingestion_page_acceptance(
+                self.ingestion_store, cursor_key, page_id))
+        for methods in page_methods:
+            self.assertIn("server_info", methods)
+            self.assertEqual(methods.count("ledger"), 3)
+            self.assertIn("account_tx", methods)
 
     def test_expired_opaque_marker_restarts_same_fixed_range_from_first_page(self):
         self.worker.run_once()
@@ -167,6 +234,20 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
         checkpoint = self.ingestion_store.get_checkpoint(
             f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}")
         self.assertEqual(checkpoint["marker"], "page-2")
+
+    def test_rejects_validated_ledger_with_wrong_parent_hash_before_account_page(self):
+        original = self.provider.fetch_ledger_header
+        def broken_parent(index):
+            header = original(index)
+            if index == 501:
+                header["parent_hash"] = "C" * 64
+            return header
+        self.provider.fetch_ledger_header = broken_parent
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+        self.assertEqual(error.exception.reason_code, "XRPL_PARENT_HASH_MISMATCH")
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
 
     def test_validated_ledger_hash_change_tombstones_then_replays_event(self):
         self.provider.pages = {None: ((record(),), None)}

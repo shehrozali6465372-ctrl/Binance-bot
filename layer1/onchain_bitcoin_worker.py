@@ -7,12 +7,18 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Callable
 
 from .onchain import OnChainAssetMapping
-from .onchain_ingestion import normalize_bitcoin_transaction_outputs
-from .onchain_providers import BitcoinAddressTransaction, ProviderTransportError, retry_provider_operation
+from .onchain_ingestion import OnChainFinalitySnapshot, normalize_bitcoin_transaction_outputs
+from .onchain_providers import (
+    BitcoinAddressTransaction, ProviderTransportError, retry_provider_operation,
+    _is_valid_bitcoin_mainnet_address,
+    _capture_provider_run_receipts, drain_provider_run_receipts,
+    include_provider_receipts_in_current_scope,
+)
 from .onchain_protocols import (
     OnChainIngestionStoreProtocol, OnChainMappingStoreProtocol,
     require_ingestion_store, require_mapping_store,
@@ -55,9 +61,9 @@ class BitcoinAddressIngestionWorker:
         for mapping_id, addresses in monitored_addresses.items():
             if (not isinstance(mapping_id, str) or not mapping_id.strip()
                     or not isinstance(addresses, (tuple, list)) or not addresses
-                    or any(not isinstance(a, str) or not a.strip() or any(c.isspace() for c in a) for a in addresses)
+                    or any(not _is_valid_bitcoin_mainnet_address(a) for a in addresses)
                     or len(set(addresses)) != len(addresses)):
-                raise ValueError("each mapping requires unique, explicit non-empty monitored address seeds")
+                raise ValueError("each mapping requires unique, checksum-valid Bitcoin mainnet address seeds")
         for mapping_id, height in start_blocks.items():
             if not isinstance(mapping_id, str) or not mapping_id.strip() or isinstance(height, bool) or not isinstance(height, int) or height < 0:
                 raise ValueError("start block mapping IDs and heights are invalid")
@@ -119,23 +125,37 @@ class BitcoinAddressIngestionWorker:
                     earliest = height
         return tombstoned, earliest, detected
 
+    def _finalize_page_acceptances(self, summary: dict) -> None:
+        result = self.mapping_store.engine.sign_pending_ingestion_pages(self.ingestion_store)
+        summary["page_acceptances_signed"] = result["signed"]
+        summary["page_acceptances_pending"] = result["pending"]
+        summary["page_acceptances_rejected"] = result["rejected"]
+
+    @_capture_provider_run_receipts
     def run_once(self) -> dict:
         mappings = self.mapping_store.list_verified_mappings("bitcoin-mainnet")
         summary = {"mappings": 0, "addresses": 0, "blocks_scanned": 0,
-                   "events_inserted": 0, "duplicates": 0, "tombstoned": 0,
+                   "events_inserted": 0, "transactions_skipped_orphaned": 0,
+                   "duplicates": 0, "tombstoned": 0,
                    "reorg_blocks_detected": 0, "reorg_events_tombstoned": 0,
                    "pages_committed": 0, "checkpoints_advanced": 0}
+        summary.update({"page_acceptances_signed": 0, "page_acceptances_pending": 0,
+                        "page_acceptances_rejected": 0})
         for mapping in mappings:
+            drain_provider_run_receipts()  # discard any uncommitted evidence from a prior mapping
             self._validate_mapping(mapping)
             if mapping.mapping_id not in self.start_blocks or mapping.mapping_id not in self.monitored_addresses:
                 raise ValueError(f"verified Bitcoin mapping {mapping.mapping_id} has no explicit seed/start block")
             summary["mappings"] += 1
             tip = self._retry(self.provider.fetch_bitcoin_tip_height)
+            tip_receipts = drain_provider_run_receipts()
             if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
                 raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin tip height is invalid")
             # A transaction at height H has tip-H+1 confirmations.
             safe_height = tip - self.minimum_confirmations + 1
             for address in self.monitored_addresses[mapping.mapping_id]:
+                drain_provider_run_receipts()  # isolate the next address scope
+                include_provider_receipts_in_current_scope(tip_receipts)
                 summary["addresses"] += 1
                 cursor_key, scope = self._cursor_key(address), f"address:{address}"
                 initial = self.start_blocks[mapping.mapping_id]
@@ -222,17 +242,29 @@ class BitcoinAddressIngestionWorker:
                 for record in records:
                     if not isinstance(record, BitcoinAddressTransaction):
                         raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin address-history page contains a malformed transaction")
-                    if (record.block_height is None or not range_start <= record.block_height <= range_end
+                    if record.finality == "ORPHANED":
+                        summary["transactions_skipped_orphaned"] += 1
+                        continue
+                    if (record.finality != "CONFIRMED" or record.block_height is None
+                            or not range_start <= record.block_height <= range_end
+                            or isinstance(record.confirmations, bool)
+                            or not isinstance(record.confirmations, int)
                             or record.confirmations < self.minimum_confirmations):
                         raise ProviderTransportError("BITCOIN_CONFIRMATIONS_INSUFFICIENT", "Bitcoin page contains a transaction outside the fixed range or below the configured confirmation threshold")
                     header = headers[record.block_height]
                     detail = self._retry(lambda txid=record.txid: self.provider.fetch_bitcoin_transaction(txid))
                     block_time = datetime.fromtimestamp(header["timestamp"], timezone.utc).isoformat()
-                    normalized.extend(normalize_bitcoin_transaction_outputs(
-                        record, detail, asset_id=mapping.asset_id, mapping_id=mapping.mapping_id,
-                        monitored_address=address, canonical_block_hash=header["hash"],
-                        block_time=block_time, observed_at=observed_at,
-                        minimum_confirmations=self.minimum_confirmations))
+                    normalized.extend(
+                        replace(event, finality_snapshot=OnChainFinalitySnapshot(
+                            version=1, network_id="bitcoin-mainnet", status="CONFIRMED",
+                            reference=f"confirmations-policy:min={self.minimum_confirmations}",
+                        ))
+                        for event in normalize_bitcoin_transaction_outputs(
+                            record, detail, asset_id=mapping.asset_id, mapping_id=mapping.mapping_id,
+                            monitored_address=address, canonical_block_hash=header["hash"],
+                            block_time=block_time, observed_at=observed_at,
+                            minimum_confirmations=self.minimum_confirmations)
+                    )
                 has_more = page_number < total_pages
                 next_cursor = {
                     "mapping_id": mapping.mapping_id, "network_id": "bitcoin-mainnet",
@@ -242,6 +274,7 @@ class BitcoinAddressIngestionWorker:
                     "page": page_number + 1 if has_more else 1,
                     "total_pages": total_pages, "next_block": range_start if has_more else range_end + 1,
                     "minimum_confirmations": self.minimum_confirmations,
+                    "observed_tip_height": tip,
                 }
                 blocks = tuple({
                     "network_id": "bitcoin-mainnet", "provider": "alchemy", "scope": scope,
@@ -251,7 +284,8 @@ class BitcoinAddressIngestionWorker:
                 committed = self.ingestion_store.commit_page(
                     cursor_key, next_cursor, normalized, allow_recanonicalized=True,
                     canonical_blocks=blocks, expected_cursor=cursor,
-                    scope_identity=("bitcoin-mainnet", "alchemy", scope))
+                    scope_identity=("bitcoin-mainnet", "alchemy", scope),
+                    provider_receipts=drain_provider_run_receipts())
                 cursor = next_cursor
                 summary["events_inserted"] += committed["inserted"]
                 summary["duplicates"] += committed["duplicates"]
@@ -259,4 +293,5 @@ class BitcoinAddressIngestionWorker:
                 summary["blocks_scanned"] += len(headers)
                 summary["pages_committed"] += 1
                 summary["checkpoints_advanced"] += 1
+        self._finalize_page_acceptances(summary)
         return summary

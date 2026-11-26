@@ -13,6 +13,20 @@ from typing import Mapping, Optional
 
 
 _KEY_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_HEX_KEY = re.compile(r"^(?:[0-9a-fA-F]{2})+$")
+
+
+class _DuplicateJsonKeyError(ValueError):
+    pass
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonKeyError("duplicate JSON object key")
+        result[key] = value
+    return result
 
 
 @dataclass(frozen=True)
@@ -50,7 +64,9 @@ def load_onchain_receipt_config_from_env(
     keyring: dict[str, bytes] = {}
     if raw_keyring:
         try:
-            parsed = json.loads(raw_keyring)
+            parsed = json.loads(raw_keyring, object_pairs_hook=_unique_json_object)
+        except _DuplicateJsonKeyError:
+            raise ValueError("on-chain receipt keyring contains duplicate JSON key IDs") from None
         except (TypeError, ValueError):
             raise ValueError("on-chain receipt keyring configuration is invalid") from None
         if not isinstance(parsed, dict):
@@ -59,6 +75,8 @@ def load_onchain_receipt_config_from_env(
             if (not isinstance(key_id, str) or _KEY_ID.fullmatch(key_id) is None
                     or not isinstance(encoded_key, str)):
                 raise ValueError("on-chain receipt keyring entry is invalid")
+            if _HEX_KEY.fullmatch(encoded_key) is None:
+                raise ValueError("on-chain receipt key must use contiguous even-length hexadecimal encoding")
             try:
                 key = bytes.fromhex(encoded_key)
             except ValueError:

@@ -10,6 +10,7 @@ from layer1.foundation import (
 from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine, OnChainObservation, OnChainStore
 from layer1.onchain_ingestion import NormalizedTransferEvent, OnChainIngestionStore
 from layer1.onchain_aggregation import OnChainTransferAggregator
+from tests.onchain_test_support import seed_accepted_observation_page
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 ASSET = "coingecko:bitcoin"
@@ -60,6 +61,9 @@ def observation(asset_mapping, suffix="1"):
     elif network == "bitcoin-mainnet":
         provider, finality, reference, tx_hash = "alchemy", "CONFIRMED", "confirmations=6", "c" * 64
         block_hash = "d" * 64
+    elif network == "xrpl-mainnet":
+        provider, finality, reference, tx_hash = "chainstack", "FINALIZED", "validated_ledger=true", "f" * 64
+        block_hash = "e" * 64
     else:
         provider, finality, reference, tx_hash = "alchemy", "FINALIZED", "eth_getBlockByNumber:finalized", "0x" + "c" * 64
         block_hash = "0x" + "d" * 64
@@ -67,9 +71,10 @@ def observation(asset_mapping, suffix="1"):
         observation_id=f"{asset_mapping.mapping_id}-observation-{suffix}",
         mapping_id=asset_mapping.mapping_id, asset_id=asset_mapping.asset_id,
         network_id=network, chain_id=asset_mapping.chain_id, provider=provider,
-        endpoint_id=network, observation_type="TRANSFER", block_height=100,
+        endpoint_id=f"{provider}:{network}", observation_type="TRANSFER", block_height=100,
         block_hash=block_hash, transaction_hash=tx_hash, block_time=stamp,
         observed_at=stamp, finality=finality, finality_reference=reference,
+        scope="anchor:" + asset_mapping.mapping_id,
     )
 
 
@@ -113,14 +118,61 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
         self.wbtc = mapping("ethereum-mainnet", "wbtc-ethereum-v1", 18, "WRAPPED")
         self.sol = mapping("solana-mainnet", "sol-btc-v1", 8, "TOKEN")
         self.decision = eligibility()
-        self.mapping_store.save_verified(self.decision, self.btc, observation(self.btc))
-        self.mapping_store.save_verified(self.decision, self.wbtc, observation(self.wbtc))
-        self.mapping_store.save_verified(self.decision, self.sol, observation(self.sol))
+        seed_accepted_observation_page(
+            self.ingestion_store, self.mapping_store, self.decision,
+            self.btc, observation(self.btc),
+        )
+        seed_accepted_observation_page(
+            self.ingestion_store, self.mapping_store, self.decision,
+            self.wbtc, observation(self.wbtc),
+        )
+        seed_accepted_observation_page(
+            self.ingestion_store, self.mapping_store, self.decision,
+            self.sol, observation(self.sol),
+        )
         self.aggregator = OnChainTransferAggregator(
             self.mapping_store,
             minimum_amount_by_mapping={"btc-native-v1": "0.75", "wbtc-ethereum-v1": "0.75", "sol-btc-v1": "0.75"},
             eligibility_max_age_seconds=300, identity_proof_max_age_seconds=900,
         )
+
+    def bind_and_sign_events(self, events):
+        from layer1.onchain_providers import (
+            ProviderResponseReceipt, _ACTIVE_PAGE_RECEIPTS,
+            _approved_endpoint_profile_sha256,
+            _capture_provider_run_receipts, drain_provider_run_receipts,
+        )
+        events = tuple(events)
+        if not events:
+            raise ValueError("test page must contain events")
+        first = events[0]
+        identity = (first.network_id, first.provider, first.scope)
+        if any((row.network_id, row.provider, row.scope) != identity for row in events):
+            raise ValueError("test helper creates one page per provider scope")
+        receipt = ProviderResponseReceipt(
+            sequence=1, provider=first.provider, network_id=first.network_id,
+            method="test_getTransfers", request_sha256="a" * 64,
+            response_sha256="b" * 64, response_bytes=128, http_status=200,
+            received_at=NOW.isoformat(),
+            endpoint_profile_sha256=_approved_endpoint_profile_sha256(first.provider, first.network_id),
+        )
+        @_capture_provider_run_receipts
+        def captured():
+            _ACTIVE_PAGE_RECEIPTS.get().append(receipt)
+            return drain_provider_run_receipts()
+        blocks = {}
+        for row in events:
+            blocks[(row.network_id, row.provider, row.scope, row.block_number)] = {
+                "network_id": row.network_id, "provider": row.provider, "scope": row.scope,
+                "block_number": row.block_number, "block_hash": row.block_hash,
+                "block_time": row.block_time,
+            }
+        self.ingestion_store.commit_page(
+            "signed-test-page", {"next": None}, events, expected_cursor=None,
+            scope_identity=identity, canonical_blocks=tuple(blocks.values()),
+            provider_receipts=captured(),
+        )
+        self.mapping_store.engine.sign_pending_ingestion_pages(self.ingestion_store)
 
     def bind_events(self, events, *, persist_events=True, persist_blocks=True):
         blocks = {}
@@ -132,7 +184,7 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
             }
         self.ingestion_store.commit_page(
             "test-block-journal", {"test": True}, tuple(events) if persist_events else (),
-            canonical_blocks=tuple(blocks.values()) if persist_blocks else ())
+            canonical_blocks=tuple(blocks.values()) if persist_blocks else (), expected_cursor=self.ingestion_store.get_checkpoint("test-block-journal"))
         self.aggregator.bind_ingestion_store(self.ingestion_store)
 
     def tearDown(self):
@@ -166,11 +218,10 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
             "TOKEN", None, "XRPL_ISSUED_CURRENCY", 8, "VERIFIED", "OFFICIAL_PROJECT",
             "https://xrpl.org", (NOW - timedelta(minutes=10)).isoformat(),
             issuer_address="rhub8VRN55s94qWKDv6jmDy1pUykJzF3wq", issued_currency="BTC")
-        stamp = (NOW - timedelta(minutes=10)).isoformat()
-        xrpl_obs = OnChainObservation("xrpl-proof", xrpl.mapping_id, ASSET, "xrpl-mainnet", "xrpl-mainnet",
-            "chainstack", "xrpl-mainnet", "TRANSFER", 100, "e" * 64, "f" * 64,
-            stamp, stamp, "FINALIZED", "validated_ledger=true")
-        self.mapping_store.save_verified(self.decision, xrpl, xrpl_obs)
+        xrpl_obs = observation(xrpl)
+        seed_accepted_observation_page(
+            self.ingestion_store, self.mapping_store, self.decision, xrpl, xrpl_obs,
+        )
         aggregator = OnChainTransferAggregator(
             self.mapping_store,
             minimum_amount_by_mapping={"btc-native-v1": "0.1", "wbtc-ethereum-v1": "0.1", "sol-btc-v1": "0.1", "xrpl-btc-v1": "0.1"},
@@ -241,6 +292,16 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
             OnChainTransferAggregator(self.mapping_store, minimum_amount_by_mapping={
                 "btc-native-v1": "0.1", "wbtc-ethereum-v1": "0.1", "sol-btc-v1": "0.1", "unknown": "0.1"})
 
+    def test_rejects_thresholds_that_could_expand_beyond_bounded_amount_output(self):
+        for unsafe in ("1e256", "1e-37"):
+            with self.subTest(threshold=unsafe):
+                with self.assertRaisesRegex(ValueError, "bounded decimal amount"):
+                    OnChainTransferAggregator(self.mapping_store, minimum_amount_by_mapping={
+                        "btc-native-v1": unsafe, "wbtc-ethereum-v1": "0.1", "sol-btc-v1": "0.1"})
+        with self.assertRaisesRegex(ValueError, "decimal amount"):
+            OnChainTransferAggregator(self.mapping_store, minimum_amount_by_mapping={
+                "btc-native-v1": "9" * 257, "wbtc-ethereum-v1": "0.1", "sol-btc-v1": "0.1"})
+
     def test_solana_instruction_identity_preserves_multiple_transfers_in_one_transaction(self):
         signature = "2" * 88
         first = event(self.sol, event_id=f"{signature}:outer:0", tx_hash=signature,
@@ -298,7 +359,7 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
             {"network_id": row.network_id, "provider": row.provider, "scope": row.scope,
              "block_number": row.block_number, "block_hash": "e" * 64,
              "block_time": row.block_time},
-        ))
+        ), expected_cursor=self.ingestion_store.get_checkpoint("wrong-block"))
         mismatch = self.aggregator.aggregate([row], {ASSET: self.decision}, now=NOW)
         self.assertIn(("CANONICAL_BLOCK_HASH_MISMATCH", 1), mismatch.rejection_counts)
 
@@ -314,7 +375,7 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
 
     def test_real_aggregator_result_flows_into_candidate_as_non_scoring_corroboration(self):
         row = event(self.btc, event_id="end-to-end-btc", amount_raw="100000000")
-        self.bind_events([row])
+        self.bind_and_sign_events([row])
         current = datetime.now(timezone.utc)
         current_eligibility = eligibility(current.isoformat())
         result = self.aggregator.aggregate_store(
@@ -329,15 +390,35 @@ class OnChainTransferAggregatorTests(unittest.TestCase):
         self.assertEqual(corroborated.state, "READY_FOR_RESEARCH")
         self.assertEqual(len(corroborated.onchain_transfer_summary_ids), 1)
 
+    def test_aggregate_store_rejects_events_from_unsigned_ingestion_pages(self):
+        row = event(self.btc, event_id="unsigned-page-event", amount_raw="100000000")
+        self.bind_events([row])
+
+        with self.assertRaisesRegex(ValueError, "page acceptance"):
+            self.aggregator.aggregate_store(
+                self.ingestion_store, {ASSET: self.decision}, now=NOW)
+
+    def test_aggregate_store_rejects_tampered_page_acceptance_signature(self):
+        row = event(self.btc, event_id="tampered-acceptance-event", amount_raw="100000000")
+        self.bind_and_sign_events([row])
+        self.ingestion_store.conn.execute(
+            "UPDATE layer1_onchain_ingestion_page_acceptances SET signature=?",
+            ("0" * 64,),
+        )
+        self.ingestion_store.conn.commit()
+
+        with self.assertRaisesRegex(ValueError, "page acceptance"):
+            self.aggregator.aggregate_store(
+                self.ingestion_store, {ASSET: self.decision}, now=NOW)
+
     def test_aggregate_store_reads_only_canonical_events(self):
         good = event(self.btc, event_id="btc-out:0", amount_raw="100000000")
         bad = event(self.btc, event_id="btc-out:1", amount_raw="100000000", status="REORGED")
-        self.ingestion_store.commit_page("cursor", {"next": None}, [good, bad], canonical_blocks=(
-            {"network_id": good.network_id, "provider": good.provider, "scope": good.scope,
-             "block_number": good.block_number, "block_hash": good.block_hash, "block_time": good.block_time},
+        self.bind_and_sign_events([good])
+        self.ingestion_store.commit_page("reorged-test-page", {"next": None}, [bad], canonical_blocks=(
             {"network_id": bad.network_id, "provider": bad.provider, "scope": bad.scope,
              "block_number": bad.block_number, "block_hash": bad.block_hash, "block_time": bad.block_time},
-        ))
+        ), expected_cursor=self.ingestion_store.get_checkpoint("reorged-test-page"))
         result = self.aggregator.aggregate_store(self.ingestion_store, {ASSET: self.decision}, now=NOW)
         self.assertEqual(result.network_summaries[0].transfer_count, 1)
 

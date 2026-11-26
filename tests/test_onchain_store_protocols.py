@@ -58,7 +58,7 @@ class OnChainStoreProtocolTests(unittest.TestCase):
     def test_bitcoin_worker_accepts_postgres_store_shapes_without_database_or_provider_io(self):
         worker = BitcoinAddressIngestionWorker(
             object(), self.mapping_store, self.ingestion_store,
-            monitored_addresses={self.mapping.mapping_id: ("bc1q" + "a" * 38,)},
+            monitored_addresses={self.mapping.mapping_id: ("1BoatSLRHtKNngkdXEeobR76b53LETtpyT",)},
             start_blocks={self.mapping.mapping_id: 1}, minimum_confirmations=1,
             max_blocks_per_run=1, page_size=1, reorg_lookback_blocks=1,
             retry_attempts=1, sleep=lambda _: None,
@@ -111,7 +111,7 @@ class OnChainStoreProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mapping store"):
             BitcoinAddressIngestionWorker(
                 object(), broken, self.ingestion_store,
-                monitored_addresses={self.mapping.mapping_id: ("bc1q" + "a" * 38,)},
+                monitored_addresses={self.mapping.mapping_id: ("1BoatSLRHtKNngkdXEeobR76b53LETtpyT",)},
                 start_blocks={self.mapping.mapping_id: 1}, minimum_confirmations=1,
                 max_blocks_per_run=1, page_size=1, reorg_lookback_blocks=1,
             )
@@ -123,7 +123,7 @@ class OnChainStoreProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mapping store"):
             BitcoinAddressIngestionWorker(
                 object(), broken, self.ingestion_store,
-                monitored_addresses={self.mapping.mapping_id: ("bc1q" + "a" * 38,)},
+                monitored_addresses={self.mapping.mapping_id: ("1BoatSLRHtKNngkdXEeobR76b53LETtpyT",)},
                 start_blocks={self.mapping.mapping_id: 1}, minimum_confirmations=1,
                 max_blocks_per_run=1, page_size=1, reorg_lookback_blocks=1,
             )
@@ -132,7 +132,7 @@ class OnChainStoreProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ingestion store"):
             BitcoinAddressIngestionWorker(
                 object(), self.mapping_store, object(),
-                monitored_addresses={self.mapping.mapping_id: ("bc1q" + "a" * 38,)},
+                monitored_addresses={self.mapping.mapping_id: ("1BoatSLRHtKNngkdXEeobR76b53LETtpyT",)},
                 start_blocks={self.mapping.mapping_id: 1}, minimum_confirmations=1,
                 max_blocks_per_run=1, page_size=1, reorg_lookback_blocks=1,
             )
@@ -146,11 +146,17 @@ class OnChainStoreProtocolTests(unittest.TestCase):
             def get_solana_slot_journal(self, *args): return {}
             def get_event(self, *args): return None
             def list_all_events(self, canonical_only=False): return []
+            def list_page_receipts(self, cursor_key): return ()
+            def get_page_acceptance_material(self, cursor_key, page_id): return {}
+            def save_page_acceptance(self, cursor_key, page_id, key_id, payload_json, payload_sha256, signature): return "INSERTED"
+            def get_page_acceptance(self, cursor_key, page_id): return None
+            def list_ingestion_pages(self): return ()
+            def list_pending_page_acceptances(self): return ()
 
         with self.assertRaisesRegex(ValueError, "expected_cursor"):
             BitcoinAddressIngestionWorker(
                 object(), self.mapping_store, WeakIngestionStore(),
-                monitored_addresses={self.mapping.mapping_id: ("bc1q" + "a" * 38,)},
+                monitored_addresses={self.mapping.mapping_id: ("1BoatSLRHtKNngkdXEeobR76b53LETtpyT",)},
                 start_blocks={self.mapping.mapping_id: 1}, minimum_confirmations=1,
                 max_blocks_per_run=1, page_size=1, reorg_lookback_blocks=1,
             )
@@ -158,17 +164,23 @@ class OnChainStoreProtocolTests(unittest.TestCase):
     def test_rejects_ingestion_store_missing_optional_commit_page_keywords_used_by_workers(self):
         class IncompleteIngestionStore:
             def get_checkpoint(self, cursor_key): return None
-            def commit_page(self, cursor_key, next_cursor, events, *, expected_cursor, scope_identity): return {}
+            def commit_page(self, cursor_key, next_cursor, events, *, expected_cursor, scope_identity, allow_recanonicalized=False, canonical_blocks=(), canonical_slots=()): return {}
             def get_block_hash(self, network_id, provider, scope, block_number): return None
             def reconcile_block(self, network_id, block_number, canonical_hash, *, provider, scope): return 0
             def get_solana_slot_journal(self, network_id, provider, scope, start_slot, end_slot): return {}
             def get_event(self, event_id, network_id, provider=None, scope=None): return None
             def list_all_events(self, canonical_only=False): return []
+            def list_page_receipts(self, cursor_key): return ()
+            def get_page_acceptance_material(self, cursor_key, page_id): return {}
+            def save_page_acceptance(self, cursor_key, page_id, key_id, payload_json, payload_sha256, signature): return "INSERTED"
+            def get_page_acceptance(self, cursor_key, page_id): return None
+            def list_ingestion_pages(self): return ()
+            def list_pending_page_acceptances(self): return ()
 
-        with self.assertRaisesRegex(ValueError, "allow_recanonicalized"):
+        with self.assertRaisesRegex(ValueError, "provider_receipts"):
             BitcoinAddressIngestionWorker(
                 object(), self.mapping_store, IncompleteIngestionStore(),
-                monitored_addresses={self.mapping.mapping_id: ("bc1q" + "a" * 38,)},
+                monitored_addresses={self.mapping.mapping_id: ("1BoatSLRHtKNngkdXEeobR76b53LETtpyT",)},
                 start_blocks={self.mapping.mapping_id: 1}, minimum_confirmations=1,
                 max_blocks_per_run=1, page_size=1, reorg_lookback_blocks=1,
             )
@@ -182,7 +194,7 @@ class OnChainStoreProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "freshness_limits_seconds"):
             BitcoinAddressIngestionWorker(
                 object(), self.mapping_store, self.ingestion_store,
-                monitored_addresses={self.mapping.mapping_id: ("bc1q" + "a" * 38,)},
+                monitored_addresses={self.mapping.mapping_id: ("1BoatSLRHtKNngkdXEeobR76b53LETtpyT",)},
                 start_blocks={self.mapping.mapping_id: 1}, minimum_confirmations=1,
                 max_blocks_per_run=1, page_size=1, reorg_lookback_blocks=1,
             )
