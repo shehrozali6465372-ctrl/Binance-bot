@@ -2,23 +2,32 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Callable
 
-from .onchain import OnChainAssetMapping, OnChainStore
+from .onchain import OnChainAssetMapping
 from .onchain_ingestion import (
-    OnChainIngestionStore, normalize_solana_token_transfer_instructions,
-    _solana_base58_decode,
+    OnChainFinalitySnapshot, normalize_solana_token_transfer_instructions,
 )
-from .onchain_providers import ProviderTransportError, SolanaAddressTransaction, retry_provider_operation
+from .onchain_providers import (
+    ProviderTransportError, SolanaAddressTransaction, retry_provider_operation,
+    _capture_provider_run_receipts, drain_provider_run_receipts,
+    _solana_base58_decode,
+    include_provider_receipts_in_current_scope,
+)
+from .onchain_protocols import (
+    OnChainIngestionStoreProtocol, OnChainMappingStoreProtocol,
+    require_ingestion_store, require_mapping_store,
+)
 
 _RETRYABLE = {"TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"}
 
 
 class SolanaAddressIngestionWorker:
     def __init__(
-        self, provider, mapping_store: OnChainStore,
-        ingestion_store: OnChainIngestionStore, *,
+        self, provider, mapping_store: OnChainMappingStoreProtocol,
+        ingestion_store: OnChainIngestionStoreProtocol, *,
         monitored_addresses: dict[str, tuple[str, ...]],
         start_slots: dict[str, int],
         max_slots_per_run: int,
@@ -28,8 +37,8 @@ class SolanaAddressIngestionWorker:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
-        if not isinstance(mapping_store, OnChainStore) or not isinstance(ingestion_store, OnChainIngestionStore):
-            raise ValueError("worker requires existing mapping and ingestion stores")
+        require_mapping_store(mapping_store)
+        require_ingestion_store(ingestion_store)
         if not isinstance(monitored_addresses, dict) or not monitored_addresses:
             raise ValueError("explicit monitored Solana address seeds are required")
         if not isinstance(start_slots, dict) or set(start_slots) != set(monitored_addresses):
@@ -95,16 +104,25 @@ class SolanaAddressIngestionWorker:
         }
         for slot in produced:
             header = self._retry(lambda slot=slot: self.provider.fetch_solana_block_header(slot))
-            if (not isinstance(header, dict) or header.get("number") != slot
+            parent_slot = header.get("parent_slot") if isinstance(header, dict) else None
+            previous_block_hash = header.get("previous_block_hash") if isinstance(header, dict) else None
+            if (not isinstance(header, dict) or isinstance(header.get("number"), bool)
+                    or header.get("number") != slot
                     or not isinstance(header.get("hash"), str) or len(_solana_base58_decode(header["hash"])) != 32
+                    or not isinstance(previous_block_hash, str)
+                    or len(_solana_base58_decode(previous_block_hash)) != 32
+                    or isinstance(parent_slot, bool) or not isinstance(parent_slot, int)
+                    or parent_slot < 0 or parent_slot >= slot
                     or isinstance(header.get("timestamp"), bool)
                     or not isinstance(header.get("timestamp"), int) or header["timestamp"] <= 0
-                    or (header.get("parent_slot") is not None and (
-                        isinstance(header.get("parent_slot"), bool)
-                        or not isinstance(header.get("parent_slot"), int)
-                        or header["parent_slot"] >= slot))
                     or header.get("finality_reference") != "commitment=finalized"):
-                raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana finalized block header is malformed or not finalized")
+                raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana finalized block header or parent linkage is malformed/not finalized")
+            parent_state = states.get(parent_slot)
+            if parent_slot >= start_slot and (
+                    parent_state is None or not parent_state["produced"]):
+                raise ProviderTransportError("SOLANA_PARENT_SLOT_MISSING", "Solana finalized block parent slot is missing from the produced-slot range")
+            if parent_state is not None and parent_state["block_hash"] != previous_block_hash:
+                raise ProviderTransportError("SOLANA_PARENT_HASH_MISMATCH", "Solana finalized block previousBlockhash does not match its produced parent slot")
             block_time = datetime.fromtimestamp(header["timestamp"], timezone.utc).isoformat()
             states[slot] = {
                 "produced": True, "block_hash": header["hash"], "block_time": block_time,
@@ -136,13 +154,23 @@ class SolanaAddressIngestionWorker:
             earliest = slot if earliest is None else min(earliest, slot)
         return tombstoned, earliest, changed, current
 
+    def _finalize_page_acceptances(self, summary: dict) -> None:
+        result = self.mapping_store.engine.sign_pending_ingestion_pages(self.ingestion_store)
+        summary["page_acceptances_signed"] = result["signed"]
+        summary["page_acceptances_pending"] = result["pending"]
+        summary["page_acceptances_rejected"] = result["rejected"]
+
+    @_capture_provider_run_receipts
     def run_once(self) -> dict:
         mappings = self.mapping_store.list_verified_mappings("solana-mainnet")
         summary = {"mappings": 0, "mappings_skipped": 0, "addresses": 0, "slots_scanned": 0,
                    "events_inserted": 0, "duplicates": 0, "tombstoned": 0,
                    "reorg_slots_detected": 0, "reorg_events_tombstoned": 0,
                    "pages_committed": 0, "checkpoints_advanced": 0}
+        summary.update({"page_acceptances_signed": 0, "page_acceptances_pending": 0,
+                        "page_acceptances_rejected": 0})
         for mapping in mappings:
+            drain_provider_run_receipts()  # discard uncommitted evidence from prior mapping
             # Native SOL and Token-2022 extension mints are deliberately outside
             # this first token-only decoder; never silently mislabel them.
             if mapping.representation == "NATIVE" or mapping.token_standard == "TOKEN_2022":
@@ -153,10 +181,13 @@ class SolanaAddressIngestionWorker:
                 raise ValueError(f"verified Solana mapping {mapping.mapping_id} has no explicit seed/start slot")
             summary["mappings"] += 1
             finalized_slot = self._retry(self.provider.fetch_solana_finalized_slot)
+            finalized_slot_receipts = drain_provider_run_receipts()
             if isinstance(finalized_slot, bool) or not isinstance(finalized_slot, int) or finalized_slot <= 0:
                 raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana finalized slot is invalid")
             initial_slot = self.start_slots[mapping.mapping_id]
             for address in self.monitored_addresses[mapping.mapping_id]:
+                drain_provider_run_receipts()  # isolate the next address scope
+                include_provider_receipts_in_current_scope(finalized_slot_receipts)
                 summary["addresses"] += 1
                 cursor_key, scope = self._cursor_key(address, mapping.mapping_id), self._scope(address, mapping.mapping_id)
                 cursor = self.ingestion_store.get_checkpoint(cursor_key)
@@ -268,13 +299,19 @@ class SolanaAddressIngestionWorker:
                     header = active.get(record.slot)
                     if header is None or not header["produced"]:
                         raise ProviderTransportError("SOLANA_BLOCK_EVIDENCE_MISSING", "Solana transaction slot has no independently verified finalized block")
-                    events.extend(normalize_solana_token_transfer_instructions(
-                        record, asset_id=mapping.asset_id, mapping_id=mapping.mapping_id,
-                        mint=mapping.contract_address, token_standard=mapping.token_standard,
-                        decimals=mapping.decimals, monitored_address=address,
-                        canonical_block_hash=header["block_hash"],
-                        canonical_block_time=header["block_time"], observed_at=observed_at,
-                    ))
+                    events.extend(
+                        replace(event, finality_snapshot=OnChainFinalitySnapshot(
+                            version=1, network_id="solana-mainnet", status="FINALIZED",
+                            reference=page.finality_reference,
+                        ))
+                        for event in normalize_solana_token_transfer_instructions(
+                            record, asset_id=mapping.asset_id, mapping_id=mapping.mapping_id,
+                            mint=mapping.contract_address, token_standard=mapping.token_standard,
+                            decimals=mapping.decimals, monitored_address=address,
+                            canonical_block_hash=header["block_hash"],
+                            canonical_block_time=header["block_time"], observed_at=observed_at,
+                        )
+                    )
                 if len(set(positions)) != len(positions):
                     raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana page contains duplicate slot/transaction-index positions")
                 if positions != sorted(positions, reverse=True):
@@ -300,6 +337,7 @@ class SolanaAddressIngestionWorker:
                     "last_position": next_last_position if has_more else None,
                     "next_slot": range_start if has_more else range_end + 1,
                     "finality_reference": "commitment=finalized",
+                    "finalized_slot": finalized_slot,
                 }
                 canonical_slots = self._journal_payload(scope, active)
                 canonical_blocks = tuple({
@@ -311,7 +349,8 @@ class SolanaAddressIngestionWorker:
                     cursor_key, next_cursor, events, allow_recanonicalized=True,
                     canonical_blocks=canonical_blocks, canonical_slots=canonical_slots,
                     expected_cursor=cursor,
-                    scope_identity=("solana-mainnet", "alchemy", scope))
+                    scope_identity=("solana-mainnet", "alchemy", scope),
+                    provider_receipts=drain_provider_run_receipts())
                 cursor = next_cursor
                 summary["events_inserted"] += committed["inserted"]
                 summary["duplicates"] += committed["duplicates"]
@@ -319,4 +358,5 @@ class SolanaAddressIngestionWorker:
                 summary["slots_scanned"] += len(active)
                 summary["pages_committed"] += 1
                 summary["checkpoints_advanced"] += 1
+        self._finalize_page_acceptances(summary)
         return summary

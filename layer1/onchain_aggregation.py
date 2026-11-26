@@ -16,8 +16,12 @@ from decimal import Decimal, InvalidOperation, localcontext
 from typing import Iterable, Mapping, Optional
 
 from .foundation import BinanceListingEligibilityEngine, EligibilityDecision
-from .onchain import NETWORK_PROVIDERS, OnChainAssetMapping, OnChainStore, _parse_timestamp
-from .onchain_ingestion import NormalizedTransferEvent, OnChainIngestionStore
+from .onchain import NETWORK_PROVIDERS, OnChainAssetMapping, _parse_timestamp
+from .onchain_ingestion import NormalizedTransferEvent
+from .onchain_protocols import (
+    OnChainIngestionStoreProtocol, OnChainMappingStoreProtocol,
+    require_ingestion_store, require_mapping_store,
+)
 
 
 @dataclass(frozen=True)
@@ -78,14 +82,13 @@ class OnChainTransferAggregator:
 
     def __init__(
         self,
-        mapping_store: OnChainStore,
+        mapping_store: OnChainMappingStoreProtocol,
         *,
         minimum_amount_by_mapping: Mapping[str, str | int | Decimal],
         eligibility_max_age_seconds: int = 300,
         identity_proof_max_age_seconds: int = 900,
     ):
-        if not isinstance(mapping_store, OnChainStore):
-            raise ValueError("mapping_store must be the verified OnChainStore")
+        require_mapping_store(mapping_store)
         if (isinstance(eligibility_max_age_seconds, bool)
                 or not isinstance(eligibility_max_age_seconds, int)
                 or eligibility_max_age_seconds <= 0
@@ -100,11 +103,28 @@ class OnChainTransferAggregator:
             if not isinstance(mapping_id, str) or not mapping_id.strip():
                 raise ValueError("threshold mapping IDs must be non-empty strings")
             try:
-                amount = Decimal(str(value))
+                threshold_text = str(value)
+                if len(threshold_text) > 256:
+                    raise ValueError("threshold representation is too long")
+                amount = Decimal(threshold_text)
             except (InvalidOperation, ValueError):
                 raise ValueError(f"threshold for {mapping_id} must be a decimal amount") from None
             if not amount.is_finite() or amount <= 0:
                 raise ValueError(f"threshold for {mapping_id} must be a positive finite decimal")
+            # Summary serialization uses fixed-point formatting. Bound the
+            # effective scale/magnitude so a tiny exponent or huge integer
+            # cannot expand one configured threshold into unbounded output.
+            _, digits, exponent = amount.as_tuple()
+            significant_digits = list(digits)
+            while len(significant_digits) > 1 and significant_digits[-1] == 0:
+                significant_digits.pop()
+                exponent += 1
+            adjusted_exponent = len(significant_digits) + exponent - 1
+            if exponent < -36 or adjusted_exponent > 255:
+                raise ValueError(
+                    f"threshold for {mapping_id} must be a bounded decimal amount "
+                    "(at most 256 integer digits and 36 fractional places)"
+                )
             thresholds[mapping_id] = amount
         verified_ids = {mapping.mapping_id for mapping in mapping_store.list_verified_mappings()}
         if not verified_ids:
@@ -120,7 +140,7 @@ class OnChainTransferAggregator:
             raise ValueError("threshold configuration must exactly cover verified mappings: " + "; ".join(details))
         self.mapping_store = mapping_store
         self.minimum_amount_by_mapping = thresholds
-        self._ingestion_store: Optional[OnChainIngestionStore] = None
+        self._ingestion_store: Optional[OnChainIngestionStoreProtocol] = None
         self.eligibility_max_age_seconds = eligibility_max_age_seconds
         self.identity_proof_max_age_seconds = identity_proof_max_age_seconds
 
@@ -175,8 +195,21 @@ class OnChainTransferAggregator:
         observation = self.mapping_store.get_latest_accepted_observation(mapping.mapping_id)
         if observation is None:
             return "ONCHAIN_MAPPING_LACKS_ACCEPTED_SPOT_PROOF"
+        stored = self.mapping_store.get_observation(observation.observation_id)
+        if stored is None or stored[1].status != "ACCEPTED":
+            return "ONCHAIN_MAPPING_LACKS_ACCEPTED_SPOT_PROOF"
+        from .onchain import OnChainObservationProvenance
+        validation_receipt = stored[1]
+        provenance = OnChainObservationProvenance(
+            validation_receipt.provenance_cursor_key,
+            validation_receipt.provenance_page_id,
+            validation_receipt.provenance_observation_id,
+        )
         validated = self.mapping_store.engine.validate(
-            decision, mapping, observation, now=now.isoformat())
+            decision, mapping, observation, now=now.isoformat(),
+            ingestion_store=getattr(self.mapping_store, "ingestion_store", None),
+            provenance=provenance,
+        )
         if validated.status != "ACCEPTED":
             return validated.reason_code
         return None
@@ -194,10 +227,9 @@ class OnChainTransferAggregator:
             event.canonical_status,
         )
 
-    def bind_ingestion_store(self, ingestion_store: OnChainIngestionStore) -> None:
+    def bind_ingestion_store(self, ingestion_store: OnChainIngestionStoreProtocol) -> None:
         """Bind the canonical block journal required to verify each event's hash."""
-        if not isinstance(ingestion_store, OnChainIngestionStore):
-            raise ValueError("ingestion_store must be the canonical OnChainIngestionStore")
+        require_ingestion_store(ingestion_store)
         self._ingestion_store = ingestion_store
 
     def aggregate(
@@ -208,7 +240,7 @@ class OnChainTransferAggregator:
         now: Optional[datetime] = None,
     ) -> TransferAggregationResult:
         current = self._now(now)
-        if not isinstance(self._ingestion_store, OnChainIngestionStore):
+        if self._ingestion_store is None:
             raise ValueError("canonical ingestion store must be bound before aggregation")
         if not isinstance(eligibility_by_asset, Mapping):
             raise ValueError("current Binance eligibility decisions must be supplied by canonical asset ID")
@@ -399,15 +431,37 @@ class OnChainTransferAggregator:
 
     def aggregate_store(
         self,
-        ingestion_store: OnChainIngestionStore,
+        ingestion_store: OnChainIngestionStoreProtocol,
         eligibility_by_asset: Mapping[str, EligibilityDecision],
         *,
         now: Optional[datetime] = None,
     ) -> TransferAggregationResult:
-        if not isinstance(ingestion_store, OnChainIngestionStore):
-            raise ValueError("ingestion_store must be the canonical OnChainIngestionStore")
+        require_ingestion_store(ingestion_store)
+        acceptance_verifier = getattr(self.mapping_store.engine, "verify_ingestion_page_acceptance", None)
+        if not callable(acceptance_verifier):
+            raise ValueError("trusted ingestion page acceptance verifier is required before aggregation")
+
+        accepted_event_keys: set[tuple[str, str, str, str]] = set()
+        for cursor_key, page_id in ingestion_store.list_ingestion_pages():
+            if not acceptance_verifier(ingestion_store, cursor_key, page_id):
+                continue
+            material = ingestion_store.get_page_acceptance_material(cursor_key, page_id)
+            page_material = material.get("page_material")
+            page_events = page_material.get("events") if isinstance(page_material, dict) else None
+            if not isinstance(page_events, list):
+                raise ValueError("verified ingestion page acceptance has malformed event lineage")
+            for payload in page_events:
+                page_event = NormalizedTransferEvent(**payload)
+                accepted_event_keys.add((
+                    page_event.event_id, page_event.network_id,
+                    page_event.provider, page_event.scope,
+                ))
+
+        events = ingestion_store.list_all_events(canonical_only=True)
+        for event in events:
+            event_key = (event.event_id, event.network_id, event.provider, event.scope)
+            if event_key not in accepted_event_keys:
+                raise ValueError("canonical event lacks a valid signed ingestion page acceptance")
+
         self._ingestion_store = ingestion_store
-        return self.aggregate(
-            ingestion_store.list_all_events(canonical_only=True),
-            eligibility_by_asset, now=now,
-        )
+        return self.aggregate(events, eligibility_by_asset, now=now)

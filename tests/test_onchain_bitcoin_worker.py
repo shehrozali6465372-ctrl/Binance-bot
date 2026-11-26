@@ -1,22 +1,26 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from layer1.foundation import EligibilityDecision
-from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine, OnChainObservation, OnChainStore
+from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine
+from tests.onchain_test_support import MappingStoreStub
 from layer1.onchain_ingestion import OnChainIngestionStore
-from layer1.onchain_providers import BitcoinAddressTransaction, ProviderDataPage, ProviderTransportError
+from layer1.onchain_providers import (
+    BitcoinAddressTransaction, ProviderDataPage, ProviderTransportError,
+    ProviderResponseReceipt, _ACTIVE_PAGE_RECEIPTS, _approved_endpoint_profile_sha256,
+)
 from layer1.onchain_bitcoin_worker import BitcoinAddressIngestionWorker
 
-ADDRESS = "bc1q" + "a" * 38
+ADDRESS = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
 TXID = "a" * 64
 HASH = "b" * 64
-NOW = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 def history(txid=TXID, height=100, confirmations=8, block_hash=HASH):
-    return BitcoinAddressTransaction(txid, confirmations, height, block_hash, 1794398400,
+    return BitcoinAddressTransaction(txid, confirmations, height, block_hash, int(NOW.timestamp()) - 600,
                                      "CONFIRMED", {"txid": txid})
 
 
@@ -44,7 +48,7 @@ class FakeBitcoinProvider:
 
     def fetch_bitcoin_block_header(self, height):
         return self.headers.get(height, {
-            "number": height, "hash": HASH, "timestamp": 1794398400 + height,
+            "number": height, "hash": HASH, "timestamp": int(NOW.timestamp()) - (110 - height) * 60,
         })
 
     def fetch_bitcoin_address_transactions(self, address, page, page_size, from_height, to_height):
@@ -65,25 +69,16 @@ class BitcoinAddressIngestionWorkerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         path = os.path.join(self.tmp.name, "onchain.sqlite3")
-        self.mapping_store = OnChainStore(path, OnChainIntelligenceEngine(
-            {"bitcoin-mainnet": 86400}, {"bitcoin-mainnet": 6}))
+        engine = OnChainIntelligenceEngine(
+            {"bitcoin-mainnet": 86400}, {"bitcoin-mainnet": 6},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1")
         self.ingestion_store = OnChainIngestionStore(path)
         self.mapping = OnChainAssetMapping(
             "bitcoin-native-v1", "coingecko:bitcoin", "BTC", "bitcoin-mainnet",
             "UTXO", "bitcoin-mainnet", "NATIVE", None, None, 8, "VERIFIED",
-            "OFFICIAL_NETWORK", "https://bitcoin.org", "2026-11-11T10:00:00+00:00")
-        stamp = NOW.isoformat()
-        eligibility = EligibilityDecision(
-            status="ELIGIBLE", asset_id="coingecko:bitcoin", symbol="BTC",
-            eligible_pairs=("BTCUSDT",), verified_at=stamp,
-            identity_proof_status="VERIFIED", identity_proof_source="coingecko_coin_tickers",
-            identity_proof_verified_at=stamp, identity_proof_source_timestamp=stamp,
-            identity_proof_data_hash="a" * 64)
-        observation = OnChainObservation(
-            "btc-map-proof", self.mapping.mapping_id, self.mapping.asset_id,
-            "bitcoin-mainnet", "bitcoin-mainnet", "alchemy", "bitcoin-mainnet",
-            "TRANSFER", 90, HASH, TXID, stamp, stamp, "CONFIRMED", "confirmations=8")
-        self.mapping_store.save_verified(eligibility, self.mapping, observation)
+            "OFFICIAL_NETWORK", "https://bitcoin.org", (NOW - timedelta(hours=2)).isoformat())
+        self.mapping_store = MappingStoreStub(engine, self.mapping)
         self.provider = FakeBitcoinProvider()
         record = history()
         self.provider.pages = {1: ((record,), 2), 2: ((), 2)}
@@ -101,6 +96,69 @@ class BitcoinAddressIngestionWorkerTests(unittest.TestCase):
         self.mapping_store.close()
         self.tmp.cleanup()
 
+    def test_rejects_monitored_address_seed_with_invalid_mainnet_checksum(self):
+        with self.assertRaisesRegex(ValueError, "checksum-valid Bitcoin mainnet address seeds"):
+            BitcoinAddressIngestionWorker(
+                self.provider, self.mapping_store, self.ingestion_store,
+                monitored_addresses={self.mapping.mapping_id: ("1BoatSLRHtKNngkdXEeobR76b53LETtpyU",)},
+                start_blocks={self.mapping.mapping_id: 99},
+                minimum_confirmations=6, max_blocks_per_run=5, page_size=1,
+                reorg_lookback_blocks=2, retry_attempts=1, sleep=lambda _: None,
+                clock=lambda: NOW)
+
+    def test_accepts_valid_mainnet_bech32_seed(self):
+        worker = BitcoinAddressIngestionWorker(
+            self.provider, self.mapping_store, self.ingestion_store,
+            monitored_addresses={self.mapping.mapping_id: ("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",)},
+            start_blocks={self.mapping.mapping_id: 99},
+            minimum_confirmations=6, max_blocks_per_run=5, page_size=1,
+            reorg_lookback_blocks=2, retry_attempts=1, sleep=lambda _: None,
+            clock=lambda: NOW)
+        self.assertEqual(worker.monitored_addresses[self.mapping.mapping_id],
+                         ("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",))
+
+    def test_accepts_official_bip350_mainnet_taproot_bech32m_vector(self):
+        address = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"
+        worker = BitcoinAddressIngestionWorker(
+            self.provider, self.mapping_store, self.ingestion_store,
+            monitored_addresses={self.mapping.mapping_id: (address,)},
+            start_blocks={self.mapping.mapping_id: 99},
+            minimum_confirmations=6, max_blocks_per_run=5, page_size=1,
+            reorg_lookback_blocks=2, retry_attempts=1, sleep=lambda _: None,
+            clock=lambda: NOW)
+        self.assertEqual(worker.monitored_addresses[self.mapping.mapping_id], (address,))
+
+    def test_rejects_v1_witness_address_using_bech32_instead_of_bech32m(self):
+        address = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqh2y7hd"
+        with self.assertRaisesRegex(ValueError, "checksum-valid Bitcoin mainnet address seeds"):
+            BitcoinAddressIngestionWorker(
+                self.provider, self.mapping_store, self.ingestion_store,
+                monitored_addresses={self.mapping.mapping_id: (address,)},
+                start_blocks={self.mapping.mapping_id: 99},
+                minimum_confirmations=6, max_blocks_per_run=5, page_size=1,
+                reorg_lookback_blocks=2, retry_attempts=1, sleep=lambda _: None,
+                clock=lambda: NOW)
+
+    def test_rejects_invalid_bech32_checksum(self):
+        with self.assertRaisesRegex(ValueError, "checksum-valid Bitcoin mainnet address seeds"):
+            BitcoinAddressIngestionWorker(
+                self.provider, self.mapping_store, self.ingestion_store,
+                monitored_addresses={self.mapping.mapping_id: ("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3tq",)},
+                start_blocks={self.mapping.mapping_id: 99},
+                minimum_confirmations=6, max_blocks_per_run=5, page_size=1,
+                reorg_lookback_blocks=2, retry_attempts=1, sleep=lambda _: None,
+                clock=lambda: NOW)
+
+    def test_rejects_wrong_network_bech32_seed(self):
+        with self.assertRaisesRegex(ValueError, "checksum-valid Bitcoin mainnet address seeds"):
+            BitcoinAddressIngestionWorker(
+                self.provider, self.mapping_store, self.ingestion_store,
+                monitored_addresses={self.mapping.mapping_id: ("tb1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",)},
+                start_blocks={self.mapping.mapping_id: 99},
+                minimum_confirmations=6, max_blocks_per_run=5, page_size=1,
+                reorg_lookback_blocks=2, retry_attempts=1, sleep=lambda _: None,
+                clock=lambda: NOW)
+
     def test_ingests_outputs_and_scopes_events_to_explicit_monitored_address(self):
         first = self.worker.run_once()  # page 1 is durably checkpointed
         result = self.worker.run_once()  # page 2 completes the fixed block range
@@ -112,6 +170,88 @@ class BitcoinAddressIngestionWorkerTests(unittest.TestCase):
         self.assertEqual(saved[0].amount_raw, "12345")
         self.assertEqual(self.ingestion_store.get_checkpoint(
             "alchemy:bitcoin-mainnet:address:" + ADDRESS)["next_block"], 104)
+
+    def test_skips_orphaned_history_rows_without_blocking_confirmed_page(self):
+        confirmed = history()
+        orphaned = BitcoinAddressTransaction("d" * 64, -1, 100, HASH,
+                                              int(NOW.timestamp()) - 600,
+                                              "ORPHANED", {"txid": "d" * 64})
+        self.provider.pages = {1: ((orphaned, confirmed), 1)}
+        self.provider.details = {TXID: transaction(confirmed)}
+        self.worker.page_size = 3
+
+        result = self.worker.run_once()
+
+        saved = self.ingestion_store.list_events("bitcoin-mainnet", canonical_only=True)
+        self.assertEqual(result["transactions_skipped_orphaned"], 1)
+        self.assertEqual(result["events_inserted"], 1)
+        self.assertEqual([row.event_id for row in saved], [TXID + ":0"])
+        self.assertEqual(self.provider.detail_calls, [TXID])
+        self.assertEqual(self.ingestion_store.get_checkpoint(
+            "alchemy:bitcoin-mainnet:address:" + ADDRESS)["next_block"], 104)
+
+    def test_transaction_detail_response_receipt_is_bound_to_signed_ingestion_page(self):
+        class ReceiptProvider(FakeBitcoinProvider):
+            @staticmethod
+            def _capture(method):
+                collector = _ACTIVE_PAGE_RECEIPTS.get()
+                collector.append(ProviderResponseReceipt(
+                    sequence=len(collector) + 1, provider="alchemy",
+                    network_id="bitcoin-mainnet", method=method,
+                    request_sha256="a" * 64, response_sha256="b" * 64,
+                    response_bytes=128, http_status=200,
+                    received_at=NOW.isoformat(),
+                    endpoint_profile_sha256=_approved_endpoint_profile_sha256(
+                        "alchemy", "bitcoin-mainnet"),
+                ))
+
+            def fetch_bitcoin_tip_height(self):
+                self._capture("getblockcount")
+                return super().fetch_bitcoin_tip_height()
+
+            def fetch_bitcoin_block_header(self, height):
+                self._capture("getblockhash")
+                self._capture("getblockheader")
+                return super().fetch_bitcoin_block_header(height)
+
+            def fetch_bitcoin_address_transactions(self, *args, **kwargs):
+                self._capture("GET api/v2/address")
+                return super().fetch_bitcoin_address_transactions(*args, **kwargs)
+
+            def fetch_bitcoin_transaction(self, txid):
+                self._capture("GET api/v2/tx")
+                return super().fetch_bitcoin_transaction(txid)
+
+        provider = ReceiptProvider()
+        record = history()
+        provider.pages = {1: ((record,), 2)}
+        provider.details = {TXID: transaction(record)}
+        worker = BitcoinAddressIngestionWorker(
+            provider, self.mapping_store, self.ingestion_store,
+            monitored_addresses={self.mapping.mapping_id: (ADDRESS,)},
+            start_blocks={self.mapping.mapping_id: 99}, minimum_confirmations=6,
+            max_blocks_per_run=5, page_size=1, reorg_lookback_blocks=0,
+            retry_attempts=1, sleep=lambda _: None, clock=lambda: NOW,
+        )
+        result = worker.run_once()
+        self.assertEqual(result["pages_committed"], 1)
+        cursor_key = "alchemy:bitcoin-mainnet:address:" + ADDRESS
+        page_id, receipts_json = self.ingestion_store.conn.execute(
+            "SELECT page_id, receipts_json FROM layer1_onchain_ingestion_pages WHERE cursor_key=?",
+            (cursor_key,),
+        ).fetchone()
+        import json
+        methods = [item["method"] for item in json.loads(receipts_json)]
+        self.assertIn("GET api/v2/address", methods)
+        self.assertIn("GET api/v2/tx", methods)
+        event = self.ingestion_store.list_events("bitcoin-mainnet", canonical_only=True)[0]
+        self.assertEqual(event.finality_snapshot.status, "CONFIRMED")
+        self.assertEqual(event.finality_snapshot.reference, "confirmations-policy:min=6")
+        checkpoint = self.ingestion_store.get_checkpoint(cursor_key)
+        self.assertEqual(checkpoint["observed_tip_height"], provider.tip)
+        self.assertEqual(checkpoint["minimum_confirmations"], 6)
+        self.assertTrue(self.mapping_store.engine.verify_ingestion_page_acceptance(
+            self.ingestion_store, cursor_key, page_id))
 
     def test_page_checkpoint_resumes_after_detail_timeout_without_skipping_page(self):
         self.provider.pages = {1: ((history(),), 2), 2: ((history("d" * 64),), 2)}

@@ -69,6 +69,27 @@ class XrplPaymentNormalizationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.normalize(issued_currency=currency)
 
+    def test_rejects_reserved_or_malformed_hex_and_standard_currency_codes(self):
+        for currency in (
+            "0000000000000000000000005852500000000000",
+            "0000000000000000000000000000000000000000",
+            "0000000000000000000000005553440000000000",
+            "A/B", "U_D", "A:B",
+        ):
+            with self.subTest(currency=currency):
+                with self.assertRaises(ValueError):
+                    self.normalize(issued_currency=currency)
+
+    def test_accepts_documented_nonstandard_160_bit_currency_code(self):
+        currency = "444F4C4C415259444F4F00000000000000000000"
+        record = self.record(
+            tx={"Amount": {"currency": currency, "issuer": ISSUER, "value": "12.345"}},
+            meta={"delivered_amount": {"currency": currency, "issuer": ISSUER, "value": "12.345"}},
+        )
+        event = self.normalize(record, issued_currency=currency,
+                               scope=f"issued:{ISSUER}:{currency}")
+        self.assertEqual(event.amount_raw, "12345000")
+
     def test_unrelated_currency_or_issuer_is_not_normalized(self):
         wrong_currency = self.record(meta={"delivered_amount": {
             "currency": "EUR", "issuer": ISSUER, "value": "12.345"}})

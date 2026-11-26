@@ -84,6 +84,75 @@ class Layer1FoundationTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_layer1_store_exposes_ordered_source_record_read_contract(self):
+        store = Layer1Store(self.db)
+        try:
+            older = AnnouncementEvidence(
+                "source-a", "https://www.binance.com/en/support/announcement/source-a",
+                "Binance", "listing", "Older announcement", iso(-120), iso(-120),
+                (self.identity.asset_id,), "1" * 64,
+            )
+            newer = AnnouncementEvidence(
+                "source-a", "https://www.binance.com/en/support/announcement/source-a",
+                "Binance", "listing", "Newer announcement", iso(-60), iso(-60),
+                (self.identity.asset_id,), "2" * 64,
+            )
+            observation = MarketObservation(self.identity.asset_id, "provider", "/market", iso(), price=100)
+            signal = TrendSignal("BTC", "provider-a", iso(), 1, (self.identity.asset_id,), "item-1", "3" * 64)
+            store.save_announcement(older)
+            store.save_announcement(newer)
+            store.save_market(observation)
+            store.save_trend(signal)
+
+            revisions = store.iter_announcement_revisions()
+            markets = store.iter_market_observations()
+            trends = store.iter_trend_signals()
+
+            self.assertEqual([item.content_hash for item in revisions], ["1" * 64, "2" * 64])
+            self.assertEqual([item.data_hash for item in markets], [observation.data_hash])
+            self.assertEqual([item.source_item_id for item in trends], [signal.source_item_id])
+        finally:
+            store.close()
+
+    def test_postgresql_runtime_routes_layer1_and_claim_registry_to_postgres_store(self):
+        class FakePostgresStore:
+            def __init__(self):
+                self.conn = sqlite3.connect(":memory:")
+                self.saved_registries = []
+                self.lifecycle_snapshots = []
+            def save_claim_registry(self, registry):
+                self.saved_registries.append(registry)
+                return "verification-id"
+            def load_event_lifecycle(self, event_id):
+                return None
+            def sync_event_lifecycle_snapshot(self, connection, event_id):
+                self.lifecycle_snapshots.append((connection, event_id))
+
+        postgres_store = FakePostgresStore()
+        layer1_store = Layer1Store(self.db)
+        with patch("layer1.layer1_postgres.PostgresLayer1Store", return_value=layer1_store) as factory:
+            summary = main._persist_layer1_market_intelligence(
+                [], self.db, [], postgres_store=postgres_store,
+            )
+        factory.assert_called_once_with(postgres_store.conn)
+        self.assertEqual(len(postgres_store.saved_registries), 1)
+        self.assertEqual(postgres_store.lifecycle_snapshots, [])
+        self.assertEqual(summary["observations"], 0)
+        # PostgreSQL selection must not also create the SQLite claim snapshot table.
+        check = sqlite3.connect(self.db)
+        try:
+            table = check.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='layer1_claim_verification_runs'"
+            ).fetchone()
+            self.assertIsNone(table)
+            lifecycle_table = check.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='layer1_event_lifecycle'"
+            ).fetchone()
+            self.assertIsNone(lifecycle_table)
+        finally:
+            check.close()
+        postgres_store.conn.close()
+
     def test_module1_config_validation_and_run_context(self):
         with self.assertRaises(ValueError):
             AgentConfig(http_timeout_seconds=0).validate()
@@ -93,11 +162,11 @@ class Layer1FoundationTests(unittest.TestCase):
         self.assertEqual(len(context.config_hash), 64)
 
     def test_module1_live_mode_requires_generation_and_publisher_credentials(self):
-        with self.assertRaisesRegex(ValueError, "GEMINI_API_KEY"):
-            replace(main.CONFIG, dry_run=False, gemini_api_key="", square_api_key="configured").validate()
+        with self.assertRaisesRegex(ValueError, "DEEPSEEK_API_KEY"):
+            replace(main.CONFIG, dry_run=False, deepseek_api_key="", square_api_key="configured").validate()
         with self.assertRaisesRegex(ValueError, "SQUARE_API_KEY"):
-            replace(main.CONFIG, dry_run=False, gemini_api_key="configured", square_api_key="").validate()
-        replace(main.CONFIG, dry_run=True, gemini_api_key="", square_api_key="").validate()
+            replace(main.CONFIG, dry_run=False, deepseek_api_key="configured", square_api_key="").validate()
+        replace(main.CONFIG, dry_run=True, deepseek_api_key="", square_api_key="").validate()
 
     def test_module1_boolean_environment_values_are_strict(self):
         self.assertTrue(main._parse_env_bool("DRY_RUN", "true", default=False))
@@ -186,6 +255,28 @@ class Layer1FoundationTests(unittest.TestCase):
         with patch("main._get_binance_listed", return_value={"BTC"}), \
              patch("main.market_data_http_get", return_value=ProviderResponse(payload)):
             self.assertEqual(scanner._coingecko_universe(), [])
+
+
+    def test_module2_coingecko_turnover_is_typed_as_percentage_not_volume_multiple(self):
+        payload = [{
+            "id": "bitcoin", "symbol": "btc", "name": "Bitcoin",
+            "current_price": 65000, "price_change_percentage_24h": 1.5,
+            "total_volume": 2_500_000_000, "market_cap": 10_000_000_000,
+            "last_updated": iso(), "sparkline_in_7d": {"price": [64000, 65000]},
+        }]
+        scanner = main.MarketScanner(AgentConfigShim())
+        with patch("main._get_binance_listed", return_value={"BTC"}), \
+             patch("main.market_data_http_get", return_value=ProviderResponse(payload)):
+            coins = scanner._coingecko_universe()
+        self.assertEqual(len(coins), 1)
+        self.assertAlmostEqual(coins[0].turnover_ratio_pct, 25.0)
+        serialized = coins[0].as_dict()
+        self.assertEqual(serialized["turnover_ratio_pct"], 25.0)
+        self.assertEqual(serialized["turnover_metric_unit"], "PCT_MARKET_CAP_24H")
+        self.assertEqual(serialized["turnover_metric_source"], "coingecko_markets")
+        self.assertNotIn("volume_ratio", serialized)
+        with patch.object(scanner, "_universe", return_value=coins):
+            self.assertEqual(scanner.high_turnover_assets(min_turnover_pct=20.0)[0]["symbol"], "BTC")
 
     def test_module2_scanner_cache_uses_configured_ttl_without_refreshing_observation_time(self):
         scanner = main.MarketScanner(replace(main.CONFIG, live_market_data=True,
@@ -338,12 +429,16 @@ class Layer1FoundationTests(unittest.TestCase):
     def test_market_data_http_adapter_surfaces_429_retry_after_without_retrying(self):
         error = main.urllib.error.HTTPError(
             "https://api.coingecko.com/api/v3/coins/markets", 429, "rate limited",
-            {"Retry-After": "17"}, None,
+            {"Retry-After": "17", "X-MBX-Used-Weight-1M": "1200",
+             "X-RateLimit-Limit-Minute": "6000", "Authorization": "Bearer do-not-log"}, None,
         )
         with patch("main.urllib.request.urlopen", side_effect=error) as urlopen:
             response = main.market_data_http_get("https://api.coingecko.com/api/v3/coins/markets", 5)
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.headers["Retry-After"], "17")
+        self.assertEqual(response.headers["X-MBX-Used-Weight-1M"], "1200")
+        self.assertEqual(response.headers["X-RateLimit-Limit-Minute"], "6000")
+        self.assertNotIn("Authorization", response.headers)
         urlopen.assert_called_once()
 
     def test_module2_coingecko_sparkline_freshness_is_unknown_without_its_own_timestamp(self):
@@ -719,6 +814,51 @@ class Layer1FoundationTests(unittest.TestCase):
         with patch("main._get_binance_listed", return_value={"BTC"}), patch("main.market_data_http_get", side_effect=RuntimeError("provider unavailable")):
             self.assertEqual(scanner._coingecko_universe(), [])
 
+    def test_legacy_listing_check_logs_safe_http_status_and_allowlisted_headers_only(self):
+        main._binance_listed_cache = None
+        main._binance_listed_cache_time = 0
+        main._binance_spot_provider_status = "NOT_REQUESTED"
+        secret = "authorization-token-do-not-log"
+        error = main.urllib.error.HTTPError(
+            "https://user:password@api.binance.com/api/v3/exchangeInfo?permissions=SPOT",
+            403, "Forbidden", {
+                "Retry-After": "17", "X-MBX-USED-WEIGHT-1M": "1200",
+                "Authorization": f"Bearer {secret}", "X-Unlisted-Debug": "private-value",
+            }, None,
+        )
+        with patch("main.market_data_http_get", side_effect=error), \
+             self.assertLogs("agent", level="ERROR") as captured:
+            self.assertEqual(main._get_binance_listed(), set())
+        output = "\n".join(captured.output)
+        self.assertIn("HTTPError", output)
+        self.assertIn("status=403", output)
+        self.assertIn("retry-after", output.lower())
+        self.assertIn("17", output)
+        self.assertIn("x-mbx-used-weight-1m", output.lower())
+        self.assertIn("1200", output)
+        self.assertNotIn(secret, output)
+        self.assertNotIn("password", output)
+        self.assertNotIn("private-value", output)
+        self.assertNotIn("Forbidden", output)
+
+    def test_legacy_listing_check_logs_status_from_rate_limit_response_without_body(self):
+        main._binance_listed_cache = None
+        main._binance_listed_cache_time = 0
+        main._binance_spot_provider_status = "NOT_REQUESTED"
+        response = ProviderResponse(None, 429, {
+            "Retry-After": "31", "X-MBX-USED-WEIGHT-1M": "6000",
+            "Authorization": "Bearer do-not-log",
+        })
+        with patch("main.market_data_http_get", return_value=response), \
+             self.assertLogs("agent", level="ERROR") as captured:
+            self.assertEqual(main._get_binance_listed(), set())
+        output = "\n".join(captured.output)
+        self.assertIn("status=429", output)
+        self.assertIn("retry-after", output.lower())
+        self.assertIn("31", output)
+        self.assertIn("6000", output)
+        self.assertNotIn("do-not-log", output)
+
     def test_legacy_listing_check_fails_closed_without_static_allowlist(self):
         main._binance_listed_cache = None
         main._binance_listed_cache_time = 0
@@ -774,6 +914,40 @@ class Layer1FoundationTests(unittest.TestCase):
         finally:
             active.finish("INTERRUPTED", {"reason": "test cleanup"})
             active.close()
+
+    def test_run_once_fails_closed_if_postgresql_selected_without_runtime_store(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True,
+                      persistence_backend="postgresql", postgres_dsn="postgresql://test")
+        with patch("main._run_once_impl") as runtime:
+            with self.assertRaisesRegex(RuntimeError, "PostgreSQL runtime store is required"):
+                main.run_once(cfg, None, None, None, None, None, set())
+            runtime.assert_not_called()
+        self.assertFalse(os.path.exists(self.db), "explicit PostgreSQL selection must not fall back to SQLite")
+
+    def test_run_once_selects_postgres_run_lease_when_postgres_store_is_attached(self):
+        cfg = replace(main.CONFIG, database_path=self.db, dry_run=True,
+                      persistence_backend="postgresql", postgres_dsn="postgresql://test")
+        calls = []
+        class FakePostgresLease:
+            def __init__(self, store):
+                calls.append(("init", store))
+                self.run_id = None
+            def acquire(self, context):
+                calls.append(("acquire", context.run_id))
+                self.run_id = context.run_id
+            def finish(self, status, summary):
+                calls.append(("finish", status, summary["run_id"]))
+                self.run_id = None
+            def close(self):
+                calls.append(("close",))
+        postgres_store = object()
+        publisher = type("Publisher", (), {"postgres_store": postgres_store})()
+        with patch("layer1.publication_runtime.PostgresRunLease", FakePostgresLease), \
+             patch("main._run_once_impl", return_value=True):
+            self.assertTrue(main.run_once(cfg, None, None, None, None, publisher, set()))
+        self.assertEqual([call[0] for call in calls], ["init", "acquire", "finish", "close"])
+        self.assertIs(calls[0][1], postgres_store)
+        self.assertFalse(os.path.exists(self.db), "PostgreSQL run lease must not create the SQLite lease database")
 
     def test_run_once_integrates_layer1_run_lease(self):
         cfg = replace(main.CONFIG, database_path=self.db, dry_run=True)
@@ -889,7 +1063,7 @@ class Layer1FoundationTests(unittest.TestCase):
     def test_legacy_candidate_filter_requires_canonical_asset_identity(self):
         with patch("main._get_binance_listed", return_value={"BTC"}):
             accepted = main._passes_objective_filters(
-                symbol="BTC", price=65000, change_24h=8, volume_ratio=2,
+                symbol="BTC", price=65000, change_24h=8, turnover_ratio_pct=2,
                 market_cap=1_000_000_000, announcements=[], posted_hours_data={},
                 asset_id="",
             )
@@ -964,6 +1138,17 @@ class Layer1FoundationTests(unittest.TestCase):
             self.assertEqual(result["trend_independent_source_counts"]["coingecko:bitcoin"]["btc"], 2)
             self.assertEqual(result["candidates"], 1)
             self.assertEqual(result["ready_asset_ids"], ["coingecko:bitcoin"])
+            self.assertEqual(result["event_graph_summary"]["status"], "AVAILABLE")
+            self.assertEqual(result["claim_verification_summary"]["status"], "AVAILABLE")
+            self.assertEqual(
+                result["claim_verification_summary"]["coverage"],
+                "PERSISTED_SOURCE_RECORD_ASSERTIONS_ONLY",
+            )
+            self.assertGreater(result["claim_verification_summary"]["claim_count"], 0)
+            self.assertGreater(result["event_graph_summary"]["entity_count"], 0)
+            self.assertGreater(result["event_graph_summary"]["relationship_count"], 0)
+            self.assertEqual(result["event_graph_summary"]["duplicate_cluster_count"], 1)
+            self.assertEqual(len(result["event_graph"]["duplicate_cluster_ids"]), 1)
             self.assertEqual(result["provider_health"]["binance_spot_metadata"], "AVAILABLE")
             self.assertEqual(result["provider_health"]["coingecko_market_data"], "AVAILABLE")
             self.assertEqual(result["provider_health"]["coingecko_trending"], "AVAILABLE")
@@ -993,6 +1178,9 @@ class Layer1FoundationTests(unittest.TestCase):
                 self.assertIsNone(analysis_payload["return_24h_pct"])
                 self.assertIn("HISTORY_BASELINE_24H_UNAVAILABLE", analysis_payload["quality_flags"])
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM layer1_trend_signals").fetchone()[0], 3)
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM layer1_claim_verification_runs").fetchone()[0], 1
+                )
                 cluster_row = conn.execute(
                     "SELECT source_count, independent_source_count, signal_count, confidence_limit "
                     "FROM layer1_trend_clusters"
@@ -1011,6 +1199,13 @@ class Layer1FoundationTests(unittest.TestCase):
             self.assertEqual(cached_result["identity_proof_requests"], 0)
             self.assertEqual(cached_result["identity_proof_cache_hits"], 1)
             self.assertEqual(cached_result["identity_proof_verified"], 1)
+            conn = sqlite3.connect(self.db)
+            try:
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM layer1_claim_verification_runs").fetchone()[0], 1
+                )
+            finally:
+                conn.close()
         finally:
             main._binance_spot_pairs_cache = old_pairs
             main._binance_spot_snapshot_observed_at = old_snapshot
@@ -1488,12 +1683,19 @@ class Layer1FoundationTests(unittest.TestCase):
         try:
             main._binance_listed_cache = {"OLD"}
             main._binance_listed_cache_time = time.time()
-            with patch.dict(os.environ, {"BINANCE_ALLOWED_QUOTE_ASSETS": "USDT"}), \
+            spot_receipt_key = b"approved-binance-spot-key-material-32bytes"
+            receipt_env = {
+                "BINANCE_ALLOWED_QUOTE_ASSETS": "USDT",
+                "BINANCE_SPOT_INGESTION_HMAC_KEY_HEX": spot_receipt_key.hex(),
+                "BINANCE_SPOT_INGESTION_KEY_ID": "spot-key-v1",
+                "BINANCE_SOURCE_RECEIPT_TRUSTED_KEY_IDS": "spot-key-v1",
+            }
+            with patch.dict(os.environ, receipt_env), \
                  patch("main.market_data_http_get", side_effect=[ProviderResponse(payload), ProviderResponse(ticker_payload)]) as fetch:
                 self.assertTrue(main._revalidate_binance_spot_asset("BTC", "coingecko:bitcoin"))
                 self.assertEqual(fetch.call_count, 2)
             stale_ticker_payload = {"tickers": [{**ticker_payload["tickers"][0], "last_fetch_at": iso(-3600)}]}
-            with patch.dict(os.environ, {"BINANCE_ALLOWED_QUOTE_ASSETS": "USDT"}), \
+            with patch.dict(os.environ, receipt_env), \
                  patch("main.market_data_http_get", side_effect=[ProviderResponse(payload), ProviderResponse(stale_ticker_payload)]):
                 self.assertFalse(main._revalidate_binance_spot_asset("BTC", "coingecko:bitcoin"))
             with patch("main.market_data_http_get") as fetch:

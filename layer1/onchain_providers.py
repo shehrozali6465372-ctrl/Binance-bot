@@ -5,18 +5,21 @@ transactions, infer whale intent, or fabricate transaction-level observations.
 """
 from __future__ import annotations
 
+import contextvars
+import functools
 import hashlib
 import json
 import math
 import os
 import re
+import ssl
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from typing import Any, Callable, Optional
 
 
@@ -29,6 +32,89 @@ ALCHEMY_ENDPOINTS = {
 SOLANA_MAINNET_GENESIS_HASH = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
 
 
+def _endpoint_profile_sha256(endpoint: str) -> str:
+    """Hash only the canonical HTTPS origin; never include path credentials or query."""
+    if not isinstance(endpoint, str) or not endpoint:
+        raise ValueError("provider endpoint must be a non-empty HTTPS URL")
+    parsed = urlparse(endpoint)
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError("provider endpoint authority is invalid") from None
+    if (parsed.scheme.lower() != "https" or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None):
+        raise ValueError("provider endpoint profile must be an HTTPS origin without credentials")
+    hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    canonical_port = port if port is not None else 443
+    canonical_origin = f"https://{hostname}:{canonical_port}"
+    return hashlib.sha256(canonical_origin.encode("ascii")).hexdigest()
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Keep API-key-bearing provider endpoints on their configured origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _approved_endpoint_id(provider: str, network_id: str) -> Optional[str]:
+    """Stable, non-secret endpoint identity paired with the pinned provider/network origin."""
+    if provider == "alchemy" and network_id in ALCHEMY_ENDPOINTS:
+        return f"alchemy:{network_id}"
+    if provider == "chainstack" and network_id == "xrpl-mainnet":
+        return "chainstack:xrpl-mainnet"
+    return None
+
+
+def _approved_endpoint_profile_sha256(provider: str, network_id: str) -> Optional[str]:
+    """Resolve the pinned, non-secret endpoint origin for a provider/network pair."""
+    if provider == "alchemy":
+        template = ALCHEMY_ENDPOINTS.get(network_id)
+        if template is None:
+            return None
+        endpoint = template.format(api_key="endpoint-profile-placeholder")
+    elif provider == "chainstack" and network_id == "xrpl-mainnet":
+        endpoint = "https://xrpl-mainnet.core.chainstack.com/endpoint-profile-placeholder"
+    else:
+        return None
+    return _endpoint_profile_sha256(endpoint)
+
+
+def _open_without_redirect(request, *, timeout: int):
+    # Explicit empty proxy map disables HTTP_PROXY/HTTPS_PROXY/ALL_PROXY and
+    # system proxy discovery. Provider traffic is direct-only by policy.
+    # An explicit default SSL context requires trusted certificates and hostname
+    # verification; do not replace it with an unverified/custom context.
+    tls_context = ssl.create_default_context()
+    return build_opener(
+        ProxyHandler({}),
+        HTTPSHandler(context=tls_context),
+        _NoRedirectHandler,
+    ).open(request, timeout=timeout)
+
+
+def _alchemy_endpoint(network_id: str, api_key: str) -> str:
+    template = ALCHEMY_ENDPOINTS.get(network_id)
+    if template is None or re.fullmatch(r"[A-Za-z0-9_-]{1,256}", api_key) is None:
+        raise ValueError("Alchemy endpoint profile or API key is invalid")
+    endpoint = template.format(api_key=api_key)
+    parsed = urlparse(endpoint)
+    expected_host = urlparse(template.format(api_key="placeholder")).hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError("Alchemy endpoint authority is invalid") from None
+    if (parsed.scheme != "https" or parsed.hostname != expected_host
+            or parsed.netloc not in {expected_host, f"{expected_host}:443"}
+            or port not in (None, 443) or parsed.username is not None
+            or parsed.password is not None or parsed.query or parsed.fragment
+            or parsed.path != f"/v2/{api_key}"):
+        raise ValueError("Alchemy endpoint does not match the approved HTTPS provider profile")
+    return endpoint
+
+
 class ProviderTransportError(RuntimeError):
     def __init__(self, reason_code: str, message: str, http_status: Optional[int] = None,
                  retry_after_seconds: Optional[float] = None):
@@ -36,6 +122,40 @@ class ProviderTransportError(RuntimeError):
         self.reason_code = reason_code
         self.http_status = http_status
         self.retry_after_seconds = retry_after_seconds
+
+
+def _max_provider_response_bytes_from_env(environ=os.environ) -> int:
+    raw = environ.get("ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES", "")
+    if not isinstance(raw, str) or re.fullmatch(r"[1-9][0-9]*", raw.strip()) is None:
+        raise ValueError("ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES must be an explicit positive integer")
+    return int(raw.strip())
+
+
+def _read_bounded_response(response, max_response_bytes: int) -> bytes:
+    headers = getattr(response, "headers", None)
+    content_length = headers.get("Content-Length") if headers is not None else None
+    if content_length is not None:
+        raw_length = str(content_length).strip()
+        if re.fullmatch(r"[0-9]+", raw_length) is None:
+            raise ProviderTransportError("INVALID_CONTENT_LENGTH", "provider response Content-Length is invalid")
+        if int(raw_length) > max_response_bytes:
+            raise ProviderTransportError("RESPONSE_TOO_LARGE", "provider response exceeded configured byte limit")
+
+    chunks = []
+    total = 0
+    while True:
+        # Read at most one byte beyond the remaining budget to detect an
+        # oversized/chunked response without buffering an unbounded body.
+        chunk = response.read(min(65536, max_response_bytes - total + 1))
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise ProviderTransportError("INVALID_RESPONSE_BODY", "provider response body is not bytes")
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_response_bytes:
+            raise ProviderTransportError("RESPONSE_TOO_LARGE", "provider response exceeded configured byte limit")
+        chunks.append(bytes(chunk))
+    return b"".join(chunks)
 
 
 def retry_provider_operation(
@@ -97,22 +217,59 @@ def _retry_after_seconds(headers) -> Optional[float]:
 
 
 class ReadOnlyJsonRpcTransport:
-    """Small JSON-RPC HTTP transport that never logs endpoint URLs or bodies."""
+    """Bounded read-only HTTP transport with non-secret origin/response digests."""
 
     def __init__(self, endpoint: str, timeout_seconds: int = 10,
-                 request_style: str = "jsonrpc2", opener: Callable = urlopen):
+                 request_style: str = "jsonrpc2", opener: Optional[Callable] = None,
+                 max_response_bytes: Optional[int] = None):
         parsed = urlparse(endpoint)
-        if parsed.scheme != "https" or not parsed.hostname:
-            raise ValueError("provider endpoint must be an HTTPS URL")
+        if (parsed.scheme != "https" or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("provider endpoint must be an HTTPS URL without embedded credentials")
         if request_style not in {"jsonrpc2", "xrpl"}:
             raise ValueError("unsupported JSON-RPC request style")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive integer")
+        if (isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int)
+                or max_response_bytes <= 0):
+            raise ValueError("max_response_bytes must be an explicit positive integer")
         self._endpoint = endpoint
+        self._endpoint_profile_sha256 = _endpoint_profile_sha256(endpoint)
         self._timeout_seconds = timeout_seconds
         self._request_style = request_style
-        self._opener = opener
+        self._max_response_bytes = max_response_bytes
+        # Provider credentials may be embedded in endpoint paths; never follow
+        # redirects to a different origin with those credentials in the URL.
+        self._opener = opener if opener is not None else _open_without_redirect
         self._request_id = 0
+        self._last_response_attestation = None
+
+    @property
+    def last_response_attestation(self) -> Optional[dict]:
+        """Return non-secret transport metadata for the most recent successful read.
+
+        This is an application-observed digest record, not a provider signature
+        or independently verifiable proof of remote provider identity.
+        """
+        return dict(self._last_response_attestation) if self._last_response_attestation else None
+
+    def _record_response_attestation(self, request_identity: dict, raw: bytes, response) -> None:
+        request_bytes = json.dumps(
+            request_identity, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False,
+        ).encode("utf-8")
+        getcode = getattr(response, "getcode", None)
+        status = getcode() if callable(getcode) else 200
+        if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+            raise ProviderTransportError("INVALID_HTTP_STATUS", "provider returned an invalid HTTP status")
+        self._last_response_attestation = {
+            "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+            "endpoint_profile_sha256": self._endpoint_profile_sha256,
+            "response_sha256": hashlib.sha256(raw).hexdigest(),
+            "response_bytes": len(raw),
+            "http_status": status,
+            "received_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     def get_json(self, path: str, query: Optional[dict] = None) -> dict:
         if (not isinstance(path, str) or not path or path.startswith("/")
@@ -128,9 +285,13 @@ class ReadOnlyJsonRpcTransport:
         if query:
             url += "?" + urlencode(query)
         request = Request(url, headers={"Accept": "application/json"}, method="GET")
+        self._last_response_attestation = None
         try:
             with self._opener(request, timeout=self._timeout_seconds) as response:
-                raw = response.read()
+                raw = _read_bounded_response(response, self._max_response_bytes)
+                self._record_response_attestation({
+                    "http_method": "GET", "relative_path": path, "query": query,
+                }, raw, response)
         except HTTPError as exc:
             status = int(exc.code)
             reason = "RATE_LIMITED" if status == 429 else "HTTP_ERROR"
@@ -168,9 +329,13 @@ class ReadOnlyJsonRpcTransport:
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             method="POST",
         )
+        self._last_response_attestation = None
         try:
             with self._opener(request, timeout=self._timeout_seconds) as response:
-                raw = response.read()
+                raw = _read_bounded_response(response, self._max_response_bytes)
+                self._record_response_attestation({
+                    "http_method": "POST", "rpc_request": payload,
+                }, raw, response)
         except HTTPError as exc:
             status = int(exc.code)
             reason = "RATE_LIMITED" if status == 429 else "HTTP_ERROR"
@@ -220,6 +385,135 @@ class ProviderHealthResult:
 
 
 @dataclass(frozen=True)
+class ProviderResponseReceipt:
+    """Application-observed response digest; endpoint hash is optional for legacy rows.
+
+    The endpoint hash identifies only the approved HTTPS origin. It is not proof
+    of provider identity, response authorship, or cryptographic provider signing.
+    """
+    sequence: int
+    provider: str
+    network_id: str
+    method: str
+    request_sha256: str
+    response_sha256: str
+    response_bytes: int
+    http_status: int
+    received_at: str
+    endpoint_profile_sha256: Optional[str] = None
+
+    def __post_init__(self):
+        if (isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1
+                or not all(isinstance(value, str) and value for value in (
+                    self.provider, self.network_id, self.method, self.received_at,
+                ))
+                or not all(isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value)
+                           for value in (self.request_sha256, self.response_sha256))
+                or (self.endpoint_profile_sha256 is not None and (
+                    not isinstance(self.endpoint_profile_sha256, str)
+                    or re.fullmatch(r"[a-f0-9]{64}", self.endpoint_profile_sha256) is None
+                ))
+                or isinstance(self.response_bytes, bool) or not isinstance(self.response_bytes, int)
+                or self.response_bytes < 0
+                or isinstance(self.http_status, bool) or not isinstance(self.http_status, int)
+                or not 100 <= self.http_status <= 599):
+            raise ValueError("provider response receipt is malformed")
+
+
+_ACTIVE_PAGE_RECEIPTS = contextvars.ContextVar("onchain_page_receipts", default=None)
+_ACTIVE_PROVIDER_RUN = contextvars.ContextVar("onchain_provider_run", default=False)
+_CAPTURE_BATCH_CAPABILITY = object()
+
+
+@dataclass(frozen=True, init=False)
+class CapturedProviderReceiptBatch:
+    """Opaque receipt batch issued only by the active provider-call collector."""
+    receipts: tuple[ProviderResponseReceipt, ...]
+    _capability: object
+
+    def __init__(self, receipts, *, _capability=None):
+        if _capability is not _CAPTURE_BATCH_CAPABILITY:
+            raise ValueError("captured provider receipt batch can only be issued by the provider collector")
+        values = tuple(receipts)
+        if any(not isinstance(item, ProviderResponseReceipt) for item in values):
+            raise ValueError("captured provider receipt batch contains an invalid receipt")
+        if any(item.sequence != index for index, item in enumerate(values, 1)):
+            raise ValueError("captured provider receipt batch sequence is invalid")
+        object.__setattr__(self, "receipts", values)
+        object.__setattr__(self, "_capability", _CAPTURE_BATCH_CAPABILITY)
+
+    def is_collector_issued(self) -> bool:
+        return self._capability is _CAPTURE_BATCH_CAPABILITY
+
+
+def drain_provider_run_receipts() -> CapturedProviderReceiptBatch:
+    """Return and clear an opaque, collector-issued batch for one page commit."""
+    collector = _ACTIVE_PAGE_RECEIPTS.get()
+    if collector is None:
+        raise RuntimeError("provider receipt batch can only be drained inside a worker capture scope")
+    drained = tuple(replace(item, sequence=index) for index, item in enumerate(collector, 1))
+    collector.clear()
+    return CapturedProviderReceiptBatch(drained, _capability=_CAPTURE_BATCH_CAPABILITY)
+
+
+def include_provider_receipts_in_current_scope(batch: CapturedProviderReceiptBatch) -> None:
+    """Attach previously captured shared evidence to another page in the same run."""
+    if (not isinstance(batch, CapturedProviderReceiptBatch)
+            or not batch.is_collector_issued()):
+        raise ValueError("only a collector-issued provider receipt batch can be replayed")
+    collector = _ACTIVE_PAGE_RECEIPTS.get()
+    if collector is None:
+        raise RuntimeError("shared provider receipts require an active worker capture scope")
+    for item in batch.receipts:
+        collector.append(replace(item, sequence=len(collector) + 1))
+
+
+def _capture_provider_run_receipts(method):
+    """Give one worker run a context-local collector for all supporting RPC calls."""
+    @functools.wraps(method)
+    def wrapped(*args, **kwargs):
+        run_token = _ACTIVE_PROVIDER_RUN.set(True)
+        if _ACTIVE_PAGE_RECEIPTS.get() is not None:
+            try:
+                return method(*args, **kwargs)
+            finally:
+                _ACTIVE_PROVIDER_RUN.reset(run_token)
+        collector = []
+        token = _ACTIVE_PAGE_RECEIPTS.set(collector)
+        try:
+            return method(*args, **kwargs)
+        finally:
+            _ACTIVE_PAGE_RECEIPTS.reset(token)
+            _ACTIVE_PROVIDER_RUN.reset(run_token)
+    return wrapped
+
+
+def _capture_provider_page_receipts(method):
+    """Collect page RPCs, joining an enclosing worker scope when one exists."""
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        collector = _ACTIVE_PAGE_RECEIPTS.get()
+        owns_collector = collector is None
+        if owns_collector:
+            collector = []
+            token = _ACTIVE_PAGE_RECEIPTS.set(collector)
+        start = len(collector)
+        try:
+            page = method(self, *args, **kwargs)
+        finally:
+            if owns_collector:
+                _ACTIVE_PAGE_RECEIPTS.reset(token)
+        if not isinstance(page, ProviderDataPage):
+            raise TypeError("provider page operation did not return ProviderDataPage")
+        page_receipts = tuple(
+            replace(item, sequence=index)
+            for index, item in enumerate(collector[start:], 1)
+        )
+        return replace(page, response_receipts=page_receipts)
+    return wrapped
+
+
+@dataclass(frozen=True)
 class ProviderDataPage:
     provider: str
     network_id: str
@@ -232,6 +526,15 @@ class ProviderDataPage:
     to_block: Optional[int] = None
     finalized_height: Optional[int] = None
     finality_reference: str = ""
+    response_receipts: tuple[ProviderResponseReceipt, ...] = ()
+
+    def __post_init__(self):
+        if not isinstance(self.response_receipts, tuple) or any(
+            not isinstance(item, ProviderResponseReceipt) for item in self.response_receipts
+        ):
+            raise ValueError("provider page response receipts must be an immutable receipt tuple")
+        if any(item.sequence != index for index, item in enumerate(self.response_receipts, 1)):
+            raise ValueError("provider page response receipt sequence is invalid")
 
     @property
     def complete(self) -> bool:
@@ -304,12 +607,104 @@ def _is_evm_address(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"0x[0-9a-fA-F]{40}", value) is not None
 
 
+_BITCOIN_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_BITCOIN_BECH32_ALPHABET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+_BITCOIN_BECH32_INDEX = {character: index for index, character in enumerate(_BITCOIN_BECH32_ALPHABET)}
+
+
+def _bech32_polymod(values: list[int]) -> int:
+    generators = (0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)
+    checksum = 1
+    for value in values:
+        top = checksum >> 25
+        checksum = ((checksum & 0x1FFFFFF) << 5) ^ value
+        for bit, generator in enumerate(generators):
+            if (top >> bit) & 1:
+                checksum ^= generator
+    return checksum
+
+
+def _is_valid_bitcoin_mainnet_address(value: Any) -> bool:
+    """Validate mainnet P2PKH/P2SH Base58Check and SegWit Bech32 addresses."""
+    if not isinstance(value, str) or not value or any(character.isspace() for character in value):
+        return False
+    if value[0] in "13":
+        number = 0
+        for character in value:
+            digit = _BITCOIN_BASE58_ALPHABET.find(character)
+            if digit < 0:
+                return False
+            number = number * 58 + digit
+        decoded = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+        decoded = (b"\x00" * (len(value) - len(value.lstrip("1")))) + decoded
+        if len(decoded) != 25 or decoded[0] not in (0x00, 0x05):
+            return False
+        return hashlib.sha256(hashlib.sha256(decoded[:-4]).digest()).digest()[:4] == decoded[-4:]
+    if len(value) < 8 or len(value) > 90 or value.lower() != value and value.upper() != value:
+        return False
+    normalized = value.lower()
+    separator = normalized.rfind("1")
+    if separator < 1 or separator + 7 > len(normalized) or normalized[:separator] != "bc":
+        return False
+    try:
+        data = [_BITCOIN_BECH32_INDEX[character] for character in normalized[separator + 1:]]
+    except KeyError:
+        return False
+    if any(item < 0 or item > 31 for item in data) or len(data) < 7:
+        return False
+    hrp_expanded = [ord(character) >> 5 for character in "bc"] + [0] + [ord(character) & 31 for character in "bc"]
+    polymod = _bech32_polymod(hrp_expanded + data)
+    payload = data[:-6]
+    if not payload or payload[0] > 16:
+        return False
+    witness_version = payload[0]
+    accumulator = bits = 0
+    decoded_program = bytearray()
+    for item in payload[1:]:
+        accumulator = (accumulator << 5) | item
+        bits += 5
+        while bits >= 8:
+            bits -= 8
+            decoded_program.append((accumulator >> bits) & 0xFF)
+    if bits >= 5 or ((accumulator << (8 - bits)) & 0xFF) != 0:
+        return False
+    if not 2 <= len(decoded_program) <= 40:
+        return False
+    if witness_version == 0 and len(decoded_program) not in (20, 32):
+        return False
+    expected_constant = 1 if witness_version == 0 else 0x2BC830A3
+    return polymod == expected_constant
+
+
+_SOLANA_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _solana_base58_decode(value: str) -> bytes:
+    if not isinstance(value, str) or not value:
+        raise ProviderTransportError("INVALID_SOLANA_BASE58", "Solana base58 value is empty")
+    number = 0
+    for character in value:
+        digit = _SOLANA_BASE58_ALPHABET.find(character)
+        if digit < 0:
+            raise ProviderTransportError("INVALID_SOLANA_BASE58", "Solana base58 value contains an invalid character")
+        number = number * 58 + digit
+    body = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+    leading_zero_bytes = len(value) - len(value.lstrip("1"))
+    return b"\x00" * leading_zero_bytes + body
+
+
 def _is_base58_pubkey(value: Any) -> bool:
-    return isinstance(value, str) and re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", value) is not None
+    try:
+        return len(_solana_base58_decode(value)) == 32
+    except ProviderTransportError:
+        return False
 
 
 def _is_base58_signature(value: Any) -> bool:
-    return isinstance(value, str) and re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", value) is not None
+    try:
+        return len(_solana_base58_decode(value)) == 64
+    except ProviderTransportError:
+        return False
 
 
 _XRPL_BASE58_ALPHABET = "rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz"
@@ -342,9 +737,37 @@ def is_valid_xrpl_classic_address(value: Any) -> bool:
     return checksum == expected
 
 
+_XRPL_STANDARD_CURRENCY_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789?!@#$%^&*<>(){}[]|"
+)
+
+
+def is_valid_xrpl_issued_currency_code(value: Any) -> bool:
+    """Validate XRPL issued-currency API codes without accepting XRP encodings.
+
+    Standard codes are exactly three permitted ASCII characters, except the
+    reserved uppercase XRP code. Nonstandard 160-bit hex codes must not use
+    the 0x00 prefix reserved for standard-format codes (including XRP and the
+    all-zero XRP sentinel).
+    """
+    if not isinstance(value, str):
+        return False
+    if len(value) == 3:
+        return value != "XRP" and all(character in _XRPL_STANDARD_CURRENCY_CHARACTERS
+                                      for character in value)
+    if re.fullmatch(r"[0-9a-fA-F]{40}", value) is None:
+        return False
+    return value[:2].lower() != "00"
+
+
+def _is_canonical_json_rpc_quantity(value: Any) -> bool:
+    """EIP-1474 Quantity: lowercase 0x prefix, no leading zeroes, zero as 0x0."""
+    return isinstance(value, str) and re.fullmatch(r"0x(?:0|[1-9a-f][0-9a-f]*)", value) is not None
+
+
 def _parse_hex_quantity(value: Any, field: str) -> int:
-    if not isinstance(value, str) or re.fullmatch(r"0x[0-9a-fA-F]+", value) is None:
-        raise ProviderTransportError("INVALID_PROVIDER_DATA", f"provider {field} is not a valid hex quantity")
+    if not _is_canonical_json_rpc_quantity(value):
+        raise ProviderTransportError("INVALID_PROVIDER_DATA", f"provider {field} is not a canonical JSON-RPC quantity")
     return int(value, 16)
 
 
@@ -359,17 +782,25 @@ class AlchemyReadOnlyAdapter:
     }
 
     def __init__(self, api_key: str, timeout_seconds: int = 10,
-                 transport_factory: Optional[Callable[[str, int], ReadOnlyJsonRpcTransport]] = None):
+                 transport_factory: Optional[Callable[[str, int], ReadOnlyJsonRpcTransport]] = None,
+                 max_response_bytes: Optional[int] = None):
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("Alchemy API key is required")
-        if any(char in api_key for char in "/?#"):
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,256}", api_key.strip()) is None:
             raise ValueError("Alchemy API key contains invalid URL characters")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive integer")
         self._api_key = api_key.strip()
         self._timeout_seconds = timeout_seconds
+        if transport_factory is None and (
+            isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int)
+            or max_response_bytes <= 0
+        ):
+            raise ValueError("max_response_bytes must be an explicit positive integer")
         self._transport_factory = transport_factory or (
-            lambda endpoint, timeout: ReadOnlyJsonRpcTransport(endpoint, timeout)
+            lambda endpoint, timeout: ReadOnlyJsonRpcTransport(
+                endpoint, timeout, max_response_bytes=max_response_bytes,
+            )
         )
 
     @classmethod
@@ -377,7 +808,8 @@ class AlchemyReadOnlyAdapter:
         api_key = environ.get("ALCHEMY_API_KEY", "")
         if not api_key:
             raise ValueError("ALCHEMY_API_KEY is not configured")
-        return cls(api_key)
+        max_response_bytes = _max_provider_response_bytes_from_env(environ)
+        return cls(api_key, max_response_bytes=max_response_bytes)
 
     def _call(self, network_id: str, method: str, params: Optional[list] = None):
         allowed = self._READ_METHODS.get(network_id)
@@ -385,20 +817,42 @@ class AlchemyReadOnlyAdapter:
             raise ValueError("network is not supported by the Alchemy adapter")
         if method not in allowed:
             raise ValueError("RPC method is not allowed by the read-only Alchemy adapter")
-        endpoint = ALCHEMY_ENDPOINTS[network_id].format(api_key=self._api_key)
-        return self._transport_factory(endpoint, self._timeout_seconds).call(method, params)
+        endpoint = _alchemy_endpoint(network_id, self._api_key)
+        transport = self._transport_factory(endpoint, self._timeout_seconds)
+        result = transport.call(method, params)
+        collector = _ACTIVE_PAGE_RECEIPTS.get()
+        attestation = getattr(transport, "last_response_attestation", None)
+        if collector is not None and (_ACTIVE_PROVIDER_RUN.get() or (
+                isinstance(attestation, dict)
+                and attestation.get("endpoint_profile_sha256") is not None
+        )):
+            if not isinstance(attestation, dict):
+                raise ProviderTransportError(
+                    "MISSING_RESPONSE_ATTESTATION",
+                    "Alchemy RPC response has no transport receipt attestation",
+                )
+            expected_endpoint_profile = _endpoint_profile_sha256(endpoint)
+            if attestation.get("endpoint_profile_sha256") != expected_endpoint_profile:
+                raise ProviderTransportError(
+                    "ENDPOINT_PROFILE_MISMATCH",
+                    "provider response attestation does not match the approved endpoint profile",
+                )
+            collector.append(ProviderResponseReceipt(
+                sequence=len(collector) + 1, provider="alchemy", network_id=network_id,
+                method=method, request_sha256=attestation.get("request_sha256"),
+                response_sha256=attestation.get("response_sha256"),
+                endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                response_bytes=attestation.get("response_bytes"),
+                http_status=attestation.get("http_status"),
+                received_at=attestation.get("received_at"),
+            ))
+        return result
 
     @staticmethod
     def _hex_int(value: Any, field: str) -> int:
-        if not isinstance(value, str) or not value.startswith("0x"):
-            raise ProviderTransportError("INVALID_PROVIDER_DATA", f"provider {field} is not a hex quantity")
-        try:
-            number = int(value, 16)
-        except ValueError:
-            raise ProviderTransportError("INVALID_PROVIDER_DATA", f"provider {field} is invalid") from None
-        if number < 0:
-            raise ProviderTransportError("INVALID_PROVIDER_DATA", f"provider {field} is negative")
-        return number
+        if not _is_canonical_json_rpc_quantity(value):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", f"provider {field} is not a canonical JSON-RPC quantity")
+        return int(value, 16)
 
     def fetch_bitcoin_tip_height(self) -> int:
         """Return the Bitcoin mainnet tip height from the read-only RPC endpoint."""
@@ -427,11 +881,37 @@ class AlchemyReadOnlyAdapter:
         """Fetch full UTXO input/output details for one exact transaction ID."""
         if not isinstance(txid, str) or re.fullmatch(r"[0-9a-fA-F]{64}", txid) is None:
             raise ValueError("Bitcoin transaction ID must be exactly 32-byte hex")
-        endpoint = ALCHEMY_ENDPOINTS["bitcoin-mainnet"].format(api_key=self._api_key)
+        endpoint = _alchemy_endpoint("bitcoin-mainnet", self._api_key)
         transport = self._transport_factory(endpoint, self._timeout_seconds)
         result = transport.get_json(
             f"api/v2/tx/{quote(txid, safe='')}", {"spending": "false"},
         )
+        collector = _ACTIVE_PAGE_RECEIPTS.get()
+        attestation = getattr(transport, "last_response_attestation", None)
+        if collector is not None and (_ACTIVE_PROVIDER_RUN.get() or (
+                isinstance(attestation, dict)
+                and attestation.get("endpoint_profile_sha256") is not None
+        )):
+            if not isinstance(attestation, dict):
+                raise ProviderTransportError(
+                    "MISSING_RESPONSE_ATTESTATION",
+                    "Alchemy Bitcoin transaction-detail response has no transport receipt attestation",
+                )
+            expected_endpoint_profile = _endpoint_profile_sha256(endpoint)
+            if attestation.get("endpoint_profile_sha256") != expected_endpoint_profile:
+                raise ProviderTransportError(
+                    "ENDPOINT_PROFILE_MISMATCH",
+                    "Bitcoin transaction-detail response does not match the approved endpoint profile",
+                )
+            collector.append(ProviderResponseReceipt(
+                sequence=len(collector) + 1, provider="alchemy", network_id="bitcoin-mainnet",
+                method="GET api/v2/tx", request_sha256=attestation.get("request_sha256"),
+                response_sha256=attestation.get("response_sha256"),
+                endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                response_bytes=attestation.get("response_bytes"),
+                http_status=attestation.get("http_status"),
+                received_at=attestation.get("received_at"),
+            ))
         returned_txid = result.get("txid") if isinstance(result, dict) else None
         if (not isinstance(returned_txid, str)
                 or re.fullmatch(r"[0-9a-fA-F]{64}", returned_txid) is None
@@ -444,12 +924,13 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin transaction details require vin and vout arrays")
         return result
 
+    @_capture_provider_page_receipts
     def fetch_bitcoin_address_transactions(self, address: str, page: int = 1,
                                            page_size: int = 1000,
                                            from_height: Optional[int] = None,
                                            to_height: Optional[int] = None) -> ProviderDataPage:
-        if not isinstance(address, str) or not address.strip() or any(ch.isspace() for ch in address):
-            raise ValueError("Bitcoin address must be a non-empty address string")
+        if not _is_valid_bitcoin_mainnet_address(address):
+            raise ValueError("Bitcoin address must be a valid Bitcoin mainnet address")
         if isinstance(page, bool) or not isinstance(page, int) or page < 1:
             raise ValueError("Bitcoin page must be a positive integer")
         if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000:
@@ -460,7 +941,7 @@ class AlchemyReadOnlyAdapter:
             raise ValueError("to_height must be a non-negative integer")
         if from_height is not None and to_height is not None and from_height > to_height:
             raise ValueError("from_height must not exceed to_height")
-        endpoint = ALCHEMY_ENDPOINTS["bitcoin-mainnet"].format(api_key=self._api_key)
+        endpoint = _alchemy_endpoint("bitcoin-mainnet", self._api_key)
         transport = self._transport_factory(endpoint, self._timeout_seconds)
         query = {"page": page, "pageSize": page_size, "details": "txs"}
         if from_height is not None:
@@ -470,6 +951,32 @@ class AlchemyReadOnlyAdapter:
         response = transport.get_json(
             f"api/v2/address/{quote(address, safe='')}", query,
         )
+        collector = _ACTIVE_PAGE_RECEIPTS.get()
+        attestation = getattr(transport, "last_response_attestation", None)
+        if collector is not None and (_ACTIVE_PROVIDER_RUN.get() or (
+                isinstance(attestation, dict)
+                and attestation.get("endpoint_profile_sha256") is not None
+        )):
+            if not isinstance(attestation, dict):
+                raise ProviderTransportError(
+                    "MISSING_RESPONSE_ATTESTATION",
+                    "Alchemy Bitcoin REST response has no transport receipt attestation",
+                )
+            expected_endpoint_profile = _endpoint_profile_sha256(endpoint)
+            if attestation.get("endpoint_profile_sha256") != expected_endpoint_profile:
+                raise ProviderTransportError(
+                    "ENDPOINT_PROFILE_MISMATCH",
+                    "provider response attestation does not match the approved endpoint profile",
+                )
+            collector.append(ProviderResponseReceipt(
+                sequence=len(collector) + 1, provider="alchemy", network_id="bitcoin-mainnet",
+                method="GET api/v2/address", request_sha256=attestation.get("request_sha256"),
+                response_sha256=attestation.get("response_sha256"),
+                endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                response_bytes=attestation.get("response_bytes"),
+                http_status=attestation.get("http_status"),
+                received_at=attestation.get("received_at"),
+            ))
         if response.get("address") != address:
             raise ProviderTransportError("ADDRESS_SCOPE_MISMATCH", "Bitcoin provider returned a different address scope")
         returned_page, total_pages = response.get("page"), response.get("totalPages")
@@ -480,6 +987,8 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin address transaction page has an invalid shape")
         if returned_page > max(total_pages, 1):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin provider page exceeds its reported page count")
+        if len(raw_records) > page_size:
+            raise ProviderTransportError("PAGE_LIMIT_EXCEEDED", "Bitcoin provider returned more transactions than the requested page size")
         records = []
         for item in raw_records:
             txid = item.get("txid")
@@ -503,6 +1012,7 @@ class AlchemyReadOnlyAdapter:
         return ProviderDataPage("alchemy", "bitcoin-mainnet", address, tuple(records),
                                 cursor, returned_page, total_pages)
 
+    @_capture_provider_page_receipts
     def fetch_ethereum_asset_transfers(self, contract_addresses=None,
                                        from_block: Optional[int] = None,
                                        to_block: Optional[int] = None,
@@ -559,6 +1069,8 @@ class AlchemyReadOnlyAdapter:
         result = self._call("ethereum-mainnet", "alchemy_getAssetTransfers", [params])
         if not isinstance(result, dict) or not isinstance(result.get("transfers"), list):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Alchemy Ethereum transfer page has an invalid shape")
+        if len(result["transfers"]) > max_count:
+            raise ProviderTransportError("PAGE_LIMIT_EXCEEDED", "Alchemy returned more transfers than the requested max_count")
         records = []
         for transfer in result["transfers"]:
             if (not isinstance(transfer, dict)
@@ -638,6 +1150,7 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum canonical block header identity is invalid")
         return {"number": returned_number, "hash": block_hash.lower(), "timestamp": timestamp}
 
+    @_capture_provider_page_receipts
     def fetch_ethereum_erc20_transfer_logs(self, contract_address: str,
                                            from_block: int, to_block: int) -> ProviderDataPage:
         """Fetch a bounded mapped-contract ERC-20 Transfer log range on Ethereum."""
@@ -705,6 +1218,7 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "BNB canonical block header identity is invalid")
         return {"number": returned_number, "hash": block_hash.lower(), "timestamp": timestamp}
 
+    @_capture_provider_page_receipts
     def fetch_bnb_erc20_transfer_logs(self, contract_address: str, from_block: int,
                                      to_block: int) -> ProviderDataPage:
         if not _is_evm_address(contract_address):
@@ -718,7 +1232,9 @@ class AlchemyReadOnlyAdapter:
         if not isinstance(chain_id, str) or chain_id.lower() != "0x38":
             raise ProviderTransportError("NETWORK_ID_MISMATCH", "Alchemy endpoint returned the wrong BNB Smart Chain ID")
         finalized_header = self._call("bnb-smart-chain-mainnet", "eth_getFinalizedHeader", [-3])
-        if not isinstance(finalized_header, dict) or not isinstance(finalized_header.get("hash"), str):
+        if (not isinstance(finalized_header, dict)
+                or not isinstance(finalized_header.get("hash"), str)
+                or re.fullmatch(r"0x[0-9a-fA-F]{64}", finalized_header["hash"]) is None):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "BNB finalized header response is invalid")
         finalized_height = self._hex_int(finalized_header.get("number"), "BNB finalized block number")
         if to_block > finalized_height:
@@ -774,6 +1290,7 @@ class AlchemyReadOnlyAdapter:
             str(int(data, 16)), block_number, block_hash, tx_hash, log_index, removed,
         )
 
+    @_capture_provider_page_receipts
     def fetch_solana_address_transactions(self, address: str,
                                           pagination_token: Optional[str] = None,
                                           limit: int = 100,
@@ -811,6 +1328,8 @@ class AlchemyReadOnlyAdapter:
         raw_records = result.get("transactions", result.get("data"))
         if not isinstance(raw_records, list) or any(not isinstance(item, dict) for item in raw_records):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Alchemy Solana transaction records are invalid")
+        if len(raw_records) > limit:
+            raise ProviderTransportError("PAGE_LIMIT_EXCEEDED", "Alchemy returned more Solana transactions than the requested limit")
         records = []
         for item in raw_records:
             signature = item.get("signature")
@@ -875,16 +1394,23 @@ class AlchemyReadOnlyAdapter:
         ])
         if block is None:
             return None
+        parent_slot = block.get("parentSlot") if isinstance(block, dict) else None
+        previous_block_hash = block.get("previousBlockhash") if isinstance(block, dict) else None
         if (not isinstance(block, dict)
                 or not isinstance(block.get("blockhash"), str)
                 or not _is_base58_pubkey(block.get("blockhash"))
+                or not isinstance(previous_block_hash, str)
+                or not _is_base58_pubkey(previous_block_hash)
+                or isinstance(parent_slot, bool) or not isinstance(parent_slot, int)
+                or parent_slot < 0 or parent_slot >= slot
                 or isinstance(block.get("blockTime"), bool)
                 or not isinstance(block.get("blockTime"), int) or block["blockTime"] <= 0):
-            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana finalized block header is malformed")
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana finalized block header or parent linkage is malformed")
         return {
             "number": slot, "hash": block["blockhash"],
             "timestamp": block["blockTime"],
-            "parent_slot": block.get("parentSlot"),
+            "parent_slot": parent_slot,
+            "previous_block_hash": previous_block_hash,
             "finality_reference": "commitment=finalized",
         }
 
@@ -951,17 +1477,34 @@ class ChainstackXrplReadOnlyAdapter:
     """Read-only XRPL mainnet health probe through a Chainstack Global Node."""
 
     def __init__(self, endpoint: str, timeout_seconds: int = 10,
-                 transport_factory: Optional[Callable[[str, int], ReadOnlyJsonRpcTransport]] = None):
+                 transport_factory: Optional[Callable[[str, int], ReadOnlyJsonRpcTransport]] = None,
+                 max_response_bytes: Optional[int] = None):
         parsed = urlparse(endpoint)
-        if (parsed.scheme != "https" or parsed.hostname != "xrpl-mainnet.core.chainstack.com"
-                or not parsed.path.strip("/")):
-            raise ValueError("Chainstack XRPL endpoint must be the configured HTTPS mainnet endpoint")
+        expected_host = "xrpl-mainnet.core.chainstack.com"
+        try:
+            port = parsed.port
+        except ValueError:
+            raise ValueError("Chainstack XRPL endpoint authority is invalid") from None
+        if (parsed.scheme != "https" or parsed.hostname != expected_host
+                or parsed.netloc not in {expected_host, f"{expected_host}:443"}
+                or port not in (None, 443) or parsed.username is not None
+                or parsed.password is not None or parsed.query or parsed.fragment
+                or re.fullmatch(r"/[A-Za-z0-9_-]{1,256}", parsed.path) is None):
+            raise ValueError("Chainstack XRPL mainnet endpoint must match the approved HTTPS host/path profile")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive integer")
         self._endpoint = endpoint
+        self._endpoint_profile_sha256 = _endpoint_profile_sha256(endpoint)
         self._timeout_seconds = timeout_seconds
+        if transport_factory is None and (
+            isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int)
+            or max_response_bytes <= 0
+        ):
+            raise ValueError("max_response_bytes must be an explicit positive integer")
         self._transport_factory = transport_factory or (
-            lambda url, timeout: ReadOnlyJsonRpcTransport(url, timeout, request_style="xrpl")
+            lambda url, timeout: ReadOnlyJsonRpcTransport(
+                url, timeout, request_style="xrpl", max_response_bytes=max_response_bytes,
+            )
         )
 
     @classmethod
@@ -969,8 +1512,10 @@ class ChainstackXrplReadOnlyAdapter:
         endpoint = environ.get("CHAINSTACK_XRPL_ENDPOINT", "")
         if not endpoint:
             raise ValueError("CHAINSTACK_XRPL_ENDPOINT is not configured")
-        return cls(endpoint)
+        max_response_bytes = _max_provider_response_bytes_from_env(environ)
+        return cls(endpoint, max_response_bytes=max_response_bytes)
 
+    @_capture_provider_page_receipts
     def fetch_account_transactions(self, account: str,
                                    ledger_index_min: int, ledger_index_max: int,
                                    marker=None, limit: int = 200) -> ProviderDataPage:
@@ -996,6 +1541,32 @@ class ChainstackXrplReadOnlyAdapter:
         if marker is not None:
             params["marker"] = marker
         result = transport.call("account_tx", [params])
+        collector = _ACTIVE_PAGE_RECEIPTS.get()
+        attestation = getattr(transport, "last_response_attestation", None)
+        if collector is not None and (_ACTIVE_PROVIDER_RUN.get() or (
+                isinstance(attestation, dict)
+                and attestation.get("endpoint_profile_sha256") is not None
+        )):
+            if not isinstance(attestation, dict):
+                raise ProviderTransportError(
+                    "MISSING_RESPONSE_ATTESTATION",
+                    "XRPL account_tx response has no transport receipt attestation",
+                )
+            expected_endpoint_profile = self._endpoint_profile_sha256
+            if attestation.get("endpoint_profile_sha256") != expected_endpoint_profile:
+                raise ProviderTransportError(
+                    "ENDPOINT_PROFILE_MISMATCH",
+                    "provider response attestation does not match the approved endpoint profile",
+                )
+            collector.append(ProviderResponseReceipt(
+                sequence=len(collector) + 1, provider="chainstack", network_id="xrpl-mainnet",
+                method="account_tx", request_sha256=attestation.get("request_sha256"),
+                response_sha256=attestation.get("response_sha256"),
+                endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                response_bytes=attestation.get("response_bytes"),
+                http_status=attestation.get("http_status"),
+                received_at=attestation.get("received_at"),
+            ))
         if not isinstance(result, dict) or result.get("validated") is not True:
             raise ProviderTransportError("UNVALIDATED_XRPL_PAGE", "XRPL account_tx page is not marked validated")
         if result.get("account") != account:
@@ -1003,6 +1574,8 @@ class ChainstackXrplReadOnlyAdapter:
         raw_records = result.get("transactions")
         if not isinstance(raw_records, list):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL account_tx transaction list is invalid")
+        if len(raw_records) > limit:
+            raise ProviderTransportError("PAGE_LIMIT_EXCEEDED", "XRPL returned more transactions than the requested limit")
         records = []
         for item in raw_records:
             if not isinstance(item, dict) or item.get("validated") is not True:
@@ -1041,31 +1614,88 @@ class ChainstackXrplReadOnlyAdapter:
         result = transport.call("ledger", [{
             "ledger_index": ledger_index, "transactions": False, "expand": False,
         }])
+        collector = _ACTIVE_PAGE_RECEIPTS.get()
+        if collector is not None:
+            attestation = getattr(transport, "last_response_attestation", None)
+            if not isinstance(attestation, dict):
+                raise ProviderTransportError(
+                    "MISSING_RESPONSE_ATTESTATION",
+                    "XRPL ledger-header response has no transport receipt attestation",
+                )
+            if attestation.get("endpoint_profile_sha256") != self._endpoint_profile_sha256:
+                raise ProviderTransportError(
+                    "ENDPOINT_PROFILE_MISMATCH",
+                    "XRPL ledger-header response does not match the approved endpoint profile",
+                )
+            collector.append(ProviderResponseReceipt(
+                sequence=len(collector) + 1, provider="chainstack",
+                network_id="xrpl-mainnet", method="ledger",
+                request_sha256=attestation.get("request_sha256"),
+                response_sha256=attestation.get("response_sha256"),
+                endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                response_bytes=attestation.get("response_bytes"),
+                http_status=attestation.get("http_status"),
+                received_at=attestation.get("received_at"),
+            ))
         if not isinstance(result, dict) or result.get("validated") is not True:
             raise ProviderTransportError("UNVALIDATED_XRPL_LEDGER", "XRPL ledger header is not validated")
         ledger = result.get("ledger")
         if not isinstance(ledger, dict):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL ledger response is missing its ledger object")
-        returned_index = result.get("ledger_index", ledger.get("ledger_index"))
-        ledger_hash = result.get("ledger_hash", ledger.get("ledger_hash"))
+        returned_index = result.get("ledger_index")
+        nested_index = ledger.get("ledger_index")
+        returned_hash = result.get("ledger_hash")
+        ledger_hash = ledger.get("ledger_hash")
+        parent_hash = ledger.get("parent_hash")
         close_time = ledger.get("close_time")
         if (isinstance(returned_index, bool) or not isinstance(returned_index, int)
                 or returned_index != ledger_index
+                or isinstance(nested_index, bool) or not isinstance(nested_index, int)
+                or nested_index != ledger_index
+                or not isinstance(returned_hash, str)
+                or re.fullmatch(r"[0-9a-fA-F]{64}", returned_hash) is None
                 or not isinstance(ledger_hash, str)
                 or re.fullmatch(r"[0-9a-fA-F]{64}", ledger_hash) is None
+                or returned_hash.lower() != ledger_hash.lower()
+                or not isinstance(parent_hash, str)
+                or re.fullmatch(r"[0-9a-fA-F]{64}", parent_hash) is None
                 or isinstance(close_time, bool) or not isinstance(close_time, int)
                 or close_time < 0):
-            raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL validated ledger header identity or close time is malformed")
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL outer/nested ledger identity, parent hash or close time is malformed or inconsistent")
         # XRPL close_time is seconds since 2000-01-01T00:00:00Z.
         timestamp = close_time + 946684800
         return {
-            "number": ledger_index, "hash": ledger_hash.lower(), "timestamp": timestamp,
+            "number": ledger_index, "hash": ledger_hash.lower(),
+            "parent_hash": parent_hash.lower(), "timestamp": timestamp,
             "finality_reference": "validated=true",
         }
 
     def probe(self) -> ProviderHealthResult:
         transport = self._transport_factory(self._endpoint, self._timeout_seconds)
         response = transport.call("server_info", [{}])
+        collector = _ACTIVE_PAGE_RECEIPTS.get()
+        if collector is not None:
+            attestation = getattr(transport, "last_response_attestation", None)
+            if not isinstance(attestation, dict):
+                raise ProviderTransportError(
+                    "MISSING_RESPONSE_ATTESTATION",
+                    "XRPL server_info response has no transport receipt attestation",
+                )
+            if attestation.get("endpoint_profile_sha256") != self._endpoint_profile_sha256:
+                raise ProviderTransportError(
+                    "ENDPOINT_PROFILE_MISMATCH",
+                    "XRPL server_info response does not match the approved endpoint profile",
+                )
+            collector.append(ProviderResponseReceipt(
+                sequence=len(collector) + 1, provider="chainstack",
+                network_id="xrpl-mainnet", method="server_info",
+                request_sha256=attestation.get("request_sha256"),
+                response_sha256=attestation.get("response_sha256"),
+                endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                response_bytes=attestation.get("response_bytes"),
+                http_status=attestation.get("http_status"),
+                received_at=attestation.get("received_at"),
+            ))
         info = response.get("info") if isinstance(response, dict) else None
         ledger = info.get("validated_ledger") if isinstance(info, dict) else None
         if not isinstance(ledger, dict):

@@ -11,15 +11,22 @@ Every image is unique, mobile-optimized, and contains:
 - Anti-duplication via hash tracking
 """
 
+import base64
 import hashlib
 import json
 import logging
 import os
 import random
+import re
 import time
+import tempfile
+import uuid
+from dataclasses import dataclass
+from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import json
 import urllib.request
@@ -28,6 +35,30 @@ from urllib.parse import quote
 from PIL import Image, ImageDraw, ImageFont
 
 LOGGER = logging.getLogger("agent.image_engine")
+MAX_DECODED_IMAGE_PIXELS = 16_777_216
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Presigned upload/API requests must not silently change their destination."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_without_redirect(request, *, timeout: int):
+    opener = urllib.request.build_opener(_NoRedirectHandler)
+    return opener.open(request, timeout=timeout)
+
+
+def _read_limited_response(response, *, max_bytes: int) -> bytes:
+    """Read an HTTP response with a strict allocation bound."""
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+        raise ValueError("response size limit must be a positive integer")
+    body = response.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise ValueError(f"response body exceeds the {max_bytes}-byte limit")
+    return body
+
 
 # Color palette (institutional dark mode)
 COLORS = {
@@ -48,6 +79,205 @@ COLORS = {
     "border": (38, 44, 54),
     "text_dim": (100, 110, 120),
 }
+
+
+
+@dataclass(frozen=True)
+class CloudflareImageArtifact:
+    path: Path
+    model: str
+    content_hash: str
+    byte_length: int
+    width: int
+    height: int
+    format: str
+    request_id: str
+    generated_at: str
+
+
+def should_generate_image(*, dry_run: bool) -> bool:
+    """Avoid paid/external image inference when the pipeline is in dry-run mode."""
+    if not isinstance(dry_run, bool):
+        raise TypeError("dry_run must be a boolean")
+    return not dry_run
+
+
+def should_upload_image(*, dry_run: bool, image_path: str | Path | None) -> bool:
+    """Prevent external media side effects during dry-run and when no image exists."""
+    if not isinstance(dry_run, bool):
+        raise TypeError("dry_run must be a boolean")
+    return not dry_run and image_path is not None and bool(str(image_path).strip())
+
+
+class CloudflareWorkersAIImageGenerator:
+    """Direct, bounded Workers AI FLUX.2 [klein] 4B image inference."""
+
+    DEFAULT_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"
+    API_BASE = "https://api.cloudflare.com/client/v4/accounts"
+
+    def __init__(
+        self,
+        api_token: Optional[str] = None,
+        account_id: Optional[str] = None,
+        *,
+        model_id: str = DEFAULT_MODEL,
+        timeout_seconds: int = 90,
+        opener=None,
+    ):
+        self.api_token = api_token if api_token is not None else os.getenv("CLOUDFLARE_API_TOKEN", "")
+        self.account_id = account_id if account_id is not None else os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
+        if not isinstance(model_id, str) or model_id != self.DEFAULT_MODEL:
+            raise ValueError("Workers AI model must be the verified FLUX.2 klein 4B identifier")
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 180:
+            raise ValueError("Workers AI timeout must be between 1 and 180 seconds")
+        self.model_id = model_id
+        self.timeout_seconds = timeout_seconds
+        # Cloudflare credentials are bearer secrets. Never allow urllib's default
+        # redirect handler to forward the Authorization header to a new origin.
+        self._opener = opener if opener is not None else _open_without_redirect
+
+    @staticmethod
+    def _response_header(response, name: str) -> str:
+        headers = getattr(response, "headers", {}) or {}
+        if hasattr(headers, "get"):
+            value = headers.get(name)
+            if value is not None:
+                return str(value)
+            for key, item in headers.items():
+                if str(key).casefold() == name.casefold():
+                    return str(item)
+        return ""
+
+    @staticmethod
+    def _multipart(fields: Dict[str, str]) -> tuple[bytes, str]:
+        boundary = "----binance-agent-" + uuid.uuid4().hex
+        chunks = []
+        for name, value in fields.items():
+            chunks.extend([
+                f"--{boundary}\r\n".encode("ascii"),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("ascii"),
+                value.encode("utf-8"),
+                b"\r\n",
+            ])
+        chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+        return b"".join(chunks), "multipart/form-data; boundary=" + boundary
+
+    def generate(
+        self,
+        prompt: str,
+        output_path: Path | str,
+        *,
+        width: int = 1024,
+        height: int = 1024,
+    ) -> CloudflareImageArtifact:
+        if not isinstance(self.api_token, str) or not self.api_token.strip() or not re.fullmatch(r"[a-f0-9]{32}", self.account_id or ""):
+            raise ValueError("Cloudflare Workers AI credentials (API token and 32-character account ID) are required")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
+            raise ValueError("image prompt must contain 1-4000 characters")
+        if (isinstance(width, bool) or not isinstance(width, int)
+                or isinstance(height, bool) or not isinstance(height, int)
+                or not 256 <= width <= 1920 or not 256 <= height <= 1920):
+            raise ValueError("image dimensions must be integers between 256 and 1920")
+        target = Path(output_path)
+        if target.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise ValueError("image output path must use PNG, JPEG or WebP")
+        body, content_type = self._multipart({
+            "prompt": prompt.strip(), "width": str(width), "height": str(height),
+        })
+        url = (
+            self.API_BASE + "/" + self.account_id + "/ai/run/"
+            + quote(self.model_id, safe="@/-")
+        )
+        request = urllib.request.Request(
+            url, data=body,
+            headers={
+                "Authorization": "Bearer " + self.api_token,
+                "Content-Type": content_type,
+                "Accept": "application/json, image/png",
+            },
+            method="POST",
+        )
+        try:
+            with self._opener(request, timeout=self.timeout_seconds) as response:
+                status = getattr(response, "status", 200)
+                raw = response.read(20 * 1024 * 1024 + 1)
+                response_type = self._response_header(response, "Content-Type").split(";", 1)[0].strip().lower()
+                request_id = self._response_header(response, "cf-ray")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"Workers AI inference failed with HTTP {exc.code}") from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise RuntimeError(f"Workers AI transport failed: {type(exc).__name__}") from None
+        if status != 200:
+            raise RuntimeError(f"Workers AI inference failed with HTTP {status}")
+        if not raw or len(raw) > 20 * 1024 * 1024:
+            raise ValueError("Workers AI returned empty or oversized image data")
+        if response_type.startswith("image/"):
+            image_bytes = raw
+        else:
+            try:
+                decoded = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise ValueError("Workers AI response is neither an image nor valid JSON") from None
+            if not isinstance(decoded, dict) or decoded.get("success") is False:
+                raise RuntimeError("Workers AI inference failed; provider returned an unsuccessful response")
+            result = decoded.get("result", decoded)
+            encoded = result.get("image") if isinstance(result, dict) else None
+            if not isinstance(encoded, str) or not encoded.strip():
+                raise ValueError("Workers AI response did not contain generated image bytes")
+            if encoded.startswith("data:") and "," in encoded:
+                encoded = encoded.split(",", 1)[1]
+            try:
+                image_bytes = base64.b64decode(encoded, validate=True)
+            except (ValueError, base64.binascii.Error):
+                raise ValueError("Workers AI image payload is not valid base64") from None
+        actual_width = actual_height = 0
+        image_format = ""
+        pixel_count_exceeded = False
+        dimensions_exceeded = False
+        try:
+            with Image.open(BytesIO(image_bytes)) as check:
+                actual_width, actual_height = check.size
+                pixel_count_exceeded = actual_width * actual_height > MAX_DECODED_IMAGE_PIXELS
+                dimensions_exceeded = not (
+                    256 <= actual_width <= 4096 and 256 <= actual_height <= 4096
+                )
+                if not pixel_count_exceeded and not dimensions_exceeded:
+                    check.verify()
+            if not pixel_count_exceeded and not dimensions_exceeded:
+                with Image.open(BytesIO(image_bytes)) as image:
+                    image.load()
+                    image_format = str(image.format or "").upper()
+                    if image.size != (actual_width, actual_height):
+                        raise ValueError("image dimensions changed while decoding")
+                    if image_format not in {"PNG", "JPEG", "WEBP"}:
+                        raise ValueError("unsupported generated image format")
+        except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+            raise ValueError("Workers AI returned bytes that are not a valid, decodable image") from None
+        if pixel_count_exceeded:
+            raise ValueError("Workers AI image pixel count exceeds safe bounds")
+        if dimensions_exceeded:
+            raise ValueError("generated image dimensions are outside safe bounds")
+        expected_format = {
+            ".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP",
+        }[target.suffix.lower()]
+        if image_format != expected_format:
+            raise ValueError("generated image format does not match output extension")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".tmp-" + uuid.uuid4().hex)
+        try:
+            temporary.write_bytes(image_bytes)
+            os.replace(temporary, target)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        return CloudflareImageArtifact(
+            path=target, model=self.model_id,
+            content_hash=hashlib.sha256(image_bytes).hexdigest(),
+            byte_length=len(image_bytes), width=actual_width, height=actual_height,
+            format=image_format, request_id=request_id,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
 
 class ImageIntelligenceEngine:
     """Generate unique, professional trading images for Binance Square posts."""
@@ -129,7 +359,7 @@ class ImageIntelligenceEngine:
             symbol=symbol,
             price=float(coin.get("price", 0) or 0),
             change=change,
-            volume_ratio=float(coin.get("volume_ratio", 1) or 1),
+            turnover_ratio_pct=float(coin.get("turnover_ratio_pct", 0.0) or 0.0),
             market_cap=float(coin.get("market_cap", 0) or 0),
             headline=headline,
             reasons=reasons,
@@ -161,7 +391,7 @@ class ImageIntelligenceEngine:
             coin.get("symbol", ""),
             str(coin.get("price", 0)),
             str(coin.get("change_24h", 0)),
-            str(coin.get("volume_ratio", 1)),
+            str(coin.get("turnover_ratio_pct", 0.0) or 0.0),
             str(setup.get("entry", "")),
             str(setup.get("target1", "")),
             str(setup.get("stop", "")),
@@ -172,7 +402,7 @@ class ImageIntelligenceEngine:
     def _select_headline(self, coin: Dict[str, Any], analysis: Dict[str, Any], is_bullish: bool) -> str:
         """Select the best headline based on coin data and context."""
         change = abs(float(coin.get("change_24h", 0) or 0))
-        vol_ratio = float(coin.get("volume_ratio", 1) or 1)
+        turnover_pct = float(coin.get("turnover_ratio_pct", 0.0) or 0.0)
         announcement = coin.get("announcement_type", "") if isinstance(analysis, dict) else ""
         narrative = analysis.get("category", "") if isinstance(analysis, dict) else ""
         
@@ -188,10 +418,10 @@ class ImageIntelligenceEngine:
             headlines = ["STRONG MOMENTUM", "TRENDING NOW", "BREAKOUT WATCH", "BULLISH SIGNAL"]
         elif change >= 3:
             headlines = ["GAINING TRACTION", "MOVING UP", "WATCH LIST"]
-        elif vol_ratio >= 3:
-            headlines = ["VOLUME SPIKE", "WHALE ALERT", "SOMETHING BIG"]
-        elif vol_ratio >= 2:
-            headlines = ["VOLUME SURGE", "SMART MONEY", "INSTITUTIONAL FLOW"]
+        elif turnover_pct >= 3:
+            headlines = ["HIGH TURNOVER", "ACTIVE MARKET", "MARKET ACTIVITY"]
+        elif turnover_pct >= 2:
+            headlines = ["ELEVATED TURNOVER", "ACTIVE MARKET", "MARKET ACTIVITY"]
         elif narrative == "AI":
             headlines = ["AI NARRATIVE", "AI SEASON", "SMART MONEY AI"]
         elif narrative == "MEME":
@@ -207,7 +437,7 @@ class ImageIntelligenceEngine:
         """Generate 3-5 data-driven reasons for the trade."""
         reasons = []
         change = float(coin.get("change_24h", 0) or 0)
-        vol_ratio = float(coin.get("volume_ratio", 1) or 1)
+        turnover_pct = float(coin.get("turnover_ratio_pct", 0.0) or 0.0)
         abs_change = abs(change)
         announcement = coin.get("announcement_type", "")
         narrative = analysis.get("category", "") if isinstance(analysis, dict) else ""
@@ -220,15 +450,15 @@ class ImageIntelligenceEngine:
         elif abs_change >= 3:
             reasons.append(f"Trending with {change:+.1f}% positive price action")
         else:
-            reasons.append(f"Notable price action with volume confirmation")
+            reasons.append("Price action is modest; reported turnover-to-market-cap percentage is separate context, not confirmation.")
         
-        # Reason 2: Volume
-        if vol_ratio >= 3:
-            reasons.append(f"Volume spike {vol_ratio:.1f}x above average - major participation")
-        elif vol_ratio >= 2:
-            reasons.append(f"Volume at {vol_ratio:.1f}x - above average interest")
-        elif vol_ratio >= 1.5:
-            reasons.append(f"Healthy volume at {vol_ratio:.1f}x confirming the move")
+        # Reason 2: 24h turnover ratio (not relative-volume surge)
+        if turnover_pct >= 3:
+            reasons.append(f"Reported 24h turnover is {turnover_pct:.2f}% of market capitalization; historical-volume baseline unavailable.")
+        elif turnover_pct >= 2:
+            reasons.append(f"Reported 24h turnover is {turnover_pct:.2f}% of market capitalization; this is not an average-volume multiple.")
+        elif turnover_pct >= 1.5:
+            reasons.append(f"Reported 24h turnover-to-market-cap ratio is {turnover_pct:.2f}%; order-book depth is not measured.")
         
         # Reason 3: Narrative
         if narrative:
@@ -275,7 +505,7 @@ class ImageIntelligenceEngine:
         symbol: str,
         price: float,
         change: float,
-        volume_ratio: float,
+        turnover_ratio_pct: float,
         market_cap: float,
         headline: str,
         reasons: List[str],
@@ -311,16 +541,17 @@ class ImageIntelligenceEngine:
         # Draw chart background
         draw.rectangle([20, chart_top, WIDTH - 20, chart_bottom], fill=bg_chart, outline=border)
         
-        # Draw simulated candlestick chart
+        # A chart is only rendered when real price history is supplied.
+        # Never fabricate a price series from the current price and percentage change.
         if coin_history and len(coin_history) >= 5:
-            self._draw_candlestick_chart(draw, coin_history, 30, chart_top + 10, WIDTH - 60, chart_height - 20, is_bullish)
+            self._draw_candlestick_chart(
+                draw, coin_history, 30, chart_top + 10,
+                WIDTH - 60, chart_height - 20, is_bullish,
+            )
+            chart_label = "CHART ANALYSIS"
         else:
-            # Generate synthetic chart data
-            synthetic = self._synthetic_chart_data(price, change, 20)
-            self._draw_candlestick_chart(draw, synthetic, 30, chart_top + 10, WIDTH - 60, chart_height - 20, is_bullish)
-        
-        # Chart label
-        draw.text((30, chart_top + 5), "CHART ANALYSIS", fill=text_dim, font=self.font_tiny)
+            chart_label = "VERIFIED PRICE HISTORY REQUIRED"
+        draw.text((30, chart_top + 5), chart_label, fill=text_dim, font=self.font_tiny)
         
         # ---- MIDDLE SECTION: Coin Info ----
         mid_y = chart_bottom + 25
@@ -364,10 +595,10 @@ class ImageIntelligenceEngine:
         data_y = sym_y + 95
         draw.rounded_rectangle([20, data_y, WIDTH - 20, data_y + 60], radius=6, fill=bg_card, outline=border)
         
-        # Volume
-        draw.text((40, data_y + 8), "VOLUME", fill=text_dim, font=self.font_tiny)
-        vol_text = f"{volume_ratio:.1f}x"
-        draw.text((40, data_y + 28), vol_text, fill=white, font=self.font_bold_small)
+        # 24h turnover-to-market-cap percentage (not relative volume)
+        draw.text((40, data_y + 8), "24H TURNOVER / MC", fill=text_dim, font=self.font_tiny)
+        turnover_text = f"{turnover_ratio_pct:.2f}%"
+        draw.text((40, data_y + 28), turnover_text, fill=white, font=self.font_bold_small)
         
         # Market Cap (center)
         if market_cap > 0:
@@ -494,22 +725,6 @@ class ImageIntelligenceEngine:
         last_y = y_start + height - int((prices[-1] - min_p) / price_range * height * 0.9) - int(height * 0.05)
         draw.ellipse([last_x, last_y - 3, last_x + candle_width, last_y + 3], fill=green if is_bullish else red)
     
-    def _synthetic_chart_data(self, price: float, change: float, points: int = 20) -> List[float]:
-        """Generate realistic-looking price history."""
-        if change == 0:
-            change = 0.1
-        end_price = price
-        start_price = price / (1 + change / 100.0)
-        
-        data = []
-        for i in range(points):
-            progress = i / (points - 1)
-            base = start_price + (end_price - start_price) * progress
-            noise = base * random.uniform(-0.02, 0.02)
-            data.append(round(base + noise, 8))
-        
-        return data
-    
     def get_stats(self) -> Dict[str, Any]:
         """Get engine statistics."""
         return {
@@ -536,6 +751,8 @@ class ImageComposer:
     
     def __init__(self, config=None):
         self.engine = ImageIntelligenceEngine(config)
+        self.images_dir = Path("images")
+        self.images_dir.mkdir(parents=True, exist_ok=True)
     
     def select_template(self, coin: Dict[str, Any]) -> str:
         """Select best template based on coin catalyst and narrative."""
@@ -557,49 +774,136 @@ class ImageComposer:
             return "defi"
         if "rwa" in narrative.lower():
             return "narrative"
-        vol = float(coin.get("volume_ratio", 0) or 0)
-        if vol > 3:
-            return "breakout"
+        # Turnover-to-market-cap percentage is not a breakout or relative-volume signal.
         return "default"
     
     def generate_post_image(
         self,
         coin: Dict[str, Any],
         v5_score: Optional[Dict[str, Any]] = None,
+        *,
+        draft_content: str,
     ) -> Optional[Path]:
-        """Generate a post image using best template and live data."""
-        template = self.select_template(coin)
-        LOGGER.info("ImageComposer: using '%s' template for $%s", template, coin.get("symbol", ""))
-        
-        analysis = {
-            "category": coin.get("narrative", coin.get("skills_narrative", "")),
-            "direction": "bullish" if float(coin.get("change_24h", 0) or 0) >= 0 else "bearish",
-        }
-        setup = {
-            "entry": coin.get("entry", "?"),
-            "target1": coin.get("target1", "?"),
-            "target2": coin.get("target2", "?"),
-            "stop": coin.get("stop", "?"),
-        }
+        """Generate an illustrative background with Cloudflare, then render only proven labels."""
+        symbol = str(coin.get("symbol") or "").strip().upper()
+        asset_id = str(coin.get("asset_id") or "").strip()
+        if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol) or not asset_id.startswith("coingecko:"):
+            LOGGER.warning("Image generation skipped: canonical asset identity is unavailable")
+            return None
+        if not isinstance(draft_content, str) or not draft_content.strip():
+            LOGGER.warning("Image generation skipped: exact validated draft text is required")
+            return None
         try:
-            return self.engine.generate(
-                coin=coin, analysis=analysis, setup=setup, v5_score_result=v5_score,
+            from PIL import ImageOps
+            generator = CloudflareWorkersAIImageGenerator()
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            self.images_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = self.images_dir / f"{symbol}_{timestamp}_workers_ai_raw.png"
+            # No ticker, price, chart, logo or factual assertion enters the generative prompt.
+            prompt = (
+                "Create a premium abstract editorial illustration for a digital asset research article. "
+                "Deep navy and midnight blue palette, subtle luminous interconnected network nodes, "
+                "refined geometric depth, restrained cyan accents, clean negative space near the lower third. "
+                "Purely illustrative background only. Absolutely no text, letters, numbers, ticker symbols, "
+                "logos, flags, charts, candlesticks, prices, arrows, trading signals, watermarks or UI."
             )
-        except Exception as e:
-            LOGGER.warning("ImageComposer failed for $%s: %s", coin.get("symbol", ""), e)
+            artifact = generator.generate(prompt, raw_path, width=1024, height=1024)
+            with Image.open(raw_path) as source:
+                canvas = ImageOps.fit(
+                    source.convert("RGB"), (1080, 1350),
+                    method=Image.Resampling.LANCZOS,
+                )
+            draw = ImageDraw.Draw(canvas)
+            overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            overlay_draw.rectangle((0, 960, 1080, 1350), fill=(5, 12, 24, 190))
+            canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
+            draw = ImageDraw.Draw(canvas)
+            font_path = Path(self.engine.fonts_dir) / "LiberationSans-Bold.ttf"
+            if not font_path.is_file():
+                raise ValueError("approved deterministic overlay font is unavailable")
+            font_sha256 = hashlib.sha256(font_path.read_bytes()).hexdigest()
+            title_font = ImageFont.truetype(str(font_path), 42)
+            symbol_font = ImageFont.truetype(str(font_path), 82)
+            title = "MARKET UPDATE"
+            ticker = "$" + symbol
+            overlay_items = []
+            for text_value, font, y, fill in (
+                (title, title_font, 1020, (170, 195, 225)),
+                (ticker, symbol_font, 1080, (255, 255, 255)),
+            ):
+                bounds = draw.textbbox((0, 0), text_value, font=font)
+                x = (1080 - (bounds[2] - bounds[0])) // 2
+                if x < 0 or y + (bounds[3] - bounds[1]) > 1350:
+                    raise ValueError("deterministic overlay would exceed image bounds")
+                draw.text((x, y), text_value, font=font, fill=fill)
+                actual_bounds = draw.textbbox((x, y), text_value, font=font)
+                overlay_items.append({
+                    "text": text_value,
+                    "bbox": list(actual_bounds),
+                    "origin_xy": [x, y],
+                    "font_id": "LIBERATION_SANS_BOLD",
+                    "font_sha256": font_sha256,
+                    "font_size_px": getattr(font, "size", 0),
+                    "fill_rgb": list(fill),
+                })
+            final_path = self.images_dir / f"{symbol}_{timestamp}_workers_ai.png"
+            canvas.save(final_path, format="PNG", optimize=True)
+            final_bytes = final_path.read_bytes()
+            metadata = {
+                "provider": "cloudflare_workers_ai",
+                "model": artifact.model,
+                "request_id": artifact.request_id,
+                "generated_at": artifact.generated_at,
+                "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "generation_parameters": {
+                    "width": artifact.width, "height": artifact.height,
+                    "output_format": artifact.format,
+                },
+                "source_image_hash": artifact.content_hash,
+                "final_image_hash": hashlib.sha256(final_bytes).hexdigest(),
+                "draft_hash": hashlib.sha256(draft_content.encode("utf-8")).hexdigest(),
+                "asset_id": asset_id,
+                "symbol": symbol,
+                "dimensions": [1080, 1350],
+                "rendered_labels": [title, ticker],
+                "visual_overlay": {
+                    "background_panel": {
+                        "bbox": [0, 960, 1080, 1350],
+                        "fill_rgba": [5, 12, 24, 190],
+                    },
+                    "items": overlay_items,
+                },
+                "chart_data_refs": [],
+                "numeric_overlays": [],
+            }
+            sidecar = Path(str(final_path) + ".json")
+            temporary_sidecar = Path(str(sidecar) + ".tmp")
+            temporary_sidecar.write_text(
+                json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            os.replace(temporary_sidecar, sidecar)
+            raw_path.unlink(missing_ok=True)
+            LOGGER.info(
+                "Cloudflare image generated and composed: model=%s hash=%s bytes=%d",
+                artifact.model, metadata["final_image_hash"], len(final_bytes),
+            )
+            return final_path
+        except Exception as exc:
+            LOGGER.warning(
+                "Cloudflare image generation/compose unavailable for $%s: %s",
+                symbol, type(exc).__name__,
+            )
             return None
 
 
 class ImageUploader:
-    """Upload generated images and return public URLs - guaranteed.
-    Binance Square OpenAPI has NO dedicated media upload endpoint.
-    Images are attached via imageUrl field in content/add.
-    
-    Provider 1: GitHub REST API (create file via API - most reliable in GHA)
-    Provider 2: Git push with token auth
-    Provider 3: GHA environment URL construction
-    
-    Every post will have an image when possible - text-only fallback always preserved.
+    """Upload authorized media through Binance's native presigned-media flow.
+
+    Legacy GitHub REST/Git repository-write methods are intentionally disabled:
+    they are not part of the active publication path and must not mutate the
+    application repository or persist credentials.
     """
     
     def __init__(self, config=None):
@@ -641,271 +945,35 @@ class ImageUploader:
         return url
 
     def binance_square_upload(self, image_path: Path) -> Optional[str]:
-        """Upload image for Binance Square post.
-        
-        Flow:
-        1. Upload image to GitHub repo via REST API (requires GH_TOKEN)
-        2. Return public raw.githubusercontent.com URL
-        3. This URL is then passed as imageUrl to content/add
-        
-        In GitHub Actions, GITHUB_TOKEN is automatically available.
-        Falls back gracefully if upload fails — text-only publish proceeds.
+        """Deprecated GitHub-repository upload path; disabled for safety.
+
+        The active publisher must use ``binance_media_upload`` and the
+        authorization-bound Binance presigned-media flow. This legacy method
+        previously wrote repository contents through GitHub REST/Git and could
+        target an unapproved branch.
         """
-        if not image_path or not image_path.exists():
-            LOGGER.warning("binance_square_upload: image path missing: %s", image_path)
-            return None
-        
-        # Log image info before upload
-        import mimetypes
-        mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
-        file_size = image_path.stat().st_size
-        LOGGER.info("Upload step 1: image ready — %s (%s, %d bytes, %s)",
-                    image_path.name, mime, file_size, image_path)
-        
-        # Attempt 1: GitHub REST API (most reliable in GHA)
-        gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
-        gh_repo = os.getenv("GITHUB_REPOSITORY", "")
-        
-        LOGGER.info("Upload step 2: checking GitHub credentials — token=%s repo=%s",
-                    "SET (%d chars)" % len(gh_token) if gh_token else "NOT SET",
-                    gh_repo if gh_repo else "NOT SET")
-        
-        if gh_token and gh_repo:
-            url = self._github_api_upload(image_path)
-            if url:
-                LOGGER.info("Upload step 3: GitHub API upload SUCCESS — %s", url)
-                return url
-            LOGGER.warning("Upload step 3: GitHub API upload returned None")
-        else:
-            LOGGER.warning("Upload step 3: GitHub API upload skipped (missing token or repo)")
-        
-        # Attempt 2: Git push upload
-        LOGGER.info("Upload step 4: trying git push upload")
-        url = self._git_push_image(image_path)
-        if url:
-            LOGGER.info("Upload step 4: git push upload SUCCESS — %s", url)
-            return url
-        
-        # Attempt 3: GHA env URL (last resort, unverified)
-        LOGGER.info("Upload step 5: trying GHA env URL")
-        url = self._gha_env_url(image_path)
-        if url:
-            LOGGER.warning("Upload step 5: GHA env URL (unverified) — %s", url)
-            return url
-        
-        LOGGER.warning("Upload step 6: ALL upload methods FAILED — proceeding text-only")
+        LOGGER.warning(
+            "Legacy GitHub repository image upload is disabled; use the authorized Binance media upload flow"
+        )
         return None
-    
+
     def upload(self, image_path: Path) -> tuple:
-        """Upload image and return (url, verified).
-        
-        Returns (url, True) if a reliable upload method succeeded.
-        Returns (url, False) if URL is constructed but not verified.
-        Returns (None, False) if all methods fail.
-        
-        verified=True means the image definitely exists at the URL.
-        verified=False means the URL might work (e.g., from a previous push).
-        """
-        if not image_path or not image_path.exists():
-            return (None, False)
-        
-        # Provider 1: GitHub REST API (most reliable in GHA)
-        url = self._github_api_upload(image_path)
-        if url:
-            LOGGER.info("Image uploaded via GitHub API: %s", url)
-            return (url, True)
-        
-        # Provider 2: Git push
-        url = self._git_push_image(image_path)
-        if url:
-            LOGGER.info("Image uploaded via git push: %s", url)
-            return (url, True)
-        
-        # Provider 3: GHA env URL construction (last resort)
-        url = self._gha_env_url(image_path)
-        if url:
-            LOGGER.info("Image URL from GHA env (unverified): %s", url)
-            return (url, False)
-        
-        LOGGER.warning("All image upload methods failed")
+        """Deprecated generic uploader; fail closed instead of mutating GitHub."""
+        LOGGER.warning(
+            "Legacy generic image uploader is disabled; use the authorized Binance media upload flow"
+        )
         return (None, False)
-    
+
     def _github_api_upload(self, image_path: Path) -> Optional[str]:
-        """Upload image to GitHub repo via REST API.
-        
-        Uses: PUT /repos/{owner}/{repo}/contents/{path}
-        This is more reliable than git push in GHA.
-        """
-        try:
-            gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
-            if not gh_token:
-                LOGGER.warning("GitHub API upload: no GH_TOKEN available")
-                return None
-            
-            gh_repo = os.getenv("GITHUB_REPOSITORY", "")
-            LOGGER.info("GitHub API upload: token=%s repo=%s",
-                        "SET" if gh_token else "NOT_SET",
-                        gh_repo if gh_repo else "NOT_SET")
-            if not gh_repo:
-                # Try git remote
-                import subprocess
-                result = subprocess.run(
-                    ["git", "remote", "get-url", "origin"],
-                    capture_output=True, text=True, timeout=5
-                )
-                remote = result.stdout.strip()
-                if "github.com" in remote:
-                    if remote.startswith("git@"):
-                        gh_repo = remote.split("github.com:")[-1].replace(".git", "")
-                    else:
-                        gh_repo = remote.split("github.com/")[-1].replace(".git", "")
-            
-            if not gh_repo:
-                return None
-            
-            # Read image as base64
-            import base64
-            with open(image_path, "rb") as f:
-                img_b64 = base64.b64encode(f.read()).decode("utf-8")
-            
-            # Get current branch
-            import subprocess
-            branch = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=3
-            ).stdout.strip() or "main"
-            
-            # Copy image to repo images/ directory  
-            repo_images = Path("images")
-            repo_images.mkdir(parents=True, exist_ok=True)
-            dest = repo_images / image_path.name
-            
-            import shutil
-            if Path(image_path).resolve() != dest.resolve():
-                shutil.copy2(str(image_path), str(dest))
-            
-            # API endpoint (URL-encode filename for special chars)
-            safe_filename = self._url_encode_filename(image_path.name)
-            api_url = f"https://api.github.com/repos/{gh_repo}/contents/images/{safe_filename}"
-            
-            # First check if file exists (get SHA if it does)
-            sha = None
-            req = urllib.request.Request(api_url, headers={
-                "Authorization": f"Bearer {gh_token}",
-                "Accept": "application/vnd.github.v3+json",
-                "User-Agent": "codex-agent/1.0"
-            }, method="GET")
-            try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    existing = json.loads(resp.read().decode())
-                    sha = existing.get("sha")
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    LOGGER.info("File does not exist on GitHub, will create new")
-                else:
-                    err_detail = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
-                    LOGGER.warning("GitHub API check failed (HTTP %d): %s", e.code, err_detail)
-            
-            # Create or update file
-            payload = {
-                "message": f"Add post image {image_path.name}",
-                "content": img_b64,
-                "branch": branch,
-            }
-            if sha:
-                payload["sha"] = sha
-            
-            data_bytes = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(api_url, data=data_bytes, headers={
-                "Authorization": f"Bearer {gh_token}",
-                "Accept": "application/vnd.github.v3+json",
-                "Content-Type": "application/json",
-                "User-Agent": "codex-agent/1.0"
-            }, method="PUT")
-            
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                response_data = json.loads(resp.read().decode())
-            
-            # Success! Get the raw URL (URL-encoded for safety)
-            safe_name = self._url_encode_filename(image_path.name)
-            raw_url = f"https://raw.githubusercontent.com/{gh_repo}/{branch}/images/{safe_name}"
-            LOGGER.info("GitHub API upload SUCCESS: %s", raw_url)
-            if self._verify_url(raw_url):
-                LOGGER.info("GitHub raw URL verified accessible: %s", raw_url)
-            else:
-                LOGGER.warning("GitHub raw URL not verifiable (may still work): %s", raw_url)
-            return raw_url
-            
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
-            LOGGER.warning("GitHub API upload FAILED (HTTP %d): %s", e.code, err_body)
-        except Exception as e:
-            LOGGER.warning("GitHub API upload FAILED: %s", e)
-        
+        """Disabled legacy GitHub Contents API write path."""
+        LOGGER.warning("Legacy GitHub Contents API image upload is disabled")
         return None
-    
+
     def _git_push_image(self, image_path: Path) -> Optional[str]:
-        """Push image to GitHub repo using git with token auth."""
-        try:
-            import subprocess
-            
-            gh_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
-            if not gh_token:
-                return None
-            
-            gh_repo = os.getenv("GITHUB_REPOSITORY", "")
-            if not gh_repo:
-                result = subprocess.run(
-                    ["git", "remote", "get-url", "origin"],
-                    capture_output=True, text=True, timeout=5
-                )
-                remote = result.stdout.strip()
-                if "github.com" in remote:
-                    if remote.startswith("git@"):
-                        gh_repo = remote.split("github.com:")[-1].replace(".git", "")
-                    else:
-                        gh_repo = remote.split("github.com/")[-1].replace(".git", "")
-            
-            if not gh_repo:
-                return None
-            
-            subprocess.run(["git", "config", "user.name", "bot"], capture_output=True, timeout=3)
-            subprocess.run(["git", "config", "user.email", "bot@bot.com"], capture_output=True, timeout=3)
-            
-            branch = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=3
-            ).stdout.strip() or "main"
-            
-            # Copy to repo
-            repo_images = Path("images")
-            repo_images.mkdir(parents=True, exist_ok=True)
-            dest = repo_images / image_path.name
-            if Path(image_path).resolve() != dest.resolve():
-                import shutil
-                shutil.copy2(str(image_path), str(dest))
-            
-            # Set auth URL
-            auth_url = f"https://x-access-token:{gh_token}@github.com/{gh_repo}.git"
-            subprocess.run(["git", "remote", "set-url", "origin", auth_url], capture_output=True, timeout=5)
-            
-            subprocess.run(["git", "add", str(dest)], capture_output=True, text=True, timeout=5)
-            subprocess.run(["git", "commit", "-m", f"Add image {image_path.name}"], capture_output=True, text=True, timeout=5)
-            subprocess.run(["git", "pull", "--rebase", "origin", branch], capture_output=True, text=True, timeout=15)
-            
-            result = subprocess.run(["git", "push", "origin", branch], capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                url = f"https://raw.githubusercontent.com/{gh_repo}/{branch}/images/{image_path.name}"
-                LOGGER.info("Git push success: %s", url)
-                return url
-            
-            LOGGER.warning("Git push failed: %s", result.stderr[:200])
-        except Exception as e:
-            LOGGER.warning("Git push error: %s", e)
-        
+        """Disabled legacy Git mutation path; never persist credentials or commit files."""
+        LOGGER.warning("Legacy Git image upload is disabled")
         return None
-    
+
     def _gha_env_url(self, image_path: Path) -> Optional[str]:
         """Construct GitHub raw URL from GHA env (file must already be in repo)."""
         gh_repo = os.getenv("GITHUB_REPOSITORY", "")
@@ -955,28 +1023,62 @@ class ImageUploader:
         file_ticket = upload_info.get("fileTicket", "")
         
         if not presigned_url or not file_ticket:
-            LOGGER.warning("Media step 1: missing presignedUrl or fileTicket in response: %s", upload_info)
+            LOGGER.warning(
+                "Media step 1: upload response missing required presigned URL or file ticket",
+            )
             return None
-        
-        LOGGER.info("Media step 2: got presignedUrl (len=%d), fileTicket=%s",
-                    len(presigned_url), file_ticket[:20] if len(file_ticket) > 20 else file_ticket)
+        if not self._is_allowed_presigned_upload_url(presigned_url):
+            LOGGER.warning("Media step 1: presigned upload host is not allowlisted")
+            return None
+
+        LOGGER.info("Media step 2: validated presigned upload host; file ticket received")
         
         # Step 2: Upload image to presigned URL
         if not self._upload_to_presigned_url(image_path, presigned_url):
             LOGGER.warning("Media step 2 FAILED: image upload to storage failed")
             return None
         
-        LOGGER.info("Media step 3: image uploaded to storage successfully")
+        LOGGER.info("Media step 3: image uploaded to allowlisted storage successfully")
         
         # Step 3: Poll image status until processed
         image_url = self._poll_image_status(square_api_key, file_ticket)
         if image_url:
-            LOGGER.info("Media step 4: obtained imageUrl: %s", image_url)
+            LOGGER.info("Media step 4: processed image URL received from Binance")
             return image_url
         
         LOGGER.warning("Media step 4 FAILED: image status polling did not return a valid URL")
         return None
     
+    @staticmethod
+    def _is_allowed_presigned_upload_url(value: str) -> bool:
+        try:
+            parsed = urlsplit(value)
+            host = (parsed.hostname or "").lower()
+            host_labels = host.split(".")
+            is_amazon_s3_host = (
+                len(host_labels) >= 3
+                and host_labels[-2:] == ["amazonaws", "com"]
+                and any(
+                    label == "s3" or label.startswith("s3-")
+                    for label in host_labels[:-2]
+                )
+            )
+            return bool(
+                parsed.scheme == "https"
+                and parsed.port in (None, 443)
+                and parsed.username is None
+                and parsed.password is None
+                and not parsed.fragment
+                and parsed.query
+                and (
+                    is_amazon_s3_host
+                    or host.endswith(".binance.com")
+                    or host.endswith(".bnbstatic.com")
+                )
+            )
+        except (TypeError, ValueError):
+            return False
+
     def _request_presigned_url(self, image_path: Path, api_key: str) -> Optional[dict]:
         """Request a presigned upload URL from Binance Square /image/presignedUrl endpoint."""
         payload = {
@@ -995,28 +1097,24 @@ class ImageUploader:
             data_bytes = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
             LOGGER.info("Image presignedUrl request: POST /image/presignedUrl imageName=%s", image_path.name)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                resp_body = resp.read().decode("utf-8", errors="replace")
+            with _open_without_redirect(req, timeout=15) as resp:
+                resp_body = _read_limited_response(resp, max_bytes=1024 * 1024).decode("utf-8", errors="replace")
             
-            LOGGER.info("Image presignedUrl response: HTTP %d %s", resp.status, resp_body[:300])
+            LOGGER.info("Image presignedUrl response: HTTP %d", resp.status)
             data = json.loads(resp_body)
             
             if data.get("code") == "000000" and data.get("data"):
                 result = data["data"]
-                LOGGER.info("Image presignedUrl SUCCESS: presignedUrl=%s..., fileTicket=%s",
-                           str(result.get("presignedUrl", ""))[:60],
-                           str(result.get("fileTicket", ""))[:20])
+                LOGGER.info("Image presignedUrl response contains upload URL and file ticket")
                 return result
             else:
-                LOGGER.warning("Image presignedUrl FAILED [%s]: %s",
-                              data.get("code"), data.get("message", ""))
+                LOGGER.warning("Image presignedUrl FAILED with provider code %s", data.get("code"))
                 return None
         except urllib.error.HTTPError as e:
-            body = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
-            LOGGER.warning("Image presignedUrl HTTP ERROR %d: %s", e.code, body)
+            LOGGER.warning("Image presignedUrl HTTP ERROR %d", e.code)
             return None
         except Exception as e:
-            LOGGER.warning("Image presignedUrl FAILED: %s", e)
+            LOGGER.warning("Image presignedUrl FAILED: %s", type(e).__name__)
             return None
     
     def _poll_image_status(self, api_key: str, file_ticket: str, max_retries: int = 10, poll_interval: int = 3) -> Optional[str]:
@@ -1039,8 +1137,8 @@ class ImageUploader:
             try:
                 data_bytes = json.dumps(payload).encode("utf-8")
                 req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    resp_body = resp.read().decode("utf-8", errors="replace")
+                with _open_without_redirect(req, timeout=15) as resp:
+                    resp_body = _read_limited_response(resp, max_bytes=1024 * 1024).decode("utf-8", errors="replace")
                 
                 data = json.loads(resp_body)
                 
@@ -1050,28 +1148,25 @@ class ImageUploader:
                     
                     if status == 1:
                         image_url = status_data.get("imageUrl", "")
-                        LOGGER.info("Image status SUCCESS (attempt %d/%d): imageUrl=%s",
-                                   attempt, max_retries, image_url)
+                        LOGGER.info("Image status SUCCESS (attempt %d/%d)", attempt, max_retries)
                         return image_url
                     elif status == 2:
-                        failed_reason = status_data.get("failedReason", "unknown")
-                        LOGGER.warning("Image status FAILED (attempt %d/%d): status=2 reason=%s",
-                                      attempt, max_retries, failed_reason)
+                        LOGGER.warning("Image status FAILED (attempt %d/%d): provider marked media failed",
+                                      attempt, max_retries)
                         return None
                     else:
                         LOGGER.info("Image status processing... (attempt %d/%d, status=%s)",
                                    attempt, max_retries, status)
                 else:
-                    LOGGER.warning("Image status API error [%s]: %s (attempt %d/%d)",
-                                  data.get("code"), data.get("message", ""), attempt, max_retries)
+                    LOGGER.warning("Image status API error code=%s (attempt %d/%d)",
+                                   data.get("code"), attempt, max_retries)
                 
             except urllib.error.HTTPError as e:
-                body = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
-                LOGGER.warning("Image status HTTP ERROR %d: %s (attempt %d/%d)",
-                              e.code, body, attempt, max_retries)
+                LOGGER.warning("Image status HTTP ERROR %d (attempt %d/%d)",
+                               e.code, attempt, max_retries)
             except Exception as e:
                 LOGGER.warning("Image status poll error: %s (attempt %d/%d)",
-                              e, attempt, max_retries)
+                               type(e).__name__, attempt, max_retries)
             
             if attempt < max_retries:
                 LOGGER.info("Waiting %ds before next poll...", poll_interval)
@@ -1081,31 +1176,112 @@ class ImageUploader:
         return None
     
     def _upload_to_presigned_url(self, image_path: Path, upload_url: str) -> bool:
-        """Upload image binary to the presigned storage URL."""
+        """Upload image binary only to an allowlisted HTTPS storage host."""
+        if not self._is_allowed_presigned_upload_url(upload_url):
+            LOGGER.warning("Storage upload blocked: presigned upload host is not allowlisted")
+            return False
         try:
             with open(image_path, "rb") as f:
-                image_data = f.read()
+                image_data = f.read(10 * 1024 * 1024 + 1)
+            if len(image_data) > 10 * 1024 * 1024:
+                LOGGER.warning("Storage upload blocked: image exceeds the 10 MiB limit")
+                return False
             
-            LOGGER.info("Storage upload: sending %d bytes to %s",
-                       len(image_data), upload_url[:60])
+            LOGGER.info("Storage upload: sending %d bytes to validated storage host",
+                         len(image_data))
             
             # Upload as binary PUT request to the presigned URL
             req = urllib.request.Request(upload_url, data=image_data, method="PUT")
             req.add_header("Content-Type", "image/png")
             
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with _open_without_redirect(req, timeout=30) as resp:
                 status = resp.status
-                resp_body = resp.read().decode("utf-8", errors="replace")[:200]
-                LOGGER.info("Storage upload response: HTTP %d %s", status, resp_body)
-            
-            # HTTP 200 or 201 = success
+                LOGGER.info("Storage upload response: HTTP %d", status)
+
+            # A completed object PUT must be explicitly acknowledged. Do not
+            # treat redirects, accepted-but-pending, empty, or error responses
+            # as a successful upload; imageStatus polling must only follow a
+            # confirmed storage write.
+            if status not in (200, 201):
+                LOGGER.warning("Storage upload rejected: unexpected HTTP status %d", status)
+                return False
             LOGGER.info("Storage upload SUCCESS (HTTP %d)", status)
             return True
             
         except urllib.error.HTTPError as e:
-            body = e.read().decode()[:200] if hasattr(e, 'read') else str(e)
-            LOGGER.warning("Storage upload FAILED (HTTP %d): %s", e.code, body)
+            LOGGER.warning("Storage upload FAILED (HTTP %d)", e.code)
             return False
         except Exception as e:
-            LOGGER.warning("Storage upload FAILED: %s", e)
+            LOGGER.warning("Storage upload FAILED: %s", type(e).__name__)
             return False
+
+def upload_authorized_image(
+    *,
+    authorization,
+    dry_run: bool,
+    image_path: str | None,
+    api_key: str | None,
+    symbol: str,
+    asset_id: str,
+    content: str,
+    image_hashes,
+    upload_fn,
+    publisher_enabled: bool = False,
+) -> str | None:
+    """Perform Binance media upload only after exact immutable publication authorization."""
+    if dry_run:
+        return None
+    if not publisher_enabled:
+        raise ValueError("PUBLISHER_ENABLED must be true before Binance media upload")
+    if not image_path:
+        return None
+    if authorization is None:
+        raise ValueError("publication authorization is required before media upload")
+    if not callable(getattr(authorization, "verify_integrity", None)):
+        raise ValueError("publication authorization object is invalid")
+    if not authorization.verify_integrity():
+        raise ValueError("publication authorization integrity check failed")
+    reasons = authorization.validate_for_submission(
+        symbol=symbol, asset_id=asset_id, content=content,
+        image_hashes=image_hashes,
+    )
+    if reasons:
+        raise ValueError("publication authorization rejected media upload: " + ",".join(reasons))
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise ValueError("Binance Square API key is unavailable")
+    if not callable(upload_fn):
+        raise ValueError("media upload function is unavailable")
+    if not isinstance(image_hashes, (list, tuple)) or len(image_hashes) != 1:
+        raise ValueError("media upload requires exactly one authorized image hash")
+    try:
+        with Path(image_path).open("rb") as image_file:
+            authorized_image_bytes = image_file.read(10 * 1024 * 1024 + 1)
+    except OSError:
+        raise ValueError("authorized image file is unavailable") from None
+    if len(authorized_image_bytes) > 10 * 1024 * 1024:
+        raise ValueError("authorized image file exceeds the 10 MiB limit")
+    actual_image_hash = hashlib.sha256(authorized_image_bytes).hexdigest()
+    if actual_image_hash != image_hashes[0]:
+        raise ValueError("image file bytes do not match the authorized image hash")
+    # Upload a private immutable snapshot, not the mutable source path. This
+    # closes the validation-to-upload race where the source file is replaced
+    # after its authorized digest has been checked.
+    with tempfile.TemporaryDirectory(prefix="binance-authorized-media-") as snapshot_dir:
+        snapshot_path = Path(snapshot_dir) / ("authorized-image" + Path(image_path).suffix)
+        snapshot_path.write_bytes(authorized_image_bytes)
+        image_url = upload_fn(snapshot_path, api_key)
+    try:
+        parsed = urlsplit(image_url)
+        host = (parsed.hostname or "").lower()
+        valid_host = host == "bin.bnbstatic.com" or host.endswith(".bnbstatic.com")
+        valid_url = (
+            parsed.scheme == "https" and valid_host
+            and parsed.port in (None, 443)
+            and parsed.username is None and parsed.password is None
+            and not parsed.fragment
+        )
+    except (TypeError, ValueError):
+        valid_url = False
+    if not valid_url:
+        raise ValueError("Binance media upload did not return an allowlisted Binance CDN URL")
+    return image_url

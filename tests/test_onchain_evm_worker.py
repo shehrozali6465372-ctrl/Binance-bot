@@ -3,9 +3,8 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from layer1.foundation import EligibilityDecision
-from layer1.onchain import (
-    OnChainAssetMapping, OnChainIntelligenceEngine, OnChainObservation, OnChainStore,
-)
+from layer1.onchain import OnChainAssetMapping, OnChainIntelligenceEngine
+from tests.onchain_test_support import MappingStoreStub
 from layer1.onchain_ingestion import OnChainIngestionStore
 from layer1.onchain_providers import EvmTokenTransferLog, ProviderDataPage, ProviderTransportError
 from layer1.onchain_evm_worker import EvmTransferIngestionWorker
@@ -62,29 +61,13 @@ class EvmTransferIngestionWorkerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         path = os.path.join(self.tmp.name, "onchain.sqlite3")
-        self.mapping_store = OnChainStore(
-            path, OnChainIntelligenceEngine({"bnb-smart-chain-mainnet": 86400})
-        )
+        engine = OnChainIntelligenceEngine(
+            {"bnb-smart-chain-mainnet": 86400},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1")
         self.ingestion_store = OnChainIngestionStore(path)
-        now = datetime.now(timezone.utc)
-        timestamp = now.isoformat()
-        eligibility = EligibilityDecision(
-            status="ELIGIBLE", asset_id="coingecko:example", symbol="EXAMPLE",
-            eligible_pairs=("EXAMPLEUSDT",), verified_at=timestamp,
-            identity_proof_status="VERIFIED", identity_proof_source="coingecko_coin_tickers",
-            identity_proof_verified_at=timestamp, identity_proof_source_timestamp=timestamp,
-            identity_proof_data_hash="a" * 64,
-        )
         verified_mapping = mapping()
-        observation = OnChainObservation(
-            observation_id="bnb-map-verification", mapping_id=verified_mapping.mapping_id,
-            asset_id=verified_mapping.asset_id, network_id=verified_mapping.network_id,
-            chain_id="56", provider="alchemy", endpoint_id="bnb-mainnet-rpc",
-            observation_type="TRANSFER", block_height=100, block_hash=BLOCK_HASH,
-            transaction_hash=TX_HASH, block_time=timestamp, observed_at=timestamp,
-            finality="FINALIZED", finality_reference="eth_getFinalizedHeader",
-        )
-        self.mapping_store.save_verified(eligibility, verified_mapping, observation)
+        self.mapping_store = MappingStoreStub(engine, verified_mapping)
         self.provider = FakeProvider()
         self.provider.logs = [EvmTokenTransferLog(
             network_id="bnb-smart-chain-mainnet", contract_address=CONTRACT,
@@ -112,9 +95,16 @@ class EvmTransferIngestionWorkerTests(unittest.TestCase):
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved[0].event_id, TX_HASH + ":4")
         self.assertEqual(saved[0].amount_raw, "12345678901234567890")
-        self.assertEqual(self.ingestion_store.get_checkpoint(
+        self.assertEqual(saved[0].finality_snapshot.status, "FINALIZED")
+        self.assertEqual(saved[0].finality_snapshot.reference,
+                         "eth_getFinalizedHeader:verifiedValidatorNum=-3")
+        checkpoint = self.ingestion_store.get_checkpoint(
             "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT
-        )["next_block"], 110)
+        )
+        self.assertEqual(checkpoint["next_block"], 110)
+        self.assertEqual(checkpoint["finality_reference"],
+                         "eth_getFinalizedHeader:verifiedValidatorNum=-3")
+        self.assertEqual(checkpoint["finalized_height"], self.provider.finalized_height)
         self.assertEqual(self.provider.log_calls, [(CONTRACT, 100, 109)])
 
     def test_restart_resumes_from_durable_next_block_without_replaying_committed_range(self):
@@ -249,31 +239,15 @@ class EthereumTransferIngestionWorkerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         path = os.path.join(self.tmp.name, "ethereum.sqlite3")
-        self.mapping_store = OnChainStore(
-            path, OnChainIntelligenceEngine({"ethereum-mainnet": 86400})
-        )
+        engine = OnChainIntelligenceEngine(
+            {"ethereum-mainnet": 86400},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1")
         self.ingestion_store = OnChainIngestionStore(path)
-        now = datetime.now(timezone.utc)
-        timestamp = now.isoformat()
         self.asset_mapping = mapping(
             "asset-eth-v1", network_id="ethereum-mainnet", chain_id="1"
         )
-        eligibility = EligibilityDecision(
-            status="ELIGIBLE", asset_id="coingecko:example", symbol="EXAMPLE",
-            eligible_pairs=("EXAMPLEUSDT",), verified_at=timestamp,
-            identity_proof_status="VERIFIED", identity_proof_source="coingecko_coin_tickers",
-            identity_proof_verified_at=timestamp, identity_proof_source_timestamp=timestamp,
-            identity_proof_data_hash="a" * 64,
-        )
-        observation = OnChainObservation(
-            observation_id="ethereum-map-verification", mapping_id=self.asset_mapping.mapping_id,
-            asset_id=self.asset_mapping.asset_id, network_id=self.asset_mapping.network_id,
-            chain_id="1", provider="alchemy", endpoint_id="ethereum-mainnet-rpc",
-            observation_type="TRANSFER", block_height=250, block_hash=BLOCK_HASH,
-            transaction_hash=TX_HASH, block_time=timestamp, observed_at=timestamp,
-            finality="FINALIZED", finality_reference="eth_getBlockByNumber:finalized",
-        )
-        self.mapping_store.save_verified(eligibility, self.asset_mapping, observation)
+        self.mapping_store = MappingStoreStub(engine, self.asset_mapping)
         self.provider = FakeEthereumProvider()
         self.worker = EvmTransferIngestionWorker(
             self.provider, self.mapping_store, self.ingestion_store,
