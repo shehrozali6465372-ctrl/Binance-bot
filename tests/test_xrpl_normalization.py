@@ -27,7 +27,8 @@ class XrplPaymentNormalizationTests(unittest.TestCase):
             metadata.pop("delivered_amount", None)
         return XrplAccountTransaction(
             TX_HASH, ledger, "2026-11-11T12:00:00Z", transaction, metadata,
-            {"validated": True, "hash": TX_HASH, "ledger_index": ledger},
+            {"validated": True, "hash": TX_HASH, "ledger_index": ledger, "ledger_hash": LEDGER_HASH,
+             "tx_json": transaction, "meta": metadata},
         )
 
     def normalize(self, record=None, **overrides):
@@ -164,6 +165,34 @@ class XrplPaymentNormalizationTests(unittest.TestCase):
         record.raw["ledger_index"] = 499
         with self.assertRaisesRegex(ValueError, "do not match"):
             self.normalize(record)
+
+    def test_rejects_boolean_raw_ledger_index_even_when_it_equals_integer_one(self):
+        record = self.record(ledger=1)
+        record.raw["ledger_index"] = True
+        with self.assertRaisesRegex(ValueError, "do not match"):
+            self.normalize(record)
+
+    def test_raw_transaction_and_metadata_must_match_typed_provider_fields(self):
+        record = self.record()
+        record.raw["tx_json"] = {**record.transaction, "Destination": ACCOUNT}
+        with self.assertRaisesRegex(ValueError, "raw transaction and metadata"):
+            self.normalize(record)
+
+        record = self.record()
+        record.raw["meta"] = {**record.metadata, "TransactionResult": "tecFAILED"}
+        with self.assertRaisesRegex(ValueError, "raw transaction and metadata"):
+            self.normalize(record)
+
+    def test_transaction_ledger_hash_must_match_independently_verified_canonical_header(self):
+        record = self.record()
+        record.raw["ledger_hash"] = "C" * 64
+        with self.assertRaisesRegex(ValueError, "ledger hash"):
+            self.normalize(record)
+
+        record = self.record()
+        record.raw["ledger_hash"] = LEDGER_HASH.lower()
+        event = self.normalize(record)
+        self.assertEqual(event.block_hash, LEDGER_HASH.lower())
 
     def test_malformed_transaction_identity_and_ledger_are_rejected(self):
         with self.assertRaises(ValueError):

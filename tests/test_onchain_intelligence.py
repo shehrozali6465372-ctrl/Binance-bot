@@ -469,6 +469,71 @@ class OnChainIntelligenceTests(unittest.TestCase):
         result = self.engine._validate_mapping(xrpl_mapping)
         self.assertEqual(result.reason_code, "XRPL_ISSUER_CURRENCY_MAPPING_REQUIRED")
 
+    def test_solana_token_mapping_rejects_unsupported_token_standard(self):
+        mapping = OnChainAssetMapping(**{
+            **self.mapping.__dict__, "mapping_id": "invalid-solana-standard-v1",
+            "asset_id": "coingecko:usd-coin", "binance_symbol": "USDC",
+            "network_id": "solana-mainnet", "network_family": "SOLANA",
+            "chain_id": "mainnet-beta", "representation": "TOKEN",
+            "contract_address": "4" * 44, "token_standard": "ERC20",
+        })
+        result = self.engine._validate_mapping(mapping)
+        self.assertEqual(result.reason_code, "SOLANA_TOKEN_STANDARD_UNSUPPORTED")
+
+    def test_solana_token_mapping_rejects_invalid_base58_mint(self):
+        for mint in ("not-a-solana-mint", "0" * 32, "1" * 31):
+            with self.subTest(mint=mint):
+                mapping = OnChainAssetMapping(**{
+                    **self.mapping.__dict__, "mapping_id": "invalid-solana-mint-v1",
+                    "asset_id": "coingecko:usd-coin", "binance_symbol": "USDC",
+                    "network_id": "solana-mainnet", "network_family": "SOLANA",
+                    "chain_id": "mainnet-beta", "representation": "TOKEN",
+                    "contract_address": mint, "token_standard": "SPL_TOKEN",
+                })
+                result = self.engine._validate_mapping(mapping)
+                self.assertEqual(result.reason_code, "SOLANA_TOKEN_MINT_INVALID")
+
+    def test_evm_token_mapping_rejects_non_string_standard_without_exception(self):
+        for token_standard in ([], {}, 123, None):
+            with self.subTest(token_standard=token_standard):
+                mapping = OnChainAssetMapping(**{
+                    **self.mapping.__dict__, "mapping_id": "invalid-evm-standard-type-v1",
+                    "asset_id": "coingecko:usd-coin", "binance_symbol": "USDC",
+                    "network_id": "ethereum-mainnet", "network_family": "EVM",
+                    "chain_id": "1", "representation": "TOKEN",
+                    "contract_address": "0x" + "1" * 40,
+                    "token_standard": token_standard,
+                })
+                result = self.engine._validate_mapping(mapping)
+                self.assertEqual(result.reason_code, "EVM_TOKEN_STANDARD_UNSUPPORTED")
+
+    def test_evm_token_mapping_rejects_unsupported_token_standard(self):
+        mapping = OnChainAssetMapping(**{
+            **self.mapping.__dict__, "mapping_id": "invalid-evm-standard-v1",
+            "asset_id": "coingecko:usd-coin", "binance_symbol": "USDC",
+            "network_id": "ethereum-mainnet", "network_family": "EVM",
+            "chain_id": "1", "representation": "TOKEN",
+            "contract_address": "0x" + "1" * 40, "token_standard": "ERC721",
+        })
+        result = self.engine._validate_mapping(mapping)
+        self.assertEqual(result.reason_code, "EVM_TOKEN_STANDARD_UNSUPPORTED")
+
+    def test_evm_token_mapping_rejects_malformed_contract_address(self):
+        for contract_address in (
+            "not-an-evm-address", "0x" + "1" * 39, "0x" + "g" * 40,
+            "1" * 40,
+        ):
+            with self.subTest(contract_address=contract_address):
+                mapping = OnChainAssetMapping(**{
+                    **self.mapping.__dict__, "mapping_id": "invalid-evm-contract-v1",
+                    "asset_id": "coingecko:usd-coin", "binance_symbol": "USDC",
+                    "network_id": "ethereum-mainnet", "network_family": "EVM",
+                    "chain_id": "1", "representation": "TOKEN",
+                    "contract_address": contract_address, "token_standard": "ERC20",
+                })
+                result = self.engine._validate_mapping(mapping)
+                self.assertEqual(result.reason_code, "EVM_TOKEN_CONTRACT_ADDRESS_INVALID")
+
     def test_token_representation_requires_exact_contract_and_standard(self):
         token = OnChainAssetMapping(**{
             **self.mapping.__dict__, "representation": "TOKEN",
@@ -546,6 +611,27 @@ class OnChainIntelligenceTests(unittest.TestCase):
         result = self.engine.validate(self.eligibility, unsupported, self.observation)
         self.assertEqual(result.status, "UNAVAILABLE")
         self.assertEqual(result.reason_code, "NETWORK_NOT_CONFIGURED")
+
+    def test_list_verified_mappings_rejects_denormalized_identity_mismatch(self):
+        from layer1.onchain import OnChainStore
+
+        class Engine:
+            @staticmethod
+            def _validate_mapping(mapping): return None
+
+        store = OnChainStore(":memory:", engine=Engine())
+        try:
+            # The scalar index column claims Ethereum while the canonical
+            # mapping payload is a Bitcoin mapping.
+            store.conn.execute(
+                "INSERT INTO layer1_onchain_asset_mappings VALUES (?, ?, ?, ?)",
+                (self.mapping.mapping_id, self.mapping.asset_id, "ethereum-mainnet",
+                 store._canonical(self.mapping.__dict__)),
+            )
+            store.conn.commit()
+            self.assertEqual(store.list_verified_mappings("ethereum-mainnet"), [])
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":

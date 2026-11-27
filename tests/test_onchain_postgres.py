@@ -58,6 +58,43 @@ class PostgresAdapterContractTests(unittest.TestCase):
             (("cursor-events", "a" * 64), ("cursor-invalid", "c" * 64)),
         )
 
+    def test_postgres_list_page_receipts_rejects_sequence_gaps_even_when_digest_matches(self):
+        import hashlib
+        from dataclasses import asdict
+        from layer1.onchain_ingestion import OnChainIngestionStore
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        from layer1.onchain_providers import ProviderResponseReceipt
+
+        receipt = ProviderResponseReceipt(
+            sequence=2, provider="alchemy", network_id="bnb-smart-chain-mainnet",
+            method="eth_getLogs", request_sha256="a" * 64,
+            response_sha256="b" * 64, response_bytes=128, http_status=200,
+            received_at="2026-11-26T12:00:00+00:00",
+            endpoint_profile_sha256="ae9831d8c7fdd434108aa17b839f42f5c0ae1ce57069587a04bc0983e422252a",
+        )
+        page_material = {"cursor_key": "cursor"}
+        page_id = hashlib.sha256(
+            OnChainIngestionStore._canonical(page_material).encode("utf-8")
+        ).hexdigest()
+        payload = [asdict(receipt)]
+        receipt_digest = hashlib.sha256(
+            OnChainIngestionStore._canonical(payload).encode("utf-8")
+        ).hexdigest()
+
+        class Result:
+            def fetchall(self):
+                return [(page_id, page_material, receipt_digest, payload)]
+
+        class Connection:
+            def execute(self, query, params):
+                self.query, self.params = query, params
+                return Result()
+
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        with self.assertRaisesRegex(ValueError, "receipt sequence"):
+            store.list_page_receipts("cursor")
+
     def test_postgres_page_commit_rejects_omitted_checkpoint_snapshot_before_database_access(self):
         from layer1.onchain_postgres import PostgresOnChainIngestionStore
         store = object.__new__(PostgresOnChainIngestionStore)
@@ -178,6 +215,179 @@ class PostgresAdapterContractTests(unittest.TestCase):
         self.assertTrue(callable(apply_postgres_migrations))
 
 
+    def test_postgres_page_commit_rejects_naive_canonical_block_time_before_database_access(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+
+        class Connection:
+            def transaction(self):
+                raise AssertionError("database transaction must not start for invalid canonical block time")
+
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        with self.assertRaisesRegex(ValueError, "timezone-aware ISO-8601"):
+            store.commit_page(
+                "cursor", {"next": 1}, (), expected_cursor=None,
+                scope_identity=("ethereum-mainnet", "alchemy", "contract:0x" + "1" * 40),
+                canonical_blocks=({
+                    "network_id": "ethereum-mainnet", "provider": "alchemy",
+                    "scope": "contract:0x" + "1" * 40, "block_number": 1,
+                    "block_hash": "0x" + "a" * 64,
+                    "block_time": "2026-11-27T12:00:00",
+                },),
+            )
+
+    def test_postgres_page_commit_rejects_naive_produced_solana_slot_time_before_database_access(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+
+        class Connection:
+            def transaction(self):
+                raise AssertionError("database transaction must not start for invalid Solana slot time")
+
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        with self.assertRaisesRegex(ValueError, "timezone-aware ISO-8601"):
+            store.commit_page(
+                "cursor", {"next": 1}, (), expected_cursor=None,
+                scope_identity=("solana-mainnet", "alchemy", "address:" + "A" * 32),
+                canonical_slots=({
+                    "network_id": "solana-mainnet", "provider": "alchemy",
+                    "scope": "address:" + "A" * 32, "slot": 1,
+                    "produced": True, "block_hash": "B" * 32,
+                    "block_time": "2026-11-27T12:00:00",
+                },),
+            )
+
+    def test_postgres_contract_accepts_produced_slot_with_unknown_time_and_quarantine(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        from tests.test_solana_normalization import BLOCKHASH, SIGNATURE
+
+        class Connection:
+            def transaction(self):
+                raise AssertionError("validation passed; transaction boundary reached")
+
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        scope = "address:wallet-test:mapping:sol-usdc-v1"
+        with self.assertRaisesRegex(AssertionError, "transaction boundary reached"):
+            store.commit_page(
+                "cursor", {"next_slot": 2}, (), expected_cursor=None,
+                scope_identity=("solana-mainnet", "alchemy", scope),
+                canonical_slots=({
+                    "network_id": "solana-mainnet", "provider": "alchemy",
+                    "scope": scope, "slot": 1, "produced": True,
+                    "block_hash": BLOCKHASH, "block_time": None,
+                },),
+                solana_quarantine_records=({
+                    "signature": SIGNATURE, "slot": 1, "transaction_index": 0,
+                    "block_hash": BLOCKHASH,
+                    "payload": {
+                        "block_time": None,
+                        "raw": {"slot": 1, "transaction": {"signatures": [SIGNATURE], "message": {}}, "meta": {"err": None}},
+                        "observed_at": "2026-11-27T12:00:00+00:00",
+                    },
+                },),
+            )
+
+    def test_postgres_contract_rejects_boolean_raw_slot_alias_in_quarantine(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        from tests.test_solana_normalization import BLOCKHASH, SIGNATURE
+
+        class Connection:
+            def transaction(self):
+                raise AssertionError("validation passed; transaction boundary reached")
+
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        scope = "address:wallet-test:mapping:sol-usdc-v1"
+        with self.assertRaisesRegex(ValueError, "Solana quarantine transaction record is malformed"):
+            store.commit_page(
+                "cursor", {"next_slot": 2}, (), expected_cursor=None,
+                scope_identity=("solana-mainnet", "alchemy", scope),
+                canonical_slots=({
+                    "network_id": "solana-mainnet", "provider": "alchemy",
+                    "scope": scope, "slot": 1, "produced": True,
+                    "block_hash": BLOCKHASH, "block_time": None,
+                },),
+                solana_quarantine_records=({
+                    "signature": SIGNATURE, "slot": 1, "transaction_index": 0,
+                    "block_hash": BLOCKHASH,
+                    "payload": {
+                        "block_time": None, "raw": {"slot": True},
+                        "observed_at": "2026-11-27T12:00:00+00:00",
+                    },
+                },),
+            )
+
+    def test_postgres_contract_rejects_raw_block_time_mismatch_in_quarantine(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        from tests.test_solana_normalization import BLOCKHASH, SIGNATURE
+
+        class Connection:
+            def transaction(self):
+                raise AssertionError("validation passed; transaction boundary reached")
+
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        scope = "address:wallet-test:mapping:sol-usdc-v1"
+        with self.assertRaisesRegex(ValueError, "Solana quarantine transaction record is malformed"):
+            store.commit_page(
+                "cursor", {"next_slot": 2}, (), expected_cursor=None,
+                scope_identity=("solana-mainnet", "alchemy", scope),
+                canonical_slots=({
+                    "network_id": "solana-mainnet", "provider": "alchemy",
+                    "scope": scope, "slot": 1, "produced": True,
+                    "block_hash": BLOCKHASH, "block_time": None,
+                },),
+                solana_quarantine_records=({
+                    "signature": SIGNATURE, "slot": 1, "transaction_index": 0,
+                    "block_hash": BLOCKHASH,
+                    "payload": {
+                        "block_time": 100, "raw": {"slot": 1, "blockTime": 101},
+                        "observed_at": "2026-11-27T12:00:00+00:00",
+                    },
+                },),
+            )
+
+    def test_postgres_contract_rejects_missing_transaction_execution_status_in_quarantine(self):
+        from layer1.onchain_postgres import PostgresOnChainIngestionStore
+        from tests.test_solana_normalization import BLOCKHASH, SIGNATURE
+
+        class Connection:
+            def transaction(self):
+                raise AssertionError("validation passed; transaction boundary reached")
+
+        store = object.__new__(PostgresOnChainIngestionStore)
+        store.conn = Connection()
+        scope = "address:wallet-test:mapping:sol-usdc-v1"
+        with self.assertRaisesRegex(ValueError, "Solana quarantine transaction record is malformed"):
+            store.commit_page(
+                "cursor", {"next_slot": 2}, (), expected_cursor=None,
+                scope_identity=("solana-mainnet", "alchemy", scope),
+                canonical_slots=({
+                    "network_id": "solana-mainnet", "provider": "alchemy",
+                    "scope": scope, "slot": 1, "produced": True,
+                    "block_hash": BLOCKHASH, "block_time": None,
+                },),
+                solana_quarantine_records=({
+                    "signature": SIGNATURE, "slot": 1, "transaction_index": 0,
+                    "block_hash": BLOCKHASH,
+                    "payload": {
+                        "block_time": None,
+                        "raw": {"slot": 1, "transaction": {"signatures": [SIGNATURE], "message": {}}, "meta": {}},
+                        "observed_at": "2026-11-27T12:00:00+00:00",
+                    },
+                },),
+            )
+
+    def test_solana_timestamp_quarantine_migration_relaxes_only_produced_slot_time(self):
+        from pathlib import Path
+        migration = Path("layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql").read_text()
+        self.assertIn("solana_slot_journal_time_quarantine_check", migration)
+        self.assertIn("produced = TRUE AND block_hash IS NOT NULL", migration)
+        self.assertIn("layer1_onchain_solana_quarantine", migration)
+        self.assertIn("REFERENCES layer1_onchain_ingestion_pages(page_id)", migration)
+
+
 def _dedicated_local_test_dsn():
     if not TEST_DSN:
         return False
@@ -269,6 +479,7 @@ class PostgresOnChainIngestionTests(unittest.TestCase):
             response_sha256="b" * 64, response_bytes=128, http_status=200,
             received_at="2026-11-26T12:00:00+00:00",
             endpoint_profile_sha256="ae9831d8c7fdd434108aa17b839f42f5c0ae1ce57069587a04bc0983e422252a",
+            tls_peer_certificate_sha256="c" * 64,
         )
         @_capture_provider_run_receipts
         def captured():
@@ -302,6 +513,7 @@ class PostgresOnChainIngestionTests(unittest.TestCase):
             response_sha256="b" * 64, response_bytes=128, http_status=200,
             received_at="2026-11-26T12:00:00+00:00",
             endpoint_profile_sha256="ae9831d8c7fdd434108aa17b839f42f5c0ae1ce57069587a04bc0983e422252a",
+            tls_peer_certificate_sha256="c" * 64,
         )
         @_capture_provider_run_receipts
         def captured():
@@ -358,6 +570,7 @@ class PostgresOnChainIngestionTests(unittest.TestCase):
             response_sha256="b" * 64, response_bytes=128, http_status=200,
             received_at="2026-11-26T12:00:00+00:00",
             endpoint_profile_sha256="ae9831d8c7fdd434108aa17b839f42f5c0ae1ce57069587a04bc0983e422252a",
+            tls_peer_certificate_sha256="c" * 64,
         )
         @_capture_provider_run_receipts
         def captured():
@@ -1089,3 +1302,112 @@ class PostgresLegacyReceiptFingerprintAcceptanceTests(unittest.TestCase):
         store.conn = Connection()
         with self.assertRaisesRegex(ValueError, "endpoint profile fingerprint"):
             store.get_page_acceptance_material(material["cursor_key"], page_id)
+
+
+class PostgresLatestObservationOrderingIntegrityTests(unittest.TestCase):
+    def test_latest_accepted_observation_orders_by_signed_payload_timestamp(self):
+        from dataclasses import asdict, replace
+        from datetime import datetime
+        from layer1.onchain import OnChainValidationResult
+        from layer1.onchain_postgres import PostgresOnChainStore
+        from tests.test_onchain_intelligence import OnChainIntelligenceTests
+
+        fixture = OnChainIntelligenceTests()
+        fixture.setUp()
+        mapping = fixture.mapping
+        older = fixture.observation
+        newer = replace(
+            older, observation_id=older.observation_id + "-newer",
+            observed_at="2027-01-01T12:00:00+00:00",
+        )
+        # Simulate a corrupted denormalized SQL column: the older signed JSON
+        # payload is made to sort ahead of the newer signed JSON payload.
+        denormalized_sort_keys = {
+            older.observation_id: "2027-12-31T00:00:00+00:00",
+            newer.observation_id: "2020-01-01T00:00:00+00:00",
+        }
+        validation = OnChainValidationResult(
+            status="ACCEPTED", reason_code="ACCEPTED", reason="fixture",
+            observation_id=older.observation_id, asset_id=older.asset_id,
+            mapping_id=older.mapping_id, network_id=older.network_id,
+            provider=older.provider, provenance_cursor_key="cursor",
+            provenance_page_id="a" * 64, provenance_observation_id=older.observation_id,
+        )
+        newer_validation = replace(
+            validation, observation_id=newer.observation_id,
+            provenance_observation_id=newer.observation_id,
+        )
+        malformed = replace(
+            older, observation_id=older.observation_id + "-malformed",
+            observed_at="not-an-iso-timestamp",
+        )
+        malformed_validation = replace(
+            validation, observation_id=malformed.observation_id,
+            provenance_observation_id=malformed.observation_id,
+        )
+        observation_rows = [
+            (asdict(older), asdict(validation)),
+            (asdict(newer), asdict(newer_validation)),
+            (asdict(malformed), asdict(malformed_validation)),
+        ]
+        denormalized_sort_keys[malformed.observation_id] = "2030-01-01T00:00:00+00:00"
+
+        class Result:
+            def __init__(self, rows): self.rows = rows
+            def fetchall(self): return self.rows
+            def fetchone(self): return self.rows[0] if self.rows else None
+
+        class Connection:
+            def execute(self, query, params=()):
+                if "FROM layer1_onchain_observations" in query:
+                    if "payload_json->>'observed_at'" in query:
+                        rows = sorted(
+                            observation_rows,
+                            key=lambda row: datetime.fromisoformat(row[0]["observed_at"].replace("Z", "+00:00")),
+                            reverse=True,
+                        )
+                    else:
+                        rows = sorted(
+                            observation_rows,
+                            key=lambda row: denormalized_sort_keys[row[0]["observation_id"]],
+                            reverse=True,
+                        )
+                    return Result(rows)
+                if "FROM layer1_onchain_asset_mappings" in query:
+                    return Result([(asdict(mapping),)])
+                raise AssertionError("unexpected SQL in latest-observation ordering test")
+
+        class Engine:
+            def verify_persisted_acceptance_receipt(self, observation, validation): return True
+            def verify_observation_provenance(self, ingestion_store, provenance, mapping, observation): return True
+
+        store = object.__new__(PostgresOnChainStore)
+        store.conn = Connection()
+        store.engine = Engine()
+        store.ingestion_store = object()
+
+        result = store.get_latest_accepted_observation(mapping.mapping_id)
+        self.assertEqual(result.observation_id, newer.observation_id)
+
+
+class PostgresMappingProjectionIntegrityTests(unittest.TestCase):
+    def test_postgres_verified_mapping_list_rejects_denormalized_identity_mismatch(self):
+        from dataclasses import asdict
+        from layer1.onchain_postgres import PostgresOnChainStore
+        from tests.test_onchain_intelligence import OnChainIntelligenceTests
+
+        fixture = OnChainIntelligenceTests()
+        fixture.setUp()
+        mapping = fixture.mapping
+        class Result:
+            def fetchall(self):
+                return [(mapping.mapping_id, mapping.asset_id, "ethereum-mainnet", asdict(mapping))]
+        class Connection:
+            def execute(self, query, params=()): return Result()
+        class Engine:
+            @staticmethod
+            def _validate_mapping(value): return None
+        store = object.__new__(PostgresOnChainStore)
+        store.conn = Connection()
+        store.engine = Engine()
+        self.assertEqual(store.list_verified_mappings("ethereum-mainnet"), [])

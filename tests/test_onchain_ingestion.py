@@ -49,6 +49,73 @@ class OnChainIngestionStoreTests(unittest.TestCase):
             canonical_status=status, provenance="eth_getLogs",
         )
 
+    def test_sqlite_quarantine_rejects_boolean_raw_slot_alias(self):
+        from tests.test_solana_normalization import BLOCKHASH, SIGNATURE
+        scope = "address:wallet-test:mapping:sol-usdc-v1"
+        with self.assertRaisesRegex(ValueError, "Solana quarantine transaction record is malformed"):
+            self.store.commit_page(
+                "solana:wallet-test", {"next_slot": 2}, (), expected_cursor=None,
+                scope_identity=("solana-mainnet", "alchemy", scope),
+                canonical_slots=({
+                    "network_id": "solana-mainnet", "provider": "alchemy",
+                    "scope": scope, "slot": 1, "produced": True,
+                    "block_hash": BLOCKHASH, "block_time": None,
+                },),
+                solana_quarantine_records=({
+                    "signature": SIGNATURE, "slot": 1, "transaction_index": 0,
+                    "block_hash": BLOCKHASH,
+                    "payload": {
+                        "block_time": None, "raw": {"slot": True},
+                        "observed_at": "2026-11-27T12:00:00+00:00",
+                    },
+                },),
+            )
+
+    def test_sqlite_quarantine_rejects_raw_block_time_mismatch(self):
+        from tests.test_solana_normalization import BLOCKHASH, SIGNATURE
+        scope = "address:wallet-test:mapping:sol-usdc-v1"
+        with self.assertRaisesRegex(ValueError, "Solana quarantine transaction record is malformed"):
+            self.store.commit_page(
+                "solana:wallet-test", {"next_slot": 2}, (), expected_cursor=None,
+                scope_identity=("solana-mainnet", "alchemy", scope),
+                canonical_slots=({
+                    "network_id": "solana-mainnet", "provider": "alchemy",
+                    "scope": scope, "slot": 1, "produced": True,
+                    "block_hash": BLOCKHASH, "block_time": None,
+                },),
+                solana_quarantine_records=({
+                    "signature": SIGNATURE, "slot": 1, "transaction_index": 0,
+                    "block_hash": BLOCKHASH,
+                    "payload": {
+                        "block_time": 100, "raw": {"slot": 1, "blockTime": 101},
+                        "observed_at": "2026-11-27T12:00:00+00:00",
+                    },
+                },),
+            )
+
+    def test_sqlite_quarantine_rejects_missing_transaction_execution_status(self):
+        from tests.test_solana_normalization import BLOCKHASH, SIGNATURE
+        scope = "address:wallet-test:mapping:sol-usdc-v1"
+        with self.assertRaisesRegex(ValueError, "Solana quarantine transaction record is malformed"):
+            self.store.commit_page(
+                "solana:wallet-test", {"next_slot": 2}, (), expected_cursor=None,
+                scope_identity=("solana-mainnet", "alchemy", scope),
+                canonical_slots=({
+                    "network_id": "solana-mainnet", "provider": "alchemy",
+                    "scope": scope, "slot": 1, "produced": True,
+                    "block_hash": BLOCKHASH, "block_time": None,
+                },),
+                solana_quarantine_records=({
+                    "signature": SIGNATURE, "slot": 1, "transaction_index": 0,
+                    "block_hash": BLOCKHASH,
+                    "payload": {
+                        "block_time": None,
+                        "raw": {"slot": 1, "transaction": {"signatures": [SIGNATURE], "message": {}}, "meta": {}},
+                        "observed_at": "2026-11-27T12:00:00+00:00",
+                    },
+                },),
+            )
+
     def test_finality_snapshot_rejects_boolean_version_and_wrong_network_policy(self):
         with self.assertRaisesRegex(ValueError, "identity is invalid"):
             OnChainFinalitySnapshot(
@@ -162,6 +229,7 @@ class OnChainIngestionStoreTests(unittest.TestCase):
             response_sha256="b" * 64, response_bytes=128, http_status=200,
             received_at="2026-11-26T12:00:00+00:00",
             endpoint_profile_sha256="ae9831d8c7fdd434108aa17b839f42f5c0ae1ce57069587a04bc0983e422252a",
+            tls_peer_certificate_sha256="c" * 64,
         )
         database = os.path.join(self.tmp.name, "ingestion.sqlite3")
         self.store.commit_page(
@@ -188,6 +256,7 @@ class OnChainIngestionStoreTests(unittest.TestCase):
             def __init__(self, raw):
                 self.raw = raw
                 self.headers = {"Content-Length": str(len(raw))}
+                self.peer_certificate_sha256 = "d" * 64
 
             def __enter__(self): return self
             def __exit__(self, *args): return False
@@ -237,6 +306,7 @@ class OnChainIngestionStoreTests(unittest.TestCase):
             item.endpoint_profile_sha256 == _approved_endpoint_profile_sha256("alchemy", "ethereum-mainnet")
             for item in saved
         ))
+        self.assertEqual([item.tls_peer_certificate_sha256 for item in saved], ["d" * 64] * 3)
         page_id = self.store.list_ingestion_pages()[0][1]
         material = self.store.get_page_acceptance_material(cursor_key, page_id)
         self.assertEqual(material["receipts"], [item.__dict__ for item in page.response_receipts])
@@ -267,6 +337,35 @@ class OnChainIngestionStoreTests(unittest.TestCase):
             self.store.commit_page(**args, provider_receipts=captured_batch(substituted))
         self.assertEqual(self.store.get_checkpoint(key), {"next_block": 101})
         self.assertEqual(self.store.list_page_receipts(key), (first,))
+
+    def test_list_page_receipts_rejects_sequence_gaps_even_when_receipt_digest_matches(self):
+        key = "alchemy:bnb-smart-chain:receipt-sequence-gap"
+        identity = ("bnb-smart-chain-mainnet", "alchemy", "contract:0x" + "1" * 40)
+        receipt = ProviderResponseReceipt(
+            sequence=1, provider="alchemy", network_id="bnb-smart-chain-mainnet",
+            method="eth_getLogs", request_sha256="a" * 64,
+            response_sha256="b" * 64, response_bytes=128, http_status=200,
+            received_at="2026-11-26T12:00:00+00:00",
+            endpoint_profile_sha256="ae9831d8c7fdd434108aa17b839f42f5c0ae1ce57069587a04bc0983e422252a",
+        )
+        self.store.commit_page(
+            key, {"next_block": 101}, [self.event()], expected_cursor=None,
+            scope_identity=identity, provider_receipts=captured_batch(receipt),
+        )
+        page_id, payload = self.store.conn.execute(
+            "SELECT page_id, receipts_json FROM layer1_onchain_ingestion_pages WHERE cursor_key=?",
+            (key,),
+        ).fetchone()
+        tampered = json.loads(payload)
+        tampered[0]["sequence"] = 2
+        canonical = self.store._canonical(tampered)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        self.store.conn.execute(
+            "UPDATE layer1_onchain_ingestion_pages SET receipts_json=?, receipt_sha256=? WHERE page_id=?",
+            (canonical, digest, page_id),
+        )
+        with self.assertRaisesRegex(ValueError, "receipt sequence"):
+            self.store.list_page_receipts(key)
 
     def test_persisted_provider_receipt_digest_detects_storage_tampering(self):
         key = "alchemy:bnb-smart-chain:contract-1"
@@ -1107,10 +1206,70 @@ class BitcoinOutputNormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "confirmation threshold"):
             self.normalize(history=self.history(confirmations=5))
 
+    def test_rejects_boolean_or_float_block_height_in_transaction_details(self):
+        from dataclasses import replace
+        source = replace(self.history(), block_height=1, block_time=1)
+        for value in (True, 1.0):
+            with self.subTest(value=value):
+                details = self.transaction()
+                details["blockHeight"] = value
+                details["blockTime"] = 1
+                with self.assertRaisesRegex(ValueError, "transaction identity or block reference"):
+                    self.normalize(history=source, transaction=details)
+
+    def test_rejects_boolean_or_float_block_time_in_transaction_details(self):
+        from dataclasses import replace
+        source = replace(self.history(), block_height=1, block_time=1)
+        for value in (True, 1.0):
+            with self.subTest(value=value):
+                details = self.transaction()
+                details["blockHeight"] = 1
+                details["blockTime"] = value
+                with self.assertRaisesRegex(ValueError, "transaction identity or block reference"):
+                    self.normalize(history=source, transaction=details)
+
+    def test_rejects_raw_address_history_txid_that_diverges_from_typed_record(self):
+        history = self.history()
+        history.raw["txid"] = "f" * 64
+        with self.assertRaises(ValueError):
+            self.normalize(history=history)
+
+    def test_rejects_raw_numeric_history_fields_using_boolean_integer_aliases(self):
+        history = self.history(confirmations=8)
+        raw = dict(history.raw, blockHeight=True)
+        history = BitcoinAddressTransaction(
+            history.txid, 8, 1, history.block_hash, history.block_time, "CONFIRMED", raw,
+        )
+        transaction = self.transaction()
+        transaction.update({"blockHeight": 1, "confirmations": 8})
+        with self.assertRaises(ValueError):
+            self.normalize(history=history, transaction=transaction)
+
     def test_rejects_transaction_identity_or_block_reference_mismatch(self):
         details = self.transaction()
         details["txid"] = "f" * 64
         with self.assertRaisesRegex(ValueError, "transaction identity"):
+            self.normalize(transaction=details)
+
+    def test_rejects_bitcoin_output_above_consensus_maximum_money(self):
+        details = self.transaction()
+        details["vout"][0]["value"] = "2100000000000001"
+        with self.assertRaisesRegex(ValueError, "Bitcoin output value exceeds maximum money"):
+            self.normalize(transaction=details)
+
+    def test_rejects_total_bitcoin_outputs_above_consensus_maximum_money(self):
+        details = self.transaction()
+        details["vout"] = [
+            {"n": 0, "value": "1200000000000000", "addresses": [self.destination_one], "isAddress": True},
+            {"n": 1, "value": "900000000000001", "addresses": [self.destination_two], "isAddress": True},
+        ]
+        with self.assertRaisesRegex(ValueError, "Bitcoin transaction output total exceeds maximum money"):
+            self.normalize(transaction=details)
+
+    def test_rejects_bitcoin_output_index_above_uint32(self):
+        details = self.transaction()
+        details["vout"][0]["n"] = 4294967296
+        with self.assertRaisesRegex(ValueError, "output index"):
             self.normalize(transaction=details)
 
     def test_rejects_duplicate_output_indexes(self):

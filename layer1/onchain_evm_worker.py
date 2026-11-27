@@ -12,8 +12,11 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from .onchain import OnChainAssetMapping
-from .onchain_ingestion import OnChainFinalitySnapshot, normalize_evm_transfer_log
+from .onchain_ingestion import (
+    OnChainFinalitySnapshot, normalize_evm_transfer_log, _is_uint256_decimal,
+)
 from .onchain_providers import (
+    MAX_DATETIME_UNIX_TIMESTAMP,
     EvmTokenTransferLog, ProviderTransportError, retry_provider_operation,
     _capture_provider_run_receipts, drain_provider_run_receipts,
     include_provider_receipts_in_current_scope,
@@ -90,6 +93,10 @@ class EvmTransferIngestionWorker:
         if (network is None or mapping.network_family != "EVM"
                 or mapping.chain_id != network["chain_id"] or mapping.mapping_status != "VERIFIED"
                 or mapping.representation not in {"TOKEN", "WRAPPED", "BRIDGED", "DERIVATIVE"}
+                or not isinstance(mapping.token_standard, str)
+                or mapping.token_standard not in {"ERC20", "ERC-20"}
+                or isinstance(mapping.decimals, bool) or not isinstance(mapping.decimals, int)
+                or not 0 <= mapping.decimals <= 36
                 or not isinstance(mapping.contract_address, str)
                 or re.fullmatch(r"0x[0-9a-fA-F]{40}", mapping.contract_address) is None):
             raise ValueError("worker encountered a mapping outside the verified Ethereum/BNB token scope")
@@ -104,8 +111,14 @@ class EvmTransferIngestionWorker:
                 or header.get("number") != height
                 or not isinstance(header.get("hash"), str)
                 or re.fullmatch(r"0x[0-9a-fA-F]{64}", header["hash"]) is None
+                or not isinstance(header.get("parent_hash"), str)
+                or re.fullmatch(r"0x[0-9a-f]{64}", header["parent_hash"]) is None
+                or not isinstance(header.get("transaction_hashes"), tuple)
+                or any(not isinstance(item, str) or re.fullmatch(r"0x[0-9a-f]{64}", item) is None
+                       for item in header["transaction_hashes"])
+                or len(set(header["transaction_hashes"])) != len(header["transaction_hashes"])
                 or isinstance(header.get("timestamp"), bool)
-                or not isinstance(header.get("timestamp"), int) or header["timestamp"] < 0):
+                or not isinstance(header.get("timestamp"), int) or not 0 <= header["timestamp"] <= MAX_DATETIME_UNIX_TIMESTAMP):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "provider returned a malformed canonical block header")
         return header
 
@@ -195,6 +208,12 @@ class EvmTransferIngestionWorker:
             bounded_end = min(finalized_height, next_block + self.max_blocks_per_run - 1)
             if next_block > bounded_end:
                 continue
+            previous_header_hash = None
+            previous_header_timestamp = None
+            if next_block > initial_block:
+                anchor_header = self._header(mapping, next_block - 1)
+                previous_header_hash = anchor_header["hash"].lower()
+                previous_header_timestamp = anchor_header["timestamp"]
             for range_start in range(next_block, bounded_end + 1, MAX_PROVIDER_BLOCK_SPAN):
                 range_end = min(bounded_end, range_start + MAX_PROVIDER_BLOCK_SPAN - 1)
                 page = self._retry(lambda: logs_method(
@@ -221,7 +240,29 @@ class EvmTransferIngestionWorker:
                     height: self._header(mapping, height)
                     for height in range(range_start, range_end + 1)
                 }
+                for height in range(range_start, range_end + 1):
+                    header = headers[height]
+                    if (previous_header_hash is not None
+                            and header["parent_hash"].lower() != previous_header_hash):
+                        raise ProviderTransportError(
+                            "EVM_PARENT_HASH_MISMATCH",
+                            "EVM finalized block parentHash does not match the preceding fetched block hash",
+                        )
+                    if previous_header_timestamp is not None:
+                        invalid_time_order = (
+                            header["timestamp"] <= previous_header_timestamp
+                            if mapping.network_id == "ethereum-mainnet"
+                            else header["timestamp"] < previous_header_timestamp
+                        )
+                        if invalid_time_order:
+                            raise ProviderTransportError(
+                                "EVM_BLOCK_TIMESTAMP_NOT_MONOTONIC",
+                                "EVM finalized block timestamp is not monotonic relative to its parent",
+                            )
+                    previous_header_hash = header["hash"].lower()
+                    previous_header_timestamp = header["timestamp"]
                 normalized = []
+                seen_log_positions = set()
                 observed = self.clock()
                 if observed.tzinfo is None or observed.utcoffset() is None:
                     raise ValueError("worker clock must return a timezone-aware datetime")
@@ -229,10 +270,55 @@ class EvmTransferIngestionWorker:
                 for record in records:
                     if not isinstance(record, EvmTokenTransferLog):
                         raise ProviderTransportError("INVALID_PROVIDER_DATA", "provider log page contains a malformed record")
+                    if (
+                        not isinstance(record.network_id, str)
+                        or not isinstance(record.contract_address, str)
+                        or re.fullmatch(r"0x[0-9a-fA-F]{40}", record.contract_address) is None
+                        or not isinstance(record.from_address, str)
+                        or re.fullmatch(r"0x[0-9a-fA-F]{40}", record.from_address) is None
+                        or not isinstance(record.to_address, str)
+                        or re.fullmatch(r"0x[0-9a-fA-F]{40}", record.to_address) is None
+                        or not _is_uint256_decimal(record.amount_raw)
+                        or isinstance(record.block_number, bool)
+                        or not isinstance(record.block_number, int)
+                        or record.block_number < 0
+                        or not isinstance(record.block_hash, str)
+                        or re.fullmatch(r"0x[0-9a-fA-F]{64}", record.block_hash) is None
+                        or not isinstance(record.transaction_hash, str)
+                        or re.fullmatch(r"0x[0-9a-fA-F]{64}", record.transaction_hash) is None
+                        or isinstance(record.log_index, bool)
+                        or not isinstance(record.log_index, int)
+                        or record.log_index < 0
+                        or not isinstance(record.removed, bool)
+                        or isinstance(record.transaction_index, bool)
+                        or not isinstance(record.transaction_index, int)
+                        or record.transaction_index < 0
+                    ):
+                        raise ProviderTransportError(
+                            "INVALID_PROVIDER_DATA",
+                            "provider EVM transfer log contains malformed identity, address, amount, index or flag fields",
+                        )
                     if (record.network_id != mapping.network_id
                             or record.contract_address.lower() != mapping.contract_address.lower()
                             or not range_start <= record.block_number <= range_end):
                         raise ProviderTransportError("PROVIDER_SCOPE_MISMATCH", "provider log is outside the requested mapping/range")
+                    header = headers[record.block_number]
+                    transaction_index = record.transaction_index
+                    if (isinstance(transaction_index, bool) or not isinstance(transaction_index, int)
+                            or transaction_index < 0
+                            or transaction_index >= len(header["transaction_hashes"])
+                            or header["transaction_hashes"][transaction_index] != record.transaction_hash.lower()):
+                        raise ProviderTransportError(
+                            "EVM_TRANSACTION_INDEX_MISMATCH",
+                            "EVM log transactionHash does not match the canonical block transaction at transactionIndex",
+                        )
+                    log_position = (record.block_number, record.log_index)
+                    if log_position in seen_log_positions:
+                        raise ProviderTransportError(
+                            "DUPLICATE_EVM_LOG_INDEX",
+                            "provider returned more than one log for the same block-global logIndex",
+                        )
+                    seen_log_positions.add(log_position)
                     header = headers[record.block_number]
                     block_time = datetime.fromtimestamp(header["timestamp"], timezone.utc).isoformat()
                     normalized.append(replace(

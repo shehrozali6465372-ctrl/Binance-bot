@@ -42,14 +42,19 @@ _TLS_FIXTURES = Path(__file__).parent / "fixtures" / "onchain_tls"
 
 
 @contextmanager
-def _local_tls_server(cert_name):
+def _local_tls_server(cert_name, payload=b"tls-test-ok"):
     class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            payload = b"tls-test-ok"
+        def _send_payload(self):
             self.send_response(200)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+
+        def do_GET(self):
+            self._send_payload()
+
+        def do_POST(self):
+            self._send_payload()
 
         def log_message(self, *args):
             return
@@ -90,6 +95,7 @@ class FakeTransport:
         self.last_response_attestation = {
             "request_sha256": hashlib.sha256(f"request-{ordinal}".encode()).hexdigest(),
             "response_sha256": hashlib.sha256(json.dumps(response, sort_keys=True).encode()).hexdigest(),
+            "tls_peer_certificate_sha256": "e" * 64,
             **({"endpoint_profile_sha256": self.endpoint_profile_sha256}
                if self.endpoint_profile_sha256 is not None else {}),
             "response_bytes": len(json.dumps(response).encode()),
@@ -100,9 +106,10 @@ class FakeTransport:
 
 
 class FakeHttpResponse:
-    def __init__(self, payload, headers=None):
+    def __init__(self, payload, headers=None, peer_certificate_sha256=None):
         self.payload = payload
         self.headers = headers or {}
+        self.peer_certificate_sha256 = peer_certificate_sha256
         self.read_calls = []
         self._offset = 0
 
@@ -129,6 +136,21 @@ class OnChainProviderTests(unittest.TestCase):
             self.assertEqual(timeout, 10)
             return FakeTransport(responses, calls, endpoint)
         return AlchemyReadOnlyAdapter("test-key", transport_factory=factory), calls
+
+    def test_provider_response_receipt_requires_timezone_aware_iso_received_at(self):
+        from layer1.onchain_providers import ProviderResponseReceipt
+        base = {
+            "sequence": 1, "provider": "alchemy", "network_id": "ethereum-mainnet",
+            "method": "eth_getBlockByNumber", "request_sha256": "a" * 64,
+            "response_sha256": "b" * 64, "response_bytes": 10,
+            "http_status": 200,
+        }
+        for received_at in ("not-a-timestamp", "2026-11-27T12:00:00"):
+            with self.subTest(received_at=received_at):
+                with self.assertRaisesRegex(ValueError, "timezone-aware ISO-8601"):
+                    ProviderResponseReceipt(**base, received_at=received_at)
+        valid = ProviderResponseReceipt(**base, received_at="2026-11-27T12:00:00Z")
+        self.assertEqual(valid.received_at, "2026-11-27T12:00:00Z")
 
     def test_nested_page_capture_keeps_worker_supporting_calls_and_drains_ordered_receipts(self):
         from layer1.onchain_providers import ProviderResponseReceipt
@@ -272,6 +294,15 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertFalse(is_valid_xrpl_classic_address("X7F9A2D3E4B5C6D7E8F9A2D3E4B5C6D7E8F9A2D3"))
         self.assertFalse(is_valid_xrpl_classic_address("r" + "1" * 24))
 
+    def test_bitcoin_probe_rejects_header_time_above_protocol_uint32(self):
+        adapter, _ = self.adapter([
+            900000, "a" * 64,
+            {"height": 900000, "hash": "a" * 64, "time": 2**32, "confirmations": 6},
+        ])
+        with self.assertRaises(ProviderTransportError) as error:
+            adapter.probe("bitcoin-mainnet")
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+
     def test_alchemy_bitcoin_probe_uses_read_only_header_and_preserves_confirmation_count(self):
         adapter, calls = self.adapter([
             900000,
@@ -289,15 +320,55 @@ class OnChainProviderTests(unittest.TestCase):
         block_hash = "a" * 64
         adapter, calls = self.adapter([900000, block_hash, {
             "height": 900000, "hash": block_hash, "time": 1794398340,
+            "previousblockhash": "b" * 64,
         }])
         self.assertEqual(adapter.fetch_bitcoin_tip_height(), 900000)
         header = adapter.fetch_bitcoin_block_header(900000)
         self.assertEqual(header, {
-            "number": 900000, "hash": block_hash, "timestamp": 1794398340,
+            "number": 900000, "hash": block_hash,
+            "previous_block_hash": "b" * 64, "timestamp": 1794398340,
         })
         self.assertEqual([call[0] for call in calls], [
             "getblockcount", "getblockhash", "getblockheader",
         ])
+
+    def test_bitcoin_worker_header_rejects_boolean_height_alias(self):
+        adapter, _ = self.adapter([
+            "a" * 64,
+            {"height": True, "hash": "a" * 64, "time": 1794398340,
+             "previousblockhash": "b" * 64},
+        ])
+        with self.assertRaises(ProviderTransportError):
+            adapter.fetch_bitcoin_block_header(1)
+
+    def test_bitcoin_worker_header_rejects_timestamp_above_uint32(self):
+        adapter, _ = self.adapter([
+            "a" * 64,
+            {"height": 900000, "hash": "a" * 64, "time": 2**32,
+                "previousblockhash": "b" * 64},
+        ])
+        with self.assertRaises(ProviderTransportError):
+            adapter.fetch_bitcoin_block_header(900000)
+
+    def test_bitcoin_worker_header_rejects_missing_or_malformed_previous_block_hash(self):
+        for previous_hash in (None, "not-a-block-hash", "a" * 63):
+            header = {
+                "height": 900000, "hash": "a" * 64, "time": 1794398340,
+            }
+            if previous_hash is not None:
+                header["previousblockhash"] = previous_hash
+            adapter, _ = self.adapter(["a" * 64, header])
+            with self.subTest(previous_hash=previous_hash):
+                with self.assertRaises(ProviderTransportError):
+                    adapter.fetch_bitcoin_block_header(900000)
+
+    def test_bitcoin_genesis_header_may_omit_previous_block_hash(self):
+        adapter, _ = self.adapter([
+            "0" * 64,
+            {"height": 0, "hash": "0" * 64, "time": 1231006505},
+        ])
+        header = adapter.fetch_bitcoin_block_header(0)
+        self.assertIsNone(header["previous_block_hash"])
 
     def test_bitcoin_worker_rejects_canonical_header_hash_mismatch(self):
         adapter, _ = self.adapter([
@@ -317,7 +388,20 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual([call[0] for call in calls], ["eth_chainId", "eth_getBlockByNumber"])
         self.assertEqual(calls[1][1], ["finalized", False])
 
-    def test_ethereum_eth_getlogs_decodes_exact_transfer_log_and_checks_finality(self):
+    def test_ethereum_and_bnb_probes_reject_timestamps_outside_datetime_storage_range(self):
+        for network_id, chain_id in (("ethereum-mainnet", "0x1"),
+                                     ("bnb-smart-chain-mainnet", "0x38")):
+            adapter, _ = self.adapter([
+                chain_id,
+                {"number": "0x100", "hash": "0x" + "a" * 64,
+                 "timestamp": hex(253402300800)},
+            ])
+            with self.subTest(network_id=network_id):
+                with self.assertRaises(ProviderTransportError) as error:
+                    adapter.probe(network_id)
+                self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+
+    def test_ethereum_eth_getlogs_rejects_missing_transaction_index(self):
         contract = "0x" + "3" * 40
         sender = "0x" + "1" * 40
         recipient = "0x" + "2" * 40
@@ -328,15 +412,51 @@ class OnChainProviderTests(unittest.TestCase):
             "topics": [transfer_topic, "0x" + "0" * 24 + sender[2:], "0x" + "0" * 24 + recipient[2:]],
             "data": "0x" + format(123456, "064x"),
         }
+        with self.assertRaises(ProviderTransportError):
+            AlchemyReadOnlyAdapter._decode_evm_transfer_log(
+                "ethereum-mainnet", contract, log, 256, 265,
+            )
+
+    def test_ethereum_eth_getlogs_rejects_missing_removed_flag(self):
+        contract = "0x" + "3" * 40
+        sender = "0x" + "1" * 40
+        recipient = "0x" + "2" * 40
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        log = {
+            "address": contract, "blockNumber": "0x100", "blockHash": "0x" + "a" * 64,
+            "transactionHash": "0x" + "b" * 64, "transactionIndex": "0x0", "logIndex": "0x7",
+            "topics": [transfer_topic, "0x" + "0" * 24 + sender[2:], "0x" + "0" * 24 + recipient[2:]],
+            "data": "0x" + format(123456, "064x"),
+        }
+        with self.assertRaises(ProviderTransportError):
+            AlchemyReadOnlyAdapter._decode_evm_transfer_log(
+                "ethereum-mainnet", contract, log, 256, 265,
+            )
+
+    def test_ethereum_eth_getlogs_decodes_exact_transfer_log_and_checks_finality(self):
+        contract = "0x" + "3" * 40
+        sender = "0x" + "1" * 40
+        recipient = "0x" + "2" * 40
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        log = {
+            "address": contract, "blockNumber": "0x100", "blockHash": "0x" + "a" * 64,
+            "transactionHash": "0x" + "b" * 64, "transactionIndex": "0x0", "logIndex": "0x7", "removed": False,
+            "topics": [transfer_topic, "0x" + "0" * 24 + sender[2:], "0x" + "0" * 24 + recipient[2:]],
+            "data": "0x" + format(123456, "064x"),
+        }
         adapter, calls = self.adapter([
             "0x1", {"number": "0x200", "hash": "0x" + "c" * 64},
-            {"number": "0x100", "hash": "0x" + "c" * 64, "timestamp": "0x6553f100"},
+            {"number": "0x100", "hash": "0x" + "c" * 64,
+             "parentHash": "0x" + "d" * 64, "timestamp": "0x6553f100",
+             "transactions": ["0x" + "b" * 64]},
             "0x1", {"number": "0x200", "hash": "0x" + "c" * 64},
             [log],
         ])
         self.assertEqual(adapter.fetch_ethereum_finalized_height(), 512)
         header = adapter.fetch_ethereum_block_header(256)
         self.assertEqual(header["hash"], "0x" + "c" * 64)
+        self.assertEqual(header["parent_hash"], "0x" + "d" * 64)
+        self.assertEqual(header["transaction_hashes"], ("0x" + "b" * 64,))
         page = adapter.fetch_ethereum_erc20_transfer_logs(contract, 256, 265)
         self.assertEqual(page.network_id, "ethereum-mainnet")
         self.assertEqual(page.finalized_height, 512)
@@ -346,6 +466,7 @@ class OnChainProviderTests(unittest.TestCase):
                 "https://eth-mainnet.g.alchemy.com/v2/test-key"
             ) for item in page.response_receipts
         ))
+        self.assertEqual([item.tls_peer_certificate_sha256 for item in page.response_receipts], ["e" * 64] * 3)
         self.assertEqual([item.method for item in page.response_receipts], [
             "eth_chainId", "eth_getBlockByNumber", "eth_getLogs",
         ])
@@ -373,7 +494,9 @@ class OnChainProviderTests(unittest.TestCase):
             self.assertEqual(timeout, 10)
             raw = raw_responses[len(response_index)]
             response_index.append(raw)
-            return FakeHttpResponse(raw, headers={"Content-Length": str(len(raw))})
+            return FakeHttpResponse(
+                raw, headers={"Content-Length": str(len(raw))}, peer_certificate_sha256="f" * 64,
+            )
         adapter = AlchemyReadOnlyAdapter(
             "test-key",
             transport_factory=lambda endpoint, timeout: ReadOnlyJsonRpcTransport(
@@ -388,6 +511,7 @@ class OnChainProviderTests(unittest.TestCase):
         )
         self.assertEqual([receipt.response_bytes for receipt in page.response_receipts],
                          [len(raw) for raw in raw_responses])
+        self.assertEqual([receipt.tls_peer_certificate_sha256 for receipt in page.response_receipts], ["f" * 64] * 3)
         self.assertEqual([receipt.sequence for receipt in page.response_receipts], [1, 2, 3])
         self.assertTrue(all(receipt.http_status == 200 for receipt in page.response_receipts))
         self.assertNotIn("test-key", repr(page.response_receipts))
@@ -401,7 +525,9 @@ class OnChainProviderTests(unittest.TestCase):
         adapter, _ = self.adapter([
             "0x1", {"number": "0x200", "hash": "0x" + "b" * 64},
             "0x1", {"number": "0x200", "hash": "0x" + "b" * 64}, [],
-            {"number": "0x100", "hash": "0x" + "c" * 64, "timestamp": "0x6553f100"},
+            {"number": "0x100", "hash": "0x" + "c" * 64,
+             "parentHash": "0x" + "e" * 64, "timestamp": "0x6553f100",
+             "transactions": ["0x" + "d" * 64]},
         ])
 
         @_capture_provider_run_receipts
@@ -449,6 +575,43 @@ class OnChainProviderTests(unittest.TestCase):
             adapter.fetch_ethereum_erc20_transfer_logs("0x" + "3" * 40, 257, 257)
         self.assertEqual(error.exception.reason_code, "BLOCK_RANGE_NOT_FINALIZED")
 
+    def test_ethereum_block_header_rejects_missing_malformed_or_duplicate_transaction_hashes(self):
+        for transactions in (None, ["not-a-transaction-hash"], ["0x" + "a" * 64, "0x" + "A" * 64]):
+            response = {
+                "number": "0x100", "hash": "0x" + "c" * 64,
+                "parentHash": "0x" + "d" * 64,
+                "timestamp": "0x6553f100",
+            }
+            if transactions is not None:
+                response["transactions"] = transactions
+            adapter, _ = self.adapter([response])
+            with self.subTest(transactions=transactions):
+                with self.assertRaises(ProviderTransportError):
+                    adapter.fetch_ethereum_block_header(256)
+
+    def test_ethereum_block_header_rejects_missing_or_malformed_parent_hash(self):
+        for parent_hash in (None, "not-a-block-hash", "0x" + "a" * 63):
+            response = {
+                "number": "0x100", "hash": "0x" + "c" * 64,
+                "timestamp": "0x6553f100", "transactions": [],
+            }
+            if parent_hash is not None:
+                response["parentHash"] = parent_hash
+            adapter, _ = self.adapter([response])
+            with self.subTest(parent_hash=parent_hash):
+                with self.assertRaises(ProviderTransportError):
+                    adapter.fetch_ethereum_block_header(256)
+
+    def test_ethereum_block_header_rejects_timestamp_outside_datetime_storage_range(self):
+        adapter, _ = self.adapter([{
+            "number": "0x100", "hash": "0x" + "c" * 64,
+            "parentHash": "0x" + "d" * 64, "timestamp": hex(253402300800),
+            "transactions": [],
+        }])
+        with self.assertRaises(ProviderTransportError) as error:
+            adapter.fetch_ethereum_block_header(256)
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+
     def test_ethereum_block_header_rejects_wrong_height(self):
         adapter, _ = self.adapter([
             {"number": "0x101", "hash": "0x" + "c" * 64, "timestamp": "0x6553f100"},
@@ -461,13 +624,17 @@ class OnChainProviderTests(unittest.TestCase):
         adapter, calls = self.adapter([
             "0x38",
             {"number": "0x200", "hash": "0x" + "b" * 64},
-            {"number": "0x201", "hash": "0x" + "c" * 64, "timestamp": "0x6553f100"},
+            {"number": "0x201", "hash": "0x" + "c" * 64,
+             "parentHash": "0x" + "e" * 64, "timestamp": "0x6553f100",
+             "transactions": ["0x" + "d" * 64]},
         ])
         self.assertEqual(adapter.fetch_bnb_finalized_height(), 512)
         header = adapter.fetch_bnb_block_header(513)
         self.assertEqual(header["number"], 513)
         self.assertEqual(header["hash"], "0x" + "c" * 64)
+        self.assertEqual(header["parent_hash"], "0x" + "e" * 64)
         self.assertEqual(header["timestamp"], int("6553f100", 16))
+        self.assertEqual(header["transaction_hashes"], ("0x" + "d" * 64,))
         self.assertEqual([call[0] for call in calls], [
             "eth_chainId", "eth_getFinalizedHeader", "eth_getBlockByNumber",
         ])
@@ -478,7 +645,9 @@ class OnChainProviderTests(unittest.TestCase):
         adapter, _ = self.adapter([
             "0x38", {"number": "0x200", "hash": "0x" + "b" * 64},
             "0x38", {"number": "0x200", "hash": "0x" + "b" * 64}, [],
-            {"number": "0x100", "hash": "0x" + "c" * 64, "timestamp": "0x6553f100"},
+            {"number": "0x100", "hash": "0x" + "c" * 64,
+             "parentHash": "0x" + "e" * 64, "timestamp": "0x6553f100",
+             "transactions": ["0x" + "d" * 64]},
         ])
 
         @_capture_provider_run_receipts
@@ -499,6 +668,29 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual([item.sequence for item in batch.receipts], list(range(1, 7)))
         expected_profile = _approved_endpoint_profile_sha256("alchemy", "bnb-smart-chain-mainnet")
         self.assertTrue(all(item.endpoint_profile_sha256 == expected_profile for item in batch.receipts))
+
+    def test_bnb_block_header_rejects_timestamp_outside_datetime_storage_range(self):
+        adapter, _ = self.adapter([{
+            "number": "0x201", "hash": "0x" + "c" * 64,
+            "parentHash": "0x" + "e" * 64, "timestamp": hex(253402300800),
+            "transactions": [],
+        }])
+        with self.assertRaises(ProviderTransportError) as error:
+            adapter.fetch_bnb_block_header(513)
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+
+    def test_bnb_block_header_rejects_missing_or_malformed_parent_hash(self):
+        for parent_hash in (None, "not-a-block-hash", "0x" + "a" * 63):
+            response = {
+                "number": "0x201", "hash": "0x" + "c" * 64,
+                "timestamp": "0x6553f100", "transactions": [],
+            }
+            if parent_hash is not None:
+                response["parentHash"] = parent_hash
+            adapter, _ = self.adapter([response])
+            with self.subTest(parent_hash=parent_hash):
+                with self.assertRaises(ProviderTransportError):
+                    adapter.fetch_bnb_block_header(513)
 
     def test_bnb_block_header_rejects_wrong_returned_height(self):
         adapter, _ = self.adapter([
@@ -656,6 +848,16 @@ class OnChainProviderTests(unittest.TestCase):
             adapter.probe()
         self.assertEqual(error.exception.reason_code, "XRPL_HISTORY_WINDOW_UNAVAILABLE")
 
+    def test_rest_transport_rejects_falsey_non_dict_query_values(self):
+        for invalid_query in ([], (), "", 0, False):
+            with self.subTest(query=invalid_query):
+                transport = ReadOnlyJsonRpcTransport(
+                    "https://provider.example/v2/key", max_response_bytes=64,
+                    opener=lambda request, timeout: FakeHttpResponse(b'{"ok":true}'),
+                )
+                with self.assertRaisesRegex(ValueError, "query parameters"):
+                    transport.get_json("api/v1/status", invalid_query)
+
     def test_rest_transport_uses_get_and_never_exposes_api_key_in_errors(self):
         captured = {}
         def opener(request, timeout):
@@ -809,7 +1011,7 @@ class OnChainProviderTests(unittest.TestCase):
         transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
         log = {
             "address": contract, "blockNumber": "0x64", "blockHash": "0x" + "a" * 64,
-            "transactionHash": "0x" + "b" * 64, "logIndex": "0x2", "removed": False,
+            "transactionHash": "0x" + "b" * 64, "transactionIndex": "0x0", "logIndex": "0x2", "removed": False,
             "topics": [transfer_topic, "0x" + "0" * 24 + sender[2:], "0x" + "0" * 24 + recipient[2:]],
             "data": "0x" + format(123456, "064x"),
         }
@@ -839,7 +1041,7 @@ class OnChainProviderTests(unittest.TestCase):
         topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
         log = {
             "address": contract, "blockNumber": "0x64", "blockHash": "0x" + "a" * 64,
-            "transactionHash": "0x" + "b" * 64, "logIndex": "0x2", "removed": True,
+            "transactionHash": "0x" + "b" * 64, "transactionIndex": "0x0", "logIndex": "0x2", "removed": True,
             "topics": [topic, "0x" + "0" * 64, "0x" + "0" * 64],
             "data": "0x" + "0" * 64,
         }
@@ -848,6 +1050,41 @@ class OnChainProviderTests(unittest.TestCase):
         ])
         event = adapter.fetch_bnb_erc20_transfer_logs(contract, 100, 100).records[0]
         self.assertTrue(event.removed)
+
+    def test_solana_finalized_slot_rejects_value_above_signed_int64(self):
+        adapter, _ = self.adapter([SOLANA_MAINNET_GENESIS_HASH, 2**63])
+        with self.assertRaises(ProviderTransportError):
+            adapter.fetch_solana_finalized_slot()
+
+    def test_solana_address_history_rejects_slot_above_signed_int64(self):
+        address = "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY"
+        signature = "3jUKrQp1UGq5ih6FTDUUt2kkqUfoG2o4kY5T1DoVHK2tXXDLdxJSXzuJGY4JPoRivgbi45U2bc7LZfMa6C4R3szX"
+        adapter, _ = self.adapter([
+            SOLANA_MAINNET_GENESIS_HASH,
+            {"transactions": [{"signature": signature, "slot": 2**63,
+                "transactionIndex": 0, "transaction": {"signatures": [signature]},
+                "meta": {"err": None}}], "paginationToken": None},
+        ])
+        with self.assertRaises(ProviderTransportError):
+            adapter.fetch_solana_address_transactions(address)
+
+    def test_solana_produced_slots_reject_value_above_signed_int64(self):
+        adapter, _ = self.adapter([[2**63]])
+        with self.assertRaises(ProviderTransportError):
+            adapter.fetch_solana_produced_slots(0, 1)
+
+    def test_solana_block_header_rejects_requested_slot_above_u64(self):
+        adapter, calls = self.adapter([])
+        with self.assertRaises(ValueError):
+            adapter.fetch_solana_block_header(2**64)
+        self.assertEqual(calls, [])
+
+    def test_solana_slot_range_rejects_bounds_above_signed_int64_before_io(self):
+        address = "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY"
+        adapter, calls = self.adapter([])
+        with self.assertRaises(ValueError):
+            adapter.fetch_solana_address_transactions(address, slot_start=0, slot_end=2**63)
+        self.assertEqual(calls, [])
 
     def test_solana_address_history_rejects_base58_string_that_decodes_to_33_bytes(self):
         adapter, calls = self.adapter([])
@@ -875,6 +1112,21 @@ class OnChainProviderTests(unittest.TestCase):
         page = adapter.fetch_solana_address_transactions(address, slot_start=10, slot_end=20)
         self.assertEqual(page.records, ())
         self.assertEqual(calls[1][0], "getTransactionsForAddress")
+
+    def test_solana_address_history_rejects_block_time_outside_datetime_storage_range(self):
+        address = "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY"
+        signature = "3jUKrQp1UGq5ih6FTDUUt2kkqUfoG2o4kY5T1DoVHK2tXXDLdxJSXzuJGY4JPoRivgbi45U2bc7LZfMa6C4R3szX"
+        adapter, _ = self.adapter([
+            SOLANA_MAINNET_GENESIS_HASH,
+            {"transactions": [{
+                "signature": signature, "slot": 300, "transactionIndex": 17,
+                "blockTime": 253402300800,
+                "transaction": {"signatures": [signature]}, "meta": {"err": None},
+            }], "paginationToken": None},
+        ])
+        with self.assertRaises(ProviderTransportError) as error:
+            adapter.fetch_solana_address_transactions(address, slot_start=300, slot_end=300)
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
 
     def test_solana_address_transaction_pages_require_finalized_commitment(self):
         address = "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY"
@@ -910,9 +1162,9 @@ class OnChainProviderTests(unittest.TestCase):
         adapter, _ = self.adapter([
             SOLANA_MAINNET_GENESIS_HASH, 310, [300, 301],
             {"blockhash": blockhash, "previousBlockhash": blockhash,
-             "blockTime": 1794398400, "parentSlot": 299},
+             "blockTime": 1794398400, "parentSlot": 299, "signatures": ["1" * 64]},
             {"blockhash": blockhash, "previousBlockhash": blockhash,
-             "blockTime": 1794398401, "parentSlot": 300},
+             "blockTime": 1794398401, "parentSlot": 300, "signatures": ["1" * 64]},
             SOLANA_MAINNET_GENESIS_HASH, {"transactions": [], "paginationToken": None},
         ])
 
@@ -964,7 +1216,8 @@ class OnChainProviderTests(unittest.TestCase):
         adapter, calls = self.adapter([
             SOLANA_MAINNET_GENESIS_HASH, 300,
             {"blockhash": blockhash, "previousBlockhash": blockhash,
-             "blockTime": 1794398400, "parentSlot": 299},
+             "blockTime": 1794398400, "parentSlot": 299,
+             "signatures": ["1" * 64]},
         ])
         self.assertEqual(adapter.fetch_solana_finalized_slot(), 300)
         header = adapter.fetch_solana_block_header(300)
@@ -973,9 +1226,44 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual(header["timestamp"], 1794398400)
         self.assertEqual(header["parent_slot"], 299)
         self.assertEqual(header["previous_block_hash"], blockhash)
+        self.assertEqual(header["transaction_signatures"], ("1" * 64,))
         self.assertEqual(header["finality_reference"], "commitment=finalized")
+        self.assertEqual(calls[2][1][1]["transactionDetails"], "signatures")
         self.assertEqual(calls[2][1][1]["maxSupportedTransactionVersion"], 1)
         self.assertEqual([call[0] for call in calls], ["getGenesisHash", "getSlot", "getBlock"])
+
+    def test_solana_block_header_rejects_timestamp_outside_datetime_storage_range(self):
+        blockhash = "11111111111111111111111111111111"
+        adapter, _ = self.adapter([{
+            "blockhash": blockhash, "previousBlockhash": blockhash,
+            "blockTime": 253402300800, "parentSlot": 299, "signatures": ["1" * 64],
+        }])
+        with self.assertRaises(ProviderTransportError) as error:
+            adapter.fetch_solana_block_header(300)
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+
+    def test_solana_block_header_preserves_protocol_null_block_time_as_unknown(self):
+        blockhash = "11111111111111111111111111111111"
+        adapter, _ = self.adapter([{
+            "blockhash": blockhash, "previousBlockhash": blockhash,
+            "blockTime": None, "parentSlot": 299, "signatures": ["1" * 64],
+        }])
+        header = adapter.fetch_solana_block_header(300)
+        self.assertIsNone(header["timestamp"])
+        self.assertEqual(header["hash"], blockhash)
+
+    def test_solana_block_header_rejects_missing_or_duplicate_transaction_signatures(self):
+        block = {"blockhash": "11111111111111111111111111111111",
+                 "previousBlockhash": "11111111111111111111111111111111",
+                 "blockTime": 1794398400, "parentSlot": 299}
+        for signatures in (None, ["not-a-transaction-signature"], ["1" * 64, "1" * 64]):
+            response = dict(block)
+            if signatures is not None:
+                response["signatures"] = signatures
+            adapter, _ = self.adapter([response])
+            with self.subTest(signatures=signatures):
+                with self.assertRaises(ProviderTransportError):
+                    adapter.fetch_solana_block_header(300)
 
     def test_solana_block_header_rejects_missing_parent_linkage(self):
         adapter, _ = self.adapter([{"blockhash": "11111111111111111111111111111111",
@@ -1065,6 +1353,20 @@ class OnChainProviderTests(unittest.TestCase):
             adapter.fetch_bitcoin_transaction("a" * 64)
         self.assertEqual(error.exception.reason_code, "TRANSACTION_ID_MISMATCH")
 
+    def test_bitcoin_address_history_rejects_nonempty_page_with_zero_total_pages(self):
+        class FakeRestTransport(FakeTransport):
+            def get_json(self, path, query=None):
+                return {"address": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT", "page": 1, "totalPages": 0,
+                        "txs": [{"txid": "a" * 64, "blockHeight": 900000,
+                                 "blockHash": "b" * 64, "blockTime": 1794398340,
+                                 "confirmations": 3}]}
+        adapter = AlchemyReadOnlyAdapter(
+            "test-key", transport_factory=lambda endpoint, timeout: FakeRestTransport([], []),
+        )
+        with self.assertRaises(ProviderTransportError) as error:
+            adapter.fetch_bitcoin_address_transactions("1BoatSLRHtKNngkdXEeobR76b53LETtpyT", page=1, page_size=25)
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+
     def test_bitcoin_address_history_uses_bounded_rest_pagination(self):
         calls = []
         class FakeRestTransport(FakeTransport):
@@ -1093,6 +1395,7 @@ class OnChainProviderTests(unittest.TestCase):
                 "account": "rLNaPoKeeBjZe2qs6x52yVPZpZ8td4dc6w", "validated": True,
                 "ledger_index_min": 100, "ledger_index_max": 200,
                 "transactions": [{"hash": "A" * 64, "validated": True, "ledger_index": 150,
+                                  "ledger_hash": "B" * 64,
                                   "tx_json": {"TransactionType": "Payment"}, "meta": {"TransactionResult": "tesSUCCESS"}}],
                 "marker": {"ledger": 150, "seq": 5},
             }], calls, endpoint)
@@ -1117,6 +1420,45 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual(params["marker"], {"ledger": 149, "seq": 4})
         self.assertTrue(page.complete is False)
 
+    def test_xrpl_account_tx_rejects_missing_or_malformed_transaction_ledger_hash(self):
+        for ledger_hash in (None, "bad", "G" * 64):
+            with self.subTest(ledger_hash=ledger_hash):
+                row = {"hash": "A" * 64, "validated": True, "ledger_index": 150,
+                       "tx_json": {"TransactionType": "Payment"},
+                       "meta": {"TransactionResult": "tesSUCCESS"}}
+                if ledger_hash is not None:
+                    row["ledger_hash"] = ledger_hash
+                adapter = ChainstackXrplReadOnlyAdapter(
+                    "https://xrpl-mainnet.core.chainstack.com/redacted-key",
+                    transport_factory=lambda url, timeout, row=row: FakeTransport([{
+                        "account": "rLNaPoKeeBjZe2qs6x52yVPZpZ8td4dc6w", "validated": True,
+                        "ledger_index_min": 100, "ledger_index_max": 200,
+                        "transactions": [row],
+                    }], [], url),
+                )
+                with self.assertRaises(ProviderTransportError):
+                    adapter.fetch_account_transactions(
+                        "rLNaPoKeeBjZe2qs6x52yVPZpZ8td4dc6w", 100, 200)
+
+    def test_xrpl_ledger_header_rejects_index_above_uint32(self):
+        adapter = ChainstackXrplReadOnlyAdapter(
+            "https://xrpl-mainnet.core.chainstack.com/redacted-key",
+            transport_factory=lambda url, timeout: FakeTransport([], [], url),
+        )
+        with self.assertRaises(ValueError):
+            adapter.fetch_ledger_header(2**32)
+
+    def test_xrpl_account_tx_rejects_requested_ledger_range_above_uint32(self):
+        calls = []
+        adapter = ChainstackXrplReadOnlyAdapter(
+            "https://xrpl-mainnet.core.chainstack.com/redacted-key",
+            transport_factory=lambda url, timeout: FakeTransport([], calls, url),
+        )
+        with self.assertRaises(ValueError):
+            adapter.fetch_account_transactions(
+                "rLNaPoKeeBjZe2qs6x52yVPZpZ8td4dc6w", 1, 2**32)
+        self.assertEqual(calls, [])
+
     def test_xrpl_fetches_exact_validated_ledger_header_and_converts_ripple_close_time(self):
         calls = []
         def factory(endpoint, timeout):
@@ -1136,6 +1478,18 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual(header["finality_reference"], "validated=true")
         self.assertEqual(calls[0][0], "ledger")
         self.assertEqual(calls[0][1][0], {"ledger_index": 500, "transactions": False, "expand": False})
+
+    def test_xrpl_ledger_header_rejects_close_time_above_uint32(self):
+        adapter = ChainstackXrplReadOnlyAdapter(
+            "https://xrpl-mainnet.core.chainstack.com/redacted-key",
+            transport_factory=lambda url, timeout: FakeTransport([{
+                "validated": True, "ledger_index": 500, "ledger_hash": "B" * 64,
+                "ledger": {"ledger_index": 500, "ledger_hash": "B" * 64,
+                           "parent_hash": "A" * 64, "close_time": 2**32},
+            }], [], url),
+        )
+        with self.assertRaises(ProviderTransportError):
+            adapter.fetch_ledger_header(500)
 
     def test_xrpl_ledger_header_rejects_conflicting_outer_and_nested_ledger_index(self):
         adapter = ChainstackXrplReadOnlyAdapter(
@@ -1359,6 +1713,19 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(context.check_hostname)
 
+    def test_provider_tls_records_leaf_peer_certificate_fingerprint_after_validation(self):
+        ca_file = str(_TLS_FIXTURES / "ca.pem")
+        cert_der = ssl.PEM_cert_to_DER_cert((_TLS_FIXTURES / "trusted-ip.pem").read_text())
+        expected = hashlib.sha256(cert_der).hexdigest()
+        raw = b'{"jsonrpc":"2.0","id":1,"result":"0x1"}'
+        with patch.dict(os.environ, {"SSL_CERT_FILE": ca_file, "SSL_CERT_DIR": ""}):
+            with _local_tls_server("trusted-ip", payload=raw) as url:
+                transport = ReadOnlyJsonRpcTransport(url, max_response_bytes=1024)
+                self.assertEqual(transport.call("eth_chainId"), "0x1")
+                self.assertEqual(
+                    transport.last_response_attestation["tls_peer_certificate_sha256"], expected,
+                )
+
     def test_provider_tls_accepts_trusted_chain_and_matching_ip_san(self):
         ca_file = str(_TLS_FIXTURES / "ca.pem")
         with patch.dict(os.environ, {"SSL_CERT_FILE": ca_file, "SSL_CERT_DIR": ""}):
@@ -1412,6 +1779,73 @@ class OnChainProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mainnet endpoint"):
             ChainstackXrplReadOnlyAdapter("http://xrpl-mainnet.core.chainstack.com/key")
 
+
+    def test_transport_rejects_duplicate_json_object_members_in_rest_and_rpc(self):
+        rest_payload = b'{"status":"success","status":"error"}'
+        rest_response = FakeHttpResponse(rest_payload)
+        rest_transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/v2/key", max_response_bytes=128,
+            opener=lambda request, timeout: rest_response,
+        )
+        with self.assertRaises(ProviderTransportError) as rest_error:
+            rest_transport.get_json("api/v1/status")
+        self.assertEqual(rest_error.exception.reason_code, "INVALID_JSON")
+
+        rpc_payload = (
+            b'{"jsonrpc":"2.0","id":1,"result":{"height":100},'
+            b'"result":{"height":1}}'
+        )
+        rpc_response = FakeHttpResponse(rpc_payload)
+        rpc_transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/v2/key", max_response_bytes=256,
+            opener=lambda request, timeout: rpc_response,
+        )
+        with self.assertRaises(ProviderTransportError) as rpc_error:
+            rpc_transport.call("eth_chainId")
+        self.assertEqual(rpc_error.exception.reason_code, "INVALID_JSON")
+
+    def test_transport_rejects_nonstandard_nonfinite_json_numbers(self):
+        rest_response = FakeHttpResponse(b'{"metric":NaN}')
+        rest_transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/v2/key", max_response_bytes=64,
+            opener=lambda request, timeout: rest_response,
+        )
+        with self.assertRaises(ProviderTransportError) as rest_error:
+            rest_transport.get_json("api/v1/status")
+        self.assertEqual(rest_error.exception.reason_code, "INVALID_JSON")
+
+        rpc_response = FakeHttpResponse(
+            b'{"jsonrpc":"2.0","id":1,"result":{"amount":Infinity}}',
+        )
+        rpc_transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/v2/key", max_response_bytes=128,
+            opener=lambda request, timeout: rpc_response,
+        )
+        with self.assertRaises(ProviderTransportError) as rpc_error:
+            rpc_transport.call("eth_chainId")
+        self.assertEqual(rpc_error.exception.reason_code, "INVALID_JSON")
+
+    def test_transport_maps_excessively_nested_json_to_invalid_json(self):
+        nested = b"[" * 1100 + b"0" + b"]" * 1100
+        rest_response = FakeHttpResponse(b'{"nested":' + nested + b'}')
+        rest_transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/v2/key", max_response_bytes=4096,
+            opener=lambda request, timeout: rest_response,
+        )
+        with self.assertRaises(ProviderTransportError) as rest_error:
+            rest_transport.get_json("api/v1/status")
+        self.assertEqual(rest_error.exception.reason_code, "INVALID_JSON")
+
+        rpc_response = FakeHttpResponse(
+            b'{"jsonrpc":"2.0","id":1,"result":' + nested + b'}',
+        )
+        rpc_transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/v2/key", max_response_bytes=4096,
+            opener=lambda request, timeout: rpc_response,
+        )
+        with self.assertRaises(ProviderTransportError) as rpc_error:
+            rpc_transport.call("eth_chainId")
+        self.assertEqual(rpc_error.exception.reason_code, "INVALID_JSON")
 
     def test_transport_requires_an_explicit_positive_response_byte_limit(self):
         with self.assertRaisesRegex(ValueError, "max_response_bytes"):
@@ -1517,7 +1951,9 @@ class OnChainProviderTests(unittest.TestCase):
 
     def test_json_rpc_transport_exposes_non_secret_request_and_exact_response_digests(self):
         raw = b'{"jsonrpc":"2.0","id":1,"result":"0x1"}'
-        response = FakeHttpResponse(raw, headers={"Content-Length": str(len(raw))})
+        response = FakeHttpResponse(
+            raw, headers={"Content-Length": str(len(raw))}, peer_certificate_sha256="c" * 64,
+        )
         transport = ReadOnlyJsonRpcTransport(
             "https://provider.example/v2/credential-must-not-leak",
             opener=lambda request, timeout: response, max_response_bytes=1024,
@@ -1525,6 +1961,7 @@ class OnChainProviderTests(unittest.TestCase):
         self.assertEqual(transport.call("eth_chainId"), "0x1")
         attestation = transport.last_response_attestation
         self.assertEqual(attestation["response_sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(attestation["tls_peer_certificate_sha256"], "c" * 64)
         self.assertEqual(attestation["response_bytes"], len(raw))
         self.assertEqual(attestation["http_status"], 200)
         self.assertRegex(attestation["request_sha256"], r"^[a-f0-9]{64}$")
@@ -1534,6 +1971,19 @@ class OnChainProviderTests(unittest.TestCase):
         )
         self.assertNotIn("credential-must-not-leak", repr(attestation))
         self.assertNotIn("provider.example", repr(attestation))
+
+    def test_default_verified_transport_fails_closed_without_peer_certificate_evidence(self):
+        raw = b'{"jsonrpc":"2.0","id":1,"result":"0x1"}'
+        transport = ReadOnlyJsonRpcTransport(
+            "https://provider.example/key", max_response_bytes=1024,
+        )
+        transport._opener = lambda request, timeout: FakeHttpResponse(
+            raw, headers={"Content-Length": str(len(raw))},
+        )
+        with self.assertRaises(ProviderTransportError) as error:
+            transport.call("eth_chainId")
+        self.assertEqual(error.exception.reason_code, "MISSING_TLS_PEER_CERTIFICATE_EVIDENCE")
+        self.assertIsNone(transport.last_response_attestation)
 
     def test_failed_transport_call_clears_previous_response_metadata(self):
         responses = [

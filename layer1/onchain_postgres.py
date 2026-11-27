@@ -7,6 +7,7 @@ is performed here.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import re
@@ -16,7 +17,7 @@ from typing import Any, Iterable, Optional
 from .onchain_ingestion import NormalizedTransferEvent, OnChainIngestionStore
 from .onchain_providers import (
     CapturedProviderReceiptBatch, ProviderResponseReceipt,
-    _approved_endpoint_profile_sha256, _approved_endpoint_id,
+    _approved_endpoint_profile_sha256, _approved_endpoint_id, _solana_base58_decode,
 )
 
 _UNSET = object()
@@ -272,6 +273,8 @@ class PostgresOnChainIngestionStore:
         scope_identity: Any = None,
         provider_receipts: Optional[CapturedProviderReceiptBatch] = None,
         provider_observations: Iterable[dict] = (),
+        solana_quarantine_records: Iterable[dict] = (),
+        solana_quarantine_replayed: Iterable[str] = (),
     ) -> dict:
         if not isinstance(cursor_key, str) or not cursor_key.strip():
             raise ValueError("cursor_key must be a non-empty string")
@@ -281,6 +284,8 @@ class PostgresOnChainIngestionStore:
             raise ValueError("allow_recanonicalized must be boolean")
         network_id, provider, scope = self._identity(scope_identity)
         batch, blocks, slots = tuple(events), tuple(canonical_blocks), tuple(canonical_slots)
+        quarantine_records = tuple(solana_quarantine_records)
+        quarantine_replayed = tuple(solana_quarantine_replayed)
         anchor_observations = tuple(provider_observations)
         if provider_receipts is not None and (
             not isinstance(provider_receipts, CapturedProviderReceiptBatch)
@@ -314,6 +319,12 @@ class PostgresOnChainIngestionStore:
                     or not isinstance(block.get("block_hash"), str) or not block["block_hash"].strip()
                     or not isinstance(block.get("block_time"), str) or not block["block_time"].strip()):
                 raise ValueError("canonical block record is malformed or outside checkpoint scope")
+            try:
+                parsed = datetime.datetime.fromisoformat(block["block_time"].replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError("canonical block time must be timezone-aware ISO-8601") from None
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError("canonical block time must be timezone-aware ISO-8601")
         for slot in slots:
             if (not isinstance(slot, dict) or network_id != "solana-mainnet"
                     or slot.get("network_id") != network_id
@@ -322,8 +333,17 @@ class PostgresOnChainIngestionStore:
                     or slot["slot"] < 0 or not isinstance(slot.get("produced"), bool)):
                 raise ValueError("canonical Solana slot record is malformed or outside checkpoint scope")
             if slot["produced"]:
-                if not isinstance(slot.get("block_hash"), str) or not slot["block_hash"].strip() or not isinstance(slot.get("block_time"), str) or not slot["block_time"].strip():
-                    raise ValueError("produced Solana slots require block hash and time")
+                if not isinstance(slot.get("block_hash"), str) or not slot["block_hash"].strip():
+                    raise ValueError("produced Solana slots require block hash")
+                if slot.get("block_time") is not None:
+                    if not isinstance(slot.get("block_time"), str) or not slot["block_time"].strip():
+                        raise ValueError("Solana slot block time must be null or timezone-aware ISO-8601")
+                    try:
+                        parsed = datetime.datetime.fromisoformat(slot["block_time"].replace("Z", "+00:00"))
+                    except ValueError:
+                        raise ValueError("Solana slot block time must be timezone-aware ISO-8601") from None
+                    if parsed.tzinfo is None or parsed.utcoffset() is None:
+                        raise ValueError("Solana slot block time must be timezone-aware ISO-8601")
             elif slot.get("block_hash") is not None or slot.get("block_time") is not None:
                 raise ValueError("skipped Solana slots must have null block hash and time")
 
@@ -362,8 +382,60 @@ class PostgresOnChainIngestionStore:
                         or block["block_time"] != item["block_time"]):
                     raise ValueError("provider observation does not bind to canonical block evidence")
 
+        if (quarantine_records or quarantine_replayed) and network_id != "solana-mainnet":
+            raise ValueError("Solana quarantine requires a Solana scope identity")
+        for record in quarantine_records:
+            if (not isinstance(record, dict)
+                    or isinstance(record.get("slot"), bool) or not isinstance(record.get("slot"), int)
+                    or record["slot"] < 0
+                    or isinstance(record.get("transaction_index"), bool)
+                    or not isinstance(record.get("transaction_index"), int)
+                    or record["transaction_index"] < 0
+                    or not isinstance(record.get("signature"), str)
+                    or re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", record["signature"]) is None
+                    or len(_solana_base58_decode(record["signature"])) != 64
+                    or not isinstance(record.get("block_hash"), str)
+                    or len(_solana_base58_decode(record["block_hash"])) != 32
+                    or not isinstance(record.get("payload"), dict)
+                    or not isinstance(record["payload"].get("raw"), dict)
+                    or not isinstance(record["payload"]["raw"].get("transaction"), dict)
+                    or not isinstance(record["payload"]["raw"].get("meta"), dict)
+                    or "err" not in record["payload"]["raw"]["meta"]
+                    or not isinstance(record["payload"]["raw"]["transaction"].get("signatures"), list)
+                    or not record["payload"]["raw"]["transaction"]["signatures"]
+                    or record["payload"]["raw"]["transaction"]["signatures"][0] != record["signature"]
+                    or not isinstance(record["payload"]["raw"]["transaction"].get("message"), dict)
+                    or isinstance(record["payload"]["raw"].get("slot"), bool)
+                    or not isinstance(record["payload"]["raw"].get("slot"), int)
+                    or record["payload"]["raw"].get("slot") != record["slot"]
+                    or record["payload"]["raw"].get("signature") not in (None, record["signature"])
+                    or ("blockTime" in record["payload"]["raw"] and (
+                        (record["payload"]["raw"].get("blockTime") is not None and (
+                            isinstance(record["payload"]["raw"].get("blockTime"), bool)
+                            or not isinstance(record["payload"]["raw"].get("blockTime"), int)
+                            or record["payload"]["raw"].get("blockTime") <= 0))
+                        or record["payload"]["raw"].get("blockTime") != record["payload"].get("block_time")
+                    ))
+                    or not isinstance(record["payload"].get("observed_at"), str)
+                    or record["payload"].get("block_time") is not None
+                       and (isinstance(record["payload"].get("block_time"), bool)
+                            or not isinstance(record["payload"].get("block_time"), int)
+                            or record["payload"]["block_time"] <= 0)):
+                raise ValueError("Solana quarantine transaction record is malformed")
+            try:
+                observed_at = datetime.datetime.fromisoformat(record["payload"]["observed_at"].replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError("Solana quarantine observed_at must be timezone-aware ISO-8601") from None
+            if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+                raise ValueError("Solana quarantine observed_at must be timezone-aware ISO-8601")
+        if (len({record["signature"] for record in quarantine_records}) != len(quarantine_records)
+                or any(not isinstance(signature, str) or re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", signature) is None
+                       or len(_solana_base58_decode(signature)) != 64
+                       for signature in quarantine_replayed)
+                or len(set(quarantine_replayed)) != len(quarantine_replayed)):
+            raise ValueError("Solana quarantine signatures are malformed or duplicated")
+
         from psycopg.types.json import Jsonb
-        import datetime
         now = datetime.datetime.now(datetime.timezone.utc)
         inserted = duplicates = tombstoned = 0
         identity_text = "\x1f".join((network_id, provider, scope))
@@ -496,7 +568,7 @@ class PostgresOnChainIngestionStore:
 
             for slot in slots:
                 prior_slot = self.conn.execute(
-                    """SELECT produced, block_hash FROM layer1_onchain_solana_slot_journal
+                    """SELECT produced, block_hash, block_time FROM layer1_onchain_solana_slot_journal
                        WHERE network_id=%s AND provider=%s AND scope=%s AND slot=%s
                        FOR UPDATE""",
                     (network_id, provider, scope, slot["slot"]),
@@ -511,6 +583,10 @@ class PostgresOnChainIngestionStore:
                        WHERE (layer1_onchain_solana_slot_journal.produced=EXCLUDED.produced
                               AND layer1_onchain_solana_slot_journal.block_hash IS NOT DISTINCT FROM EXCLUDED.block_hash
                               AND layer1_onchain_solana_slot_journal.block_time IS NOT DISTINCT FROM EXCLUDED.block_time)
+                          OR (%s AND layer1_onchain_solana_slot_journal.produced=EXCLUDED.produced
+                              AND layer1_onchain_solana_slot_journal.block_hash IS NOT DISTINCT FROM EXCLUDED.block_hash
+                              AND layer1_onchain_solana_slot_journal.block_time IS NULL
+                              AND EXCLUDED.block_time IS NOT NULL)
                           OR (%s AND (
                               layer1_onchain_solana_slot_journal.produced IS DISTINCT FROM EXCLUDED.produced
                               OR layer1_onchain_solana_slot_journal.block_hash IS DISTINCT FROM EXCLUDED.block_hash
@@ -523,7 +599,8 @@ class PostgresOnChainIngestionStore:
                           ))
                        RETURNING slot""",
                     (slot["network_id"], provider, scope, slot["slot"], slot["produced"],
-                     slot.get("block_hash"), slot.get("block_time"), now, allow_recanonicalized),
+                     slot.get("block_hash"), slot.get("block_time"), now,
+                     allow_recanonicalized, allow_recanonicalized),
                 )
                 if result.fetchone() is None:
                     raise CanonicalBlockConflict("canonical Solana slot journal conflict")
@@ -546,6 +623,10 @@ class PostgresOnChainIngestionStore:
                 "canonical_blocks": list(blocks),
                 "canonical_slots": list(slots),
             }
+            if quarantine_records:
+                page_material["solana_quarantine_records"] = list(quarantine_records)
+            if quarantine_replayed:
+                page_material["solana_quarantine_replayed"] = list(quarantine_replayed)
             if anchor_observations:
                 page_material["provider_observations"] = list(anchor_observations)
             page_id = hashlib.sha256(
@@ -569,6 +650,36 @@ class PostgresOnChainIngestionStore:
                     (page_id, cursor_key, Jsonb([network_id, provider, scope]),
                      Jsonb(page_material), receipt_sha256, Jsonb(receipts_payload), now),
                 )
+            for record in quarantine_records:
+                payload = record["payload"]
+                prior = self.conn.execute(
+                    """SELECT slot, transaction_index, block_hash, payload_json
+                       FROM layer1_onchain_solana_quarantine
+                       WHERE network_id=%s AND provider=%s AND scope=%s AND signature=%s
+                       FOR UPDATE""",
+                    (network_id, provider, scope, record["signature"]),
+                ).fetchone()
+                expected = (record["slot"], record["transaction_index"], record["block_hash"], payload)
+                if prior is not None and prior != expected:
+                    raise ValueError("Solana quarantine transaction identity collision")
+                if prior is None:
+                    self.conn.execute(
+                        """INSERT INTO layer1_onchain_solana_quarantine
+                           (network_id, provider, scope, signature, slot, transaction_index,
+                            block_hash, payload_json, source_page_id, status)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING')""",
+                        (network_id, provider, scope, record["signature"], record["slot"],
+                         record["transaction_index"], record["block_hash"], Jsonb(payload), page_id),
+                    )
+            for signature in quarantine_replayed:
+                result = self.conn.execute(
+                    """UPDATE layer1_onchain_solana_quarantine SET status='REPLAYED', updated_at=%s
+                       WHERE network_id=%s AND provider=%s AND scope=%s
+                         AND signature=%s AND status='PENDING'""",
+                    (now, network_id, provider, scope, signature),
+                )
+                if result.rowcount != 1:
+                    raise ValueError("Solana quarantine replay does not reference one pending transaction")
             self.conn.execute(
                 """UPDATE layer1_onchain_ingestion_checkpoints
                    SET cursor_json=%s, revision=%s, updated_at=%s
@@ -596,7 +707,12 @@ class PostgresOnChainIngestionStore:
             actual_receipt_digest = hashlib.sha256(canonical_receipts.encode("utf-8")).hexdigest()
             if actual_receipt_digest != expected_digest:
                 raise ValueError("persisted provider receipt digest mismatch")
-            result.extend(ProviderResponseReceipt(**item) for item in payload)
+            if not isinstance(payload, list):
+                raise ValueError("persisted provider receipt collection is malformed")
+            receipts = tuple(ProviderResponseReceipt(**item) for item in payload)
+            if any(item.sequence != index for index, item in enumerate(receipts, 1)):
+                raise ValueError("persisted provider receipt sequence is invalid")
+            result.extend(receipts)
         return tuple(result)
 
     def get_page_acceptance_material(self, cursor_key: str, page_id: str) -> dict:
@@ -713,8 +829,32 @@ class PostgresOnChainIngestionStore:
             ).fetchone()
             actual_time = actual[2].isoformat() if actual and actual[2] else None
             expected = (bool(slot["produced"]), slot.get("block_hash"), slot.get("block_time"))
-            if actual is None or (actual[0], actual[1], actual_time) != expected:
+            if actual is None or (
+                (actual[0], actual[1], actual_time) != expected
+                and not (expected[0] is True and actual[0] is True
+                         and actual[1] == expected[1] and expected[2] is None
+                         and actual_time is not None)
+            ):
                 raise ValueError("persisted canonical Solana slot evidence no longer matches the committed page")
+        for record in page_material.get("solana_quarantine_records", []):
+            stored = self.conn.execute(
+                """SELECT slot, transaction_index, block_hash, payload_json, source_page_id
+                   FROM layer1_onchain_solana_quarantine
+                   WHERE network_id=%s AND provider=%s AND scope=%s AND signature=%s""",
+                (*scope_identity, record["signature"]),
+            ).fetchone()
+            expected = (record["slot"], record["transaction_index"], record["block_hash"],
+                        record["payload"], page_id)
+            if stored is None or stored != expected:
+                raise ValueError("persisted Solana quarantine record no longer matches its source page")
+        for signature in page_material.get("solana_quarantine_replayed", []):
+            stored = self.conn.execute(
+                """SELECT status FROM layer1_onchain_solana_quarantine
+                   WHERE network_id=%s AND provider=%s AND scope=%s AND signature=%s""",
+                (*scope_identity, signature),
+            ).fetchone()
+            if stored is None or stored[0] != "REPLAYED":
+                raise ValueError("persisted Solana quarantine replay is not finalized")
         return {"page_id": page_id, "cursor_key": cursor_key,
                 "page_material": page_material, "receipts": receipts_payload,
                 "receipt_sha256": row[2]}
@@ -952,6 +1092,23 @@ class PostgresOnChainIngestionStore:
             for row in rows
         }
 
+    def list_pending_solana_quarantine(self, network_id: str, provider: str, scope: str,
+                                       limit: int = 100) -> list[dict]:
+        if (network_id != "solana-mainnet" or not isinstance(provider, str) or not provider.strip()
+                or not isinstance(scope, str) or not scope.strip()
+                or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000):
+            raise ValueError("Solana quarantine query identity or limit is invalid")
+        rows = self.conn.execute(
+            """SELECT signature, slot, transaction_index, block_hash, payload_json, source_page_id
+               FROM layer1_onchain_solana_quarantine
+               WHERE network_id=%s AND provider=%s AND scope=%s AND status='PENDING'
+               ORDER BY slot, transaction_index, signature LIMIT %s""",
+            (network_id, provider, scope, limit),
+        ).fetchall()
+        return [{"signature": row[0], "slot": row[1], "transaction_index": row[2],
+                 "block_hash": row[3], "payload": row[4],
+                 "source_page_id": row[5]} for row in rows]
+
     def reconcile_block(self, network_id: str, block_number: int, canonical_block_hash: str,
                         provider: Optional[str] = None, scope: Optional[str] = None) -> int:
         if not isinstance(network_id, str) or not network_id.strip():
@@ -1066,35 +1223,41 @@ class PostgresOnChainStore:
         return "INSERTED"
 
     def get_latest_accepted_observation(self, mapping_id: str):
-        from .onchain import OnChainObservation, OnChainValidationResult
+        from .onchain import (
+            OnChainAssetMapping, OnChainObservation, OnChainObservationProvenance,
+            OnChainValidationResult, _parse_timestamp,
+        )
         rows = self.conn.execute(
             """SELECT payload_json, validation_json FROM layer1_onchain_observations
-               WHERE mapping_id=%s AND validation_json->>'status'='ACCEPTED'
-               ORDER BY observed_at DESC""",
+               WHERE mapping_id=%s AND validation_json->>'status'='ACCEPTED'""",
             (mapping_id,),
         ).fetchall()
-        from .onchain import OnChainAssetMapping, OnChainObservationProvenance
+        mapping_row = self.conn.execute(
+            "SELECT payload_json FROM layer1_onchain_asset_mappings WHERE mapping_id=%s",
+            (mapping_id,),
+        ).fetchone()
+        if mapping_row is None:
+            return None
+        mapping = OnChainAssetMapping(**mapping_row[0])
+        accepted = []
         for payload, validation_payload in rows:
-            observation = OnChainObservation(**payload)
-            validation = OnChainValidationResult(**validation_payload)
-            mapping_row = self.conn.execute(
-                "SELECT payload_json FROM layer1_onchain_asset_mappings WHERE mapping_id=%s",
-                (mapping_id,),
-            ).fetchone()
-            if mapping_row is None:
+            try:
+                observation = OnChainObservation(**payload)
+                validation = OnChainValidationResult(**validation_payload)
+                observed_at = _parse_timestamp(observation.observed_at)
+                provenance = OnChainObservationProvenance(
+                    validation.provenance_cursor_key,
+                    validation.provenance_page_id,
+                    validation.provenance_observation_id,
+                )
+            except (TypeError, ValueError, KeyError):
                 continue
-            mapping = OnChainAssetMapping(**mapping_row[0])
-            provenance = OnChainObservationProvenance(
-                validation.provenance_cursor_key,
-                validation.provenance_page_id,
-                validation.provenance_observation_id,
-            )
             if (self.engine.verify_persisted_acceptance_receipt(observation, validation)
                     and self.engine.verify_observation_provenance(
                         self.ingestion_store, provenance, mapping, observation,
                     )):
-                return observation
-        return None
+                accepted.append((observed_at, observation.observation_id, observation))
+        return max(accepted, key=lambda item: (item[0], item[1]))[2] if accepted else None
 
     def get_observation(self, observation_id: str):
         from dataclasses import replace
@@ -1139,15 +1302,19 @@ class PostgresOnChainStore:
 
     def list_verified_mappings(self, network_id: Optional[str] = None):
         from .onchain import OnChainAssetMapping
-        query = "SELECT payload_json FROM layer1_onchain_asset_mappings"
+        query = "SELECT mapping_id, asset_id, network_id, payload_json FROM layer1_onchain_asset_mappings"
         params = ()
         if network_id is not None:
             query += " WHERE network_id=%s"
             params = (network_id,)
         query += " ORDER BY mapping_id"
         mappings = []
-        for (payload,) in self.conn.execute(query, params).fetchall():
+        for stored_mapping_id, stored_asset_id, stored_network_id, payload in self.conn.execute(query, params).fetchall():
             mapping = OnChainAssetMapping(**payload)
+            if (mapping.mapping_id, mapping.asset_id, mapping.network_id) != (
+                stored_mapping_id, stored_asset_id, stored_network_id,
+            ):
+                continue
             if mapping.mapping_status == "VERIFIED" and self.engine._validate_mapping(mapping) is None:
                 mappings.append(mapping)
         return mappings

@@ -26,6 +26,7 @@ def b58encode(raw):
 
 
 DEST_OWNER = b58encode(bytes([2]) * 32)
+LOOKUP_TABLE = b58encode(bytes([4]) * 32)
 
 
 def rpc_tx(*, opcode=12, amount=1234567, decimals=6, program=TOKEN_PROGRAM,
@@ -81,6 +82,12 @@ class SolanaTokenInstructionNormalizationTests(unittest.TestCase):
             observed_at=NOW.isoformat(),
         )
 
+    def test_rejects_raw_block_time_that_diverges_from_typed_history_record(self):
+        record = rpc_tx()
+        record.raw["blockTime"] = 1794398401
+        with self.assertRaises(ProviderTransportError):
+            self.normalize(record)
+
     def test_transfer_checked_emits_exact_raw_amount_and_stable_outer_instruction_identity(self):
         record = rpc_tx()
         events = self.normalize(record)
@@ -121,7 +128,7 @@ class SolanaTokenInstructionNormalizationTests(unittest.TestCase):
         record = rpc_tx()
         message = record.raw["transaction"]["message"]
         message["accountKeys"] = [SOURCE, MINT, DESTINATION, WALLET]
-        message["addressTableLookups"] = [{"accountKey": "AddressLookupTable1111111111111111111111111",
+        message["addressTableLookups"] = [{"accountKey": LOOKUP_TABLE,
                                            "writableIndexes": [0], "readonlyIndexes": []}]
         message["instructions"][0]["programIdIndex"] = 4
         record.raw["meta"]["loadedAddresses"] = {"writable": [TOKEN_PROGRAM], "readonly": []}
@@ -139,11 +146,37 @@ class SolanaTokenInstructionNormalizationTests(unittest.TestCase):
         self.assertEqual(events[0].event_id, SIGNATURE + ":outer:0")
         self.assertEqual(events[0].amount_raw, "1234567")
 
+    def test_rejects_lookup_table_index_outside_u8_range(self):
+        record = rpc_tx()
+        message = record.raw["transaction"]["message"]
+        message["accountKeys"] = [SOURCE, MINT, DESTINATION, WALLET]
+        message["addressTableLookups"] = [{
+            "accountKey": LOOKUP_TABLE,
+            "writableIndexes": [256], "readonlyIndexes": [],
+        }]
+        message["instructions"][0]["programIdIndex"] = 4
+        record.raw["meta"]["loadedAddresses"] = {"writable": [TOKEN_PROGRAM], "readonly": []}
+        with self.assertRaises(ProviderTransportError):
+            self.normalize(record)
+
+    def test_rejects_invalid_address_lookup_table_account_key(self):
+        record = rpc_tx()
+        message = record.raw["transaction"]["message"]
+        message["accountKeys"] = [SOURCE, MINT, DESTINATION, WALLET]
+        message["addressTableLookups"] = [{
+            "accountKey": "not-a-solana-pubkey",
+            "writableIndexes": [0], "readonlyIndexes": [],
+        }]
+        message["instructions"][0]["programIdIndex"] = 4
+        record.raw["meta"]["loadedAddresses"] = {"writable": [TOKEN_PROGRAM], "readonly": []}
+        with self.assertRaises(ProviderTransportError):
+            self.normalize(record)
+
     def test_versioned_transaction_requires_resolved_lookup_addresses(self):
         record = rpc_tx()
         message = record.raw["transaction"]["message"]
         message["addressTableLookups"] = [{
-            "accountKey": "AddressLookupTable1111111111111111111111111",
+            "accountKey": LOOKUP_TABLE,
             "writableIndexes": [0], "readonlyIndexes": [],
         }]
         record.raw["meta"].pop("loadedAddresses")
@@ -154,7 +187,7 @@ class SolanaTokenInstructionNormalizationTests(unittest.TestCase):
         record = rpc_tx()
         message = record.raw["transaction"]["message"]
         message["addressTableLookups"] = [{
-            "accountKey": "AddressLookupTable1111111111111111111111111",
+            "accountKey": LOOKUP_TABLE,
             "writableIndexes": [0], "readonlyIndexes": [],
         }]
         record.raw["meta"]["loadedAddresses"] = {"writable": [], "readonly": []}
@@ -167,9 +200,22 @@ class SolanaTokenInstructionNormalizationTests(unittest.TestCase):
         with self.assertRaises(ProviderTransportError):
             self.normalize(record)
 
-    def test_rejects_failed_transaction(self):
-        with self.assertRaises(ProviderTransportError):
-            self.normalize(rpc_tx(err={"InstructionError": [0, "Custom"]}))
+    def test_rejects_transaction_metadata_without_explicit_execution_status(self):
+        record = rpc_tx()
+        record.raw["meta"].pop("err")
+        with self.assertRaisesRegex(ProviderTransportError, "execution status"):
+            self.normalize(record)
+
+    def test_rejects_malformed_non_null_execution_error_shapes(self):
+        for invalid_error in (False, 1, [], "", {}):
+            with self.subTest(error=invalid_error):
+                with self.assertRaisesRegex(ProviderTransportError, "execution status"):
+                    self.normalize(rpc_tx(err=invalid_error))
+
+    def test_skips_failed_transaction_without_transfer_evidence(self):
+        self.assertEqual(
+            self.normalize(rpc_tx(err={"InstructionError": [0, "Custom"]})), ())
+        self.assertEqual(self.normalize(rpc_tx(err="AccountInUse")), ())
 
     def test_rejects_conflicting_source_and_destination_balance_mints(self):
         with self.assertRaises(ProviderTransportError):
@@ -208,6 +254,13 @@ class SolanaTokenInstructionNormalizationTests(unittest.TestCase):
         })
         with self.assertRaises(ProviderTransportError):
             self.normalize(record)
+
+    def test_rejects_boolean_raw_slot_that_compares_equal_to_history_integer(self):
+        record = rpc_tx(slot=1)
+        record.raw["slot"] = True
+        with self.assertRaises(ProviderTransportError) as error:
+            self.normalize(record)
+        self.assertEqual(error.exception.reason_code, "SOLANA_SLOT_MISMATCH")
 
     def test_rejects_missing_canonical_slot_evidence(self):
         record = rpc_tx()

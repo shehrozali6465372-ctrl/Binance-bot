@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import http.client
 import hashlib
 import json
 import math
@@ -30,6 +31,9 @@ ALCHEMY_ENDPOINTS = {
     "bnb-smart-chain-mainnet": "https://bnb-mainnet.g.alchemy.com/v2/{api_key}",
 }
 SOLANA_MAINNET_GENESIS_HASH = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+# SQLite INTEGER and PostgreSQL BIGINT are signed 64-bit; do not accept
+# protocol-u64 slots that cannot be represented by the durable journal schema.
+SOLANA_MAX_PERSISTABLE_SLOT = 0x7FFFFFFFFFFFFFFF
 
 
 def _endpoint_profile_sha256(endpoint: str) -> str:
@@ -57,6 +61,32 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+class _PeerIdentityHTTPResponse(http.client.HTTPResponse):
+    """Capture the leaf certificate presented by the already-verified TLS socket."""
+
+    def __init__(self, sock, *args, **kwargs):
+        certificate_der = sock.getpeercert(binary_form=True)
+        self.peer_certificate_sha256 = (
+            hashlib.sha256(certificate_der).hexdigest()
+            if isinstance(certificate_der, bytes) and certificate_der else None
+        )
+        super().__init__(sock, *args, **kwargs)
+
+
+class _PeerIdentityHTTPSConnection(http.client.HTTPSConnection):
+    response_class = _PeerIdentityHTTPResponse
+
+
+class _PeerIdentityHTTPSHandler(HTTPSHandler):
+    """Use normal urllib TLS verification while retaining verified peer leaf evidence."""
+
+    def https_open(self, req):
+        return self.do_open(
+            _PeerIdentityHTTPSConnection, req,
+            context=self._context, check_hostname=self._check_hostname,
+        )
 
 
 def _approved_endpoint_id(provider: str, network_id: str) -> Optional[str]:
@@ -90,7 +120,7 @@ def _open_without_redirect(request, *, timeout: int):
     tls_context = ssl.create_default_context()
     return build_opener(
         ProxyHandler({}),
-        HTTPSHandler(context=tls_context),
+        _PeerIdentityHTTPSHandler(context=tls_context),
         _NoRedirectHandler,
     ).open(request, timeout=timeout)
 
@@ -122,6 +152,21 @@ class ProviderTransportError(RuntimeError):
         self.reason_code = reason_code
         self.http_status = http_status
         self.retry_after_seconds = retry_after_seconds
+
+
+def _reject_duplicate_json_members(pairs):
+    """Reject ambiguous JSON objects instead of accepting last-key-wins parsing."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("provider JSON object contains a duplicate member")
+        result[key] = value
+    return result
+
+
+def _reject_nonstandard_json_constant(value):
+    """Reject NaN/Infinity tokens, which are not valid JSON numbers."""
+    raise ValueError("provider JSON contains a non-standard numeric constant")
 
 
 def _max_provider_response_bytes_from_env(environ=os.environ) -> int:
@@ -240,6 +285,7 @@ class ReadOnlyJsonRpcTransport:
         self._max_response_bytes = max_response_bytes
         # Provider credentials may be embedded in endpoint paths; never follow
         # redirects to a different origin with those credentials in the URL.
+        self._uses_verified_default_transport = opener is None
         self._opener = opener if opener is not None else _open_without_redirect
         self._request_id = 0
         self._last_response_attestation = None
@@ -262,9 +308,24 @@ class ReadOnlyJsonRpcTransport:
         status = getcode() if callable(getcode) else 200
         if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
             raise ProviderTransportError("INVALID_HTTP_STATUS", "provider returned an invalid HTTP status")
+        peer_certificate_sha256 = getattr(response, "peer_certificate_sha256", None)
+        if (self._uses_verified_default_transport and (
+                not isinstance(peer_certificate_sha256, str)
+                or re.fullmatch(r"[a-f0-9]{64}", peer_certificate_sha256) is None
+        )):
+            raise ProviderTransportError(
+                "MISSING_TLS_PEER_CERTIFICATE_EVIDENCE",
+                "verified provider transport did not expose the negotiated TLS peer certificate",
+            )
+        if (peer_certificate_sha256 is not None and (
+                not isinstance(peer_certificate_sha256, str)
+                or re.fullmatch(r"[a-f0-9]{64}", peer_certificate_sha256) is None
+        )):
+            raise ProviderTransportError("INVALID_TLS_PEER_CERTIFICATE_EVIDENCE", "TLS peer certificate fingerprint is malformed")
         self._last_response_attestation = {
             "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
             "endpoint_profile_sha256": self._endpoint_profile_sha256,
+            "tls_peer_certificate_sha256": peer_certificate_sha256,
             "response_sha256": hashlib.sha256(raw).hexdigest(),
             "response_bytes": len(raw),
             "http_status": status,
@@ -275,7 +336,8 @@ class ReadOnlyJsonRpcTransport:
         if (not isinstance(path, str) or not path or path.startswith("/")
                 or any(part in {".", ".."} for part in path.split("/"))):
             raise ValueError("REST path must be a safe relative path")
-        query = query or {}
+        if query is None:
+            query = {}
         if not isinstance(query, dict) or any(
             not isinstance(key, str) or not isinstance(value, (str, int)) or isinstance(value, bool)
             for key, value in query.items()
@@ -306,8 +368,8 @@ class ReadOnlyJsonRpcTransport:
         except OSError:
             raise ProviderTransportError("NETWORK_ERROR", "provider network request failed") from None
         try:
-            decoded = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            decoded = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_members, parse_constant=_reject_nonstandard_json_constant)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             raise ProviderTransportError("INVALID_JSON", "provider returned invalid JSON") from None
         if not isinstance(decoded, dict):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "provider REST response must be a JSON object")
@@ -350,8 +412,8 @@ class ReadOnlyJsonRpcTransport:
         except OSError:
             raise ProviderTransportError("NETWORK_ERROR", "provider network request failed") from None
         try:
-            decoded = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            decoded = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_members, parse_constant=_reject_nonstandard_json_constant)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             raise ProviderTransportError("INVALID_JSON", "provider returned invalid JSON") from None
         if (not isinstance(decoded, dict) or type(decoded.get("id")) is not int
                 or decoded.get("id") != request_id
@@ -388,8 +450,10 @@ class ProviderHealthResult:
 class ProviderResponseReceipt:
     """Application-observed response digest; endpoint hash is optional for legacy rows.
 
-    The endpoint hash identifies only the approved HTTPS origin. It is not proof
-    of provider identity, response authorship, or cryptographic provider signing.
+    The endpoint hash identifies only the approved HTTPS origin. The optional
+    TLS leaf-certificate hash records the certificate observed after the default
+    verified TLS handshake; it is not a pin, provider signature, or proof that
+    application data faithfully represents upstream chain state.
     """
     sequence: int
     provider: str
@@ -401,6 +465,7 @@ class ProviderResponseReceipt:
     http_status: int
     received_at: str
     endpoint_profile_sha256: Optional[str] = None
+    tls_peer_certificate_sha256: Optional[str] = None
 
     def __post_init__(self):
         if (isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1
@@ -413,11 +478,21 @@ class ProviderResponseReceipt:
                     not isinstance(self.endpoint_profile_sha256, str)
                     or re.fullmatch(r"[a-f0-9]{64}", self.endpoint_profile_sha256) is None
                 ))
+                or (self.tls_peer_certificate_sha256 is not None and (
+                    not isinstance(self.tls_peer_certificate_sha256, str)
+                    or re.fullmatch(r"[a-f0-9]{64}", self.tls_peer_certificate_sha256) is None
+                ))
                 or isinstance(self.response_bytes, bool) or not isinstance(self.response_bytes, int)
                 or self.response_bytes < 0
                 or isinstance(self.http_status, bool) or not isinstance(self.http_status, int)
                 or not 100 <= self.http_status <= 599):
             raise ValueError("provider response receipt is malformed")
+        try:
+            parsed_received_at = datetime.fromisoformat(self.received_at.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("provider receipt received_at must be timezone-aware ISO-8601") from None
+        if parsed_received_at.tzinfo is None or parsed_received_at.utcoffset() is None:
+            raise ValueError("provider receipt received_at must be timezone-aware ISO-8601")
 
 
 _ACTIVE_PAGE_RECEIPTS = contextvars.ContextVar("onchain_page_receipts", default=None)
@@ -598,6 +673,7 @@ class EvmTokenTransferLog:
     transaction_hash: str
     log_index: int
     removed: bool
+    transaction_index: int = 0
 
 
 TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -765,6 +841,10 @@ def _is_canonical_json_rpc_quantity(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"0x(?:0|[1-9a-f][0-9a-f]*)", value) is not None
 
 
+MAX_DATETIME_UNIX_TIMESTAMP = 253402300799  # 9999-12-31T23:59:59Z, the durable ISO-8601 upper bound
+BITCOIN_MAX_BLOCK_TIMESTAMP = (1 << 32) - 1
+
+
 def _parse_hex_quantity(value: Any, field: str) -> int:
     if not _is_canonical_json_rpc_quantity(value):
         raise ProviderTransportError("INVALID_PROVIDER_DATA", f"provider {field} is not a canonical JSON-RPC quantity")
@@ -842,6 +922,7 @@ class AlchemyReadOnlyAdapter:
                 method=method, request_sha256=attestation.get("request_sha256"),
                 response_sha256=attestation.get("response_sha256"),
                 endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                tls_peer_certificate_sha256=attestation.get("tls_peer_certificate_sha256"),
                 response_bytes=attestation.get("response_bytes"),
                 http_status=attestation.get("http_status"),
                 received_at=attestation.get("received_at"),
@@ -869,13 +950,25 @@ class AlchemyReadOnlyAdapter:
         if not isinstance(block_hash, str) or re.fullmatch(r"[0-9a-fA-F]{64}", block_hash) is None:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin getblockhash returned an invalid hash")
         header = self._call("bitcoin-mainnet", "getblockheader", [block_hash, True])
-        if (not isinstance(header, dict) or header.get("height") != height
+        previous_block_hash = header.get("previousblockhash") if isinstance(header, dict) else None
+        if (not isinstance(header, dict)
+                or isinstance(header.get("height"), bool)
+                or not isinstance(header.get("height"), int)
+                or header.get("height") != height
                 or not isinstance(header.get("hash"), str)
                 or header["hash"].lower() != block_hash.lower()
+                or (height == 0 and previous_block_hash is not None)
+                or (height > 0 and (not isinstance(previous_block_hash, str)
+                    or re.fullmatch(r"[0-9a-fA-F]{64}", previous_block_hash) is None))
                 or isinstance(header.get("time"), bool)
-                or not isinstance(header.get("time"), int) or header["time"] <= 0):
+                or not isinstance(header.get("time"), int)
+                or not 1 <= header["time"] <= 0xFFFFFFFF):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin canonical block header is malformed or mismatched")
-        return {"number": height, "hash": block_hash.lower(), "timestamp": header["time"]}
+        return {
+            "number": height, "hash": block_hash.lower(),
+            "previous_block_hash": previous_block_hash.lower() if previous_block_hash is not None else None,
+            "timestamp": header["time"],
+        }
 
     def fetch_bitcoin_transaction(self, txid: str) -> dict:
         """Fetch full UTXO input/output details for one exact transaction ID."""
@@ -908,6 +1001,7 @@ class AlchemyReadOnlyAdapter:
                 method="GET api/v2/tx", request_sha256=attestation.get("request_sha256"),
                 response_sha256=attestation.get("response_sha256"),
                 endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                tls_peer_certificate_sha256=attestation.get("tls_peer_certificate_sha256"),
                 response_bytes=attestation.get("response_bytes"),
                 http_status=attestation.get("http_status"),
                 received_at=attestation.get("received_at"),
@@ -973,6 +1067,7 @@ class AlchemyReadOnlyAdapter:
                 method="GET api/v2/address", request_sha256=attestation.get("request_sha256"),
                 response_sha256=attestation.get("response_sha256"),
                 endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                tls_peer_certificate_sha256=attestation.get("tls_peer_certificate_sha256"),
                 response_bytes=attestation.get("response_bytes"),
                 http_status=attestation.get("http_status"),
                 received_at=attestation.get("received_at"),
@@ -989,6 +1084,8 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin provider page exceeds its reported page count")
         if len(raw_records) > page_size:
             raise ProviderTransportError("PAGE_LIMIT_EXCEEDED", "Bitcoin provider returned more transactions than the requested page size")
+        if total_pages == 0 and raw_records:
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin provider returned records while reporting zero total pages")
         records = []
         for item in raw_records:
             txid = item.get("txid")
@@ -1144,11 +1241,25 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum block header response is invalid")
         returned_number = self._hex_int(header.get("number"), "Ethereum block number")
         timestamp = self._hex_int(header.get("timestamp"), "Ethereum block timestamp")
+        if timestamp > MAX_DATETIME_UNIX_TIMESTAMP:
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum block timestamp exceeds the supported UTC datetime range")
         block_hash = header.get("hash")
+        parent_hash = header.get("parentHash")
+        transactions = header.get("transactions")
         if (returned_number != block_number or not isinstance(block_hash, str)
-                or re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash) is None):
-            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum canonical block header identity is invalid")
-        return {"number": returned_number, "hash": block_hash.lower(), "timestamp": timestamp}
+                or re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash) is None
+                or not isinstance(parent_hash, str)
+                or re.fullmatch(r"0x[0-9a-fA-F]{64}", parent_hash) is None
+                or not isinstance(transactions, list)
+                or any(not isinstance(item, str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", item) is None
+                       for item in transactions)
+                or len({item.lower() for item in transactions}) != len(transactions)):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "Ethereum canonical block header identity or transaction hash list is invalid")
+        return {
+            "number": returned_number, "hash": block_hash.lower(),
+            "parent_hash": parent_hash.lower(), "timestamp": timestamp,
+            "transaction_hashes": tuple(item.lower() for item in transactions),
+        }
 
     @_capture_provider_page_receipts
     def fetch_ethereum_erc20_transfer_logs(self, contract_address: str,
@@ -1212,11 +1323,25 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "BNB block header response is invalid")
         returned_number = self._hex_int(header.get("number"), "BNB block number")
         timestamp = self._hex_int(header.get("timestamp"), "BNB block timestamp")
+        if timestamp > MAX_DATETIME_UNIX_TIMESTAMP:
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "BNB block timestamp exceeds the supported UTC datetime range")
         block_hash = header.get("hash")
+        parent_hash = header.get("parentHash")
+        transactions = header.get("transactions")
         if (returned_number != block_number or not isinstance(block_hash, str)
-                or re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash) is None):
-            raise ProviderTransportError("INVALID_PROVIDER_DATA", "BNB canonical block header identity is invalid")
-        return {"number": returned_number, "hash": block_hash.lower(), "timestamp": timestamp}
+                or re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash) is None
+                or not isinstance(parent_hash, str)
+                or re.fullmatch(r"0x[0-9a-fA-F]{64}", parent_hash) is None
+                or not isinstance(transactions, list)
+                or any(not isinstance(item, str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", item) is None
+                       for item in transactions)
+                or len({item.lower() for item in transactions}) != len(transactions)):
+            raise ProviderTransportError("INVALID_PROVIDER_DATA", "BNB canonical block header identity or transaction hash list is invalid")
+        return {
+            "number": returned_number, "hash": block_hash.lower(),
+            "parent_hash": parent_hash.lower(), "timestamp": timestamp,
+            "transaction_hashes": tuple(item.lower() for item in transactions),
+        }
 
     @_capture_provider_page_receipts
     def fetch_bnb_erc20_transfer_logs(self, contract_address: str, from_block: int,
@@ -1276,18 +1401,20 @@ class AlchemyReadOnlyAdapter:
             raise ProviderTransportError("INVALID_TRANSFER_LOG", f"{label} Transfer event amount must be one uint256 word")
         block_number = _parse_hex_quantity(log.get("blockNumber"), "log block number")
         log_index = _parse_hex_quantity(log.get("logIndex"), "log index")
+        transaction_index = _parse_hex_quantity(log.get("transactionIndex"), "log transaction index")
         block_hash, tx_hash = log.get("blockHash"), log.get("transactionHash")
         if (not isinstance(block_hash, str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash) is None
                 or not isinstance(tx_hash, str) or re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash) is None
                 or not from_block <= block_number <= to_block):
             raise ProviderTransportError("INVALID_TRANSFER_LOG", f"{label} Transfer event block/transaction references are invalid")
-        removed = log.get("removed", False)
+        removed = log.get("removed")
         if not isinstance(removed, bool):
-            raise ProviderTransportError("INVALID_TRANSFER_LOG", f"{label} log removed flag must be boolean")
+            raise ProviderTransportError("INVALID_TRANSFER_LOG", f"{label} log removed flag must be present and boolean")
         return EvmTokenTransferLog(
             network_id, contract_address,
             "0x" + topics[1][-40:], "0x" + topics[2][-40:],
             str(int(data, 16)), block_number, block_hash, tx_hash, log_index, removed,
+            transaction_index,
         )
 
     @_capture_provider_page_receipts
@@ -1305,8 +1432,10 @@ class AlchemyReadOnlyAdapter:
         if (slot_start is None) != (slot_end is None):
             raise ValueError("Solana fixed slot queries require both slot_start and slot_end")
         if slot_start is not None and (
-            isinstance(slot_start, bool) or not isinstance(slot_start, int) or slot_start < 0
-            or isinstance(slot_end, bool) or not isinstance(slot_end, int) or slot_end < slot_start
+            isinstance(slot_start, bool) or not isinstance(slot_start, int)
+            or not 0 <= slot_start <= SOLANA_MAX_PERSISTABLE_SLOT
+            or isinstance(slot_end, bool) or not isinstance(slot_end, int)
+            or not slot_start <= slot_end <= SOLANA_MAX_PERSISTABLE_SLOT
         ):
             raise ValueError("Solana slot range must be a fixed non-negative inclusive range")
         genesis = self._call("solana-mainnet", "getGenesisHash")
@@ -1339,7 +1468,8 @@ class AlchemyReadOnlyAdapter:
             slot, block_time = item.get("slot"), item.get("blockTime")
             transaction_index = item.get("transactionIndex")
             if (not _is_base58_signature(signature)
-                    or isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0
+                    or isinstance(slot, bool) or not isinstance(slot, int)
+                    or not 1 <= slot <= SOLANA_MAX_PERSISTABLE_SLOT
                     or (transaction_index is not None and (
                         isinstance(transaction_index, bool) or not isinstance(transaction_index, int)
                         or transaction_index < 0))
@@ -1347,7 +1477,9 @@ class AlchemyReadOnlyAdapter:
                     or (slot_start is not None and transaction_index is None)
                     or not isinstance(item.get("transaction"), dict)
                     or not isinstance(item.get("meta"), dict)
-                    or (block_time is not None and (isinstance(block_time, bool) or not isinstance(block_time, int) or block_time <= 0))):
+                    or (block_time is not None and (
+                        isinstance(block_time, bool) or not isinstance(block_time, int)
+                        or not 0 < block_time <= MAX_DATETIME_UNIX_TIMESTAMP))):
                 raise ProviderTransportError("INVALID_PROVIDER_DATA", "Alchemy Solana transaction lacks a valid signature, slot, transaction metadata or block time")
             records.append(SolanaAddressTransaction(
                 signature, slot, block_time, item, transaction_index))
@@ -1365,20 +1497,24 @@ class AlchemyReadOnlyAdapter:
         if genesis != SOLANA_MAINNET_GENESIS_HASH:
             raise ProviderTransportError("NETWORK_ID_MISMATCH", "Alchemy endpoint returned the wrong Solana genesis hash")
         slot = self._call("solana-mainnet", "getSlot", [{"commitment": "finalized"}])
-        if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+        if (isinstance(slot, bool) or not isinstance(slot, int)
+                or not 1 <= slot <= SOLANA_MAX_PERSISTABLE_SLOT):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana finalized slot is invalid")
         return slot
 
     def fetch_solana_produced_slots(self, start_slot: int, end_slot: int) -> tuple[int, ...]:
         """Return only produced block slots; skipped slots are not fake blocks."""
-        if (isinstance(start_slot, bool) or not isinstance(start_slot, int) or start_slot < 0
-                or isinstance(end_slot, bool) or not isinstance(end_slot, int) or end_slot < start_slot):
+        if (isinstance(start_slot, bool) or not isinstance(start_slot, int)
+                or not 0 <= start_slot <= SOLANA_MAX_PERSISTABLE_SLOT
+                or isinstance(end_slot, bool) or not isinstance(end_slot, int)
+                or not start_slot <= end_slot <= SOLANA_MAX_PERSISTABLE_SLOT):
             raise ValueError("Solana produced-slot range must be fixed and non-negative")
         slots = self._call("solana-mainnet", "getBlocks", [
             start_slot, end_slot, {"commitment": "finalized"},
         ])
         if (not isinstance(slots, list)
                 or any(isinstance(slot, bool) or not isinstance(slot, int)
+                       or not 0 <= slot <= SOLANA_MAX_PERSISTABLE_SLOT
                        or not start_slot <= slot <= end_slot for slot in slots)
                 or slots != sorted(set(slots))):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana getBlocks returned malformed or unordered produced slots")
@@ -1386,31 +1522,39 @@ class AlchemyReadOnlyAdapter:
 
     def fetch_solana_block_header(self, slot: int) -> Optional[dict]:
         """Fetch finalized block identity/time; None means the slot has no block."""
-        if isinstance(slot, bool) or not isinstance(slot, int) or slot < 0:
-            raise ValueError("Solana slot must be a non-negative integer")
+        if (isinstance(slot, bool) or not isinstance(slot, int)
+                or not 0 <= slot <= SOLANA_MAX_PERSISTABLE_SLOT):
+            raise ValueError("Solana slot must be a non-negative UInt64 integer")
         block = self._call("solana-mainnet", "getBlock", [
-            slot, {"commitment": "finalized", "transactionDetails": "none",
+            slot, {"commitment": "finalized", "transactionDetails": "signatures",
                    "rewards": False, "maxSupportedTransactionVersion": 1},
         ])
         if block is None:
             return None
         parent_slot = block.get("parentSlot") if isinstance(block, dict) else None
         previous_block_hash = block.get("previousBlockhash") if isinstance(block, dict) else None
+        signatures = block.get("signatures") if isinstance(block, dict) else None
         if (not isinstance(block, dict)
+                or not isinstance(signatures, list)
+                or any(not _is_base58_signature(signature) for signature in signatures)
+                or len(set(signatures)) != len(signatures)
                 or not isinstance(block.get("blockhash"), str)
                 or not _is_base58_pubkey(block.get("blockhash"))
                 or not isinstance(previous_block_hash, str)
                 or not _is_base58_pubkey(previous_block_hash)
                 or isinstance(parent_slot, bool) or not isinstance(parent_slot, int)
-                or parent_slot < 0 or parent_slot >= slot
-                or isinstance(block.get("blockTime"), bool)
-                or not isinstance(block.get("blockTime"), int) or block["blockTime"] <= 0):
+                or not 0 <= parent_slot <= SOLANA_MAX_PERSISTABLE_SLOT or parent_slot >= slot
+                or (block.get("blockTime") is not None and (
+                    isinstance(block.get("blockTime"), bool)
+                    or not isinstance(block.get("blockTime"), int)
+                    or not 0 < block["blockTime"] <= MAX_DATETIME_UNIX_TIMESTAMP))):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana finalized block header or parent linkage is malformed")
         return {
             "number": slot, "hash": block["blockhash"],
             "timestamp": block["blockTime"],
             "parent_slot": parent_slot,
             "previous_block_hash": previous_block_hash,
+            "transaction_signatures": tuple(signatures),
             "finality_reference": "commitment=finalized",
         }
 
@@ -1428,8 +1572,9 @@ class AlchemyReadOnlyAdapter:
             if isinstance(confirmations, bool) or not isinstance(confirmations, int) or confirmations < 0:
                 raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin confirmation count is invalid")
             block_time = header.get("time")
-            if isinstance(block_time, bool) or not isinstance(block_time, int) or block_time <= 0:
-                raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin block time is invalid")
+            if (isinstance(block_time, bool) or not isinstance(block_time, int)
+                    or not 0 < block_time <= BITCOIN_MAX_BLOCK_TIMESTAMP):
+                raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin block time is outside the protocol UInt32 range")
             return ProviderHealthResult(
                 "alchemy", network_id, "AVAILABLE", observed_at, height, block_hash,
                 datetime.fromtimestamp(block_time, timezone.utc).isoformat(),
@@ -1452,6 +1597,8 @@ class AlchemyReadOnlyAdapter:
                 raise ProviderTransportError("INVALID_PROVIDER_DATA", "finalized EVM block response is invalid")
             height = self._hex_int(block.get("number"), "block number")
             block_timestamp = self._hex_int(block.get("timestamp"), "block timestamp")
+            if block_timestamp > MAX_DATETIME_UNIX_TIMESTAMP:
+                raise ProviderTransportError("INVALID_PROVIDER_DATA", "finalized EVM block timestamp exceeds the supported UTC datetime range")
             return ProviderHealthResult(
                 "alchemy", network_id, "AVAILABLE", observed_at, height, block["hash"],
                 datetime.fromtimestamp(block_timestamp, timezone.utc).isoformat(),
@@ -1463,7 +1610,8 @@ class AlchemyReadOnlyAdapter:
             if genesis_hash != SOLANA_MAINNET_GENESIS_HASH:
                 raise ProviderTransportError("NETWORK_ID_MISMATCH", "Alchemy endpoint returned the wrong Solana genesis hash")
             slot = self._call(network_id, "getSlot", [{"commitment": "finalized"}])
-            if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+            if (isinstance(slot, bool) or not isinstance(slot, int)
+                    or not 1 <= slot <= SOLANA_MAX_PERSISTABLE_SLOT):
                 raise ProviderTransportError("INVALID_PROVIDER_DATA", "Solana finalized slot is invalid")
             return ProviderHealthResult(
                 "alchemy", network_id, "AVAILABLE", observed_at, slot,
@@ -1523,8 +1671,8 @@ class ChainstackXrplReadOnlyAdapter:
             raise ValueError("XRPL account must be a checksum-valid classic mainnet address")
         if (isinstance(ledger_index_min, bool) or not isinstance(ledger_index_min, int) or ledger_index_min < 0
                 or isinstance(ledger_index_max, bool) or not isinstance(ledger_index_max, int)
-                or ledger_index_max < ledger_index_min):
-            raise ValueError("XRPL account_tx requires a fixed non-negative ledger range")
+                or ledger_index_max < ledger_index_min or ledger_index_max > 0xFFFFFFFF):
+            raise ValueError("XRPL account_tx requires a fixed UInt32 ledger range")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise ValueError("XRPL account_tx limit must be between 1 and 1000")
         if marker is not None:
@@ -1563,6 +1711,7 @@ class ChainstackXrplReadOnlyAdapter:
                 method="account_tx", request_sha256=attestation.get("request_sha256"),
                 response_sha256=attestation.get("response_sha256"),
                 endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                tls_peer_certificate_sha256=attestation.get("tls_peer_certificate_sha256"),
                 response_bytes=attestation.get("response_bytes"),
                 http_status=attestation.get("http_status"),
                 received_at=attestation.get("received_at"),
@@ -1582,18 +1731,23 @@ class ChainstackXrplReadOnlyAdapter:
                 raise ProviderTransportError("UNVALIDATED_XRPL_TRANSACTION", "XRPL account_tx contains a transaction without validated-ledger proof")
             tx_hash, ledger_index = item.get("hash"), item.get("ledger_index")
             transaction, metadata = item.get("tx_json"), item.get("meta")
+            ledger_hash = item.get("ledger_hash")
             if (not isinstance(tx_hash, str) or re.fullmatch(r"[0-9a-fA-F]{64}", tx_hash) is None
                     or isinstance(ledger_index, bool) or not isinstance(ledger_index, int)
                     or not ledger_index_min <= ledger_index <= ledger_index_max
+                    or not isinstance(ledger_hash, str)
+                    or re.fullmatch(r"[0-9a-fA-F]{64}", ledger_hash) is None
                     or not isinstance(transaction, dict) or not isinstance(metadata, dict)):
-                raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL transaction identity, ledger or metadata is malformed")
+                raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL transaction identity, ledger hash or metadata is malformed")
             close_time = item.get("close_time_iso")
             if close_time is not None and not isinstance(close_time, str):
                 raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL close_time_iso must be a string")
             records.append(XrplAccountTransaction(tx_hash, ledger_index, close_time, transaction, metadata, item))
         returned_min, returned_max = result.get("ledger_index_min"), result.get("ledger_index_max")
         if (isinstance(returned_min, bool) or not isinstance(returned_min, int)
+                or not 0 <= returned_min <= 0xFFFFFFFF
                 or isinstance(returned_max, bool) or not isinstance(returned_max, int)
+                or not 0 <= returned_max <= 0xFFFFFFFF
                 or returned_min > ledger_index_min or returned_max < ledger_index_max):
             raise ProviderTransportError("XRPL_LEDGER_RANGE_INCOMPLETE", "XRPL provider did not cover the requested fixed ledger range")
         cursor = result.get("marker")
@@ -1608,8 +1762,9 @@ class ChainstackXrplReadOnlyAdapter:
 
     def fetch_ledger_header(self, ledger_index: int) -> dict:
         """Fetch one exact validated ledger header for canonical hash/time proof."""
-        if isinstance(ledger_index, bool) or not isinstance(ledger_index, int) or ledger_index <= 0:
-            raise ValueError("XRPL ledger index must be a positive integer")
+        if (isinstance(ledger_index, bool) or not isinstance(ledger_index, int)
+                or not 1 <= ledger_index <= 0xFFFFFFFF):
+            raise ValueError("XRPL ledger index must be a positive UInt32 integer")
         transport = self._transport_factory(self._endpoint, self._timeout_seconds)
         result = transport.call("ledger", [{
             "ledger_index": ledger_index, "transactions": False, "expand": False,
@@ -1633,6 +1788,7 @@ class ChainstackXrplReadOnlyAdapter:
                 request_sha256=attestation.get("request_sha256"),
                 response_sha256=attestation.get("response_sha256"),
                 endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                tls_peer_certificate_sha256=attestation.get("tls_peer_certificate_sha256"),
                 response_bytes=attestation.get("response_bytes"),
                 http_status=attestation.get("http_status"),
                 received_at=attestation.get("received_at"),
@@ -1660,7 +1816,7 @@ class ChainstackXrplReadOnlyAdapter:
                 or not isinstance(parent_hash, str)
                 or re.fullmatch(r"[0-9a-fA-F]{64}", parent_hash) is None
                 or isinstance(close_time, bool) or not isinstance(close_time, int)
-                or close_time < 0):
+                or not 0 <= close_time <= 0xFFFFFFFF):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL outer/nested ledger identity, parent hash or close time is malformed or inconsistent")
         # XRPL close_time is seconds since 2000-01-01T00:00:00Z.
         timestamp = close_time + 946684800
@@ -1692,6 +1848,7 @@ class ChainstackXrplReadOnlyAdapter:
                 request_sha256=attestation.get("request_sha256"),
                 response_sha256=attestation.get("response_sha256"),
                 endpoint_profile_sha256=attestation.get("endpoint_profile_sha256"),
+                tls_peer_certificate_sha256=attestation.get("tls_peer_certificate_sha256"),
                 response_bytes=attestation.get("response_bytes"),
                 http_status=attestation.get("http_status"),
                 received_at=attestation.get("received_at"),
@@ -1704,7 +1861,8 @@ class ChainstackXrplReadOnlyAdapter:
         history_range = info.get("complete_ledgers")
         if not isinstance(history_range, str) or not history_range.strip() or history_range == "empty":
             raise ProviderTransportError("XRPL_HISTORY_WINDOW_UNAVAILABLE", "Chainstack did not report an available XRPL ledger-history window")
-        if (isinstance(height, bool) or not isinstance(height, int) or height <= 0
+        if (isinstance(height, bool) or not isinstance(height, int)
+                or not 1 <= height <= 0xFFFFFFFF
                 or not isinstance(block_hash, str) or not block_hash
                 or isinstance(age, bool) or not isinstance(age, (int, float)) or age < 0):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Chainstack validated-ledger metadata is invalid")

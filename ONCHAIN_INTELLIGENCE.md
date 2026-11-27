@@ -782,7 +782,7 @@ No provider response-size telemetry or representative production payload corpus 
 
 ### Solana finalized block parent-link verification — AUD-ONCHAIN-021 (27 November 2026)
 - Solana `getBlock` exposes `previousBlockhash` and `parentSlot`; the adapter previously discarded the parent hash and did not require parent linkage. A synthetic wrong-parent-hash response passed the prior worker checks.
-- Adapter now validates and returns both parent fields. Worker verifies in-range parent slots are produced and their block hashes match `previousBlockhash`. Parents before the bounded range are not fetched/compared by this fix.
+- Adapter validates and returns both parent fields. Worker verifies in-range parent slots and hashes; Section 216 additionally fetches external parent-slot headers, caches them, and checks their block hashes against `previousBlockhash`, closing the bounded-range boundary gap.
 - TDD RED/GREEN regressions cover missing linkage, wrong parent hash and parent slot omitted from the produced-slot set. See Master Audit Section 197. Local fix pending review; Module 9 remains NO-GO.
 - Verification addendum: focused provider + Solana worker suites **109 passed**; full repository suite **1,206 tests, 0 failures/errors, 72 skipped** (27 November 2026; 71.843 seconds); compileall and `git diff --check` PASS. No live provider/production DB access. Local fix pending review.
 
@@ -794,3 +794,598 @@ No provider response-size telemetry or representative production payload corpus 
 - Adapter now requires the response-level and nested ledger indexes to both equal the requested index and their 32-byte hashes to agree case-insensitively. Previously conflicting outer/nested identities were accepted. TDD mismatch fixtures now fail closed with `INVALID_PROVIDER_DATA`. Master Audit Section 199.
 - Both changes are local and pending review; no live provider/production DB access. Module 9 remains NO-GO.
 - AUD-ONCHAIN-022/023 verification: focused provider + XRPL worker suites **115 passed**; full repository suite **1,210 tests, 0 failures/errors, 72 skipped** (27 November 2026; 88.505 seconds); compileall and diff-check PASS. No live Chainstack or production DB access. Both fixes remain local/pending review.
+
+### XRPL transaction-to-ledger hash binding — AUD-ONCHAIN-024 (27 November 2026)
+- XRPL account_tx rows include a ledger_hash identifying the validated ledger that contains each transaction. The adapter previously did not require this field, and the normalizer checked the row's transaction hash/index but not its ledger hash against the independently fetched canonical header.
+- Adapter now requires a valid 32-byte transaction-row ledger hash; normalizer requires exact case-insensitive equality with the independently verified canonical ledger hash. Mismatches fail before event creation.
+- TDD RED reproduced acceptance of a mismatched row hash. GREEN tests cover provider rejection of missing/malformed row hashes, normalizer mismatch rejection, and worker no-event/no-checkpoint-advance behavior. Master Audit Section 200.
+- Focused provider + XRPL worker + normalization suites: **134 passed**, 0 failures/errors. Full repository verification pending. No live provider/production DB/migration access. AUD-ONCHAIN-024 fixed locally pending review; Module 9 remains NO-GO.
+
+- Verification addendum: focused suites **134 passed**; full repository suite **1,213 tests, 0 failures/errors, 72 skipped** (27 November 2026; 77.800 seconds). compileall and diff-check PASS. PostgreSQL DSN unset; no PostgreSQL server/live provider used. Local uncommitted fix only; Module 9 remains NO-GO.
+
+### Solana failed-transaction page isolation — AUD-ONCHAIN-025 (27 November 2026)
+- Solana RPC transaction metadata defines `meta.err` as null on success and string/object on failure. The normalizer previously raised for a failed transaction, aborting the entire address-history page and preventing unrelated successful transactions and checkpoint progress.
+- Normalizer now returns no events for non-null `meta.err`; worker continues with the remaining page records. Mixed-page regression proves successful transfer persists and checkpoint advances while failed transaction produces no event. Master Audit Section 201.
+- Focused Solana worker + normalization suites: **30 passed**. Full repository verification pending. No live provider/production DB access; local uncommitted fix only; Module 9 remains NO-GO.
+
+### Solana explicit execution-status requirement — AUD-ONCHAIN-026 (27 November 2026)
+- Solana RPC metadata defines `meta.err` as string/object/null; null means success. Normalizer previously used `meta.get("err")`, so an absent field was indistinguishable from explicit null and could be accepted as a successful transfer.
+- Normalizer now requires the explicit `err` field. Missing status fails closed; non-null status is skipped under AUD-ONCHAIN-025. RED/GREEN regression proves missing status is rejected. Master Audit Section 202.
+- Focused Solana worker + normalization suites: **31 passed**. Full repository verification pending. No live provider/production DB access; local uncommitted fix; Module 9 remains NO-GO.
+
+- Verification addendum for AUD-ONCHAIN-025/026: focused Solana worker + normalization suites **31 passed**; full repository suite **1,215 tests, 0 failures/errors, 72 skipped** (27 November 2026; 85.067 seconds); compileall and diff-check PASS. Combined worktree includes prior local XRPL AUD-ONCHAIN-024 changes. PostgreSQL DSN unset; no live provider/DB/migration. Local uncommitted only; Module 9 remains NO-GO.
+
+### Solana canonical transaction-index binding — AUD-ONCHAIN-027 (27 November 2026)
+- Found that the worker ordered/paginated address-history records using `transactionIndex`, while the independently fetched finalized block used `getBlock(transactionDetails="none")`; that mode omits the canonical block transaction/signature list. The supplied signature therefore was not proven to occupy the reported index.
+- TDD RED: a record with index 18 was accepted when the canonical block signature list contained only indexes 0–17; the checkpoint advanced.
+- Fixed locally: block-header adapter requests `transactionDetails="signatures"`, validates unique 64-byte Base58 signatures and returns the ordered immutable list. Worker requires exact `block_signatures[transactionIndex] == address_history.signature` before normalization or checkpoint commit. Invalid index/signature fails with `SOLANA_TRANSACTION_INDEX_MISMATCH`.
+- Signature lists are transient and excluded from durable slot journals. This is a same-provider RPC cross-check, not a cryptographic inclusion proof or provider-authenticity guarantee.
+- Focused Solana worker + provider + normalization suites: **134 passed**, 0 failures/errors. Full repository suite: **1,217 tests, 0 failures, 0 errors, 72 skipped** (27 November 2026; 82.168 seconds). `compileall` and `git diff --check` PASS. Master Audit Section 203. Local/uncommitted; Module 9 remains NO-GO.
+
+### EVM block-global log-index uniqueness — AUD-ONCHAIN-028 (27 November 2026)
+- Found that the EVM worker normalized each `eth_getLogs` record independently without enforcing uniqueness of `(block_number, log_index)` across a bounded page. Two different transaction hashes could claim the same block-global log position and both be committed.
+- TDD RED: duplicate `logIndex=4` in the same block, attached to different transaction hashes, was accepted and advanced the checkpoint.
+- Fixed locally: worker tracks every `(block_number, log_index)` in the page and fails with `DUPLICATE_EVM_LOG_INDEX` before `commit_page`. The same numeric index in different blocks remains valid.
+- Focused EVM worker + provider suites: **114 passed**, 0 failures/errors. Full repository suite: **1,218 tests, 0 failures, 0 errors, 72 skipped** (27 November 2026; 80.604 seconds). `compileall` and `git diff --check` PASS. Master Audit Section 204. Local/uncommitted; Module 9 remains NO-GO.
+
+### TLS peer leaf-certificate evidence — AUD-ONCHAIN-001 (27 November 2026)
+- Standard direct-only HTTPS transport already enforced default CA-chain and hostname verification and rejected redirects. It did not persist the actual leaf certificate observed by the TLS socket; configured endpoint-profile hashes are not peer-certificate identity.
+- Fixed locally: default HTTPS handler uses an `HTTPSConnection`/`HTTPResponse` subclass to capture `getpeercert(binary_form=True)` only after the unchanged verified TLS handshake. SHA-256 of the DER leaf certificate is added to transport attestation and `ProviderResponseReceipt.tls_peer_certificate_sha256`. Default verified transport fails closed if the peer fingerprint is absent or malformed.
+- Alchemy RPC/Bitcoin REST and Chainstack XRPL receipt paths propagate the field. Existing JSON/JSONB receipt storage persists it without schema migration; legacy receipts default to null. SQLite reopen/page-acceptance tests verify persistence. PostgreSQL integration test definitions were updated but no PostgreSQL server was contacted.
+- Local TLS TDD verifies exact certificate fingerprint and preserves existing rejection of untrusted chain/hostname mismatch. Focused provider + ingestion suites: **164 passed**; combined provider + ingestion + PostgreSQL tests: **195 run, 21 skipped** (PostgreSQL DSN unset). Full repository suite: **1,220 tests, 0 failures/errors, 72 skipped**; `compileall` and `git diff --check` PASS.
+- Residual: leaf fingerprint is observational evidence, not pinning, provider signature, or proof of application response truth. Alchemy's documented `X-Alchemy-Signature` HMAC applies to webhook requests, not standard JSON-RPC responses; do not treat it as RPC response authentication (https://support.alchemy.com/articles/1337366997-what-is-alchemy-signature-and-where-to-find-the-auth-token). Injected opener/transport factory remains a trusted seam; production composition, deployed trust store/egress and real provider peer capture remain unverified. AUD-ONCHAIN-001 remains PARTIALLY REMEDIATED / OPEN; Module 9 remains NO-GO. Master Audit Section 205.
+
+### EVM transaction-index to canonical block binding — AUD-ONCHAIN-029 (27 November 2026)
+- Found that `eth_getLogs` decoder ignored `transactionIndex`, and the worker discarded the ordered transaction hashes returned by its independently fetched `eth_getBlockByNumber(..., false)` block header. A log's `transactionHash` was therefore not checked against the canonical block transaction at its claimed index.
+- TDD RED: valid-looking log with missing `transactionIndex` was accepted by the decoder.
+- Fixed locally: decoder requires canonical `transactionIndex`; Ethereum and BNB block-header adapters validate unique ordered 32-byte transaction hashes and return them as a tuple; worker requires exact `transaction_hashes[transaction_index] == transaction_hash` before normalization. Mismatch/out-of-range raises `EVM_TRANSACTION_INDEX_MISMATCH` before page commit/checkpoint advancement.
+- Hash list remains transient; raw block/log response digests remain in page receipt lineage. This is a same-provider RPC cross-check, not a cryptographic transaction-inclusion proof.
+- Focused EVM worker + provider suites: **120 passed**, 0 failures/errors. Full repository suite: **1,224 tests, 0 failures/errors, 72 skipped** (27 November 2026; 74.380 seconds); `compileall` and `git diff --check` PASS. Official refs: https://ethereum.org/developers/docs/apis/json-rpc/ and https://ethereum.github.io/execution-apis/api/methods/eth_getLogs/ . Master Audit Section 206. Local/uncommitted; Module 9 remains NO-GO.
+
+### XRPL cumulative opaque-marker checkpoint bound — AUD-ONCHAIN-030 (27 November 2026)
+- The worker caps pages per invocation at 1–20 but persists every unique XRPL marker in `seen_markers` across restarts. The checkpoint validator checks only list type; the adapter checks only JSON serializability. There is no cumulative marker-count or encoded-byte budget.
+- Synthetic local SQLite reproduction committed 100 successive unique cursors across 100 separate runs with `max_pages_per_run=1`; the checkpoint retained 100 markers and serialized to 2,340 bytes. This proves the per-run cap does not bound lifetime checkpoint growth.
+- Each subsequent page serializes all prior markers for loop detection and rewrites the full history, causing checkpoint growth and repeated serialization/write amplification.
+- No behavior change applied: define an approved finite count/byte budget and safe recovery contract before imposing arbitrary limits. Consider storing canonical marker digests for history while retaining the current opaque marker for resume, with backward-compatible checkpoint parsing.
+- Master Audit Section 207. AUD-ONCHAIN-030 MEDIUM / CONFIRMED / OPEN. No live Chainstack, PostgreSQL, migration, secrets, publication or Git write operations. Module 9 remains NO-GO.
+
+
+### EVM removed-log lifecycle gap — AUD-ONCHAIN-031 (27 November 2026)
+- The decoder accepts `removed=true`, and the normalizer is intended to persist removed logs as `REORGED` tombstones. The EVM worker currently performs canonical block `transactionIndex` binding first and does so unconditionally. A removed-fork transaction absent from the replacement canonical block therefore fails with `EVM_TRANSACTION_INDEX_MISMATCH` before reaching the tombstone normalizer.
+- Synthetic local SQLite reproduction: removed log at transaction index 0, replacement canonical block with a different hash and no transactions; worker rejected the page and stored no event. No live provider/network used.
+- Do not bypass the check without defining how removed records are matched, how unknown removed identities are handled, and how old-fork timestamps/finality metadata are represented. The replacement canonical header must not be presented as evidence about the removed fork.
+- Alchemy references: https://www.alchemy.com/docs/how-to-get-on-chain-events and https://www.alchemy.com/docs/reference/logs . Master Audit Section 208. AUD-ONCHAIN-031 MEDIUM / CONFIRMED / OPEN; no behavior change. Module 9 remains NO-GO.
+
+
+### Solana cumulative opaque-token/checkpoint bound — AUD-ONCHAIN-032 (27 November 2026)
+- The Solana worker limits seen-token count to 10,000 but does not limit individual token length or total checkpoint JSON size. The Alchemy adapter accepts any non-empty string cursor; SQLite checkpoint persistence canonicalizes and commits the entire cursor payload without a byte budget.
+- Synthetic local SQLite reproduction committed a 250,000-character pagination token in a single-entry seen-token history; serialized checkpoint size was 500,287 bytes, with zero events. This proves the count cap is not a byte cap; it does not claim Alchemy emits such a token.
+- The shared HTTP response reader has a configurable limit, but `ONCHAIN_MAX_PROVIDER_RESPONSE_BYTES` is not provisioned in the inspected runtime and no operational ceiling is approved. Injected worker providers are not inherently constrained by that HTTP reader. An explicit token/checkpoint budget remains necessary.
+- No behavior change: define operator-approved token, aggregate checkpoint and history budgets; reject over-budget cursors atomically; define recovery. Consider bounded digest history while preserving the current opaque resume token and backward-compatible checkpoints.
+- Master Audit Section 209. AUD-ONCHAIN-032 MEDIUM / CONFIRMED / OPEN. No live RPC, PostgreSQL server, migration, secrets or Git write operations. Module 9 remains NO-GO.
+
+
+### Solana worker page-cardinality enforcement — AUD-ONCHAIN-033 (27 November 2026)
+- Alchemy adapter already rejected raw responses with more records than requested `limit`, but the worker itself trusted any tuple length from its injected provider and did not enforce configured `page_size`.
+- TDD RED: worker configured for one record accepted a synthetic two-record page from the injected provider and advanced the checkpoint to slot 305. Both records were explicit failed transactions to isolate cardinality/checkpoint behavior.
+- Local fix: worker now rejects `len(page.records) > self.page_size` with `PAGE_LIMIT_EXCEEDED` before normalization/commit. Regression asserts no checkpoint or event rows are written. Existing adapter-level guard remains.
+- Focused worker suite: **15 passed**. Full suite/compile/diff verification pending. Master Audit Section 210. AUD-ONCHAIN-033 LOW / CONFIRMED / REMEDIATED LOCALLY pending full verification; Module 9 remains NO-GO.
+
+
+### Bitcoin/XRPL worker page-cardinality enforcement — AUD-ONCHAIN-034 (27 November 2026)
+- Alchemy Bitcoin and Chainstack XRPL adapters already reject raw pages larger than requested limits, but worker provider boundaries did not enforce `self.page_size` for injected providers.
+- TDD RED: Bitcoin `page_size=1` accepted two records; XRPL `page_size=10` accepted eleven records. Both workers advanced/accepted the oversized page without `PAGE_LIMIT_EXCEEDED`.
+- Local fix: Bitcoin and XRPL workers reject oversized record tuples before transaction detail fetch/normalization and durable page commit. Tests prove no event rows; XRPL retains its initial fixed-range checkpoint without advancing its marker/ledger cursor.
+- Focused Bitcoin + XRPL + Solana worker suites: **49 passed**. Full suite pending. Master Audit Section 211. AUD-ONCHAIN-034 LOW / CONFIRMED / REMEDIATED LOCALLY pending full verification; Module 9 remains NO-GO.
+
+
+### Solana null block-time recovery contract — AUD-ONCHAIN-035 (27 November 2026)
+- Official Solana `getBlock` defines `blockTime` as `i64 | null`; null means no estimated time is available. `getBlockTime` also returns null when no block time was recorded: https://solana.com/developers/docs/rpc/http/getblock and https://solana.com/developers/docs/rpc/http/getblocktime .
+- Alchemy adapter now preserves protocol-valid null as `timestamp=None`; the Solana worker still requires a positive integer timestamp for every produced slot being journaled/ingested. An external parent with null time can be used for hash-only anchoring, while an in-range null-time slot raises `INVALID_PROVIDER_DATA` before address-history ingestion/checkpoint progress.
+- This avoids fabricated timestamps but one null-time block stalls the entire bounded slot window; no fallback, quarantine, partial progress or replay contract exists. No behavior fix applied pending an owner-approved timestamp provenance and partial-progress policy. Do not infer time from slot or wall clock.
+- Master Audit Section 212. AUD-ONCHAIN-035 MEDIUM / CONFIRMED / OPEN. No live RPC/DB/migration. Module 9 remains NO-GO.
+
+### EVM finalized block parent-hash continuity — AUD-ONCHAIN-036 (27 November 2026)
+- Ethereum and BNB block-header adapters previously discarded the protocol `parentHash`, and the worker did not prove adjacent fetched headers formed a continuous chain. A synthetic two-block range with a deliberately wrong second-block parent hash was accepted and checkpointed before the fix.
+- TDD RED/GREEN: adapters now require and return a valid 32-byte `parent_hash`; the EVM worker independently validates it and checks each fetched header points to the preceding fetched block hash. Resumed ranges fetch the immediately preceding header as an anchor; the check spans the worker's consecutive 10-block provider subranges in one run.
+- Discontinuity fails with `EVM_PARENT_HASH_MISMATCH` before event or checkpoint commit. Provider tests cover missing/malformed parent hashes for Ethereum and BNB. Parent hashes are transient and not added to the durable journal.
+- This is same-provider chain-continuity evidence, not consensus verification, block-header hash recomputation, or provider-authenticity proof. The configured seed block has no prior trusted anchor. Official references: https://ethereum.github.io/execution-apis/api/methods/eth_getBlockByNumber/ and https://eips.ethereum.org/EIPS/eip-1474 .
+- Focused EVM worker + provider suites: **123 passed**, 0 failures/errors. Full repository verification pending. Master Audit Section 213. Local/uncommitted; Module 9 remains NO-GO.
+
+### Bitcoin block-header parent-hash continuity — AUD-ONCHAIN-037 (27 November 2026)
+- Bitcoin `getblockheader` exposes `previousblockhash` when a parent exists. The adapter previously discarded it; the worker did not validate adjacent headers in its fixed range. RED reproduction: a second block claimed a parent hash different from the first block's hash, but the worker accepted and advanced its checkpoint.
+- TDD RED/GREEN: adapter now validates and returns `previous_block_hash`; worker validates the injected-provider field and checks each range's parent hash against the preceding header. Resumed ranges fetch the immediately preceding header as a continuity anchor. Genesis height 0 legitimately omits `previousblockhash`; the adapter permits absence only there.
+- Mismatch fails with `BITCOIN_PARENT_HASH_MISMATCH` before event/checkpoint commit. Tests cover fixed-range discontinuity, resumed-range anchor mismatch, malformed/missing non-genesis parent hash and genesis omission. Parent hashes remain transient; no journal schema change.
+- This is same-provider continuity validation, not proof-of-work/consensus verification, Merkle inclusion, header-hash recomputation or provider-authenticity proof. Official references: https://developer.bitcoin.org/reference/rpc/getblockheader.html and https://github.com/bitcoin/bitcoin/blob/master/src/rpc/blockchain.cpp .
+- Focused Bitcoin worker + provider suites: **129 passed**, 0 failures/errors; compileall and diff-check PASS. Full repository verification pending. Master Audit Section 214. Local/uncommitted; Module 9 remains NO-GO.
+
+- **AUD-ONCHAIN-022 boundary addendum (27 November 2026):** The original in-range XRPL parent check did not validate the first ledger against its predecessor. TDD reproduced acceptance of a first-ledger parent mismatch. Worker now fetches `range_start - 1` for every fixed range starting above ledger 1 and checks the first ledger's `parent_hash` against that header hash before `account_tx`; the existing in-range loop remains. Focused XRPL worker + provider suites: **128 passed**. Master Audit Section 215. Local/uncommitted; Module 9 remains NO-GO.
+
+### Solana external parent-slot anchor — AUD-ONCHAIN-021 boundary addendum (27 November 2026)
+- The initial parent-link fix checked parents only when they were inside the bounded slot range. RED reproduced acceptance of a wrong `previousBlockhash` for the first produced slot whose `parentSlot` was outside the range.
+- Worker now fetches external parent-slot headers, validates exact slot/hash identity, caches parent hashes and compares them with child `previousBlockhash`. Missing parent fails with `SOLANA_PARENT_SLOT_MISSING`; mismatch fails with `SOLANA_PARENT_HASH_MISMATCH` before address history/checkpoint commit.
+- Provider adapter preserves protocol-valid null `blockTime` as `timestamp=None` for identity-only external-parent checks. In-range produced slots still require positive time and fail closed on null; AUD-ONCHAIN-035 remains open. No time is fabricated and no schema migration is required.
+- Focused Solana worker + provider suites: **129 passed**, 0 failures/errors. Tests prove an external parent with null time still anchors by hash, while an in-range null-time slot remains fail-closed. Full repository suite: **1,239 tests, 0 failures/errors, 72 skipped**; compileall and diff-check PASS. `TEST_POSTGRES_DSN` unset; no PostgreSQL server contacted. Master Audit Section 216. Local/uncommitted; Module 9 remains NO-GO.
+
+
+### PostgreSQL canonical timestamp parity — AUD-ONCHAIN-038 (27 November 2026)
+- Found a SQLite/PostgreSQL validation asymmetry: SQLite parsed canonical block and produced Solana slot timestamps and required timezone awareness; PostgreSQL checked only for non-empty strings.
+- TDD RED: timezone-naive EVM block time and Solana produced-slot time both passed PostgreSQL validation and reached the fake connection's transaction boundary. No real database was contacted.
+- Fixed locally: PostgreSQL now parses both timestamp fields as ISO-8601 and requires a timezone offset, matching SQLite. Invalid/naive timestamps fail before transaction; skipped Solana slots retain null hash/time semantics. No schema migration.
+- Focused RED/GREEN regressions: **2 passed**; PostgreSQL contract + SQLite ingestion suites: **69 passed**. Full repository suite: **1,241 tests, 0 failures/errors, 72 skipped** (27 November 2026; 75.371 seconds). TEST_POSTGRES_DSN unset; no PostgreSQL server contacted. compileall and git diff --check PASS. Master Audit Section 217. Module 9 remains NO-GO.
+
+
+### Solana null blockTime quarantine and replay — AUD-ONCHAIN-035 (27 November 2026)
+- Owner-approved policy implemented locally: preserve the raw address-history transaction in durable quarantine with signature, slot, transaction index, block hash, provider transaction time (if any), and original observed_at. Do not fabricate canonical time.
+- Unknown-time transactions are excluded from canonical events. Other known-time slots can proceed only after quarantine/page/checkpoint commit is atomic.
+- Recovery re-fetches finalized slot header; requires same block hash and exact signature/index binding; uses the subsequently available canonical block time; commits canonical event + REPLAYED state atomically. Replay batch is bounded by existing configured page_size (max 100).
+- Slot journal supports only same-hash null-to-known time enrichment; known-to-null regression and conflicting known times fail closed. Page acceptance material retains source-quarantine linkage and supports historical snapshot validation through this monotonic enrichment.
+- SQLite implementation and worker path covered by tests. PostgreSQL migration 0005_solana_timestamp_quarantine.sql added and parser-validated (4 statements), but NOT APPLIED; no PostgreSQL server contacted.
+- End-to-end quarantine/replay test PASS; Module 9 on-chain suite **369 tests, 0 failures/errors, 21 skipped**; full repository suite **1,243 tests, 0 failures/errors, 72 skipped** (78.274 seconds). An injected SQLite trigger failure proves replay transaction rollback leaves the quarantine row pending and the checkpoint/slot journal unchanged; retry succeeds after removing the trigger. compileall and diff-check PASS. TEST_POSTGRES_DSN unset.
+- Remaining: PostgreSQL runtime/migration acceptance, quarantine retention/backlog/alert budget, and explicit operator/reorg resolution when slot hash or signature position changes. AUD-ONCHAIN-035 behavior locally remediated; operational/DB acceptance remains open. Module 9 NO-GO.
+
+
+### Duplicate JSON member rejection — AUD-ONCHAIN-039 (27 November 2026)
+- Both provider REST and JSON-RPC transports previously used Python's default JSON object parsing, which silently applies last-key-wins semantics when an object repeats a member name. Synthetic responses proved duplicate `status` and duplicate RPC `result` fields were accepted.
+- TDD RED/GREEN: added a shared `object_pairs_hook` that rejects duplicate member names at every object depth; both transport paths convert the parse failure to `INVALID_JSON`. Unique-member responses retain existing parsing behavior.
+- RED/GREEN duplicate-member regression: 1 passed after fix; focused provider suite: **112 passed**; full repository suite: **1,244 tests, 0 failures/errors, 72 skipped** (76.923 seconds). No live provider/network. Master Audit Section 219.
+- This removes parser ambiguity; it does not prove provider authorship or close response-to-record provenance. Module 9 remains NO-GO.
+
+
+### Strict JSON numeric token parsing — AUD-ONCHAIN-040 (27 November 2026)
+- Python's default JSON parser accepted `NaN` and `Infinity` tokens as non-finite floats. Synthetic REST and JSON-RPC responses proved those non-standard numeric tokens crossed the provider parser boundary.
+- TDD RED/GREEN: `_reject_nonstandard_json_constant()` is now passed as `parse_constant` to both response decoders; non-finite tokens fail as `INVALID_JSON`. This is strict syntax validation, not a new business numeric range.
+- Regression covers REST NaN and RPC Infinity; focused provider suite **113 passed**, 0 failures/errors; full repository suite **1,245 tests, 0 failures/errors, 72 skipped** (76.362 seconds). Master Audit Section 220. No live provider/network. Module 9 remains NO-GO.
+
+
+### Deeply nested provider JSON handling — AUD-ONCHAIN-041 (27 November 2026)
+- Bounded provider responses with 1,100 nested arrays caused Python JSON decoding to raise `RecursionError`, which escaped the transport's stable provider error contract. The payload was below the configured byte limit.
+- TDD RED/GREEN: REST and JSON-RPC regression fixture now verifies deeply nested content is normalized to `ProviderTransportError(INVALID_JSON)`. Both decode handlers catch `RecursionError`; the process-wide recursion limit is unchanged.
+- Focused provider suite: **114 passed**; full repository suite: **1,246 tests, 0 failures/errors, 72 skipped** (78.870 seconds). Master Audit Section 221. No live provider/network. Module 9 remains NO-GO.
+
+### REST query argument validation — AUD-ONCHAIN-042 (27 November 2026)
+- `ReadOnlyJsonRpcTransport.get_json()` used `query = query or {}`, which silently converted falsey non-dictionary arguments (empty list/tuple/string, zero and false) into an empty query before the type validator.
+- TDD RED reproduced all five invalid-input cases being accepted by an in-memory transport fixture. The fix defaults only `None` to `{}`; every other non-dictionary value reaches and fails the existing query contract validator. Explicit `{}` remains valid.
+- Focused provider suite: **115 passed**. Full repository suite: **1,247 tests, 0 failures/errors, 72 skipped** (27 November 2026; 72.014 seconds). No live provider/network. Master Audit Section 222. Module 9 remains NO-GO.
+
+### Provider receipt timestamp integrity — AUD-ONCHAIN-043 (27 November 2026)
+- `ProviderResponseReceipt` previously accepted any non-empty `received_at` string, including malformed text and timezone-naive ISO-8601. That left provider evidence without a reliably interpretable instant.
+- TDD RED reproduced acceptance of `not-a-timestamp` and `2026-11-27T12:00:00`. The model now parses ISO-8601 and requires a timezone offset; UTC `Z` remains valid and the original string is preserved. Legacy rows without endpoint fingerprints remain compatible when timestamps are valid.
+- Focused provider suite: **116 passed**. Full repository suite: **1,248 tests, 0 failures/errors, 72 skipped** (27 November 2026; 73.667 seconds). Master Audit Section 223. No live provider/database. Module 9 remains NO-GO.
+
+### Persisted receipt sequence validation — AUD-ONCHAIN-044 (27 November 2026)
+- SQLite and PostgreSQL `list_page_receipts()` checked page and receipt digests but did not independently require per-page receipt sequence numbers to be contiguous and ordered. A modified receipt payload with a recomputed digest could be returned with a sequence gap.
+- SQLite TDD RED changed sequence 1 to 2 and recomputed the receipt digest; the reader accepted it. Both adapters now validate list shape and exact 1-based sequence continuity independently for each page. Empty receipt lists remain valid. A synthetic PostgreSQL contract regression exercises the parity path without connecting to a server.
+- Focused ingestion/PostgreSQL adapter suites: **97 tests, 0 failures/errors, 21 skipped**. Full repository suite: **1,250 tests, 0 failures/errors, 72 skipped** (27 November 2026; 76.778 seconds). Master Audit Section 224. Module 9 remains NO-GO.
+
+### Persistence acceptance and recovery boundary review — Section 225 (27 November 2026)
+- Reviewed pending-page recovery, trusted-key gating, HMAC page acceptance, SQLite immediate-transaction validation, PostgreSQL evidence lock order and locked page revalidation, malformed/unreceipted page visibility, and checkpoint-only page exclusion.
+- No additional independently reproducible defect confirmed in this bounded review; finding register contained **49 unique IDs at that checkpoint**. Focused ingestion + PostgreSQL adapter + store protocol suites: **111 tests, 0 failures/errors, 21 skipped**.
+- PostgreSQL remains synthetic adapter-contract coverage only; no server or production database contacted and no migration applied. This review is not production certification; Module 9 remains NO-GO.
+
+### Canonical reorg invalidation lifecycle — Section 226 (27 November 2026)
+- Reviewed SQLite/PostgreSQL signed-page invalidation, immutable historical signatures, affected old/current canonical hashes, scoped/unscoped reconciliation, reorg idempotency, block-only and Solana-slot-only pages, and transaction rollback on lifecycle-write failure.
+- Existing focused ingestion + PostgreSQL adapter + store protocol suites: **111 tests, 0 failures/errors, 21 skipped**. No additional independently reproducible defect confirmed; finding register contained 49 unique IDs at that checkpoint.
+- PostgreSQL coverage remains synthetic adapter-contract only; no server/database/migration application. Module 9 remains NO-GO.
+
+### PostgreSQL latest-observation ordering integrity — AUD-ONCHAIN-045 (27 November 2026)
+- PostgreSQL `get_latest_accepted_observation()` ordered by the denormalized `observed_at` column, which is not covered by the signed observation payload. A synthetic fixture proved that independently drifting this column could cause an older signed observation to be selected ahead of a newer signed observation.
+- TDD RED/GREEN: lookup now parses each candidate timestamp from the signed payload, skips malformed timestamps, and selects the maximum `(observed_at, observation_id)` tuple. This avoids trusting the mutable projection column and prevents one malformed timestamp from aborting all candidate selection. SQLite already selects by the signed payload timestamp.
+- Synthetic adapter regression passed. Combined PostgreSQL adapter + on-chain intelligence + ingestion + store protocol suites: **148 tests, 0 failures/errors, 21 skipped**. Full repository suite: **1,251 tests, 0 failures/errors, 72 skipped** (27 November 2026; 76.520 seconds). `compileall` and `git diff --check` PASS after documentation updates. No PostgreSQL server contacted; Module 9 remains NO-GO.
+
+### Accepted observation read-back and reorg revocation — Section 228 (27 November 2026)
+- Reviewed SQLite/PostgreSQL latest-observation and individual-observation reads: signed receipt verification, trusted-key checks, exact page observation matching, mapping binding, canonical block/slot revalidation, restart recovery and reorg revocation.
+- SQLite observation-intelligence suite: **36 tests, 0 failures/errors**. Existing SQLite restart/reorg tests verify a reorg removes the observation from latest-accepted reads and changes individual read-back to `UNVERIFIED`.
+- No additional defect confirmed. PostgreSQL restart/reorg integration remains DSN-gated and was not run; no server contacted. Module 9 remains NO-GO.
+
+### Verified observation insert/idempotency — Section 229 (27 November 2026)
+- Reviewed SQLite/PostgreSQL verified-write gates, mapping and observation duplicate handling, ID collision protection, constructor-bound ingestion store, and transactional insert/rollback boundaries.
+- `tests.test_onchain_intelligence` + PostgreSQL adapter contract tests: **48 tests, 0 failures/errors**. No new independently reproducible defect confirmed.
+- PostgreSQL runtime concurrency/crash acceptance remains unverified without a dedicated isolated server; no PostgreSQL/production database contacted. Module 9 remains NO-GO.
+
+### Verified mapping projection consistency — AUD-ONCHAIN-046 (27 November 2026)
+- SQLite and PostgreSQL `list_verified_mappings()` filtered on denormalized `network_id` but did not compare stored `mapping_id`, `asset_id`, and `network_id` columns with the mapping payload. A Bitcoin payload paired with an Ethereum scalar network column could be returned by an Ethereum-filtered list.
+- TDD RED/GREEN: both adapters now select the three scalar identity fields and omit any row whose payload identity differs. Mapping status and `_validate_mapping()` checks remain. No schema change.
+- SQLite + synthetic PostgreSQL regressions: **2 passed**. Focused on-chain intelligence + PostgreSQL adapter + protocol suites: **89 tests, 0 failures/errors, 21 skipped**. Full repository suite: **1,253 tests, 0 failures/errors, 72 skipped** (27 November 2026; 79.626 seconds); compileall and git diff-check PASS. Module 9 remains NO-GO.
+
+
+### EVM token contract address syntax — AUD-ONCHAIN-047 (27 November 2026)
+- Mapping validation previously accepted any non-empty EVM token contract string. A TDD RED test proved `not-an-evm-address` passed `_validate_mapping()`.
+- Ethereum and BNB Smart Chain non-native mappings now require a `0x` prefix plus exactly 40 hexadecimal characters; malformed prefix/length/characters fail with `EVM_TOKEN_CONTRACT_ADDRESS_INVALID`. Native and non-EVM mapping branches are unchanged.
+- This validates only address syntax, not deployment, ownership, token standard or official source provenance. AUD-ONCHAIN-002 remains open pending approved source authority and freshness policy.
+- Focused on-chain intelligence tests: **38 passed**. Full repository suite: **1,254 tests, 0 failures/errors, 72 skipped** (27 November 2026; 82.804 seconds). Module 9 remains NO-GO.
+
+
+### Solana mint address syntax — AUD-ONCHAIN-048 (27 November 2026)
+- Central mapping validation previously accepted any non-empty Solana mint string; RED proved `not-a-solana-mint` passed `_validate_mapping()`.
+- It now uses the existing base58 public-key predicate and requires a value decoding to exactly 32 bytes, returning `SOLANA_TOKEN_MINT_INVALID` otherwise. The check applies centrally at the mapping/store boundary.
+- This is only public-key syntax/length validation, not proof that the account exists, is a mint account, uses an approved token program, or is the official asset. AUD-ONCHAIN-002 remains open.
+- Focused on-chain intelligence tests: **39 passed**. Full repository suite: **1,255 tests, 0 failures/errors, 72 skipped** (27 November 2026; 75.405 seconds). Module 9 remains NO-GO.
+
+
+### Solana token-standard alignment — AUD-ONCHAIN-049 (27 November 2026)
+- Central mapping validation previously accepted any non-empty Solana token-standard label, while the active Solana worker and normalizer support `SPL_TOKEN` only. RED reproduced acceptance of a valid 32-byte mint paired with `ERC20`.
+- Central validation now requires `token_standard == SPL_TOKEN` and rejects unsupported labels with `SOLANA_TOKEN_STANDARD_UNSUPPORTED`, aligning storage/acceptance with the implemented worker path. Additional Solana token standards require their own supported decoders and tests.
+- Focused on-chain intelligence: **40 passed**; Solana worker + normalization: **36 passed**. Full repository suite: **1,256 tests, 0 failures/errors, 72 skipped** (27 November 2026; 78.627 seconds). Module 9 remains NO-GO.
+
+
+### EVM token-standard alignment — AUD-ONCHAIN-050 (27 November 2026)
+- The active EVM worker ingests ERC-20 Transfer logs only, but central mapping validation and worker validation accepted arbitrary non-empty token-standard labels. RED reproduced acceptance of `ERC721` at both boundaries.
+- Both boundaries now accept only the existing ERC-20 labels `ERC20` and `ERC-20`; central validation returns `EVM_TOKEN_STANDARD_UNSUPPORTED` for other standards. This does not claim ERC-721/ERC-1155 ingestion.
+- Focused on-chain intelligence + EVM worker + aggregation suites: **77 tests, 0 failures/errors**. Full repository suite: **1,258 tests, 0 failures/errors, 72 skipped** (27 November 2026; 78.874 seconds). Module 9 remains NO-GO.
+
+
+### EVM token-standard type validation — AUD-ONCHAIN-051 (27 November 2026)
+- The strict ERC-20 allowlist initially used set membership before checking type. TDD RED reproduced `TypeError` for list/dict values in untrusted mapping data.
+- Central mapping validation and EVM worker now type-check the token-standard value before allowlist membership; malformed types are rejected cleanly. Supported labels remain `ERC20` and `ERC-20` only.
+- Focused on-chain intelligence + EVM worker: **58 tests, 0 failures/errors**. Full repository suite: **1,259 tests, 0 failures/errors, 72 skipped** (27 November 2026; 76.372 seconds). Module 9 remains NO-GO.
+
+
+### EVM and XRPL worker decimals boundary validation — AUD-ONCHAIN-052 (27 November 2026)
+- EVM and XRPL worker `_validate_mapping()` guards did not independently enforce the already-existing central/normalizer invariant that decimals must be a non-boolean integer in the range `0..36`. A malformed mapping from a substituted/faulty mapping-store boundary passed worker validation and failed later in normalization.
+- TDD RED reproduced eight invalid cases across both workers (`True`, `-1`, `37`, and string values). Both worker guards now enforce the existing integer/range contract before worker processing. Bitcoin's fixed 8-decimal check and Solana's existing range check were already present and remain unchanged.
+- Focused EVM + XRPL worker suites: **36 tests, 0 failures/errors**. Full repository suite: **1,261 tests, 0 failures, 0 errors, 72 skipped** (27 November 2026; 76.536 seconds). `python -m compileall -q layer1 tests` and `git diff --check` PASS. This does not prove decimals match authoritative on-chain metadata. Module 9 remains NO-GO.
+
+### EVM, Bitcoin and XRPL provider-scope review — Section 237 (27 November 2026)
+- Bounded review of EVM provider-page/record network-contract-range binding, canonical transaction-index checks and duplicate log positions; Bitcoin address-history page binding, pagination, confirmation, canonical-header and transaction-detail checks; and XRPL account-page/fixed-ledger binding, validated headers, parent linkage and delivered-amount issuer/currency matching.
+- No additional independently reproducible defect confirmed in these reviewed paths. This does not prove provider authenticity, official asset mapping, complete address indexing, chain-wide coverage or live-provider correctness. AUD-ONCHAIN-002 and existing operational-policy blockers remain unresolved; Module 9 remains NO-GO.
+
+### Solana finalized address-page and transaction-position review — Section 238 (27 November 2026)
+- Reviewed finalized provider/network/address binding, bounded page size, fixed slot/header evidence, transaction-index/signature matching, duplicate and descending-position checks, cursor replay protection, and null-block-time quarantine with atomic slot journal/events/receipts/checkpoint persistence.
+- Existing tests cover quarantine replay and transaction rollback on quarantine persistence failure. No additional independently reproducible defect confirmed in this bounded review. The hard-coded 10,000 pagination-token cap and quarantine operational limits remain policy blockers AUD-ONCHAIN-032/AUD-ONCHAIN-035; no policy was invented. Module 9 remains NO-GO.
+
+
+### XRPL opaque pagination marker validation — AUD-ONCHAIN-053 (27 November 2026)
+- Worker cursor fingerprinting previously called `json.dumps(..., allow_nan=False)` directly. A provider `next_cursor` containing NaN raised raw `ValueError`; a corrupted persisted marker was forwarded to the provider before it was rejected.
+- TDD RED reproduced both cases. The worker now uses a guarded canonical marker serializer that raises controlled `ProviderTransportError` (`INVALID_PROVIDER_DATA` for provider output; `INVALID_CHECKPOINT` for persisted state). Persisted current/history markers are validated before provider page requests. Valid opaque JSON marker structures remain unparsed.
+- XRPL worker suite: **23 tests, 0 failures/errors**. No marker-size/depth/count budget was invented; AUD-ONCHAIN-030 remains an owner-policy blocker. Module 9 remains NO-GO.
+
+
+### Bitcoin transaction-detail block metadata type validation — AUD-ONCHAIN-054 (27 November 2026)
+- Bitcoin normalization compared transaction-detail `blockHeight`/`blockTime` to integer history metadata without checking the detail field types. Python equality allowed `True == 1` and `1.0 == 1`, so malformed booleans/floats could pass in edge cases.
+- TDD RED reproduced bool/float aliases for both fields. Normalization now requires each detail field to be a non-boolean positive integer before exact history comparison.
+- Focused Bitcoin normalization + worker suites: **32 tests, 0 failures/errors**. Full repository suite: **1,265 tests, 0 failures, 0 errors, 72 skipped** (27 November 2026; 75.452 seconds). `python -m compileall -q layer1 tests` and `git diff --check` PASS. Provider authenticity and authoritative chain evidence remain separate requirements; Module 9 remains NO-GO.
+
+
+### EVM logIndex provider-boundary validation — AUD-ONCHAIN-055 (27 November 2026)
+- EVM worker record validation checked `transaction_index` strictly but did not independently check `log_index`. A malformed/substituted provider record with `log_index=True` passed normalization and leaked a raw ingestion-store `ValueError` during commit (nothing persisted).
+- TDD RED reproduced the exception-boundary leak. The worker now requires `log_index` to be a non-boolean, non-negative integer before duplicate-position tracking and normalization, returning controlled `INVALID_PROVIDER_DATA` for malformed records.
+- Focused EVM worker suite: **18 tests, 0 failures/errors**. This does not establish provider authenticity or change the unresolved removed-log/tombstone policy (AUD-ONCHAIN-031). Module 9 remains NO-GO.
+
+
+### EVM transfer-log record shape validation — AUD-ONCHAIN-056 (27 November 2026)
+- EVM worker did not validate all provider record fields before normalization. TDD RED injected `from_address=None`; `.lower()` leaked an `AttributeError` from the normalizer.
+- Worker now validates network-id type, EVM contract/from/to address syntax, amount string, non-boolean non-negative block/log/transaction indices, block/transaction hash syntax, and boolean removed flag before dereferencing record fields. Invalid records fail closed with `INVALID_PROVIDER_DATA`; canonical block transaction binding and duplicate log-position checks remain.
+- Focused EVM worker + provider suites: **135 tests, 0 failures/errors**. This does not prove provider authenticity or settle removed-log/tombstone policy (AUD-ONCHAIN-031). Module 9 remains NO-GO.
+
+
+### Bitcoin history identity validation before detail lookup — AUD-ONCHAIN-057 (27 November 2026)
+- Worker used confirmed address-history `txid` to fetch transaction details before validating its exact identity. TDD RED injected `txid=None`; worker called the detail provider and surfaced its lookup failure as `TIMEOUT` instead of rejecting malformed provider data.
+- Worker now validates confirmed record txid, block height/hash/time, confirmations and finality before detail lookup. Invalid identity/shape returns `INVALID_PROVIDER_DATA`; fixed-range/minimum-confirmation and independent detail-to-history checks remain. ORPHANED records remain skipped.
+- Focused Bitcoin worker + provider suites: **136 tests, 0 failures/errors**. This does not prove provider authenticity or complete address indexing. Module 9 remains NO-GO.
+
+
+### Bitcoin maximum-money validation — AUD-ONCHAIN-058 (27 November 2026)
+- Bitcoin output normalization accepted any non-negative decimal satoshi string without enforcing the 21,000,000 BTC maximum-money ceiling. TDD RED proved acceptance of both an individual output above `2,100,000,000,000,000` satoshis and an aggregate output sum above that limit.
+- Normalization now enforces the protocol maximum on each output and the cumulative transaction output sum. Oversized decimal strings are compared canonically before integer conversion; zero outputs remain allowed. No dust threshold or other monetary policy was added.
+- Bitcoin output normalization: **15 tests, 0 failures/errors**; Bitcoin worker + provider: **136 tests, 0 failures/errors**. This is a monetary-range invariant check, not full transaction consensus validation. Module 9 remains NO-GO.
+
+
+### EVM ERC-20 uint256 amount bound — AUD-ONCHAIN-059 (27 November 2026)
+- EVM worker and normalizer required decimal digits but did not enforce the ERC-20 Transfer event's 32-byte uint256 amount range. TDD RED injected `2^256`; worker accepted and persisted the impossible amount.
+- Shared `_is_uint256_decimal()` now checks canonical decimal text against `2^256-1` without parsing unbounded untrusted integers. EVM worker and normalizer both enforce `0..2^256-1`. No token supply or asset-specific cap was inferred.
+- Focused EVM worker + ingestion suites: **85 tests, 0 failures/errors**. This validates ABI width only, not token supply or mapping authority. Module 9 remains NO-GO.
+
+
+### EVM canonical quantity and Solana SPL amount encoding review — Section 246 (27 November 2026)
+- Re-reviewed EVM JSON-RPC quantity grammar and Solana SPL Transfer/TransferChecked amount decoding. EVM parser enforces canonical EIP-1474 quantity syntax; SPL amount extraction reads exactly eight little-endian bytes (u64) after exact instruction-layout checks, with TransferChecked decimals bound to the verified mapping.
+- Focused provider + Solana normalization + Solana worker + ingestion suites: **217 tests, 0 failures/errors**. No additional independently reproducible defect confirmed. Token-2022, provider authenticity, complete chain coverage and source authority remain outside this bounded review. Module 9 remains NO-GO.
+
+
+### Solana raw full-transaction slot type validation — AUD-ONCHAIN-060 (27 November 2026)
+- Normalizer compared `raw["slot"]` directly with `history.slot`; Python `True == 1` allowed a boolean raw slot to match integer slot 1. TDD RED reproduced acceptance and event emission.
+- Normalizer now requires raw slot to be a non-boolean integer exactly matching the validated history slot, otherwise `SOLANA_SLOT_MISMATCH`.
+- Focused Solana normalization + worker + provider suites: **153 tests, 0 failures/errors**. Provider authenticity remains a separate requirement. Module 9 remains NO-GO.
+
+
+### Solana address-table lookup u8 index bound — AUD-ONCHAIN-061 (27 November 2026)
+- Solana lookup metadata previously accepted any non-negative integer index; TDD RED showed `writableIndexes=[256]` passed and a transfer was emitted despite lookup indexes being u8 protocol values.
+- `_solana_account_keys()` now restricts lookup indexes to non-boolean integers `0..255`, retaining existing loaded-address count/order checks.
+- Focused Solana normalization + worker + provider suites: **154 tests, 0 failures/errors**. This does not verify lookup-table account state or authority. Module 9 remains NO-GO.
+
+
+### Solana address-table lookup account-key validation — AUD-ONCHAIN-062 (27 November 2026)
+- Solana normalizer checked lookup index arrays and resolved-address counts but did not validate `addressTableLookups[].accountKey`. TDD RED injected `not-a-solana-pubkey`; a transfer was still emitted.
+- `_solana_account_keys()` now requires each lookup account key to be a 32-byte base58 public key using the existing predicate. Existing u8 index and loaded-address ordering/count checks remain.
+- Focused Solana normalization + worker + provider suites: **155 tests, 0 failures/errors**. This is syntax validation only; lookup-table state/authority remains unverified. Module 9 remains NO-GO.
+
+
+### Bitcoin transaction output index uint32 bound — AUD-ONCHAIN-063 (27 November 2026)
+- Bitcoin output normalization accepted any non-negative integer output `n`; TDD RED proved `4294967296` was accepted even though the serialized outpoint vout index is uint32.
+- Normalization now restricts output indexes to non-boolean integers `0..0xFFFFFFFF`; duplicate-index protection remains.
+- Focused Bitcoin output normalization + worker + provider suites: **152 tests, 0 failures/errors**. This validates field width only, not full transaction consensus. Module 9 remains NO-GO.
+
+
+### Bitcoin zero-page/non-empty-record consistency — AUD-ONCHAIN-064 (27 November 2026)
+- Bitcoin adapter and worker accepted a page with `totalPages=0` and non-empty records. Worker then calculated no next page and advanced its fixed-range checkpoint. TDD RED reproduced both adapter and substituted-worker paths.
+- Adapter and worker now reject non-empty records when total page count is zero with `INVALID_PROVIDER_DATA`; empty zero-page results remain valid. Existing pagination and page-count-change restart behavior remains.
+- Focused Bitcoin worker + provider suites: **140 tests, 0 failures/errors**. This does not establish provider address-index completeness. Module 9 remains NO-GO.
+
+
+### SQLite/PostgreSQL verified mapping read-parity review — Section 252 (27 November 2026)
+- Both adapters read stored identity projections and payloads, compare mapping_id/asset_id/network_id, require VERIFIED status and call the same central mapping validator. Recent EVM/Solana contract/address/token-standard/decimals rules therefore remain shared rather than diverging by adapter.
+- Focused on-chain intelligence + synthetic PostgreSQL adapter + provider suites: **197 tests, 0 failures/errors, 21 skipped**. No additional independently reproducible defect confirmed. No PostgreSQL server was contacted; runtime/cross-connection behavior remains unverified. Module 9 remains NO-GO.
+
+
+### XRPL raw ledger-index type validation — AUD-ONCHAIN-065 (27 November 2026)
+- XRPL payment normalization compared `raw["ledger_index"]` with the typed record index without checking the raw field's type; Python `True == 1` let a boolean raw index match ledger 1. TDD RED reproduced acceptance and event emission.
+- Normalization now requires the raw ledger index to be a non-boolean integer before exact equality comparison with the typed record index. Malformed raw identity fails closed.
+- Focused XRPL normalization: **18 tests, 0 failures/errors**; XRPL worker + provider: **138 tests, 0 failures/errors**. This does not establish provider authenticity or settle XRPL marker-budget policy (AUD-ONCHAIN-030). Module 9 remains NO-GO.
+
+
+### XRPL raw/typed transaction binding — AUD-ONCHAIN-066 (27 November 2026)
+- The XRPL normalizer validated raw hash/ledger identity but did not verify that raw `tx_json`/`meta` matched the typed transaction/metadata dictionaries used for normalization. TDD RED showed divergent raw destination and transaction result could still produce an event.
+- Normalization now requires both raw objects to be dictionaries exactly equal to their typed counterparts; mismatch fails closed. Test fixtures now mirror the real adapter's raw response shape.
+- Focused XRPL normalization: **19 tests, 0 failures/errors**; XRPL worker + provider: **138 tests, 0 failures/errors**. This binds local representations, not provider authenticity. Module 9 remains NO-GO.
+
+
+### EVM `eth_getLogs` removed-flag presence — AUD-ONCHAIN-067 (27 November 2026)
+- Shared Ethereum/BNB log decoder previously used `log.get("removed", False)`, accepting an incomplete provider log as explicitly non-removed. TDD RED reproduced acceptance with an otherwise valid Transfer log missing `removed`.
+- Decoder now requires `removed` to be present and boolean; missing/null/non-boolean values fail with `INVALID_TRANSFER_LOG`. Explicit `False` and `True` retain their semantics.
+- Focused provider suite: **118 tests, 0 failures/errors**; EVM worker + ingestion: **86 tests, 0 failures/errors**. This does not close owner-defined tombstone lifecycle policy AUD-ONCHAIN-031. Module 9 remains NO-GO.
+
+
+### Solana raw/typed block-time binding — AUD-ONCHAIN-068 (27 November 2026)
+- Solana normalization checked typed `block_time` against canonical block time but did not bind a present raw full-transaction `blockTime` member to that typed value. TDD RED reproduced acceptance after mutating only raw `blockTime`.
+- Normalization now validates a present raw value as a positive non-boolean integer and requires exact equality with typed `history.block_time`; absent raw field remains compatible, and explicit null must match typed null. Canonical timestamp validation remains separate.
+- Focused Solana normalization + worker + provider suites: **158 tests, 0 failures/errors**. Timestamp accuracy/provider authenticity and quarantine policy AUD-ONCHAIN-035 remain unresolved. Module 9 remains NO-GO.
+
+
+### Bitcoin raw/typed address-history identity binding — AUD-ONCHAIN-069 (27 November 2026)
+- The normalizer validated typed `BitcoinAddressTransaction` fields against fetched detail data but did not bind retained raw address-history data to the typed projection. TDD RED reproduced raw txid divergence and a Python `True == 1` alias in raw block height.
+- Normalizer now requires raw txid to be valid 32-byte hex and equal typed txid; present raw confirmations/height/time must be non-boolean integers exactly equal to typed values, and present raw block hash must match typed hash case-insensitively. Optional block fields remain optional for compatibility.
+- Focused Bitcoin normalization + worker + provider suites: **157 tests, 0 failures/errors**. Provider authenticity and mapping authority/freshness AUD-ONCHAIN-002 remain unresolved. Module 9 remains NO-GO.
+
+
+### XRPL ledger-header close-time UInt32 bound — AUD-ONCHAIN-070 (27 November 2026)
+- `fetch_ledger_header()` rejected negative/boolean/non-integer close times but accepted values above the XRPL header field's UInt32 maximum. TDD RED reproduced acceptance at `2**32`.
+- Adapter now enforces `0 <= close_time <= 0xFFFFFFFF` before converting Ripple Epoch seconds into a Unix timestamp. Existing valid header conversion remains unchanged.
+- Focused valid-header + out-of-range regression tests: **2 tests, 0 failures/errors**. This checks protocol width, not timestamp truth/provider authenticity or cross-ledger monotonicity. Module 9 remains NO-GO.
+- Protocol reference: https://xrpl.org/docs/references/protocol/ledger-data/ledger-header
+
+- Section 258 full verification: **1,284 repository tests, 0 failures, 0 errors, 72 skipped**; compileall and `git diff --check` PASS. Synthetic PostgreSQL tests only; no PostgreSQL server was contacted. Module 9 remains NO-GO.
+
+
+### XRPL validated-ledger close-time monotonicity — AUD-ONCHAIN-071 (27 November 2026)
+- Worker verified parent-hash linkage but did not require each validated ledger's canonical timestamp to be later than its preceding ledger. TDD RED reproduced acceptance of equal timestamps for linked ledgers.
+- Worker now rejects equal/decreasing timestamps with `XRPL_LEDGER_TIME_NOT_MONOTONIC`, checking both the preceding anchor and every adjacent header in the fixed range before account-page requests. XRPL worker fixtures now use strictly increasing timestamps.
+- Focused XRPL worker suite: **22 tests, 0 failures/errors**. This enforces ordering for the fetched range only; wall-clock accuracy, provider authenticity and cross-run anchor continuity remain separate. Module 9 remains NO-GO.
+- Protocol reference: https://xrpl.org/docs/concepts/ledgers/ledger-close-times
+
+
+### XRPL ledger-index UInt32 bounds — AUD-ONCHAIN-072 (27 November 2026)
+- Chainstack adapter accepted out-of-range ledger indexes for exact header requests and fixed account-history ranges; validated-head and returned range metadata also lacked explicit UInt32 bounds. TDD RED showed oversized requests reached transport.
+- Adapter now enforces positive UInt32 header/head indexes, non-negative UInt32 account-history bounds, and UInt32 returned range metadata before accepting it.
+- Focused new regressions + existing valid header/account-range tests: **4 tests, 0 failures/errors**. This is protocol-width validation only; provider authenticity and history completeness remain unresolved. Module 9 remains NO-GO.
+- Protocol reference: https://xrpl.org/docs/references/protocol/ledger-data/ledger-header
+
+- Section 260 verification: **1,287 repository tests, 0 failures, 0 errors, 72 skipped**; compileall and `git diff --check` PASS. Focused XRPL provider + worker + normalization suites: 162 passed. `TEST_POSTGRES_DSN` unset; no PostgreSQL server contacted. Module 9 remains NO-GO.
+
+
+### Bitcoin resumed-range confirmation-safe tip revalidation — AUD-ONCHAIN-073 (27 November 2026)
+- Worker bounded newly created ranges by `safe_height`, but resumed a persisted fixed range without checking whether its old `range_end` still fit the current tip's confirmation-safe height. TDD RED reproduced a page-2 transaction above the current safe height being ingested after the tip regressed.
+- Worker now defers the saved range without fetching headers or another history page whenever `range_end > safe_height`; the original page/range checkpoint remains intact for safe retry after the tip catches up.
+- Focused Bitcoin worker suite: **22 tests, 0 failures/errors**. This does not prove provider confirmation claims or provider authenticity. Module 9 remains NO-GO.
+
+- Section 261 full verification: **1,288 repository tests, 0 failures, 0 errors, 72 skipped**; compileall and `git diff --check` PASS. Focused Bitcoin worker + provider + ingestion suites: 211 passed. No PostgreSQL server contacted; Module 9 remains NO-GO.
+
+
+### Bitcoin block-header timestamp UInt32 bounds — AUD-ONCHAIN-074 (27 November 2026)
+- Both Alchemy provider adapter and Bitcoin worker accepted positive header timestamps above the serialized `nTime` UInt32 maximum. TDD RED reproduced acceptance of `2**32` at both boundaries.
+- Both boundaries now enforce `1 <= timestamp <= 0xFFFFFFFF`, rejecting booleans, non-integers and out-of-width values. Valid header and genesis compatibility remain covered.
+- Focused regression + valid-header tests: **4 tests, 0 failures/errors**. Width validation does not implement Bitcoin PoW, MTP, future-time or difficulty consensus validation; Module 9 remains NO-GO.
+- Protocol references: https://github.com/bitcoin/bitcoin/blob/master/src/chain.h and https://github.com/bitcoin/bitcoin/blob/master/src/validation.cpp
+
+- Section 262 full verification: **1,290 repository tests, 0 failures, 0 errors, 72 skipped**; compileall and `git diff --check` PASS. Focused Bitcoin provider + worker + ingestion suites: 213 passed. No PostgreSQL server contacted; Module 9 remains NO-GO.
+
+
+### Bitcoin history/detail timestamp binding to canonical header — AUD-ONCHAIN-075 (27 November 2026)
+- History and full transaction detail timestamps were bound to each other, but neither was compared with the independently fetched canonical header timestamp. TDD RED reproduced acceptance when history/detail agreed with each other but differed by one second from the header.
+- Worker now rejects `record.block_time != header["timestamp"]` with `BITCOIN_BLOCK_TIME_MISMATCH` before transaction-detail fetch, event persistence or checkpoint advancement. Reorg fixtures now use matching timestamps.
+- Focused Bitcoin worker suite: **24 tests, 0 failures/errors**. This is cross-source consistency validation, not Bitcoin consensus validation/provider authenticity. Module 9 remains NO-GO.
+- Alchemy references: https://www.alchemy.com/docs/chains/bitcoin/utxo-api-endpoints/utxo-api-endpoints/get-transaction and https://www.alchemy.com/docs/chains/bitcoin/bitcoin-api-endpoints/getblock
+
+- Section 263 full verification: **1,291 repository tests, 0 failures, 0 errors, 72 skipped**; compileall and `git diff --check` PASS. Focused Bitcoin provider + worker + ingestion suites: 214 passed. No PostgreSQL server contacted; Module 9 remains NO-GO.
+
+
+### Bitcoin provider header height bool/int alias — AUD-ONCHAIN-076 (27 November 2026)
+- Provider adapter compared returned `height` directly with requested integer height; Python `True == 1` allowed JSON boolean `true` to pass as height 1. TDD RED reproduced acceptance.
+- Adapter now requires returned height to be a non-boolean integer before exact equality comparison. Focused alias + valid header/genesis tests: **3 tests, 0 failures/errors**. Module 9 remains NO-GO.
+
+- Section 264 full verification: **1,292 repository tests, 0 failures, 0 errors, 72 skipped**; compileall and `git diff --check` PASS. Focused Bitcoin provider + worker + ingestion suites: 215 passed. No PostgreSQL server contacted; Module 9 remains NO-GO.
+
+
+### Solana signed-int64 persistence bounds for u64 slots — AUD-ONCHAIN-077 (27 November 2026)
+- Provider adapter and worker accepted slot identifiers/ranges above the Solana RPC `u64` maximum despite rejecting booleans and negatives. TDD RED reproduced oversized finalized/head, transaction, produced-slot, block-slot, fixed-range and worker configuration values.
+- Added `SOLANA_MAX_PERSISTABLE_SLOT = 0x7FFFFFFFFFFFFFFF` and enforce it independently across adapter requests/responses and worker configuration, finalized slot, slot-state, checkpoint, parent and transaction boundaries. This is the signed-int64 storage ceiling for SQLite `INTEGER`/PostgreSQL `BIGINT`, a deliberately narrower subset than protocol `u64`.
+- New boundary regressions: **7 tests, 0 failures/errors**. This is representation/storage validation, not validator consensus/provider authenticity. Module 9 remains NO-GO.
+- Protocol references: https://solana.com/docs/rpc/http/getslot and https://solana.com/docs/rpc/json-structures
+
+- Section 265 full verification: **1,299 repository tests, 0 failures, 0 errors, 72 skipped**; compileall and `git diff --check` PASS. Focused Solana provider + worker + normalization + ingestion suites: 238 passed. No PostgreSQL server contacted; Module 9 remains NO-GO.
+
+
+### Solana terminal signed-int64 slot checkpoint — AUD-ONCHAIN-078 (27 November 2026)
+- A completed Solana range ending at the signed-int64 persistence maximum computed `next_slot=max+1`; SQLite rejected the checkpoint with `OverflowError`. TDD RED reproduced the failed commit.
+- Worker now persists `next_slot=max` plus a validated `exhausted=true` marker at the terminal slot. Future runs continue pending quarantine recovery but do not restart address-history pagination for the exhausted scope. Ordinary ranges still increment normally.
+- Focused Solana worker suite: **22 tests, 0 failures/errors**. Module 9 remains NO-GO.
+
+- Section 266 full verification: **1,300 repository tests, 0 failures, 0 errors, 72 skipped**; compileall and `git diff --check` PASS. Focused Solana provider + worker + normalization + ingestion suites: 239 passed. Focused Solana worker suite: 22 passed. No PostgreSQL server contacted; Module 9 remains NO-GO.
+
+
+### Solana quarantine replay checks canonical hash before timestamp deferral — AUD-ONCHAIN-079 (27 November 2026)
+- TDD reproduced a reorged quarantined slot whose replacement block still had null `block_time`: the worker skipped hash comparison, reorg reconciliation rewound the cursor, and the same signature later caused a quarantine identity-collision `ValueError`.
+- Replay now compares canonical block hash before deferring for unknown time. Changed hash fails closed with `SOLANA_QUARANTINE_BLOCK_HASH_MISMATCH`; unchanged hash/null time remains pending. No automatic deletion or retention-policy choice was introduced.
+- Focused regression + replay + reorg tests: 3 passed. Solana worker + normalization + ingestion + PostgreSQL contract suites: 150 tests, 0 failures/errors, 21 skipped. Full repository suite: **1,301 tests, 0 failures, 0 errors, 72 skipped**; compileall and `git diff --check` PASS. Module 9 remains NO-GO.
+
+
+### Solana quarantine rejects raw boolean slot aliases — AUD-ONCHAIN-080 (27 November 2026)
+- Null-timestamp quarantine bypassed the ordinary normalizer's strict raw-slot check. Worker/store equality accepted raw `slot: true` for typed slot `1` because Python `True == 1`; later replay would fail the normalizer and leave the quarantine item pending.
+- Worker now validates raw slot as a non-boolean integer matching typed slot before quarantine. SQLite and PostgreSQL commit validators independently reject boolean/non-integer raw slot aliases.
+- Focused worker + SQLite store + synthetic PostgreSQL store regressions: 3 passed. Full repository verification pending. Module 9 remains NO-GO.
+
+- Section 268 verification: focused worker + SQLite store + synthetic PostgreSQL store regressions **3 passed**; full repository suite **1,304 passed, 0 failures/errors, 72 skipped** (80.180 seconds); compileall and `git diff --check` PASS. No PostgreSQL runtime was available; Module 9 remains NO-GO.
+
+
+### Solana quarantine binds raw blockTime to typed history — AUD-ONCHAIN-081 (27 November 2026)
+- Null-canonical-time quarantine bypassed normalizer validation. TDD RED reproduced a raw `blockTime` one second different from typed address-history time being persisted, although later replay would reject it.
+- Worker now validates present raw blockTime as a positive non-boolean integer exactly matching typed history before quarantine; SQLite and PostgreSQL stores independently enforce the same binding. Missing raw field remains compatible; explicit null must match typed null.
+- Focused worker + SQLite store + synthetic PostgreSQL store regressions: 3 passed. Full repository verification pending. Module 9 remains NO-GO.
+
+- Section 269 verification: focused worker + SQLite store + synthetic PostgreSQL store regressions **3 passed**; full repository suite **1,307 passed, 0 failures/errors, 72 skipped** (86.088 seconds); compileall and `git diff --check` PASS. No PostgreSQL runtime was available; Module 9 remains NO-GO.
+
+
+### Solana quarantine runs full transaction preflight — AUD-ONCHAIN-082 (27 November 2026)
+- Null-timestamp quarantine bypassed the normalizer's mandatory `meta.err` validation. TDD RED reproduced a record with missing execution status being persisted and later rejected on every replay.
+- Worker now runs the full normalizer as validation-only preflight with a temporary timestamp anchor; temporary events/time are discarded. SQLite and PostgreSQL stores independently require transaction/meta dictionaries, explicit `err`, matching first signature, and message dictionary.
+- Focused worker + SQLite store + synthetic PostgreSQL store tests: 5 passed. Full repository verification pending. Module 9 remains NO-GO.
+
+- Section 270 verification: focused worker + SQLite store + synthetic PostgreSQL store tests **5 passed**; full repository suite **1,310 passed, 0 failures/errors, 72 skipped** (79.136 seconds); compileall and `git diff --check` PASS. No PostgreSQL runtime was available; Module 9 remains NO-GO.
+
+
+### Solana transaction execution-error shape validation — AUD-ONCHAIN-083 (27 November 2026)
+- Normalizer treated every non-null `meta.err` JSON value as a valid failed transaction. TDD RED reproduced boolean, integer, array, empty-string and empty-object values being silently skipped.
+- It now accepts only a non-empty string enum variant or a single-key structured enum object; malformed shapes fail with `INVALID_SOLANA_TRANSACTION`. Valid string and structured error variants remain skippable.
+- Focused malformed-shape + valid failed transaction + missing-status tests: 3 passed. Full repository verification pending. Module 9 remains NO-GO.
+
+- Section 271 verification: focused malformed-error-shape + valid failed-transaction + missing-status tests **3 passed**; full repository suite **1,311 passed, 0 failures/errors, 72 skipped** (82.832 seconds); compileall and `git diff --check` PASS. No PostgreSQL runtime was available; Module 9 remains NO-GO.
+
+- Section 271 verification: focused malformed-error-shape + valid failed-transaction + missing-status tests **3 passed**; full repository suite **1,311 passed, 0 failures/errors, 72 skipped** (82.832 seconds); compileall and `git diff --check` PASS. No PostgreSQL runtime was available; Module 9 remains NO-GO.
+
+
+### Continuation checkpoint — 27 November 2026 (after Master Audit Section 272)
+- Section 272 fixed AUD-ONCHAIN-084. Ethereum and BNB provider header adapters accepted timestamps above the application's UTC `datetime`/ISO-8601 representable range. TDD RED reproduced both adapters accepting `253402300800` and the EVM worker raising `ValueError: year 10000 is out of range` during conversion. GREEN defines `MAX_DATETIME_UNIX_TIMESTAMP = 253402300799` and independently rejects out-of-range timestamps in both adapters and the worker before conversion/persistence.
+- Focused EVM worker + provider suites: **151 tests, 0 failures/errors**. Full repository suite: **1,314 tests, 0 failures, 0 errors, 72 skipped** (82.021 seconds); compileall and `git diff --check` PASS.
+- Preserve `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `34bbe5b959ea6196b750529e67129af8c68b7590`, all existing modifications and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql`; do not touch `/root/Binance-bot`. `TEST_POSTGRES_DSN` remains unset. No PostgreSQL runtime, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+### Continuation checkpoint — 27 November 2026 (after Master Audit Section 273)
+- Section 273 fixed AUD-ONCHAIN-085. EVM worker checked parent-hash linkage but not timestamp order. TDD RED reproduced a parent-linked BNB header sequence with decreasing seconds being committed and an Ethereum sequence with equal timestamps being accepted. GREEN now requires strictly increasing Ethereum timestamps and non-decreasing BNB second-resolution timestamps; equal BNB seconds remain allowed because the adapter does not expose BNB's millisecond remainder. Violations fail with `EVM_BLOCK_TIMESTAMP_NOT_MONOTONIC` before page commit/checkpoint advancement.
+- Focused EVM worker + provider suites: **154 tests, 0 failures/errors**. Full repository suite: **1,317 tests, 0 failures, 0 errors, 72 skipped** (83.582 seconds); compileall and `git diff --check` PASS. Official protocol references: Ethereum Yellow Paper header validation and BNB BEP-706 millisecond timestamp design.
+- Preserve `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `34bbe5b959ea6196b750529e67129af8c68b7590`, all existing modifications and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql`; do not touch `/root/Binance-bot`. `TEST_POSTGRES_DSN` remains unset. No PostgreSQL runtime, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+### Continuation checkpoint — 27 November 2026 (after Master Audit Section 274)
+- Section 274 fixed AUD-ONCHAIN-086. Solana provider accepted positive blockTime values above the application's UTC datetime/ISO-8601 representable range; worker could raise `ValueError: year 10000 is out of range` converting a canonical slot timestamp or a transaction time used as a null-time quarantine validation anchor. TDD RED reproduced both worker paths and both adapter acceptance paths. GREEN enforces `MAX_DATETIME_UNIX_TIMESTAMP = 253402300799` in Solana header/address-history adapters and independently in worker header, typed blockTime and raw blockTime validation. Protocol-valid null canonical block time remains supported.
+- Focused Solana worker + provider suites: **159 tests, 0 failures/errors**. Full repository suite: **1,321 tests, 0 failures, 0 errors, 72 skipped** (84.206 seconds); compileall and `git diff --check` PASS.
+- Preserve `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `34bbe5b959ea6196b750529e67129af8c68b7590`, all existing modifications and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql`; do not touch `/root/Binance-bot`. `TEST_POSTGRES_DSN` remains unset. No PostgreSQL runtime, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+### Continuation checkpoint — 27 November 2026 (after Master Audit Section 275)
+- Section 275 fixed AUD-ONCHAIN-087. The Alchemy provider's `probe()` method duplicated canonical header parsing and bypassed existing timestamp bounds: Bitcoin accepted `time=2**32`; Ethereum/BNB probes raised `ValueError` on `253402300800`. GREEN defines/reuses the Bitcoin UInt32 maximum and enforces the shared UTC datetime upper bound in EVM probes before conversion. All three fail with `INVALID_PROVIDER_DATA`.
+- Focused provider suite: **134 tests, 0 failures/errors**. Full repository suite: **1,323 tests, 0 failures, 0 errors, 72 skipped** (89.275 seconds); compileall and `git diff --check` PASS.
+- Preserve `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `34bbe5b959ea6196b750529e67129af8c68b7590`, all existing modifications and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql`; do not touch `/root/Binance-bot`. `TEST_POSTGRES_DSN` remains unset. No PostgreSQL runtime, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+### Continuation checkpoint — 27 November 2026 (after Master Audit Section 276)
+- Section 276 fixed AUD-ONCHAIN-088. Solana worker previously verified that a reported parent slot existed and its hash matched, but did not require it to be the immediately preceding produced slot in the ordered `getBlocks` range. TDD RED reproduced acceptance of slot 302 claiming parent 300 while slot 301 was also produced. GREEN now tracks the prior produced slot and rejects older-parent references with `SOLANA_PARENT_SLOT_MISMATCH`; missing parents retain `SOLANA_PARENT_SLOT_MISSING`. Reorg fixture updated to model changed produced-slot parent linkage coherently.
+- Regression group: **3 tests, 0 failures/errors**. Full repository suite: **1,324 tests, 0 failures, 0 errors, 72 skipped** (84.021 seconds); compileall and `git diff --check` PASS. Protocol references: Solana RPC JSON Structures (`parentSlot`) and `getBlocks` confirmed-slot range.
+- Preserve `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `34bbe5b959ea6196b750529e67129af8c68b7590`, all existing modifications and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql`; do not touch `/root/Binance-bot`. `TEST_POSTGRES_DSN` remains unset. No PostgreSQL runtime, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+### Continuation checkpoint — 27 November 2026 (after Master Audit Section 277)
+- Section 277 fixed AUD-ONCHAIN-089. Bitcoin worker compared address-history `blockHash` with transaction-detail `blockHash` through normalization but did not compare either with the independently fetched canonical block header. TDD RED reproduced acceptance of mutually agreeing but wrong transaction hashes against a different canonical header hash. GREEN compares the typed history block hash to the canonical header hash before transaction-detail fetch/normalization and rejects divergence with `BITCOIN_BLOCK_HASH_MISMATCH`.
+- Focused Bitcoin worker regressions: **4 tests, 0 failures/errors**. Full repository suite: **1,325 tests, 0 failures, 0 errors, 72 skipped** (82.909 seconds); compileall and `git diff --check` PASS.
+- Preserve `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `34bbe5b959ea6196b750529e67129af8c68b7590`, all existing modifications and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql`; do not touch `/root/Binance-bot`. `TEST_POSTGRES_DSN` remains unset. No PostgreSQL runtime, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+### Continuation checkpoint — 27 November 2026 (after Master Audit Section 278)
+- Section 278 fixed AUD-ONCHAIN-090. Bitcoin worker anchored resumed ranges to `range_start - 1` but skipped that parent-header check on the first configured scan range. TDD RED reproduced acceptance/commit of an initial range whose first header's `previous_block_hash` differed from the independently fetched preceding header hash. GREEN now fetches and validates the preceding header for every range with `range_start > 0`; genesis remains the only unanchored first range.
+- Focused Bitcoin worker tests: **4 tests, 0 failures/errors**. Full repository suite: **1,326 tests, 0 failures, 0 errors, 72 skipped** (82.849 seconds); compileall and `git diff --check` PASS.
+- Preserve `/tmp/binance-w2e-continuation`, branch `work/module9-continuation-local`, HEAD `34bbe5b959ea6196b750529e67129af8c68b7590`, all existing modifications and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql`; do not touch `/root/Binance-bot`. `TEST_POSTGRES_DSN` remains unset. No PostgreSQL runtime, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## 279. AUD-ONCHAIN-091 — XRPL account_tx close time is not bound to canonical ledger header (27 November 2026)
+
+**Finding: AUD-ONCHAIN-091 — MEDIUM / CONFIRMED / REMEDIATED LOCALLY / TDD REGRESSION.** The Chainstack `account_tx` adapter retained each transaction's `close_time_iso`, but the XRPL worker ignored it and unconditionally substituted the timestamp from a separately fetched canonical ledger header. A response could therefore contain a matching validated ledger index/hash but a contradictory transaction-wrapper close time, and the worker would still ingest the event. XRPL documents `close_time_iso` as the close time of the ledger containing the transaction; the `ledger` response independently exposes the ledger header's `close_time` and `close_time_iso`. This is an evidence-consistency defect, not a request to trust the transaction-wrapper timestamp over the canonical header.
+
+### TDD reproduction and remediation
+- Added `test_transaction_close_time_must_match_independently_verified_ledger_header`. The account transaction claims the same validated ledger index/hash but its `close_time_iso` is one second different from the independently fetched canonical header. RED: the worker ignored the disagreement, ingested the event and advanced the checkpoint instead of rejecting the provider evidence.
+- GREEN: before normalization/persistence, the worker now requires a non-empty timezone-aware ISO-8601 `record.close_time_iso`, requires the typed value to match the raw provider evidence, and compares its UTC instant exactly with the independently fetched canonical ledger-header timestamp. Malformed/missing/naive or raw/typed-conflicting evidence fails with `INVALID_PROVIDER_DATA`; a valid but different instant fails with `XRPL_LEDGER_TIME_MISMATCH`. The event timestamp continues to come from the canonical ledger header.
+- Updated the XRPL worker test fixture so its account_tx close time matches the fake canonical ledger header. Preserved the existing unvalidated-record test's raw evidence shape.
+- RED reproduced the defect: the new regression failed because `ProviderTransportError` was not raised. GREEN focused XRPL worker + provider suites: **157 tests, 0 failures/errors**. Full repository suite: **1,327 tests, 0 failures, 0 errors, 72 skipped** (27 November 2026; 86.045 seconds). `python -m compileall -q layer1 tests` and `git diff --check` PASS.
+
+### Scope and limitations
+- This binds the redundant account_tx transaction-wrapper close-time evidence to the independently fetched validated ledger header. It does not authenticate Chainstack, establish independent multi-provider corroboration, prove transaction inclusion with a Merkle proof, or constitute live-provider acceptance. The XRPL close-time protocol specifies strictly increasing validated-ledger close times; the worker's existing parent timestamp monotonicity check remains in place. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+- Protocol references: XRPL `account_tx` response defines transaction `close_time_iso` as the time the containing ledger closed: https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/account-methods/account_tx. XRPL `ledger` response defines header `close_time` / `close_time_iso`: https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/ledger-methods/ledger. XRPL Ledger Close Times states validated-ledger close times are strictly increasing: https://xrpl.org/docs/concepts/ledgers/ledger-close-times.
+
+### Section 279 verification checkpoint
+- Focused XRPL worker + provider suites: **157 tests, 0 failures/errors**. Full repository suite: **1,327 tests, 0 failures, 0 errors, 72 skipped**. Compileall and `git diff --check` PASS.
+- `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production database, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred. Existing uncommitted changes and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql` remain preserved. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## 280. AUD-ONCHAIN-092 — XRPL worker accepts timestamps beyond UInt32 close_time range (27 November 2026)
+
+**Finding: AUD-ONCHAIN-092 — LOW / CONFIRMED / REMEDIATED LOCALLY / TDD REGRESSION.** The Chainstack XRPL adapter correctly restricts the ledger header's Ripple-epoch `close_time` to UInt32 and converts it to Unix time by adding the Ripple epoch offset (946684800). The worker's independent provider boundary only required a non-negative integer timestamp, however. A different provider implementation or malformed adapter response could therefore pass a timestamp outside the protocol's representable close-time range; the worker would later fail during datetime conversion rather than rejecting provider data at the header boundary.
+
+### TDD reproduction and remediation
+- Added `test_rejects_xrpl_header_timestamp_outside_protocol_uint32_close_time_range` with a header timestamp of `253402300800`. RED: the worker accepted the malformed header through canonical-header preflight and reached later processing instead of failing closed.
+- GREEN: worker header validation now independently requires `0 <= timestamp <= 946684800 + 0xFFFFFFFF`, matching the XRPL UInt32 Ripple-epoch close_time domain before parent-time comparisons, account_tx pagination, datetime conversion or persistence.
+- Focused XRPL worker + provider suites: **158 tests, 0 failures/errors**. Full repository suite: **1,328 tests, 0 failures, 0 errors, 72 skipped**. `python -m compileall -q layer1 tests` and `git diff --check` PASS.
+
+### Scope and limitations
+- The bound reflects the protocol field's UInt32 range plus the Ripple epoch offset, not an estimate of current ledger time. The adapter's own UInt32 validation remains in place; this adds an independent worker-boundary guard. It does not establish provider authenticity or live-provider acceptance. Protocol reference: XRPL Ledger Header documents `close_time` as UInt32 seconds since the Ripple epoch: https://xrpl.org/docs/references/protocol/ledger-data/ledger-header. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+### Section 280 verification checkpoint
+- Focused XRPL worker + provider suites: **158 tests, 0 failures/errors**. Full repository suite: **1,328 tests, 0 failures, 0 errors, 72 skipped**. Compileall and `git diff --check` PASS.
+- `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production database, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred. Existing uncommitted changes and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql` remain preserved. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## 281. AUD-ONCHAIN-093 — XRPL configured start ledger exceeds protocol UInt32 range (27 November 2026)
+
+**Finding: AUD-ONCHAIN-093 — LOW / CONFIRMED / REMEDIATED LOCALLY / TDD REGRESSION.** The XRPL worker constructor validated configured start-ledger values as positive integers but did not enforce the protocol's UInt32 ledger-index domain. A configuration value above `0xFFFFFFFF` was therefore accepted even though no valid XRPL ledger can have that index. During execution, the worker could treat the configured start as beyond the validated head and skip scanning without a configuration error, leaving an impossible cursor seed silently accepted.
+
+### TDD reproduction and remediation
+- Added `test_rejects_start_ledger_above_protocol_uint32_range`. RED: constructing the worker with `start_ledgers={mapping_id: 0x100000000}` did not raise the expected `ValueError`.
+- GREEN: constructor validation now requires each configured start ledger to satisfy `1 <= ledger <= 0xFFFFFFFF`, rejecting booleans, non-integers and out-of-range values with the existing explicit start-ledger validation error.
+- Focused XRPL worker + provider suites: **159 tests, 0 failures/errors**. Full repository suite: **1,329 tests, 0 failures, 0 errors, 72 skipped** (84.516 seconds). `python -m compileall -q layer1 tests` and `git diff --check` PASS.
+
+### Scope and limitations
+- This validates the configured seed at worker construction. It does not define a source-history start policy, prove mapping authority or provider authenticity, or close the separate cumulative marker-budget policy (AUD-ONCHAIN-030). Protocol reference: XRPL Ledger Header defines ledger index as UInt32: https://xrpl.org/docs/references/protocol/ledger-data/ledger-header. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+### Section 281 verification checkpoint
+- Focused XRPL worker + provider suites: **159 tests, 0 failures/errors**. Full repository suite: **1,329 tests, 0 failures, 0 errors, 72 skipped**. Compileall and `git diff --check` PASS.
+- `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production database, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred. Existing uncommitted changes and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql` remain preserved. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## 282. AUD-ONCHAIN-094 — XRPL worker does not independently bound validated head height (27 November 2026)
+
+**Finding: AUD-ONCHAIN-094 — LOW / CONFIRMED / REMEDIATED LOCALLY / TDD REGRESSION.** The Chainstack adapter validates `server_info.validated_ledger.seq` as UInt32, but the worker's provider trust boundary only checked that `head_height` was an integer and not a boolean. A custom provider implementation or malformed adapter result could therefore advertise an impossible validated-ledger head above `0xFFFFFFFF`. The worker would accept the impossible head and continue scanning a lower configured range rather than rejecting malformed provider metadata.
+
+### TDD reproduction and remediation
+- Added `test_rejects_validated_head_above_uint32_before_scanning`. The fake provider advertises head `0x100000000` while returning otherwise valid canonical headers/timestamps for the configured scan range. RED: the worker did not raise, accepted the impossible head and proceeded to account scanning.
+- GREEN: after validating provider/network/status/finality/type, the worker now independently requires `1 <= head.head_height <= 0xFFFFFFFF`; out-of-range values fail with `INVALID_PROVIDER_DATA` before mapping/account scanning or ledger-header requests.
+- Focused XRPL worker + provider suites: **160 tests, 0 failures/errors**. Full repository suite: **1,330 tests, 0 failures, 0 errors, 72 skipped** (87.563 seconds). `python -m compileall -q layer1 tests` and `git diff --check` PASS.
+
+### Scope and limitations
+- This duplicates the adapter's protocol bound at the worker trust boundary. It does not establish provider authenticity, independent corroboration, history completeness or live-provider acceptance. Protocol reference: XRPL Ledger Header defines ledger index as UInt32: https://xrpl.org/docs/references/protocol/ledger-data/ledger-header. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+### Section 282 verification checkpoint
+- Focused XRPL worker + provider suites: **160 tests, 0 failures/errors**. Full repository suite: **1,330 tests, 0 failures, 0 errors, 72 skipped**. Compileall and `git diff --check` PASS.
+- `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production database, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred. Existing uncommitted changes and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql` remain preserved. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## 283. AUD-ONCHAIN-095 — XRPL persisted next-ledger cursor exceeds protocol exhaustion sentinel (27 November 2026)
+
+**Finding: AUD-ONCHAIN-095 — LOW / CONFIRMED / REMEDIATED LOCALLY / TDD REGRESSION.** XRPL checkpoint validation required `next_ledger` to be an integer no smaller than the configured start ledger, but did not constrain its upper bound. The legitimate exhausted-history sentinel after the final UInt32 ledger is exactly `0x100000000`; a corrupted or tampered checkpoint larger than that could be accepted, cause reorg-lookback work against impossible ledger indexes, and then silently skip scanning because the cursor lies beyond the validated head.
+
+### TDD reproduction and remediation
+- Added `test_rejects_persisted_next_ledger_above_uint32_exhaustion_sentinel`. The test seeds a checkpoint with `next_ledger=0x100000001` in the isolated SQLite fixture. RED: the worker accepted the malformed checkpoint instead of raising the stored-checkpoint validation error.
+- GREEN: checkpoint validation now requires `initial <= next_ledger <= 0x100000000`. The upper bound intentionally permits `0x100000000` as the one-past-maximum exhaustion sentinel produced after scanning the final valid UInt32 ledger, while rejecting any larger cursor before reorg reconciliation or provider ledger requests.
+- Focused XRPL worker + provider suites: **161 tests, 0 failures/errors**. Full repository suite: **1,331 tests, 0 failures, 0 errors, 72 skipped** (80.463 seconds). `python -m compileall -q layer1 tests` and `git diff --check` PASS.
+
+### Scope and limitations
+- This protects the persisted next-ledger cursor, not all marker/checkpoint resource budgets. AUD-ONCHAIN-030 remains open pending owner-approved marker count/byte limits and recovery policy. The one-past-max sentinel is a cursor position, not a valid ledger index. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+### Section 283 verification checkpoint
+- Focused XRPL worker + provider suites: **161 tests, 0 failures/errors**. Full repository suite: **1,331 tests, 0 failures, 0 errors, 72 skipped**. Compileall and `git diff --check` PASS.
+- `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production database, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred. Existing uncommitted changes and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql` remain preserved. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.

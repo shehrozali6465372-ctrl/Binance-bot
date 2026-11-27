@@ -100,8 +100,12 @@ class BitcoinAddressIngestionWorker:
                 or header.get("number") != height
                 or not isinstance(header.get("hash"), str)
                 or re.fullmatch(r"[0-9a-fA-F]{64}", header["hash"]) is None
+                or (height == 0 and header.get("previous_block_hash") is not None)
+                or (height > 0 and (not isinstance(header.get("previous_block_hash"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", header["previous_block_hash"]) is None))
                 or isinstance(header.get("timestamp"), bool)
-                or not isinstance(header.get("timestamp"), int) or header["timestamp"] <= 0):
+                or not isinstance(header.get("timestamp"), int)
+                or not 1 <= header["timestamp"] <= 0xFFFFFFFF):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin provider returned a malformed canonical block header")
         return header
 
@@ -193,7 +197,27 @@ class BitcoinAddressIngestionWorker:
                     range_start = next_block
                     range_end = min(safe_height, range_start + self.max_blocks_per_run - 1)
                     page_number = 1
+                # A resumed fixed range may have been selected under an older,
+                # higher tip. Do not continue its page offset or persist headers
+                # until the current tip again satisfies the confirmation policy.
+                if range_end > safe_height:
+                    continue
                 headers = {height: self._header(height) for height in range(range_start, range_end + 1)}
+                previous_header_hash = None
+                if range_start > 0:
+                    # The configured scan start is not itself a canonical trust
+                    # anchor: bind its parent to the independently fetched prior
+                    # header on first ingestion as well as on resumed ranges.
+                    previous_header_hash = self._header(range_start - 1)["hash"].lower()
+                for height in range(range_start, range_end + 1):
+                    header = headers[height]
+                    if (previous_header_hash is not None
+                            and header["previous_block_hash"] != previous_header_hash):
+                        raise ProviderTransportError(
+                            "BITCOIN_PARENT_HASH_MISMATCH",
+                            "Bitcoin block previousblockhash does not match the preceding fetched block hash",
+                        )
+                    previous_header_hash = header["hash"].lower()
                 # A page-level restart may resume inside a range that itself was
                 # reorganized. Reconcile its already-journaled headers before
                 # trusting the saved page number; if any changed, replay page 1.
@@ -231,9 +255,15 @@ class BitcoinAddressIngestionWorker:
                         or getattr(page, "page_number", None) != page_number
                         or isinstance(total_pages, bool) or not isinstance(total_pages, int)
                         or total_pages < 0 or page_number > max(total_pages, 1)
+                        or (total_pages == 0 and bool(records))
                         or (getattr(page, "next_cursor", None) is not None) != (page_number < total_pages)
                         or (page_number < total_pages and getattr(page, "next_cursor", None) != page_number + 1)):
                     raise ProviderTransportError("INVALID_PROVIDER_DATA", "Bitcoin address-history page is malformed or outside the requested address/page scope")
+                if len(records) > self.page_size:
+                    raise ProviderTransportError(
+                        "PAGE_LIMIT_EXCEEDED",
+                        "Bitcoin provider returned more transactions than the configured page size",
+                    )
                 normalized = []
                 observed = self.clock()
                 if observed.tzinfo is None or observed.utcoffset() is None:
@@ -245,13 +275,39 @@ class BitcoinAddressIngestionWorker:
                     if record.finality == "ORPHANED":
                         summary["transactions_skipped_orphaned"] += 1
                         continue
-                    if (record.finality != "CONFIRMED" or record.block_height is None
-                            or not range_start <= record.block_height <= range_end
-                            or isinstance(record.confirmations, bool)
-                            or not isinstance(record.confirmations, int)
+                    if (
+                        record.finality != "CONFIRMED"
+                        or not isinstance(record.txid, str)
+                        or re.fullmatch(r"[0-9a-fA-F]{64}", record.txid) is None
+                        or isinstance(record.block_height, bool)
+                        or not isinstance(record.block_height, int)
+                        or record.block_height <= 0
+                        or not isinstance(record.block_hash, str)
+                        or re.fullmatch(r"[0-9a-fA-F]{64}", record.block_hash) is None
+                        or isinstance(record.block_time, bool)
+                        or not isinstance(record.block_time, int)
+                        or record.block_time <= 0
+                        or isinstance(record.confirmations, bool)
+                        or not isinstance(record.confirmations, int)
+                    ):
+                        raise ProviderTransportError(
+                            "INVALID_PROVIDER_DATA",
+                            "confirmed Bitcoin address-history record has malformed transaction/block identity",
+                        )
+                    if (not range_start <= record.block_height <= range_end
                             or record.confirmations < self.minimum_confirmations):
                         raise ProviderTransportError("BITCOIN_CONFIRMATIONS_INSUFFICIENT", "Bitcoin page contains a transaction outside the fixed range or below the configured confirmation threshold")
                     header = headers[record.block_height]
+                    if record.block_hash.lower() != header["hash"].lower():
+                        raise ProviderTransportError(
+                            "BITCOIN_BLOCK_HASH_MISMATCH",
+                            "Bitcoin address-history blockHash does not match the independently fetched canonical header",
+                        )
+                    if record.block_time != header["timestamp"]:
+                        raise ProviderTransportError(
+                            "BITCOIN_BLOCK_TIME_MISMATCH",
+                            "Bitcoin address-history blockTime does not match the independently fetched canonical header",
+                        )
                     detail = self._retry(lambda txid=record.txid: self.provider.fetch_bitcoin_transaction(txid))
                     block_time = datetime.fromtimestamp(header["timestamp"], timezone.utc).isoformat()
                     normalized.extend(

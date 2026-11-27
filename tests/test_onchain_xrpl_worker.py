@@ -23,15 +23,19 @@ BLOCK_HASH = "B" * 64
 MAPPING_ID = "xrpl-usd-v1"
 
 
-def record(ledger=501, value="3.25", requested="100", tx_hash=TX_HASH, source=ACCOUNT, destination=DESTINATION):
+def record(ledger=501, value="3.25", requested="100", tx_hash=TX_HASH, source=ACCOUNT, destination=DESTINATION, ledger_hash=BLOCK_HASH, close_time_iso=None):
+    transaction = {"TransactionType": "Payment", "Account": source, "Destination": destination,
+                   "Amount": {"currency": "USD", "issuer": ISSUER, "value": requested},
+                   "Flags": 0x00020000}
+    metadata = {"TransactionResult": "tesSUCCESS", "TransactionIndex": 4,
+                "delivered_amount": {"currency": "USD", "issuer": ISSUER, "value": value}}
+    if close_time_iso is None:
+        close_time_iso = (NOW - timedelta(seconds=(502 - ledger) + 60)).isoformat().replace("+00:00", "Z")
+    raw = {"validated": True, "hash": tx_hash, "ledger_index": ledger,
+           "ledger_hash": ledger_hash, "close_time_iso": close_time_iso,
+           "tx_json": transaction, "meta": metadata}
     return XrplAccountTransaction(
-        tx_hash, ledger, (NOW - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
-        {"TransactionType": "Payment", "Account": source, "Destination": destination,
-         "Amount": {"currency": "USD", "issuer": ISSUER, "value": requested},
-         "Flags": 0x00020000},
-        {"TransactionResult": "tesSUCCESS", "TransactionIndex": 4,
-         "delivered_amount": {"currency": "USD", "issuer": ISSUER, "value": value}},
-        {"validated": True, "hash": tx_hash, "ledger_index": ledger},
+        tx_hash, ledger, close_time_iso, transaction, metadata, raw,
     )
 
 
@@ -52,7 +56,8 @@ class FakeXrplProvider:
     def fetch_ledger_header(self, index):
         return {"number": index, "hash": self.changed_hashes.get(index, BLOCK_HASH),
                 "parent_hash": self.changed_hashes.get(index - 1, BLOCK_HASH),
-                "timestamp": int(NOW.timestamp()) - 60, "finality_reference": "validated=true"}
+                "timestamp": int(NOW.timestamp()) - (self.head - index) - 60,
+                "finality_reference": "validated=true"}
 
     def fetch_account_transactions(self, account, ledger_index_min, ledger_index_max, marker=None, limit=200):
         self.calls.append((account, ledger_index_min, ledger_index_max, marker, limit))
@@ -104,6 +109,54 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
                 monitored_accounts={MAPPING_ID: ("rBqiK7z9a7M8w2F7yQzvVJ5QJ8qQh2vKQ",)},
                 start_ledgers={MAPPING_ID: 500}, max_ledgers_per_run=3,
             )
+
+    def test_rejects_validated_head_above_uint32_before_scanning(self):
+        self.provider.head = 0x100000000
+        original = self.provider.fetch_ledger_header
+        def valid_fixture_header(index):
+            header = original(index)
+            header["timestamp"] = int(NOW.timestamp()) - (502 - index) - 60
+            return header
+        self.provider.fetch_ledger_header = valid_fixture_header
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+
+    def test_rejects_persisted_next_ledger_above_uint32_exhaustion_sentinel(self):
+        key = f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}"
+        checkpoint = {"mapping_id": MAPPING_ID, "account": ACCOUNT,
+                      "next_ledger": 0x100000001, "range_start": None,
+                      "range_end": None, "marker": None, "seen_markers": []}
+        self.ingestion_store.commit_page(
+            key, checkpoint, (), expected_cursor=None,
+            scope_identity=("xrpl-mainnet", "chainstack", f"account:{ACCOUNT}:mapping:{MAPPING_ID}"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stored XRPL account checkpoint is malformed"):
+            self.worker.run_once()
+
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+
+    def test_rejects_start_ledger_above_protocol_uint32_range(self):
+        with self.assertRaisesRegex(ValueError, "start ledger mapping IDs and indexes are invalid"):
+            XrplIssuedCurrencyIngestionWorker(
+                self.provider, self.mapping_store, self.ingestion_store,
+                monitored_accounts={MAPPING_ID: (ACCOUNT,)},
+                start_ledgers={MAPPING_ID: 0x100000000},
+                max_ledgers_per_run=3, retry_attempts=1,
+            )
+
+    def test_rejects_invalid_mapping_decimals_at_worker_boundary(self):
+        from dataclasses import replace
+        for decimals in (True, -1, 37, "6"):
+            with self.subTest(decimals=decimals):
+                with self.assertRaises(ValueError):
+                    self.worker._validate_mapping(replace(self.mapping, decimals=decimals))
 
     def test_rejects_mapping_with_invalid_issuer_checksum(self):
         from dataclasses import replace
@@ -212,7 +265,7 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
                 self.ingestion_store, cursor_key, page_id))
         for methods in page_methods:
             self.assertIn("server_info", methods)
-            self.assertEqual(methods.count("ledger"), 3)
+            self.assertEqual(methods.count("ledger"), 4)
             self.assertIn("account_tx", methods)
 
     def test_expired_opaque_marker_restarts_same_fixed_range_from_first_page(self):
@@ -224,6 +277,30 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
             f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}")["marker"])
         self.worker.run_once()
         self.assertEqual(self.provider.calls[-1][3], None)
+
+    def test_rejects_non_finite_provider_marker_as_controlled_provider_error(self):
+        self.provider.pages = {None: ((record(),), float("nan"))}
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}")["marker"])
+
+    def test_rejects_non_finite_persisted_marker_before_provider_page_request(self):
+        self.worker.run_once()
+        key = f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}"
+        original_get_checkpoint = self.ingestion_store.get_checkpoint
+        def corrupted_checkpoint(cursor_key):
+            value = original_get_checkpoint(cursor_key)
+            if cursor_key == key:
+                value["marker"] = float("nan")
+            return value
+        self.ingestion_store.get_checkpoint = corrupted_checkpoint
+        self.provider.calls.clear()
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+        self.assertEqual(error.exception.reason_code, "INVALID_CHECKPOINT")
+        self.assertEqual(self.provider.calls, [])
 
     def test_repeated_pagination_marker_is_rejected(self):
         self.worker.max_pages_per_run = 2
@@ -249,16 +326,94 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
         self.assertEqual(self.provider.calls, [])
         self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
 
+    def test_rejects_non_monotonic_validated_ledger_close_times(self):
+        original = self.provider.fetch_ledger_header
+        def non_monotonic_time(index):
+            header = original(index)
+            if index == 501:
+                header["timestamp"] = original(500)["timestamp"]
+            return header
+        self.provider.fetch_ledger_header = non_monotonic_time
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "XRPL_LEDGER_TIME_NOT_MONOTONIC")
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+
+    def test_rejects_first_ledger_parent_hash_mismatch_against_preceding_anchor(self):
+        original = self.provider.fetch_ledger_header
+        def broken_first_parent(index):
+            header = original(index)
+            if index == 500:
+                header["parent_hash"] = "C" * 64
+            return header
+        self.provider.fetch_ledger_header = broken_first_parent
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "XRPL_PARENT_HASH_MISMATCH")
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+
     def test_validated_ledger_hash_change_tombstones_then_replays_event(self):
         self.provider.pages = {None: ((record(),), None)}
         self.worker.run_once()
         self.provider.changed_hashes[501] = "C" * 64
+        self.provider.pages = {None: ((record(ledger_hash="C" * 64),), None)}
         result = self.worker.run_once()
         scope = f"account:{ACCOUNT}:mapping:{MAPPING_ID}"
         event = self.ingestion_store.get_event(TX_HASH.lower(), "xrpl-mainnet", "chainstack", scope)
         self.assertGreaterEqual(result["reorg_ledgers_detected"], 1)
         self.assertEqual(event.canonical_status, "CANONICAL")
         self.assertEqual(event.block_hash, ("C" * 64).lower())
+
+    def test_rejects_xrpl_header_timestamp_outside_protocol_uint32_close_time_range(self):
+        original = self.provider.fetch_ledger_header
+        def out_of_range_header(index):
+            header = original(index)
+            if index == 502:
+                header["timestamp"] = 253402300800
+            return header
+        self.provider.fetch_ledger_header = out_of_range_header
+        impossible_close_time = "9999-12-31T23:59:59Z"
+        self.provider.pages = {None: ((record(ledger=502, close_time_iso=impossible_close_time),), None)}
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+
+    def test_transaction_close_time_must_match_independently_verified_ledger_header(self):
+        # The account_tx record claims the same ledger hash/index but a different
+        # ledger close time. The worker must not silently replace this evidence
+        # with the timestamp from its separate ledger-header request.
+        mismatched_time = (NOW - timedelta(seconds=60)).isoformat().replace("+00:00", "Z")
+        self.provider.pages = {None: ((record(close_time_iso=mismatched_time),), None)}
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "XRPL_LEDGER_TIME_MISMATCH")
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+        checkpoint = self.ingestion_store.get_checkpoint(
+            f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}")
+        self.assertEqual(checkpoint["next_ledger"], 500)
+        self.assertIsNone(checkpoint["marker"])
+
+    def test_transaction_ledger_hash_mismatch_cannot_create_event_or_advance_checkpoint(self):
+        self.provider.pages = {None: ((record(ledger_hash="C" * 64),), None)}
+        with self.assertRaisesRegex(ValueError, "ledger hash"):
+            self.worker.run_once()
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+        checkpoint = self.ingestion_store.get_checkpoint(
+            f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}")
+        self.assertEqual(checkpoint["next_ledger"], 500)
+        self.assertIsNone(checkpoint["marker"])
 
     def test_account_side_evidence_must_match_payment_source_or_destination(self):
         self.provider.pages = {None: ((record(source=DESTINATION, destination=ISSUER),), None)}
@@ -270,7 +425,9 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
         invalid = record()
         invalid = XrplAccountTransaction(invalid.transaction_hash, invalid.ledger_index,
                                          invalid.close_time_iso, invalid.transaction,
-                                         invalid.metadata, {"validated": False, "hash": invalid.transaction_hash, "ledger_index": invalid.ledger_index})
+                                         invalid.metadata, {"validated": False, "hash": invalid.transaction_hash,
+                                                           "ledger_index": invalid.ledger_index,
+                                                           "close_time_iso": invalid.close_time_iso})
         self.provider.pages = {None: ((invalid,), None)}
         with self.assertRaisesRegex(ValueError, "validated-ledger proof"):
             self.worker.run_once()
@@ -282,6 +439,7 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
     def test_reorg_during_active_marker_range_restarts_from_first_page(self):
         self.worker.run_once()  # page 1 committed with an opaque marker
         self.provider.changed_hashes[501] = "D" * 64
+        self.provider.pages = {None: ((record(ledger_hash="D" * 64),), None)}
         self.worker.run_once()  # detects active-range hash change and restarts
         self.assertIsNone(self.provider.calls[-1][3])
         scope = f"account:{ACCOUNT}:mapping:{MAPPING_ID}"
@@ -295,6 +453,20 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
         self.provider.pages = {None: ((invalid,), None)}
         with self.assertRaisesRegex(ValueError, "delivered_amount"):
             self.worker.run_once()
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+
+    def test_provider_page_cannot_exceed_configured_page_size(self):
+        records = tuple(record(tx_hash=f"{index:064X}") for index in range(1, 12))
+        self.provider.pages = {None: (records, None)}
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "PAGE_LIMIT_EXCEEDED")
+        checkpoint = self.ingestion_store.get_checkpoint(
+            self.worker._cursor_key(ACCOUNT, self.mapping))
+        self.assertEqual(checkpoint["next_ledger"], 500)
+        self.assertIsNone(checkpoint["marker"])
         self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
 
 

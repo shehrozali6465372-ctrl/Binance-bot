@@ -51,10 +51,18 @@ class FakeProvider:
         if self.fail_header_once:
             self.fail_header_once = False
             raise ProviderTransportError("TIMEOUT", "provider request timed out")
-        return self.headers.get(block_number, {
-            "number": block_number, "hash": BLOCK_HASH,
+        if block_number in self.headers:
+            return self.headers[block_number]
+        records = [item for item in self.logs if item.block_number == block_number]
+        previous = self.headers.get(block_number - 1)
+        parent_hash = previous["hash"] if previous is not None else BLOCK_HASH
+        by_index = {item.transaction_index: item.transaction_hash.lower() for item in records}
+        transaction_hashes = tuple(by_index[index] for index in range(max(by_index, default=-1) + 1))
+        return {
+            "number": block_number, "hash": BLOCK_HASH, "parent_hash": parent_hash,
             "timestamp": 1794398400 + block_number,
-        })
+            "transaction_hashes": transaction_hashes,
+        }
 
 
 class EvmTransferIngestionWorkerTests(unittest.TestCase):
@@ -88,6 +96,59 @@ class EvmTransferIngestionWorkerTests(unittest.TestCase):
         self.mapping_store.close()
         self.tmp.cleanup()
 
+    def test_worker_rejects_invalid_mapping_decimals_before_ingestion(self):
+        from dataclasses import replace
+        for decimals in (True, -1, 37, "18"):
+            with self.subTest(decimals=decimals):
+                with self.assertRaises(ValueError):
+                    self.worker._validate_mapping(replace(mapping(), decimals=decimals))
+
+    def test_worker_rejects_non_erc20_mapping_standard(self):
+        unsupported = mapping()
+        unsupported = OnChainAssetMapping(**{
+            **unsupported.__dict__, "token_standard": "ERC721",
+        })
+        with self.assertRaises(ValueError):
+            self.worker._validate_mapping(unsupported)
+
+    def test_rejects_erc20_amount_above_uint256_before_persistence(self):
+        from dataclasses import replace
+        self.provider.logs = [replace(
+            self.provider.logs[0], amount_raw=str(1 << 256),
+        )]
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT))
+        self.assertEqual(self.ingestion_store.list_events("bnb-smart-chain-mainnet"), [])
+
+    def test_rejects_malformed_transfer_address_at_worker_provider_boundary(self):
+        from dataclasses import replace
+        self.provider.logs = [replace(self.provider.logs[0], from_address=None)]
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT))
+        self.assertEqual(self.ingestion_store.list_events("bnb-smart-chain-mainnet"), [])
+
+    def test_rejects_boolean_log_index_at_worker_provider_boundary(self):
+        from dataclasses import replace
+        self.provider.logs = [replace(self.provider.logs[0], log_index=True)]
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT))
+        self.assertEqual(self.ingestion_store.list_events("bnb-smart-chain-mainnet"), [])
+
     def test_ingests_only_verified_mapped_contract_logs_and_commits_bounded_checkpoint(self):
         result = self.worker.run_once()
         self.assertEqual(result["events_inserted"], 1)
@@ -106,6 +167,157 @@ class EvmTransferIngestionWorkerTests(unittest.TestCase):
                          "eth_getFinalizedHeader:verifiedValidatorNum=-3")
         self.assertEqual(checkpoint["finalized_height"], self.provider.finalized_height)
         self.assertEqual(self.provider.log_calls, [(CONTRACT, 100, 109)])
+
+    def test_rejects_block_timestamp_outside_datetime_storage_range_before_checkpoint(self):
+        self.provider.headers[109] = {
+            "number": 109, "hash": BLOCK_HASH, "parent_hash": BLOCK_HASH,
+            "timestamp": 253402300800, "transaction_hashes": (TX_HASH,),
+        }
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT))
+        self.assertEqual(self.ingestion_store.list_events("bnb-smart-chain-mainnet"), [])
+
+    def test_ethereum_requires_strictly_increasing_parent_timestamp(self):
+        from layer1.onchain import OnChainIntelligenceEngine
+        from tests.onchain_test_support import MappingStoreStub
+
+        eth_mapping = mapping(network_id="ethereum-mainnet", chain_id="1")
+        engine = OnChainIntelligenceEngine(
+            {"ethereum-mainnet": 86400},
+            receipt_signing_key=b"test-only-onchain-receipt-key-32-bytes-minimum",
+            receipt_key_id="test-key-v1")
+        mapping_store = MappingStoreStub(engine, eth_mapping)
+        provider = FakeProvider()
+        provider.logs = [EvmTokenTransferLog(
+            network_id="ethereum-mainnet", contract_address=CONTRACT,
+            from_address="0x" + "2" * 40, to_address="0x" + "3" * 40,
+            amount_raw="9", block_number=109, block_hash=BLOCK_HASH,
+            transaction_hash=TX_HASH, log_index=4, removed=False,
+        )]
+        provider.fetch_ethereum_finalized_height = provider.fetch_bnb_finalized_height
+        def fetch_eth_logs(contract_address, from_block, to_block):
+            return ProviderDataPage(
+                "alchemy", "ethereum-mainnet", contract_address,
+                tuple(item for item in provider.logs if from_block <= item.block_number <= to_block),
+                from_block=from_block, to_block=to_block,
+                finalized_height=provider.finalized_height,
+                finality_reference="eth_getBlockByNumber:finalized",
+            )
+        provider.fetch_ethereum_erc20_transfer_logs = fetch_eth_logs
+        provider.fetch_ethereum_block_header = provider.fetch_bnb_block_header
+        provider.headers[108] = {
+            "number": 108, "hash": BLOCK_HASH, "parent_hash": BLOCK_HASH,
+            "timestamp": 1794398508, "transaction_hashes": (),
+        }
+        provider.headers[109] = {
+            "number": 109, "hash": BLOCK_HASH, "parent_hash": BLOCK_HASH,
+            "timestamp": 1794398508, "transaction_hashes": (TX_HASH,),
+        }
+        worker = EvmTransferIngestionWorker(
+            provider, mapping_store, self.ingestion_store,
+            start_blocks={eth_mapping.mapping_id: 100}, max_blocks_per_run=10,
+            reorg_lookback_blocks=2, retry_attempts=2, sleep=lambda _: None,
+            clock=lambda: datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc),
+        )
+
+        with self.assertRaises(ProviderTransportError) as error:
+            worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "EVM_BLOCK_TIMESTAMP_NOT_MONOTONIC")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:ethereum-mainnet:contract:" + CONTRACT))
+
+    def test_accepts_equal_bnb_second_timestamps_when_millisecond_precision_is_not_exposed(self):
+        self.provider.headers[108] = {
+            "number": 108, "hash": BLOCK_HASH, "parent_hash": BLOCK_HASH,
+            "timestamp": 1794398508, "transaction_hashes": (),
+        }
+        self.provider.headers[109] = {
+            "number": 109, "hash": BLOCK_HASH, "parent_hash": BLOCK_HASH,
+            "timestamp": 1794398508, "transaction_hashes": (TX_HASH,),
+        }
+
+        result = self.worker.run_once()
+
+        self.assertEqual(result["events_inserted"], 1)
+        self.assertEqual(self.ingestion_store.get_checkpoint(
+            "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT)["next_block"], 110)
+
+    def test_rejects_non_monotonic_evm_header_timestamps_before_page_commit(self):
+        self.provider.headers[108] = {
+            "number": 108, "hash": BLOCK_HASH, "parent_hash": BLOCK_HASH,
+            "timestamp": 1794398500, "transaction_hashes": (),
+        }
+        self.provider.headers[109] = {
+            "number": 109, "hash": BLOCK_HASH, "parent_hash": BLOCK_HASH,
+            "timestamp": 1794398499, "transaction_hashes": (TX_HASH,),
+        }
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "EVM_BLOCK_TIMESTAMP_NOT_MONOTONIC")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT))
+        self.assertEqual(self.ingestion_store.list_events("bnb-smart-chain-mainnet"), [])
+
+    def test_rejects_duplicate_log_index_within_same_canonical_block(self):
+        duplicate = EvmTokenTransferLog(
+            network_id="bnb-smart-chain-mainnet", contract_address=CONTRACT,
+            from_address="0x" + "4" * 40, to_address="0x" + "5" * 40,
+            amount_raw="9", block_number=109, block_hash=BLOCK_HASH,
+            transaction_hash="0x" + "c" * 64, log_index=4, removed=False,
+            transaction_index=1,
+        )
+        self.provider.logs.append(duplicate)
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "DUPLICATE_EVM_LOG_INDEX")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT))
+        self.assertEqual(self.ingestion_store.list_events("bnb-smart-chain-mainnet"), [])
+
+    def test_rejects_log_transaction_index_that_disagrees_with_canonical_block_transactions(self):
+        self.provider.headers[109] = {
+            "number": 109, "hash": BLOCK_HASH, "parent_hash": BLOCK_HASH, "timestamp": 1794398509,
+            "transaction_hashes": ("0x" + "f" * 64,),
+        }
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "EVM_TRANSACTION_INDEX_MISMATCH")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT))
+        self.assertEqual(self.ingestion_store.list_events("bnb-smart-chain-mainnet"), [])
+
+    def test_rejects_log_transaction_index_outside_canonical_block_transaction_list(self):
+        record = self.provider.logs[0]
+        self.provider.logs = [EvmTokenTransferLog(
+            network_id=record.network_id, contract_address=record.contract_address,
+            from_address=record.from_address, to_address=record.to_address,
+            amount_raw=record.amount_raw, block_number=record.block_number,
+            block_hash=record.block_hash, transaction_hash=record.transaction_hash,
+            log_index=record.log_index, removed=record.removed, transaction_index=1,
+        )]
+        self.provider.headers[109] = {
+            "number": 109, "hash": BLOCK_HASH, "parent_hash": BLOCK_HASH, "timestamp": 1794398509,
+            "transaction_hashes": (TX_HASH,),
+        }
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "EVM_TRANSACTION_INDEX_MISMATCH")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT))
 
     def test_restart_resumes_from_durable_next_block_without_replaying_committed_range(self):
         self.worker.run_once()
@@ -144,7 +356,8 @@ class EvmTransferIngestionWorkerTests(unittest.TestCase):
         self.worker.run_once()
         self.provider.finalized_height = 119
         self.provider.headers[109] = {
-            "number": 109, "hash": "0x" + "c" * 64, "timestamp": 1794398509,
+            "number": 109, "hash": "0x" + "c" * 64, "parent_hash": BLOCK_HASH, "timestamp": 1794398509,
+            "transaction_hashes": (TX_HASH,),
         }
         self.provider.logs = [EvmTokenTransferLog(
             network_id="bnb-smart-chain-mainnet", contract_address=CONTRACT,
@@ -170,7 +383,8 @@ class EvmTransferIngestionWorkerTests(unittest.TestCase):
         self.worker.run_once()
         self.provider.finalized_height = 119
         self.provider.headers[109] = {
-            "number": 109, "hash": "0x" + "d" * 64, "timestamp": 1794398509,
+            "number": 109, "hash": "0x" + "d" * 64, "parent_hash": BLOCK_HASH, "timestamp": 1794398509,
+            "transaction_hashes": ("0x" + "e" * 64,),
         }
         self.provider.logs = [EvmTokenTransferLog(
             network_id="bnb-smart-chain-mainnet", contract_address=CONTRACT,
@@ -190,6 +404,31 @@ class EvmTransferIngestionWorkerTests(unittest.TestCase):
         self.assertEqual(self.ingestion_store.get_block_hash(
             "bnb-smart-chain-mainnet", "alchemy", "contract:" + CONTRACT, 109
         ), "0x" + "d" * 64)
+
+    def test_rejects_discontinuous_parent_hashes_inside_fetched_finalized_range(self):
+        self.provider.finalized_height = 101
+        self.provider.logs = []
+        self.worker.max_blocks_per_run = 2
+        self.provider.headers = {
+            100: {
+                "number": 100, "hash": "0x" + "1" * 64,
+                "parent_hash": "0x" + "0" * 64,
+                "timestamp": 1794398500, "transaction_hashes": (),
+            },
+            101: {
+                "number": 101, "hash": "0x" + "2" * 64,
+                "parent_hash": "0x" + "3" * 64,
+                "timestamp": 1794398501, "transaction_hashes": (),
+            },
+        }
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "EVM_PARENT_HASH_MISMATCH")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bnb-smart-chain-mainnet:contract:" + CONTRACT))
+        self.assertEqual(self.ingestion_store.list_events("bnb-smart-chain-mainnet"), [])
 
     def test_rejects_invalid_worker_bounds(self):
         with self.assertRaises(ValueError):
@@ -217,10 +456,18 @@ class FakeEthereumProvider:
         return self.finalized_height
 
     def fetch_ethereum_block_header(self, block_number):
-        return self.headers.get(block_number, {
-            "number": block_number, "hash": BLOCK_HASH,
+        if block_number in self.headers:
+            return self.headers[block_number]
+        records = [item for item in self.logs if item.block_number == block_number]
+        previous = self.headers.get(block_number - 1)
+        parent_hash = previous["hash"] if previous is not None else BLOCK_HASH
+        by_index = {item.transaction_index: item.transaction_hash.lower() for item in records}
+        transaction_hashes = tuple(by_index[index] for index in range(max(by_index, default=-1) + 1))
+        return {
+            "number": block_number, "hash": BLOCK_HASH, "parent_hash": parent_hash,
             "timestamp": 1794398400 + block_number,
-        })
+            "transaction_hashes": transaction_hashes,
+        }
 
     def fetch_ethereum_erc20_transfer_logs(self, contract_address, from_block, to_block):
         self.log_calls.append((contract_address, from_block, to_block))
@@ -308,7 +555,8 @@ class EthereumTransferIngestionWorkerTests(unittest.TestCase):
         self.worker.run_once()
         self.provider.finalized_height = 275
         self.provider.headers[264] = {
-            "number": 264, "hash": "0x" + "c" * 64, "timestamp": 1794398664,
+            "number": 264, "hash": "0x" + "c" * 64, "parent_hash": BLOCK_HASH, "timestamp": 1794398664,
+            "transaction_hashes": ("0x" + "e" * 64,),
         }
         self.provider.logs = [EvmTokenTransferLog(
             network_id="ethereum-mainnet", contract_address=CONTRACT,

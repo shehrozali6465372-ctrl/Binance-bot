@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Mapping, Optional
 from urllib.parse import urlparse
 
-from .onchain_providers import is_valid_xrpl_classic_address, is_valid_xrpl_issued_currency_code
+from .onchain_providers import (
+    _is_base58_pubkey, is_valid_xrpl_classic_address, is_valid_xrpl_issued_currency_code,
+)
 
 from .foundation import BinanceListingEligibilityEngine, EligibilityDecision
 from .onchain_receipt_config import load_onchain_receipt_config_from_env
@@ -580,6 +582,30 @@ class OnChainIntelligenceEngine:
             if (mapping.contract_address is not None or mapping.token_standard is not None
                     or mapping.issuer_address is not None or mapping.issued_currency is not None):
                 return OnChainValidationResult("UNVERIFIED", "NATIVE_ASSET_CONTRACT_CONFLICT", "native assets must not declare a token contract, issuer or token standard")
+        elif network["family"] == "SOLANA":
+            if not _is_base58_pubkey(mapping.contract_address):
+                return OnChainValidationResult(
+                    "UNVERIFIED", "SOLANA_TOKEN_MINT_INVALID",
+                    "Solana token mappings require a base58-encoded 32-byte mint public key",
+                )
+            if mapping.token_standard != "SPL_TOKEN":
+                return OnChainValidationResult(
+                    "UNVERIFIED", "SOLANA_TOKEN_STANDARD_UNSUPPORTED",
+                    "the active Solana ingestion path supports SPL_TOKEN mappings only",
+                )
+        elif network["family"] == "EVM":
+            if (not isinstance(mapping.contract_address, str)
+                    or re.fullmatch(r"0x[0-9a-fA-F]{40}", mapping.contract_address) is None):
+                return OnChainValidationResult(
+                    "UNVERIFIED", "EVM_TOKEN_CONTRACT_ADDRESS_INVALID",
+                    "EVM token mappings require an exact 20-byte 0x-prefixed hexadecimal contract address",
+                )
+            if (not isinstance(mapping.token_standard, str)
+                    or mapping.token_standard not in {"ERC20", "ERC-20"}):
+                return OnChainValidationResult(
+                    "UNVERIFIED", "EVM_TOKEN_STANDARD_UNSUPPORTED",
+                    "the active EVM ingestion path supports ERC-20 Transfer logs only",
+                )
         elif mapping.network_id == "xrpl-mainnet":
             currency = mapping.issued_currency
             if (mapping.contract_address is not None
@@ -897,15 +923,19 @@ class OnChainStore:
 
     def list_verified_mappings(self, network_id: Optional[str] = None) -> list[OnChainAssetMapping]:
         """Return only previously accepted, verified asset mappings."""
-        query = "SELECT payload_json FROM layer1_onchain_asset_mappings"
+        query = "SELECT mapping_id, asset_id, network_id, payload_json FROM layer1_onchain_asset_mappings"
         params = ()
         if network_id is not None:
             query += " WHERE network_id=?"
             params = (network_id,)
         query += " ORDER BY mapping_id"
         mappings = []
-        for (payload,) in self.conn.execute(query, params).fetchall():
+        for stored_mapping_id, stored_asset_id, stored_network_id, payload in self.conn.execute(query, params).fetchall():
             mapping = OnChainAssetMapping(**json.loads(payload))
+            if (mapping.mapping_id, mapping.asset_id, mapping.network_id) != (
+                stored_mapping_id, stored_asset_id, stored_network_id,
+            ):
+                continue
             if mapping.mapping_status != "VERIFIED" or self.engine._validate_mapping(mapping) is not None:
                 continue
             mappings.append(mapping)

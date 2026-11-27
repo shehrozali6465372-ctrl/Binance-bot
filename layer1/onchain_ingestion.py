@@ -20,12 +20,23 @@ from .onchain_providers import (
     BitcoinAddressTransaction, EvmTokenTransferLog, SolanaAddressTransaction,
     CapturedProviderReceiptBatch, ProviderResponseReceipt, ProviderTransportError,
     _approved_endpoint_profile_sha256, _approved_endpoint_id,
-    _is_valid_bitcoin_mainnet_address, is_valid_xrpl_issued_currency_code,
+    _is_valid_bitcoin_mainnet_address, _is_base58_pubkey, is_valid_xrpl_issued_currency_code,
     _solana_base58_decode,
 )
 
 
 _UNSET = object()
+BITCOIN_MAX_MONEY_SATOSHIS = 2_100_000_000_000_000
+BITCOIN_MAX_MONEY_SATOSHIS_TEXT = str(BITCOIN_MAX_MONEY_SATOSHIS)
+UINT256_MAX_TEXT = str((1 << 256) - 1)
+
+
+def _is_uint256_decimal(value: Any) -> bool:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9]+", value) is None:
+        return False
+    canonical = value.lstrip("0") or "0"
+    return (len(canonical) < len(UINT256_MAX_TEXT)
+            or (len(canonical) == len(UINT256_MAX_TEXT) and canonical <= UINT256_MAX_TEXT))
 
 
 @dataclass(frozen=True)
@@ -178,6 +189,16 @@ class OnChainIngestionStore:
             block_hash TEXT, block_time TEXT, updated_at TEXT NOT NULL,
             PRIMARY KEY(network_id, provider, scope, slot)
         );
+        CREATE TABLE IF NOT EXISTS layer1_onchain_solana_quarantine (
+            network_id TEXT NOT NULL, provider TEXT NOT NULL, scope TEXT NOT NULL,
+            signature TEXT NOT NULL, slot INTEGER NOT NULL, transaction_index INTEGER NOT NULL,
+            block_hash TEXT NOT NULL, payload_json TEXT NOT NULL, source_page_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('PENDING', 'REPLAYED')),
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            PRIMARY KEY(network_id, provider, scope, signature)
+        );
+        CREATE INDEX IF NOT EXISTS idx_solana_quarantine_pending
+            ON layer1_onchain_solana_quarantine(network_id, provider, scope, status, slot, signature);
         """)
 
     @staticmethod
@@ -271,7 +292,9 @@ class OnChainIngestionStore:
                     expected_cursor: Any = _UNSET,
                     scope_identity: Any = None,
                     provider_receipts: Optional[CapturedProviderReceiptBatch] = None,
-                    provider_observations: Iterable[dict] = ()) -> dict:
+                    provider_observations: Iterable[dict] = (),
+                    solana_quarantine_records: Iterable[dict] = (),
+                    solana_quarantine_replayed: Iterable[str] = ()) -> dict:
         if not isinstance(cursor_key, str) or not cursor_key.strip():
             raise ValueError("cursor_key must be a non-empty string")
         if expected_cursor is _UNSET:
@@ -282,6 +305,8 @@ class OnChainIngestionStore:
         batch = tuple(events)
         blocks = tuple(canonical_blocks)
         slots = tuple(canonical_slots)
+        quarantine_records = tuple(solana_quarantine_records)
+        quarantine_replayed = tuple(solana_quarantine_replayed)
         anchor_observations = tuple(provider_observations)
         if provider_receipts is not None and (
             not isinstance(provider_receipts, CapturedProviderReceiptBatch)
@@ -323,14 +348,17 @@ class OnChainIngestionStore:
                     or not isinstance(slot.get("produced"), bool)):
                 raise ValueError("canonical Solana slot journal record is malformed")
             if slot["produced"]:
-                if not isinstance(slot.get("block_hash"), str) or not slot["block_hash"].strip() or not isinstance(slot.get("block_time"), str):
-                    raise ValueError("produced Solana slots require canonical block hash and time")
-                try:
-                    parsed = datetime.fromisoformat(slot["block_time"].replace("Z", "+00:00"))
-                except ValueError:
-                    raise ValueError("Solana slot block time must be timezone-aware ISO-8601") from None
-                if parsed.tzinfo is None or parsed.utcoffset() is None:
-                    raise ValueError("Solana slot block time must be timezone-aware ISO-8601")
+                if not isinstance(slot.get("block_hash"), str) or not slot["block_hash"].strip():
+                    raise ValueError("produced Solana slots require canonical block hash")
+                if slot.get("block_time") is not None:
+                    if not isinstance(slot.get("block_time"), str) or not slot["block_time"].strip():
+                        raise ValueError("Solana slot block time must be null or timezone-aware ISO-8601")
+                    try:
+                        parsed = datetime.fromisoformat(slot["block_time"].replace("Z", "+00:00"))
+                    except ValueError:
+                        raise ValueError("Solana slot block time must be timezone-aware ISO-8601") from None
+                    if parsed.tzinfo is None or parsed.utcoffset() is None:
+                        raise ValueError("Solana slot block time must be timezone-aware ISO-8601")
             elif slot.get("block_hash") is not None or slot.get("block_time") is not None:
                 raise ValueError("skipped Solana slots must not carry fabricated block hash or time")
         if anchor_observations and (scope_identity is None or not receipts):
@@ -368,6 +396,63 @@ class OnChainIngestionStore:
                 if (block is None or block["block_hash"] != item["block_hash"]
                         or block["block_time"] != item["block_time"]):
                     raise ValueError("provider observation does not bind to canonical block evidence")
+        if (quarantine_records or quarantine_replayed) and (
+            scope_identity is None or not isinstance(scope_identity, (tuple, list))
+            or len(scope_identity) != 3 or scope_identity[0] != "solana-mainnet"
+        ):
+            raise ValueError("Solana quarantine requires an explicit Solana scope identity")
+        for record in quarantine_records:
+            if (not isinstance(record, dict)
+                    or isinstance(record.get("slot"), bool) or not isinstance(record.get("slot"), int)
+                    or record["slot"] < 0
+                    or isinstance(record.get("transaction_index"), bool)
+                    or not isinstance(record.get("transaction_index"), int)
+                    or record["transaction_index"] < 0
+                    or not isinstance(record.get("signature"), str)
+                    or re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", record["signature"]) is None
+                    or len(_solana_base58_decode(record["signature"])) != 64
+                    or not isinstance(record.get("block_hash"), str)
+                    or len(_solana_base58_decode(record["block_hash"])) != 32
+                    or not isinstance(record.get("payload"), dict)
+                    or not isinstance(record["payload"].get("raw"), dict)
+                    or not isinstance(record["payload"]["raw"].get("transaction"), dict)
+                    or not isinstance(record["payload"]["raw"].get("meta"), dict)
+                    or "err" not in record["payload"]["raw"]["meta"]
+                    or not isinstance(record["payload"]["raw"]["transaction"].get("signatures"), list)
+                    or not record["payload"]["raw"]["transaction"]["signatures"]
+                    or record["payload"]["raw"]["transaction"]["signatures"][0] != record["signature"]
+                    or not isinstance(record["payload"]["raw"]["transaction"].get("message"), dict)
+                    or isinstance(record["payload"]["raw"].get("slot"), bool)
+                    or not isinstance(record["payload"]["raw"].get("slot"), int)
+                    or record["payload"]["raw"].get("slot") != record["slot"]
+                    or record["payload"]["raw"].get("signature") not in (None, record["signature"])
+                    or ("blockTime" in record["payload"]["raw"] and (
+                        (record["payload"]["raw"].get("blockTime") is not None and (
+                            isinstance(record["payload"]["raw"].get("blockTime"), bool)
+                            or not isinstance(record["payload"]["raw"].get("blockTime"), int)
+                            or record["payload"]["raw"].get("blockTime") <= 0))
+                        or record["payload"]["raw"].get("blockTime") != record["payload"].get("block_time")
+                    ))
+                    or not isinstance(record["payload"].get("observed_at"), str)
+                    or record["payload"].get("block_time") is not None
+                       and (isinstance(record["payload"].get("block_time"), bool)
+                            or not isinstance(record["payload"].get("block_time"), int)
+                            or record["payload"]["block_time"] <= 0)):
+                raise ValueError("Solana quarantine transaction record is malformed")
+            try:
+                quarantine_observed_at = datetime.fromisoformat(record["payload"]["observed_at"].replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError("Solana quarantine observed_at must be timezone-aware ISO-8601") from None
+            if quarantine_observed_at.tzinfo is None or quarantine_observed_at.utcoffset() is None:
+                raise ValueError("Solana quarantine observed_at must be timezone-aware ISO-8601")
+            if len(_solana_base58_decode(record["signature"])) != 64:
+                raise ValueError("Solana quarantine signature must decode to 64 bytes")
+        if (len({record["signature"] for record in quarantine_records}) != len(quarantine_records)
+                or any(not isinstance(signature, str) or re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", signature) is None
+                       or len(_solana_base58_decode(signature)) != 64
+                       for signature in quarantine_replayed)
+                or len(set(quarantine_replayed)) != len(quarantine_replayed)):
+            raise ValueError("Solana quarantine signatures are malformed or duplicated")
         if scope_identity is not None:
             if (not isinstance(scope_identity, (tuple, list)) or len(scope_identity) != 3
                     or any(not isinstance(part, str) or not part.strip() for part in scope_identity)):
@@ -500,9 +585,15 @@ class OnChainIngestionStore:
                     (slot["network_id"], slot["provider"], slot["scope"], slot["slot"]),
                 ).fetchone()
                 incoming = (int(slot["produced"]), slot.get("block_hash"), slot.get("block_time"))
-                if prior and prior[:2] == incoming[:2] and prior[2] != incoming[2]:
+                time_enrichment = bool(
+                    prior and prior[:2] == incoming[:2]
+                    and prior[2] is None and incoming[2] is not None
+                )
+                if prior and prior[:2] == incoming[:2] and prior[2] is not None and incoming[2] is None:
+                    raise ValueError("canonical Solana slot time cannot regress to unknown")
+                if prior and prior[:2] == incoming[:2] and prior[2] is not None and incoming[2] is not None and prior[2] != incoming[2]:
                     raise ValueError("canonical Solana slot timestamp conflict")
-                if prior and prior != incoming:
+                if prior and prior != incoming and not time_enrichment:
                     active = self.conn.execute(
                         """SELECT 1 FROM layer1_onchain_transfer_events
                            WHERE network_id='solana-mainnet' AND provider=? AND scope=?
@@ -542,6 +633,10 @@ class OnChainIngestionStore:
                 "canonical_blocks": list(blocks),
                 "canonical_slots": list(slots),
             }
+            if quarantine_records:
+                page_material["solana_quarantine_records"] = list(quarantine_records)
+            if quarantine_replayed:
+                page_material["solana_quarantine_replayed"] = list(quarantine_replayed)
             if anchor_observations:
                 page_material["provider_observations"] = list(anchor_observations)
             page_id = hashlib.sha256(self._canonical(page_material).encode("utf-8")).hexdigest()
@@ -564,6 +659,36 @@ class OnChainIngestionStore:
                      self._canonical(list(scope_identity)) if scope_identity is not None else None,
                      self._canonical(page_material), receipt_sha256, receipts_json, now),
                 )
+            for record in quarantine_records:
+                payload_json = self._canonical(record["payload"])
+                identity = ("solana-mainnet", scope_identity[1], scope_identity[2], record["signature"])
+                prior = self.conn.execute(
+                    """SELECT slot, transaction_index, block_hash, payload_json, source_page_id
+                       FROM layer1_onchain_solana_quarantine
+                       WHERE network_id=? AND provider=? AND scope=? AND signature=?""",
+                    identity,
+                ).fetchone()
+                expected = (record["slot"], record["transaction_index"], record["block_hash"], payload_json)
+                if prior is not None and prior[:4] != expected:
+                    raise ValueError("Solana quarantine transaction identity collision")
+                if prior is None:
+                    self.conn.execute(
+                        """INSERT INTO layer1_onchain_solana_quarantine
+                           (network_id, provider, scope, signature, slot, transaction_index,
+                            block_hash, payload_json, source_page_id, status, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)""",
+                        (*identity, record["slot"], record["transaction_index"],
+                         record["block_hash"], payload_json, page_id, now, now),
+                    )
+            for signature in quarantine_replayed:
+                result = self.conn.execute(
+                    """UPDATE layer1_onchain_solana_quarantine SET status='REPLAYED', updated_at=?
+                       WHERE network_id='solana-mainnet' AND provider=? AND scope=?
+                         AND signature=? AND status='PENDING'""",
+                    (now, scope_identity[1], scope_identity[2], signature),
+                )
+                if result.rowcount != 1:
+                    raise ValueError("Solana quarantine replay does not reference one pending transaction")
             self.conn.execute(
                 """INSERT INTO layer1_onchain_ingestion_checkpoints(cursor_key, cursor_json, updated_at)
                    VALUES (?, ?, ?)
@@ -600,7 +725,12 @@ class OnChainIngestionStore:
             actual_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
             if actual_digest != expected_digest:
                 raise ValueError("persisted provider receipt digest mismatch")
-            result.extend(ProviderResponseReceipt(**item) for item in payload)
+            if not isinstance(payload, list):
+                raise ValueError("persisted provider receipt collection is malformed")
+            receipts = tuple(ProviderResponseReceipt(**item) for item in payload)
+            if any(item.sequence != index for index, item in enumerate(receipts, 1)):
+                raise ValueError("persisted provider receipt sequence is invalid")
+            result.extend(receipts)
         return tuple(result)
 
     def get_page_acceptance_material(self, cursor_key: str, page_id: str) -> dict:
@@ -716,8 +846,31 @@ class OnChainIngestionStore:
                 (slot["network_id"], slot["provider"], slot["scope"], slot["slot"]),
             ).fetchone()
             expected = (int(slot["produced"]), slot.get("block_hash"), slot.get("block_time"))
-            if actual != expected:
+            if actual != expected and not (
+                expected[0] == 1 and actual is not None
+                and actual[0] == 1 and actual[1] == expected[1]
+                and expected[2] is None and actual[2] is not None
+            ):
                 raise ValueError("persisted canonical Solana slot evidence no longer matches the committed page")
+        for record in page_material.get("solana_quarantine_records", []):
+            stored = self.conn.execute(
+                """SELECT slot, transaction_index, block_hash, payload_json, source_page_id
+                   FROM layer1_onchain_solana_quarantine
+                   WHERE network_id=? AND provider=? AND scope=? AND signature=?""",
+                (*scope_identity, record["signature"]),
+            ).fetchone()
+            expected = (record["slot"], record["transaction_index"], record["block_hash"],
+                        self._canonical(record["payload"]), page_id)
+            if stored is None or stored != expected:
+                raise ValueError("persisted Solana quarantine record no longer matches its source page")
+        for signature in page_material.get("solana_quarantine_replayed", []):
+            stored = self.conn.execute(
+                """SELECT status FROM layer1_onchain_solana_quarantine
+                   WHERE network_id=? AND provider=? AND scope=? AND signature=?""",
+                (*scope_identity, signature),
+            ).fetchone()
+            if stored is None or stored[0] != "REPLAYED":
+                raise ValueError("persisted Solana quarantine replay is not finalized")
         return {
             "page_id": page_id, "cursor_key": cursor_key,
             "page_material": page_material, "receipts": receipts_payload,
@@ -778,7 +931,8 @@ class OnChainIngestionStore:
             return True
         return any(
             page_material.get(field, []) not in (None, [])
-            for field in ("events", "canonical_blocks", "canonical_slots", "provider_observations")
+            for field in ("events", "canonical_blocks", "canonical_slots", "provider_observations",
+                          "solana_quarantine_records", "solana_quarantine_replayed")
         )
 
     def list_pending_page_acceptances(self) -> tuple[tuple[str, str], ...]:
@@ -964,6 +1118,23 @@ class OnChainIngestionStore:
             for row in rows
         }
 
+    def list_pending_solana_quarantine(self, network_id: str, provider: str, scope: str,
+                                       limit: int = 100) -> list[dict]:
+        if (network_id != "solana-mainnet" or not isinstance(provider, str) or not provider.strip()
+                or not isinstance(scope, str) or not scope.strip()
+                or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000):
+            raise ValueError("Solana quarantine query identity or limit is invalid")
+        rows = self.conn.execute(
+            """SELECT signature, slot, transaction_index, block_hash, payload_json, source_page_id
+               FROM layer1_onchain_solana_quarantine
+               WHERE network_id=? AND provider=? AND scope=? AND status='PENDING'
+               ORDER BY slot, transaction_index, signature LIMIT ?""",
+            (network_id, provider, scope, limit),
+        ).fetchall()
+        return [{"signature": row[0], "slot": row[1], "transaction_index": row[2],
+                 "block_hash": row[3], "payload": json.loads(row[4]),
+                 "source_page_id": row[5]} for row in rows]
+
     def reconcile_block(self, network_id: str, block_number: int,
                         canonical_block_hash: str, provider: Optional[str] = None,
                         scope: Optional[str] = None) -> int:
@@ -1051,10 +1222,24 @@ def normalize_xrpl_payment(
             or isinstance(record.ledger_index, bool) or not isinstance(record.ledger_index, int)
             or record.ledger_index <= 0
             or record.raw.get("hash") != record.transaction_hash
+            or isinstance(record.raw.get("ledger_index"), bool)
+            or not isinstance(record.raw.get("ledger_index"), int)
             or record.raw.get("ledger_index") != record.ledger_index):
         raise ValueError("XRPL transaction hash and validated ledger index do not match provider record identity")
+    provider_ledger_hash = record.raw.get("ledger_hash")
+    if (not isinstance(provider_ledger_hash, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", provider_ledger_hash) is None
+            or not isinstance(canonical_ledger_hash, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", canonical_ledger_hash) is None
+            or provider_ledger_hash.lower() != canonical_ledger_hash.lower()):
+        raise ValueError("XRPL transaction ledger hash does not match the independently verified canonical ledger hash")
     if not isinstance(record.transaction, dict) or not isinstance(record.metadata, dict):
         raise ValueError("XRPL transaction and metadata must be objects")
+    if (not isinstance(record.raw.get("tx_json"), dict)
+            or not isinstance(record.raw.get("meta"), dict)
+            or record.raw.get("tx_json") != record.transaction
+            or record.raw.get("meta") != record.metadata):
+        raise ValueError("XRPL raw transaction and metadata must match the typed provider record")
     if record.transaction.get("TransactionType") != "Payment":
         return None
     if record.metadata.get("TransactionResult") != "tesSUCCESS":
@@ -1160,8 +1345,8 @@ def normalize_evm_transfer_log(event: EvmTokenTransferLog, *, asset_id: str,
         raise ValueError("canonical_block_hash must be an exact EVM block hash")
     if not isinstance(decimals, int) or isinstance(decimals, bool) or not 0 <= decimals <= 36:
         raise ValueError("decimals must be an integer from 0 to 36")
-    if not re.fullmatch(r"[0-9]+", event.amount_raw):
-        raise ValueError("provider transfer amount must be an integer base-unit string")
+    if not _is_uint256_decimal(event.amount_raw):
+        raise ValueError("provider transfer amount must be a uint256 base-unit integer string")
     return NormalizedTransferEvent(
         event_id=f"{event.transaction_hash.lower()}:{event.log_index}",
         network_id=event.network_id, provider="alchemy", scope=scope,
@@ -1195,10 +1380,12 @@ def _solana_account_keys(message: dict, meta: dict) -> list[str]:
     for lookup in lookups:
         if not isinstance(lookup, dict):
             raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana address table lookup entry is malformed")
+        if not _is_base58_pubkey(lookup.get("accountKey")):
+            raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana address table lookup account key is invalid")
         writable_indexes = lookup.get("writableIndexes")
         readonly_indexes = lookup.get("readonlyIndexes")
         if (not isinstance(writable_indexes, list) or not isinstance(readonly_indexes, list)
-                or any(isinstance(index, bool) or not isinstance(index, int) or index < 0
+                or any(isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= 255
                        for index in writable_indexes + readonly_indexes)):
             raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana address table lookup indexes are malformed")
         expected_writable += len(writable_indexes)
@@ -1302,10 +1489,22 @@ def normalize_solana_token_transfer_instructions(
             or len(_solana_base58_decode(history.signature)) != 64):
         raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana transaction signature or slot is invalid")
     raw = history.raw
-    if not isinstance(raw, dict) or raw.get("slot") != history.slot:
+    raw_slot = raw.get("slot") if isinstance(raw, dict) else None
+    if (not isinstance(raw, dict) or isinstance(raw_slot, bool)
+            or not isinstance(raw_slot, int) or raw_slot != history.slot):
         raise ProviderTransportError("SOLANA_SLOT_MISMATCH", "Solana full transaction does not match address-history slot")
     if raw.get("signature") not in (None, history.signature):
         raise ProviderTransportError("SOLANA_SIGNATURE_MISMATCH", "Solana full transaction signature does not match address history")
+    raw_block_time = raw.get("blockTime")
+    if "blockTime" in raw and (
+            (raw_block_time is not None and (
+                isinstance(raw_block_time, bool) or not isinstance(raw_block_time, int)
+                or raw_block_time <= 0))
+            or raw_block_time != history.block_time):
+        raise ProviderTransportError(
+            "SOLANA_BLOCK_TIME_MISMATCH",
+            "Solana full transaction block time does not match the typed address-history record",
+        )
     if history.block_time is not None:
         if isinstance(history.block_time, bool) or not isinstance(history.block_time, int) or history.block_time <= 0:
             raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana address-history block time is invalid")
@@ -1314,8 +1513,25 @@ def normalize_solana_token_transfer_instructions(
     transaction, meta = raw.get("transaction"), raw.get("meta")
     if not isinstance(transaction, dict) or not isinstance(meta, dict):
         raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana full transaction and metadata are required")
-    if meta.get("err") is not None:
-        raise ProviderTransportError("SOLANA_TRANSACTION_FAILED", "failed Solana transactions are not transfer evidence")
+    if "err" not in meta:
+        raise ProviderTransportError("INVALID_SOLANA_TRANSACTION", "Solana transaction metadata is missing explicit execution status")
+    execution_error = meta["err"]
+    if execution_error is not None:
+        # TransactionError is serialized as a non-empty unit-variant string or
+        # a single-key externally tagged object. Arbitrary JSON values must not
+        # be mistaken for a valid failed-transaction status and silently skipped.
+        if (isinstance(execution_error, str) and not execution_error.strip()) or (
+            isinstance(execution_error, dict)
+            and (len(execution_error) != 1
+                 or any(not isinstance(key, str) or not key.strip() for key in execution_error))
+        ) or not isinstance(execution_error, (str, dict)):
+            raise ProviderTransportError(
+                "INVALID_SOLANA_TRANSACTION", "Solana transaction execution status has an invalid error shape",
+            )
+        # Failed transactions are expected address-history entries, not malformed
+        # provider pages. Skip them so one failed signature cannot stall the page
+        # and prevent unrelated successful transactions from being checkpointed.
+        return ()
     signatures = transaction.get("signatures")
     if not isinstance(signatures, list) or not signatures or signatures[0] != history.signature:
         raise ProviderTransportError("SOLANA_SIGNATURE_MISMATCH", "transaction message must carry the exact address-history signature")
@@ -1445,6 +1661,27 @@ def normalize_bitcoin_transaction_outputs(
     if (isinstance(history.confirmations, bool) or not isinstance(history.confirmations, int)
             or history.finality != "CONFIRMED" or history.confirmations < minimum_confirmations):
         raise ValueError("Bitcoin transaction has not reached the configured confirmation threshold")
+    if (not isinstance(history.raw, dict)
+            or not isinstance(history.raw.get("txid"), str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", history.raw["txid"]) is None
+            or not isinstance(history.txid, str)
+            or history.raw["txid"].lower() != history.txid.lower()):
+        raise ValueError("Bitcoin raw address-history transaction ID does not match its typed record")
+    for raw_field, typed_value in (
+        ("confirmations", history.confirmations),
+        ("blockHeight", history.block_height),
+        ("blockTime", history.block_time),
+    ):
+        if raw_field in history.raw:
+            raw_value = history.raw[raw_field]
+            if (isinstance(raw_value, bool) or not isinstance(raw_value, int)
+                    or raw_value != typed_value):
+                raise ValueError(f"Bitcoin raw address-history {raw_field} does not match its typed record")
+    if "blockHash" in history.raw:
+        raw_hash = history.raw["blockHash"]
+        if (not isinstance(raw_hash, str) or not isinstance(history.block_hash, str)
+                or raw_hash.lower() != history.block_hash.lower()):
+            raise ValueError("Bitcoin raw address-history blockHash does not match its typed record")
     if (not isinstance(history.txid, str) or re.fullmatch(r"[0-9a-fA-F]{64}", history.txid) is None
             or isinstance(history.block_height, bool) or not isinstance(history.block_height, int)
             or history.block_height <= 0
@@ -1453,12 +1690,17 @@ def normalize_bitcoin_transaction_outputs(
             or isinstance(history.block_time, bool) or not isinstance(history.block_time, int)
             or history.block_time <= 0):
         raise ValueError("confirmed Bitcoin history lacks a valid transaction/block identity")
+    transaction_height = transaction.get("blockHeight")
+    transaction_block_time = transaction.get("blockTime")
     if (not isinstance(transaction.get("txid"), str)
             or transaction["txid"].lower() != history.txid.lower()
-            or transaction.get("blockHeight") != history.block_height
+            or isinstance(transaction_height, bool) or not isinstance(transaction_height, int)
+            or transaction_height <= 0 or transaction_height != history.block_height
             or not isinstance(transaction.get("blockHash"), str)
             or transaction["blockHash"].lower() != history.block_hash.lower()
-            or transaction.get("blockTime") != history.block_time):
+            or isinstance(transaction_block_time, bool)
+            or not isinstance(transaction_block_time, int) or transaction_block_time <= 0
+            or transaction_block_time != history.block_time):
         raise ValueError("Bitcoin transaction identity or block reference does not match address history")
     if (not isinstance(canonical_block_hash, str)
             or re.fullmatch(r"[0-9a-fA-F]{64}", canonical_block_hash) is None):
@@ -1502,16 +1744,25 @@ def normalize_bitcoin_transaction_outputs(
 
     output_indexes = set()
     events = []
+    total_output_value = 0
     for output in outputs:
         index = output.get("n")
-        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
-            raise ValueError("Bitcoin output index must be a non-negative integer")
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= 0xFFFFFFFF:
+            raise ValueError("Bitcoin output index must be a uint32 integer")
         if index in output_indexes:
             raise ValueError("Bitcoin transaction contains a duplicate output index")
         output_indexes.add(index)
         value = output.get("value")
         if not isinstance(value, str) or re.fullmatch(r"[0-9]+", value) is None:
             raise ValueError("Bitcoin output value must be an integer satoshi string")
+        canonical_value = value.lstrip("0") or "0"
+        if (len(canonical_value) > len(BITCOIN_MAX_MONEY_SATOSHIS_TEXT)
+                or (len(canonical_value) == len(BITCOIN_MAX_MONEY_SATOSHIS_TEXT)
+                    and canonical_value > BITCOIN_MAX_MONEY_SATOSHIS_TEXT)):
+            raise ValueError("Bitcoin output value exceeds maximum money")
+        total_output_value += int(canonical_value)
+        if total_output_value > BITCOIN_MAX_MONEY_SATOSHIS:
+            raise ValueError("Bitcoin transaction output total exceeds maximum money")
         addresses = output.get("addresses", [])
         is_address = output.get("isAddress", bool(addresses))
         if not isinstance(is_address, bool) or not isinstance(addresses, list):

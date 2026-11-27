@@ -47,9 +47,15 @@ class FakeBitcoinProvider:
         return self.tip
 
     def fetch_bitcoin_block_header(self, height):
-        return self.headers.get(height, {
-            "number": height, "hash": HASH, "timestamp": int(NOW.timestamp()) - (110 - height) * 60,
-        })
+        if height in self.headers:
+            return self.headers[height]
+        previous = self.headers.get(height - 1)
+        previous_block_hash = previous["hash"] if previous is not None else HASH
+        return {
+            "number": height, "hash": HASH,
+            "previous_block_hash": previous_block_hash,
+            "timestamp": int(NOW.timestamp()) - (110 - height) * 60,
+        }
 
     def fetch_bitcoin_address_transactions(self, address, page, page_size, from_height, to_height):
         self.history_calls.append((address, page, from_height, to_height))
@@ -95,6 +101,32 @@ class BitcoinAddressIngestionWorkerTests(unittest.TestCase):
         self.ingestion_store.close()
         self.mapping_store.close()
         self.tmp.cleanup()
+
+    def test_rejects_nonempty_history_page_with_zero_total_pages_before_detail_fetch(self):
+        record = history()
+        self.provider.pages = {1: ((record,), 0)}
+        self.provider.details[record.txid] = transaction(record)
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertEqual(self.provider.detail_calls, [])
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bitcoin-mainnet:address:" + ADDRESS))
+
+    def test_rejects_malformed_history_txid_before_transaction_detail_request(self):
+        from dataclasses import replace
+        self.provider.pages = {1: ((replace(history(), txid=None),), 1)}
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertEqual(self.provider.detail_calls, [])
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bitcoin-mainnet:address:" + ADDRESS))
+        self.assertEqual(self.ingestion_store.list_events("bitcoin-mainnet"), [])
 
     def test_rejects_monitored_address_seed_with_invalid_mainnet_checksum(self):
         with self.assertRaisesRegex(ValueError, "checksum-valid Bitcoin mainnet address seeds"):
@@ -284,7 +316,10 @@ class BitcoinAddressIngestionWorkerTests(unittest.TestCase):
         self.provider.pages = {1: ((), 0)}
         self.worker.run_once()
         self.provider.tip = 110
-        self.provider.headers[102] = {"number": 102, "hash": "e" * 64, "timestamp": 1794398502}
+        self.provider.headers[102] = {
+            "number": 102, "hash": "e" * 64, "previous_block_hash": HASH,
+            "timestamp": int(NOW.timestamp()) - 600,
+        }
         self.provider.pages = {1: ((history("d" * 64, 102, 8, "e" * 64),), 1)}
         self.provider.details["d" * 64] = transaction(history("d" * 64, 102, 8, "e" * 64))
         result = self.worker.run_once()
@@ -292,6 +327,28 @@ class BitcoinAddressIngestionWorkerTests(unittest.TestCase):
         self.assertEqual(self.ingestion_store.get_event(
             "d" * 64 + ":0", "bitcoin-mainnet", "alchemy", "address:" + ADDRESS).canonical_status,
             "CANONICAL")
+
+    def test_resumed_range_waits_when_tip_recedes_below_its_confirmation_safe_height(self):
+        first = history()
+        self.provider.pages = {1: ((first,), 2), 2: ((), 2)}
+        self.worker.run_once()
+        cursor_key = "alchemy:bitcoin-mainnet:address:" + ADDRESS
+        checkpoint = self.ingestion_store.get_checkpoint(cursor_key)
+        self.assertEqual(checkpoint["page"], 2)
+        self.assertEqual((checkpoint["from_block"], checkpoint["to_block"]), (99, 103))
+
+        late_record = history(txid="d" * 64, height=100, confirmations=6)
+        self.provider.tip = 100  # minimum-confirmation safe height is now 95
+        self.provider.pages[2] = ((late_record,), 2)
+        self.provider.details[late_record.txid] = transaction(late_record)
+
+        result = self.worker.run_once()
+
+        self.assertEqual(result["events_inserted"], 0)
+        self.assertEqual(self.provider.detail_calls, [first.txid])
+        events = self.ingestion_store.list_events("bitcoin-mainnet")
+        self.assertEqual([event.transaction_hash for event in events], [first.txid])
+        self.assertEqual(self.ingestion_store.get_checkpoint(cursor_key)["page"], 2)
 
     def test_changed_provider_page_count_restarts_fixed_range_at_page_one(self):
         self.provider.pages = {1: ((history(),), 2), 2: ((), 2)}
@@ -310,7 +367,8 @@ class BitcoinAddressIngestionWorkerTests(unittest.TestCase):
             "alchemy:bitcoin-mainnet:address:" + ADDRESS)["page"], 2)
         changed = history(TXID, 100, 8, "e" * 64)
         self.provider.headers[100] = {
-            "number": 100, "hash": "e" * 64, "timestamp": 1794398400,
+            "number": 100, "hash": "e" * 64, "previous_block_hash": HASH,
+            "timestamp": int(NOW.timestamp()) - (110 - 100) * 60,
         }
         self.provider.pages[1] = ((changed,), 2)
         self.provider.details[TXID] = transaction(changed)
@@ -344,6 +402,130 @@ class BitcoinAddressIngestionWorkerTests(unittest.TestCase):
             self.worker.run_once()
         self.assertIsNone(self.ingestion_store.get_checkpoint(
             "alchemy:bitcoin-mainnet:address:" + ADDRESS))
+
+    def test_rejects_address_history_block_time_that_diverges_from_canonical_header(self):
+        record = history()
+        record = BitcoinAddressTransaction(
+            record.txid, record.confirmations, record.block_height, record.block_hash,
+            record.block_time + 1, record.finality,
+            {"txid": record.txid, "confirmations": record.confirmations,
+             "blockHeight": record.block_height, "blockTime": record.block_time + 1,
+             "blockHash": record.block_hash},
+        )
+        self.provider.pages = {1: ((record,), 1)}
+        self.provider.details = {record.txid: transaction(record)}
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "BITCOIN_BLOCK_TIME_MISMATCH")
+        self.assertEqual(self.provider.detail_calls, [])
+        self.assertEqual(self.ingestion_store.list_events("bitcoin-mainnet"), [])
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bitcoin-mainnet:address:" + ADDRESS))
+
+    def test_rejects_address_history_block_hash_that_diverges_from_canonical_header(self):
+        record = history(block_hash="d" * 64)
+        self.provider.pages = {1: ((record,), 1)}
+        self.provider.details = {record.txid: transaction(record)}
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "BITCOIN_BLOCK_HASH_MISMATCH")
+        self.assertEqual(self.provider.detail_calls, [])
+        self.assertEqual(self.ingestion_store.list_events("bitcoin-mainnet"), [])
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bitcoin-mainnet:address:" + ADDRESS))
+
+    def test_worker_rejects_canonical_header_timestamp_above_uint32(self):
+        self.provider.pages = {1: ((), 0)}
+        self.provider.headers = {
+            height: {"number": height, "hash": HASH,
+                     "previous_block_hash": HASH if height > 99 else HASH,
+                     "timestamp": 2**32 if height == 99 else int(NOW.timestamp())}
+            for height in range(99, 104)
+        }
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+        self.assertEqual(error.exception.reason_code, "INVALID_PROVIDER_DATA")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bitcoin-mainnet:address:" + ADDRESS))
+
+    def test_rejects_discontinuous_bitcoin_block_headers_inside_fixed_range(self):
+        self.provider.pages = {1: ((), 0)}
+        self.provider.headers = {
+            99: {"number": 99, "hash": "a" * 64, "timestamp": 1794398500,
+                 "previous_block_hash": "b" * 64},
+            100: {"number": 100, "hash": "c" * 64, "timestamp": 1794398560,
+                  "previous_block_hash": "d" * 64},
+        }
+        self.worker.max_blocks_per_run = 2
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "BITCOIN_PARENT_HASH_MISMATCH")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bitcoin-mainnet:address:" + ADDRESS))
+        self.assertEqual(self.ingestion_store.list_events("bitcoin-mainnet"), [])
+
+    def test_initial_bitcoin_range_uses_previous_header_as_parent_anchor(self):
+        self.provider.pages = {1: ((), 0)}
+        self.provider.headers = {
+            98: {"number": 98, "hash": "c" * 64,
+                 "previous_block_hash": "b" * 64,
+                 "timestamp": int(NOW.timestamp()) - 12 * 60},
+            99: {"number": 99, "hash": HASH,
+                 "previous_block_hash": "d" * 64,
+                 "timestamp": int(NOW.timestamp()) - 11 * 60},
+        }
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "BITCOIN_PARENT_HASH_MISMATCH")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bitcoin-mainnet:address:" + ADDRESS))
+        self.assertIsNone(self.ingestion_store.get_block_hash(
+            "bitcoin-mainnet", "alchemy", "address:" + ADDRESS, 99))
+
+    def test_resumed_bitcoin_range_uses_previous_header_as_parent_anchor(self):
+        self.provider.pages = {1: ((), 0)}
+        self.worker.max_blocks_per_run = 2
+        self.worker.reorg_lookback_blocks = 0
+        self.worker.run_once()
+        cursor_key = "alchemy:bitcoin-mainnet:address:" + ADDRESS
+        self.assertEqual(self.ingestion_store.get_checkpoint(cursor_key)["next_block"], 101)
+        self.provider.headers[100] = {
+            "number": 100, "hash": "e" * 64, "previous_block_hash": HASH,
+            "timestamp": 1794398560,
+        }
+        self.provider.headers[101] = {
+            "number": 101, "hash": "f" * 64, "previous_block_hash": "d" * 64,
+            "timestamp": 1794398620,
+        }
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "BITCOIN_PARENT_HASH_MISMATCH")
+        self.assertEqual(self.ingestion_store.get_checkpoint(cursor_key)["next_block"], 101)
+        self.assertEqual(self.ingestion_store.list_events("bitcoin-mainnet"), [])
+
+    def test_provider_page_cannot_exceed_configured_page_size(self):
+        first = history(txid=TXID)
+        second = history(txid="c" * 64)
+        self.provider.pages = {1: ((first, second), 1)}
+        self.provider.details = {first.txid: transaction(first), second.txid: transaction(second)}
+
+        with self.assertRaises(ProviderTransportError) as error:
+            self.worker.run_once()
+
+        self.assertEqual(error.exception.reason_code, "PAGE_LIMIT_EXCEEDED")
+        self.assertIsNone(self.ingestion_store.get_checkpoint(
+            "alchemy:bitcoin-mainnet:address:" + ADDRESS))
+        self.assertEqual(self.ingestion_store.list_events("bitcoin-mainnet"), [])
 
 
 if __name__ == "__main__":

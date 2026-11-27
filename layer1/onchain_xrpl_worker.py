@@ -52,7 +52,8 @@ class XrplIssuedCurrencyIngestionWorker:
                     or len(set(accounts)) != len(accounts)):
                 raise ValueError("each mapping requires unique checksum-valid classic XRPL account seeds")
         for mapping_id, ledger in start_ledgers.items():
-            if not isinstance(mapping_id, str) or isinstance(ledger, bool) or not isinstance(ledger, int) or ledger < 1:
+            if (not isinstance(mapping_id, str) or isinstance(ledger, bool)
+                    or not isinstance(ledger, int) or not 1 <= ledger <= 0xFFFFFFFF):
                 raise ValueError("start ledger mapping IDs and indexes are invalid")
         if isinstance(max_ledgers_per_run, bool) or not isinstance(max_ledgers_per_run, int) or not 1 <= max_ledgers_per_run <= 100:
             raise ValueError("max_ledgers_per_run must be between 1 and 100")
@@ -77,6 +78,15 @@ class XrplIssuedCurrencyIngestionWorker:
         )
 
     @staticmethod
+    def _marker_key(marker, *, reason_code="INVALID_CHECKPOINT") -> str:
+        try:
+            return json.dumps(marker, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError, RecursionError):
+            raise ProviderTransportError(
+                reason_code, "XRPL pagination marker is not finite JSON-compatible data",
+            ) from None
+
+    @staticmethod
     def _scope(mapping: OnChainAssetMapping, account: str) -> str:
         return f"account:{account}:mapping:{mapping.mapping_id}"
 
@@ -90,6 +100,8 @@ class XrplIssuedCurrencyIngestionWorker:
                 or mapping.chain_id != "xrpl-mainnet" or mapping.mapping_status != "VERIFIED"
                 or mapping.representation != "TOKEN" or mapping.contract_address is not None
                 or mapping.token_standard != "XRPL_ISSUED_CURRENCY"
+                or isinstance(mapping.decimals, bool) or not isinstance(mapping.decimals, int)
+                or not 0 <= mapping.decimals <= 36
                 or not is_valid_xrpl_classic_address(mapping.issuer_address)
                 or not is_valid_xrpl_issued_currency_code(mapping.issued_currency)):
             raise ValueError("worker requires a checksum-valid classic XRPL issuer address and verified issued-currency mapping")
@@ -103,7 +115,8 @@ class XrplIssuedCurrencyIngestionWorker:
                 or not isinstance(header.get("parent_hash"), str)
                 or re.fullmatch(r"[0-9a-fA-F]{64}", header["parent_hash"]) is None
                 or isinstance(header.get("timestamp"), bool)
-                or not isinstance(header.get("timestamp"), int) or header["timestamp"] < 0
+                or not isinstance(header.get("timestamp"), int)
+                or not 0 <= header["timestamp"] <= 946684800 + 0xFFFFFFFF
                 or header.get("finality_reference") != "validated=true"):
             raise ProviderTransportError("INVALID_PROVIDER_DATA", "Chainstack returned a malformed or unvalidated XRPL ledger header")
         return header
@@ -155,6 +168,10 @@ class XrplIssuedCurrencyIngestionWorker:
                 or isinstance(getattr(head, "head_height", None), bool)
                 or not isinstance(getattr(head, "head_height", None), int)):
             raise ProviderTransportError("XRPL_VALIDATED_HEAD_UNAVAILABLE", "Chainstack did not return a validated XRPL mainnet head")
+        if not 1 <= head.head_height <= 0xFFFFFFFF:
+            raise ProviderTransportError(
+                "INVALID_PROVIDER_DATA", "Chainstack XRPL validated head height is outside the UInt32 ledger-index range",
+            )
         summary.update({"page_acceptances_signed": 0, "page_acceptances_pending": 0,
                         "page_acceptances_rejected": 0})
         for mapping in mappings:
@@ -181,9 +198,12 @@ class XrplIssuedCurrencyIngestionWorker:
                         or checkpoint.get("account") != account
                         or isinstance(checkpoint.get("next_ledger"), bool)
                         or not isinstance(checkpoint.get("next_ledger"), int)
-                        or checkpoint["next_ledger"] < initial
+                        or not initial <= checkpoint["next_ledger"] <= 0x100000000
                         or not isinstance(checkpoint.get("seen_markers", []), list)):
                     raise ValueError("stored XRPL account checkpoint is malformed")
+                self._marker_key(checkpoint.get("marker"))
+                for saved_marker in checkpoint.get("seen_markers", []):
+                    self._marker_key(saved_marker)
                 reorg_count, rewind, reorg_ledgers = self._reconcile_recent(
                     mapping, account, checkpoint["next_ledger"], initial)
                 summary["reorg_events_tombstoned"] += reorg_count
@@ -215,11 +235,28 @@ class XrplIssuedCurrencyIngestionWorker:
                         or range_end > head.head_height):
                     raise ValueError("stored XRPL fixed ledger range is malformed or beyond validated head")
                 headers = {index: self._header(index) for index in range(range_start, range_end + 1)}
+                if range_start > 1:
+                    preceding_header = self._header(range_start - 1)
+                    if headers[range_start]["parent_hash"].lower() != preceding_header["hash"].lower():
+                        raise ProviderTransportError(
+                            "XRPL_PARENT_HASH_MISMATCH",
+                            "XRPL first validated ledger parent_hash does not match the preceding ledger hash",
+                        )
+                    if headers[range_start]["timestamp"] <= preceding_header["timestamp"]:
+                        raise ProviderTransportError(
+                            "XRPL_LEDGER_TIME_NOT_MONOTONIC",
+                            "XRPL validated ledger close time must be strictly later than its parent ledger",
+                        )
                 for index in range(range_start + 1, range_end + 1):
                     if headers[index]["parent_hash"].lower() != headers[index - 1]["hash"].lower():
                         raise ProviderTransportError(
                             "XRPL_PARENT_HASH_MISMATCH",
                             "XRPL validated ledger parent_hash does not match the preceding ledger hash",
+                        )
+                    if headers[index]["timestamp"] <= headers[index - 1]["timestamp"]:
+                        raise ProviderTransportError(
+                            "XRPL_LEDGER_TIME_NOT_MONOTONIC",
+                            "XRPL validated ledger close time must be strictly later than its parent ledger",
                         )
                 # These provider responses are shared evidence for every page in this
                 # fixed range. Preserve an opaque collector-issued batch and attach
@@ -274,6 +311,11 @@ class XrplIssuedCurrencyIngestionWorker:
                             or page.from_block != range_start or page.to_block != range_end
                             or page.finality_reference != "validated=true"):
                         raise ProviderTransportError("INVALID_PROVIDER_DATA", "Chainstack XRPL page does not match the fixed validated account/range")
+                    if len(records) > self.page_size:
+                        raise ProviderTransportError(
+                            "PAGE_LIMIT_EXCEEDED",
+                            "XRPL provider returned more transactions than the configured page size",
+                        )
                     observed = self.clock()
                     if observed.tzinfo is None or observed.utcoffset() is None:
                         raise ValueError("worker clock must return a timezone-aware datetime")
@@ -285,7 +327,33 @@ class XrplIssuedCurrencyIngestionWorker:
                         header = headers.get(record.ledger_index)
                         if header is None:
                             raise ProviderTransportError("INVALID_PROVIDER_DATA", "XRPL transaction ledger header was not independently verified")
-                        block_time = datetime.fromtimestamp(header["timestamp"], timezone.utc).isoformat()
+                        if (not isinstance(record.close_time_iso, str)
+                                or not record.close_time_iso
+                                or not isinstance(record.raw, dict)
+                                or record.raw.get("close_time_iso") != record.close_time_iso):
+                            raise ProviderTransportError(
+                                "INVALID_PROVIDER_DATA",
+                                "XRPL transaction close_time_iso is missing or differs from its raw provider evidence",
+                            )
+                        try:
+                            transaction_close_time = datetime.fromisoformat(
+                                record.close_time_iso.replace("Z", "+00:00"))
+                        except ValueError:
+                            raise ProviderTransportError(
+                                "INVALID_PROVIDER_DATA", "XRPL transaction close_time_iso is malformed",
+                            ) from None
+                        if (transaction_close_time.tzinfo is None
+                                or transaction_close_time.utcoffset() is None):
+                            raise ProviderTransportError(
+                                "INVALID_PROVIDER_DATA", "XRPL transaction close_time_iso must be timezone-aware",
+                            )
+                        canonical_close_time = datetime.fromtimestamp(header["timestamp"], timezone.utc)
+                        if transaction_close_time.astimezone(timezone.utc) != canonical_close_time:
+                            raise ProviderTransportError(
+                                "XRPL_LEDGER_TIME_MISMATCH",
+                                "XRPL account_tx close_time_iso does not match the independently verified ledger header",
+                            )
+                        block_time = canonical_close_time.isoformat()
                         event = normalize_xrpl_payment(
                             record, monitored_account=account, asset_id=mapping.asset_id,
                             mapping_id=mapping.mapping_id, issuer_address=mapping.issuer_address,
@@ -302,11 +370,10 @@ class XrplIssuedCurrencyIngestionWorker:
                             ))
                     next_marker = page.next_cursor
                     if next_marker is not None:
-                        marker_key = json.dumps(next_marker, sort_keys=True, separators=(",", ":"), allow_nan=False)
-                        prior_keys = {json.dumps(item, sort_keys=True, separators=(",", ":"), allow_nan=False)
-                                      for item in seen_markers}
-                        current_key = (json.dumps(marker, sort_keys=True, separators=(",", ":"), allow_nan=False)
-                                       if marker is not None else None)
+                        marker_key = self._marker_key(
+                            next_marker, reason_code="INVALID_PROVIDER_DATA")
+                        prior_keys = {self._marker_key(item) for item in seen_markers}
+                        current_key = self._marker_key(marker) if marker is not None else None
                         if marker_key in prior_keys or marker_key == current_key:
                             raise ProviderTransportError("XRPL_MARKER_LOOP", "XRPL account_tx pagination marker repeated")
                         seen_markers.append(next_marker)

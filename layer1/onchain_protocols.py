@@ -62,6 +62,8 @@ class OnChainIngestionStoreProtocol(Protocol):
         canonical_slots: Iterable[dict] = (),
         provider_receipts: Optional[CapturedProviderReceiptBatch] = None,
         provider_observations: Iterable[dict] = (),
+        solana_quarantine_records: Iterable[dict] = (),
+        solana_quarantine_replayed: Iterable[str] = (),
     ) -> dict: ...
 
     def list_page_receipts(
@@ -96,6 +98,10 @@ class OnChainIngestionStoreProtocol(Protocol):
         self, network_id: str, provider: str, scope: str,
         start_slot: int, end_slot: int,
     ) -> dict[int, dict]: ...
+
+    def list_pending_solana_quarantine(
+        self, network_id: str, provider: str, scope: str, limit: int = 100,
+    ) -> list[dict]: ...
 
     def get_event(
         self, event_id: str, network_id: str,
