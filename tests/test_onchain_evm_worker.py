@@ -96,6 +96,42 @@ class EvmTransferIngestionWorkerTests(unittest.TestCase):
         self.mapping_store.close()
         self.tmp.cleanup()
 
+    def test_rejects_evm_checkpoint_bound_to_different_mapping_identity(self):
+        current = mapping()
+        cursor_key = self.worker._cursor_key(current)
+        scope = f"contract:{CONTRACT.lower()}"
+        checkpoint = {"mapping_id": "different-mapping-v2",
+                      "network_id": current.network_id, "scope": scope,
+                      "next_block": 110, "from_block": 100, "to_block": 109}
+        self.ingestion_store.commit_page(
+            cursor_key, checkpoint, (), expected_cursor=None,
+            scope_identity=(current.network_id, "alchemy", scope),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stored EVM checkpoint is malformed"):
+            self.worker.run_once()
+
+        self.assertEqual(self.provider.log_calls, [])
+        self.assertEqual(self.ingestion_store.list_events(current.network_id), [])
+
+    def test_rejects_evm_checkpoint_before_configured_start_block(self):
+        current = mapping()
+        cursor_key = self.worker._cursor_key(current)
+        scope = f"contract:{CONTRACT.lower()}"
+        checkpoint = {"mapping_id": current.mapping_id,
+                      "network_id": current.network_id, "scope": scope,
+                      "next_block": 99, "from_block": 98, "to_block": 98}
+        self.ingestion_store.commit_page(
+            cursor_key, checkpoint, (), expected_cursor=None,
+            scope_identity=(current.network_id, "alchemy", scope),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stored EVM checkpoint is malformed"):
+            self.worker.run_once()
+
+        self.assertEqual(self.provider.log_calls, [])
+        self.assertEqual(self.ingestion_store.list_events(current.network_id), [])
+
     def test_worker_rejects_invalid_mapping_decimals_before_ingestion(self):
         from dataclasses import replace
         for decimals in (True, -1, 37, "18"):

@@ -142,6 +142,75 @@ class XrplIssuedCurrencyIngestionWorkerTests(unittest.TestCase):
         self.assertEqual(self.provider.calls, [])
         self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
 
+    def test_rejects_persisted_fixed_range_wider_than_run_budget(self):
+        self.provider.head = 503
+        self.provider.pages = {None: ((), None)}
+        key = f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}"
+        checkpoint = {"mapping_id": MAPPING_ID, "account": ACCOUNT,
+                      "next_ledger": 500, "range_start": 500,
+                      "range_end": 503, "marker": None, "seen_markers": []}
+        self.ingestion_store.commit_page(
+            key, checkpoint, (), expected_cursor=None,
+            scope_identity=("xrpl-mainnet", "chainstack", f"account:{ACCOUNT}:mapping:{MAPPING_ID}"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stored XRPL fixed ledger range exceeds configured run budget"):
+            self.worker.run_once()
+
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+
+    def test_rejects_persisted_marker_without_active_fixed_range(self):
+        self.provider.head = 503
+        self.provider.pages = {None: ((), None)}
+        key = f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}"
+        checkpoint = {"mapping_id": MAPPING_ID, "account": ACCOUNT,
+                      "next_ledger": 502, "range_start": None,
+                      "range_end": None, "marker": "page-2", "seen_markers": ["page-2"]}
+        self.ingestion_store.commit_page(
+            key, checkpoint, (), expected_cursor=None,
+            scope_identity=("xrpl-mainnet", "chainstack", f"account:{ACCOUNT}:mapping:{MAPPING_ID}"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stored XRPL account checkpoint is malformed"):
+            self.worker.run_once()
+
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+
+    def test_rejects_persisted_marker_missing_from_seen_marker_history(self):
+        key = f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}"
+        checkpoint = {"mapping_id": MAPPING_ID, "account": ACCOUNT,
+                      "next_ledger": 500, "range_start": 500,
+                      "range_end": 502, "marker": "page-2", "seen_markers": []}
+        self.ingestion_store.commit_page(
+            key, checkpoint, (), expected_cursor=None,
+            scope_identity=("xrpl-mainnet", "chainstack", f"account:{ACCOUNT}:mapping:{MAPPING_ID}"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stored XRPL account checkpoint is malformed"):
+            self.worker.run_once()
+
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+
+    def test_rejects_next_ledger_outside_persisted_active_range(self):
+        self.provider.head = 503
+        key = f"chainstack:xrpl-mainnet:{ACCOUNT}:mapping:{MAPPING_ID}"
+        checkpoint = {"mapping_id": MAPPING_ID, "account": ACCOUNT,
+                      "next_ledger": 503, "range_start": 500,
+                      "range_end": 502, "marker": "page-2", "seen_markers": ["page-2"]}
+        self.ingestion_store.commit_page(
+            key, checkpoint, (), expected_cursor=None,
+            scope_identity=("xrpl-mainnet", "chainstack", f"account:{ACCOUNT}:mapping:{MAPPING_ID}"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stored XRPL account checkpoint is malformed"):
+            self.worker.run_once()
+
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("xrpl-mainnet"), [])
+
     def test_rejects_start_ledger_above_protocol_uint32_range(self):
         with self.assertRaisesRegex(ValueError, "start ledger mapping IDs and indexes are invalid"):
             XrplIssuedCurrencyIngestionWorker(

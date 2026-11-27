@@ -1389,3 +1389,38 @@ No provider response-size telemetry or representative production payload corpus 
 ### Section 283 verification checkpoint
 - Focused XRPL worker + provider suites: **161 tests, 0 failures/errors**. Full repository suite: **1,331 tests, 0 failures, 0 errors, 72 skipped**. Compileall and `git diff --check` PASS.
 - `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production database, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred. Existing uncommitted changes and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql` remain preserved. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## Section 284 — AUD-ONCHAIN-096: XRPL persisted fixed-range budget validation (27 November 2026)
+
+- XRPL worker accepted a persisted fixed ledger range whose width exceeded the current `max_ledgers_per_run`. Because it loaded canonical headers for the entire stored range, a malformed/stale checkpoint could defeat the configured bounded-work limit and amplify provider calls/memory. TDD RED reproduced this using an isolated SQLite checkpoint (`range_start=500`, `range_end=503`) against a three-ledger run budget. GREEN rejects `range_end - range_start + 1 > max_ledgers_per_run` before header or account-page fetches (`layer1/onchain_xrpl_worker.py:238`).
+- Focused XRPL worker suite: **28 tests passed**. Full repository suite: **1,332 tests, 0 failures/errors, 72 skipped**. Focused worker + provider suite and final static checks are recorded in the current continuation checkpoint.
+- This is not a substitute for owner-approved marker budgets (AUD-ONCHAIN-030), response-size limits (AUD-ONCHAIN-004), or provider/source authority policy (AUD-ONCHAIN-002). A checkpoint created under a larger prior budget requires explicit operator/config reconciliation if the configured budget is reduced. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## Section 285 — AUD-ONCHAIN-097: XRPL persisted marker/range coherence (27 November 2026)
+
+- XRPL checkpoint validation previously checked marker JSON shape but not the state-machine relationship between the active fixed range, current marker and `seen_markers`. A marker could survive without an active range and be silently discarded as the worker started a new range; an active marker absent from its seen-history could weaken restart-safe cycle detection. TDD RED reproduced both malformed checkpoint states. GREEN rejects missing-range marker state, history without a current marker, and current markers absent from canonical seen-marker keys before reorg/provider work (`layer1/onchain_xrpl_worker.py:208`).
+- Focused XRPL worker suite: **30 tests passed**. Full repository suite: **1,334 tests, 0 failures/errors, 72 skipped** (81.012 seconds). Focused XRPL worker + provider suite: **164 tests, 0 failures/errors**; `python -m compileall -q layer1 tests` and `git diff --check` PASS.
+- Owner-approved cumulative marker count/byte/retention budgets remain open under AUD-ONCHAIN-030. This validation does not authenticate a checkpoint against direct database tampering or establish live provider marker lifetime. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## Section 286 — AUD-ONCHAIN-098: XRPL active-range cursor coherence (27 November 2026)
+
+- XRPL worker validated the persisted next-ledger cursor and active range independently, but did not require the cursor to fall within that active range. TDD RED reproduced acceptance of `next_ledger=503` with active range `500..502` and an opaque marker. GREEN requires `range_start <= next_ledger <= range_end` with integer/non-boolean endpoints before reorg/provider work (`layer1/onchain_xrpl_worker.py:217`). Active reorg rewind remains valid because the rewind ledger is within the retained range.
+- Focused XRPL worker suite: **31 tests passed**. Full repository suite: **1,335 tests, 0 failures/errors, 72 skipped** (79.392 seconds). Focused worker + provider and static checks are recorded in the current checkpoint.
+- This is additive to AUD-ONCHAIN-096/097 and does not resolve cumulative marker budgets (AUD-ONCHAIN-030), checkpoint authenticity, or live provider acceptance. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## Section 287 — AUD-ONCHAIN-099: Solana persisted cursor/range coherence (27 November 2026)
+
+- Solana checkpoint validation previously checked token types/history uniqueness and range endpoints separately, but did not bind them into one state machine. TDD RED reproduced three accepted malformed states: pagination token/history/last-position without an active range; current token missing from `seen_tokens`; and `next_slot` outside the active range. GREEN rejects these states before quarantine replay, reorg reconciliation or provider calls (`layer1/onchain_solana_worker.py:360`).
+- Focused Solana worker suite: **31 tests passed**. Full repository suite: **1,338 tests, 0 failures/errors, 72 skipped** (79.396 seconds). Focused worker + provider and static checks are recorded in the current checkpoint.
+- This does not establish checkpoint authenticity or close the owner-approved cumulative token budget. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## Section 288 — AUD-ONCHAIN-100: EVM checkpoint identity and seed boundary (28 November 2026)
+
+- EVM checkpoint reader previously validated only integer shape for `next_block`, ignoring writer-persisted `mapping_id`, `network_id` and `scope`, and allowing cursors before the configured start block. TDD RED reproduced a checkpoint copied from another mapping on the same network/contract key and a cursor at block 99 against configured start 100. GREEN enforces exact mapping/network/scope identity and `next_block >= initial_block` before reorg/provider work (`layer1/onchain_evm_worker.py:185`).
+- Focused EVM worker suite: **26 tests passed**. Full repository suite: **1,340 tests, 0 failures/errors, 72 skipped** (81.826 seconds). Focused worker + provider and static checks are recorded in the current checkpoint.
+- No EVM block-height upper bound was invented; this finding does not establish seed authority or live provider acceptance. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.

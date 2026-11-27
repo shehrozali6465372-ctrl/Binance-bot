@@ -6702,3 +6702,87 @@ No ingestion-policy change applied because timestamp provenance and partial-prog
 ### Section 283 verification checkpoint
 - Focused XRPL worker + provider suites: **161 tests, 0 failures/errors**. Full repository suite: **1,331 tests, 0 failures, 0 errors, 72 skipped**. Compileall and `git diff --check` PASS.
 - `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production database, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred. Existing uncommitted changes and untracked `layer1/migrations/postgresql/0005_solana_timestamp_quarantine.sql` remain preserved. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+
+## 284. AUD-ONCHAIN-096 — XRPL persisted fixed ledger range is not bounded by the configured run budget (27 November 2026)
+
+**Finding: AUD-ONCHAIN-096 — HIGH / CONFIRMED / REMEDIATED LOCALLY / TDD REGRESSION.** The XRPL worker persisted a fixed ledger range so pagination could resume safely after a restart. On checkpoint reload it validated that the range endpoints were integers, the start was not before the configured seed, the end was not before the start, and the end was not beyond the current validated head. It did not validate the range width against `max_ledgers_per_run`. A corrupted, tampered, or stale checkpoint could therefore make the worker fetch and retain canonical headers for substantially more ledgers than the configured per-run budget (up to the validated head), defeating the worker's bounded-work contract and amplifying provider calls and memory use. The missing guard is at `layer1/onchain_xrpl_worker.py:238`.
+
+### TDD reproduction and remediation
+- Added `test_rejects_persisted_fixed_range_wider_than_run_budget`. The test seeds an isolated SQLite checkpoint with `range_start=500`, `range_end=503`, while the worker is configured for at most three ledgers per run and the fake validated head is 503. RED: the worker accepted the oversized persisted range and proceeded instead of raising the expected validation error. The fixture returns an empty page to isolate range validation from transaction timestamp checks.
+- GREEN: after validating the stored range endpoint types and head bounds, the worker now requires `range_end - range_start + 1 <= max_ledgers_per_run`. An oversized checkpoint fails closed with `ValueError` before fetching range headers or account pages. This also makes a checkpoint created under a larger prior budget require explicit operator/configuration reconciliation if the configured budget is later reduced; the worker does not silently exceed the current limit.
+- Focused XRPL worker suite: **28 tests, 0 failures/errors**. Full repository suite: **1,332 tests, 0 failures, 0 errors, 72 skipped** (27 November 2026; 84.483 seconds). XRPL worker + provider verification and compileall/diff checks are recorded below after completion.
+
+### Scope and limitations
+- This closes one persisted-range width gap only. It does not define cumulative marker count/byte/retention limits (AUD-ONCHAIN-030), provider response-size limits (AUD-ONCHAIN-004), mapping authority/corroboration/freshness (AUD-ONCHAIN-002), or live provider acceptance. A checkpoint incompatible with a newly reduced run budget requires controlled operator reconciliation; no automatic destructive checkpoint rewrite is performed. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+### Section 284 verification checkpoint
+- Focused XRPL worker + provider suite: **162 tests, 0 failures/errors**. Full repository suite: **1,332 tests, 0 failures/errors, 72 skipped** (84.483 seconds). `python -m compileall -q layer1 tests` and `git diff --check` PASS. `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred.
+
+
+## 285. AUD-ONCHAIN-097 — XRPL persisted pagination marker is not bound to its active range/history (27 November 2026)
+
+**Finding: AUD-ONCHAIN-097 — HIGH / CONFIRMED / REMEDIATED LOCALLY / TDD REGRESSION.** The XRPL worker validated that a persisted marker and each `seen_markers` entry were finite JSON-compatible values, but it did not validate the checkpoint state machine tying them together. A checkpoint with `range_start=None` could still carry a non-null marker/seen-marker history; the worker silently discarded those values when creating a new range from `next_ledger`. This can abandon an unfinished account_tx pagination cursor and skip the remainder of its fixed ledger range. Separately, an active range could carry a marker absent from `seen_markers`, weakening persisted pagination-cycle detection after restart. The missing state binding was at `layer1/onchain_xrpl_worker.py:208`.
+
+### TDD reproduction and remediation
+- Added `test_rejects_persisted_marker_without_active_fixed_range`: an isolated SQLite checkpoint contains no active range but retains `marker='page-2'` and matching history. RED: the worker silently replaced the cursor and proceeded with a new range instead of rejecting the inconsistent checkpoint.
+- Added `test_rejects_persisted_marker_missing_from_seen_marker_history`: an active fixed range contains a current marker that is absent from the persisted seen-marker history. RED: the worker accepted the checkpoint and continued pagination.
+- GREEN: checkpoint validation now rejects (1) a missing active range paired with a non-null range end, marker, or non-empty marker history; (2) marker history when the current marker is null; and (3) a non-null current marker whose canonical JSON key is absent from `seen_markers`. The check runs before reorg reconciliation, cursor reset, header fetch or account-page requests.
+- Focused XRPL worker suite: **30 tests, 0 failures/errors**. Full repository suite: **1,334 tests, 0 failures, 0 errors, 72 skipped** (27 November 2026; 81.012 seconds). Focused XRPL worker + provider suite: **164 tests, 0 failures/errors**. `python -m compileall -q layer1 tests` and `git diff --check` PASS.
+
+### Scope and limitations
+- This validates internal checkpoint coherence; it does not authenticate checkpoint storage against an attacker with database write access, impose owner-approved marker count/byte/retention limits (AUD-ONCHAIN-030), or guarantee provider-side marker lifetime. Provider marker expiry still follows the existing bounded restart-from-range-start recovery path. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+### Section 285 verification checkpoint
+- Full repository suite: **1,334 tests, 0 failures/errors, 72 skipped**. `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred.
+
+
+## 286. AUD-ONCHAIN-098 — XRPL active-range checkpoint cursor can lie outside its persisted range (27 November 2026)
+
+**Finding: AUD-ONCHAIN-098 — MEDIUM / CONFIRMED / REMEDIATED LOCALLY / TDD REGRESSION.** The XRPL worker validated `next_ledger` against the configured seed and protocol exhaustion sentinel, and separately validated active range endpoints. It did not require the durable next-ledger cursor to lie inside the active fixed range. A checkpoint could therefore claim `next_ledger=503` while its active range was `500..502` and still carry an account_tx marker. The worker would trust the marker/range, finish the old range, and rewrite the cursor to `range_end + 1`, silently normalizing an internally contradictory checkpoint. The coherence guard is at `layer1/onchain_xrpl_worker.py:217`.
+
+### TDD reproduction and remediation
+- Added `test_rejects_next_ledger_outside_persisted_active_range`. The isolated SQLite checkpoint uses an active range `500..502`, current marker `page-2`, and `next_ledger=503`. RED: the worker accepted the contradictory state and proceeded to account pagination.
+- GREEN: when a fixed range is active, the worker now requires integer, non-boolean `range_start` and `range_end` and enforces `range_start <= next_ledger <= range_end` before reorg reconciliation/provider work. The existing active-reorg rewind representation remains valid because its rewind ledger is within the retained range.
+- Focused XRPL worker suite: **31 tests, 0 failures/errors**. Full repository suite: **1,335 tests, 0 failures, 0 errors, 72 skipped** (27 November 2026; 79.392 seconds). Focused worker + provider suite, compileall and `git diff --check` are recorded in the verification checkpoint below.
+
+### Scope and limitations
+- This is internal checkpoint consistency validation. It does not replace range-width enforcement (AUD-ONCHAIN-096), marker/range/history binding (AUD-ONCHAIN-097), owner-approved marker budgets (AUD-ONCHAIN-030), or authenticated checkpoint integrity. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+### Section 286 verification checkpoint
+- Full repository suite: **1,335 tests, 0 failures/errors, 72 skipped**. `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred.
+
+
+## 287. AUD-ONCHAIN-099 — Solana persisted pagination token is not bound to its active range/history (27 November 2026)
+
+**Finding: AUD-ONCHAIN-099 — HIGH / CONFIRMED / REMEDIATED LOCALLY / TDD REGRESSION.** The Solana worker validated token types and duplicate-free `seen_tokens`, and separately validated active range endpoints, but it did not validate the checkpoint state machine tying these fields together. A checkpoint with no active `from_slot` could retain a pagination token and `last_position`; the worker silently discarded them when starting a new range at `next_slot`, potentially skipping the remainder of an unfinished address-history page sequence. An active range could also carry a current pagination token absent from `seen_tokens`, weakening persisted cursor-cycle detection after restart. Finally, the worker did not require `next_slot` to remain within the active range. The missing state binding was at `layer1/onchain_solana_worker.py:360`.
+
+### TDD reproduction and remediation
+- Added `test_rejects_persisted_solana_pagination_token_without_active_range`: a checkpoint with no active range retains a non-null token, token history and transaction position. RED: the worker discarded that state and began a new range instead of rejecting it.
+- Added `test_rejects_solana_pagination_token_missing_from_seen_history`: an active range's current opaque token is absent from persisted token history. RED: the worker accepted it and continued.
+- Added `test_rejects_solana_next_slot_outside_active_range`: `next_slot` lies one slot beyond the active range. RED: the worker accepted the contradictory cursor/range pair.
+- GREEN: checkpoint validation now rejects non-empty range/token/history/position state when no active range exists; requires active `next_slot` to lie within `from_slot..to_slot`; requires a non-null current token to exist in `seen_tokens`; and rejects seen-token history or transaction-position state when no current pagination token exists. Validation occurs before pending-quarantine replay, reorg reconciliation or provider calls.
+- Focused Solana worker suite: **31 tests, 0 failures/errors**. Full repository suite: **1,338 tests, 0 failures, 0 errors, 72 skipped** (27 November 2026; 79.396 seconds). Focused Solana worker + provider suite, compileall and `git diff --check` are recorded in the verification checkpoint below.
+
+### Scope and limitations
+- This validates persisted cursor/range coherence, not cryptographic authenticity of the SQLite/PostgreSQL checkpoint, provider cursor lifetime, or the owner-approved cumulative token budget. Existing token-history maximum remains implementation-defined and is not a substitute for the outstanding policy review. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+### Section 287 verification checkpoint
+- Full repository suite: **1,338 tests, 0 failures/errors, 72 skipped**. `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred.
+
+
+## 288. AUD-ONCHAIN-100 — EVM persisted checkpoint is not bound to its mapping/scope or configured seed (28 November 2026)
+
+**Finding: AUD-ONCHAIN-100 — HIGH / CONFIRMED / REMEDIATED LOCALLY / TDD REGRESSION.** The EVM worker loaded a persisted checkpoint and validated only that `next_block` was a non-boolean integer. The writer already persisted `mapping_id`, `network_id` and `scope`, but the reader ignored those identity fields and did not ensure the cursor remained at or beyond the configured `start_blocks` seed. Because the cursor key is derived from network and contract address rather than mapping ID, a changed/reused mapping for the same contract could silently inherit another mapping's cursor. A corrupted cursor below the configured seed could also trigger historical scanning before the explicitly approved start point. The missing reader-side checks were at `layer1/onchain_evm_worker.py:185`.
+
+### TDD reproduction and remediation
+- Added `test_rejects_evm_checkpoint_bound_to_different_mapping_identity`. It seeds the correct network/contract cursor key with a different mapping ID but otherwise plausible checkpoint metadata. RED: the worker accepted the foreign mapping cursor and silently skipped because its next block was above the fake finalized head.
+- Added `test_rejects_evm_checkpoint_before_configured_start_block`. It seeds `next_block=99` when the configured start block is 100. RED: the worker accepted a cursor before the configured history boundary.
+- GREEN: checkpoint loading now requires exact `mapping_id`, `network_id` and `scope` matches and requires `next_block >= initial_block`; malformed identity/cursor state fails with `ValueError` before reorg reconciliation or provider requests. The current writer and reorg-rewind writer already persist the required identity fields.
+- Focused EVM worker suite: **26 tests, 0 failures/errors**. Full repository suite: **1,340 tests, 0 failures, 0 errors, 72 skipped** (28 November 2026; 81.826 seconds). Focused EVM worker + provider suite, compileall and `git diff --check` are recorded in the verification checkpoint below.
+
+### Scope and limitations
+- This binds the cursor to its mapping/network/scope and prevents rewinding before the configured seed. It does not impose a protocol-specific upper bound on EVM block height, prove source authority for the configured seed, or establish live-provider acceptance. Module 9 remains NOT ACTIVATED / NOT PRODUCTION-READY / NO-GO.
+
+### Section 288 verification checkpoint
+- Full repository suite: **1,340 tests, 0 failures/errors, 72 skipped**. `TEST_POSTGRES_DSN` remains unset; no PostgreSQL runtime/server, production DB, live provider, migration application, Binance publication, staging, commit, push, merge or deployment occurred.

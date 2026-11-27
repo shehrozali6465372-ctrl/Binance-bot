@@ -357,6 +357,15 @@ class SolanaAddressIngestionWorker:
                         or (pagination_token is not None and not isinstance(pagination_token, str))
                     ):
                         raise ValueError("stored Solana active range checkpoint is malformed")
+                    if (range_start is None and (range_end is not None or pagination_token is not None
+                                                 or seen_tokens or last_position is not None)):
+                        raise ValueError("stored Solana checkpoint is malformed")
+                    if range_start is not None and (
+                        not range_start <= next_slot <= range_end
+                        or (pagination_token is None and (seen_tokens or last_position is not None))
+                        or (pagination_token is not None and pagination_token not in seen_tokens)
+                    ):
+                        raise ValueError("stored Solana checkpoint is malformed")
 
                 self._replay_pending_quarantine(
                     mapping, address, scope, cursor_key, cursor, summary,

@@ -181,7 +181,13 @@ class EvmTransferIngestionWorker:
             if checkpoint is None:
                 next_block = initial_block
             else:
-                if not isinstance(checkpoint, dict) or isinstance(checkpoint.get("next_block"), bool) or not isinstance(checkpoint.get("next_block"), int):
+                if (not isinstance(checkpoint, dict)
+                        or checkpoint.get("mapping_id") != mapping.mapping_id
+                        or checkpoint.get("network_id") != mapping.network_id
+                        or checkpoint.get("scope") != scope
+                        or isinstance(checkpoint.get("next_block"), bool)
+                        or not isinstance(checkpoint.get("next_block"), int)
+                        or checkpoint.get("next_block") < initial_block):
                     raise ValueError("stored EVM checkpoint is malformed")
                 next_block = checkpoint["next_block"]
             reorg_count, rewind_to, reorg_blocks = self._reconcile_recent(mapping, next_block, initial_block)

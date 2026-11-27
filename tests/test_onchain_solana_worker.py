@@ -475,6 +475,64 @@ class SolanaAddressIngestionWorkerTests(unittest.TestCase):
                 page_size=10, reorg_lookback_slots=0,
             )
 
+    def test_rejects_persisted_solana_pagination_token_without_active_range(self):
+        self.provider.pages = {None: ((), None)}
+        cursor_key = self.worker._cursor_key(WALLET, MAPPING_ID)
+        scope = self.worker._scope(WALLET, MAPPING_ID)
+        checkpoint = {"mapping_id": MAPPING_ID, "network_id": "solana-mainnet",
+                      "address": WALLET, "next_slot": 305, "from_slot": None,
+                      "to_slot": None, "pagination_token": "next",
+                      "seen_tokens": ["next"], "last_position": [300, 17],
+                      "exhausted": False}
+        self.ingestion_store.commit_page(
+            cursor_key, checkpoint, (), expected_cursor=None,
+            scope_identity=("solana-mainnet", "alchemy", scope),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stored Solana checkpoint is malformed"):
+            self.worker.run_once()
+
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("solana-mainnet"), [])
+
+    def test_rejects_solana_pagination_token_missing_from_seen_history(self):
+        cursor_key = self.worker._cursor_key(WALLET, MAPPING_ID)
+        scope = self.worker._scope(WALLET, MAPPING_ID)
+        checkpoint = {"mapping_id": MAPPING_ID, "network_id": "solana-mainnet",
+                      "address": WALLET, "next_slot": 300, "from_slot": 300,
+                      "to_slot": 304, "pagination_token": "next",
+                      "seen_tokens": [], "last_position": None,
+                      "exhausted": False}
+        self.ingestion_store.commit_page(
+            cursor_key, checkpoint, (), expected_cursor=None,
+            scope_identity=("solana-mainnet", "alchemy", scope),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stored Solana checkpoint is malformed"):
+            self.worker.run_once()
+
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("solana-mainnet"), [])
+
+    def test_rejects_solana_next_slot_outside_active_range(self):
+        cursor_key = self.worker._cursor_key(WALLET, MAPPING_ID)
+        scope = self.worker._scope(WALLET, MAPPING_ID)
+        checkpoint = {"mapping_id": MAPPING_ID, "network_id": "solana-mainnet",
+                      "address": WALLET, "next_slot": 305, "from_slot": 300,
+                      "to_slot": 304, "pagination_token": "next",
+                      "seen_tokens": ["next"], "last_position": None,
+                      "exhausted": False}
+        self.ingestion_store.commit_page(
+            cursor_key, checkpoint, (), expected_cursor=None,
+            scope_identity=("solana-mainnet", "alchemy", scope),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stored Solana checkpoint is malformed"):
+            self.worker.run_once()
+
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.ingestion_store.list_events("solana-mainnet"), [])
+
     def test_page_cursor_resumes_after_provider_timeout_without_replaying_or_skipping(self):
         self.worker.run_once()  # first page is committed
         self.provider.fail_token_once = "next"

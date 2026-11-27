@@ -201,9 +201,21 @@ class XrplIssuedCurrencyIngestionWorker:
                         or not initial <= checkpoint["next_ledger"] <= 0x100000000
                         or not isinstance(checkpoint.get("seen_markers", []), list)):
                     raise ValueError("stored XRPL account checkpoint is malformed")
-                self._marker_key(checkpoint.get("marker"))
-                for saved_marker in checkpoint.get("seen_markers", []):
-                    self._marker_key(saved_marker)
+                marker = checkpoint.get("marker")
+                seen_markers = checkpoint.get("seen_markers", [])
+                range_start = checkpoint.get("range_start")
+                range_end = checkpoint.get("range_end")
+                marker_keys = {self._marker_key(item) for item in seen_markers}
+                marker_key = self._marker_key(marker)
+                if ((range_start is None and (range_end is not None or marker is not None or seen_markers))
+                        or (range_start is not None and marker is None and seen_markers)
+                        or (range_start is not None and marker is not None and marker_key not in marker_keys)):
+                    raise ValueError("stored XRPL account checkpoint is malformed")
+                if (range_start is not None
+                        and (isinstance(range_start, bool) or not isinstance(range_start, int)
+                             or isinstance(range_end, bool) or not isinstance(range_end, int)
+                             or not range_start <= checkpoint["next_ledger"] <= range_end)):
+                    raise ValueError("stored XRPL account checkpoint is malformed")
                 reorg_count, rewind, reorg_ledgers = self._reconcile_recent(
                     mapping, account, checkpoint["next_ledger"], initial)
                 summary["reorg_events_tombstoned"] += reorg_count
@@ -234,6 +246,8 @@ class XrplIssuedCurrencyIngestionWorker:
                         or range_start < initial or range_end < range_start
                         or range_end > head.head_height):
                     raise ValueError("stored XRPL fixed ledger range is malformed or beyond validated head")
+                if range_end - range_start + 1 > self.max_ledgers_per_run:
+                    raise ValueError("stored XRPL fixed ledger range exceeds configured run budget")
                 headers = {index: self._header(index) for index in range(range_start, range_end + 1)}
                 if range_start > 1:
                     preceding_header = self._header(range_start - 1)
